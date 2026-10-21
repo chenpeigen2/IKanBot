@@ -1,0 +1,811 @@
+import { useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { Modal, useToast, money, num, Empty, fmtDate, today, ActionMenu, SampleStatusTag } from '../ui'
+import {
+  SAMPLE_STATUS_LABEL,
+  SAMPLE_STATUS_ORDER,
+  SAMPLE_FEE_STATUS_LABEL,
+  SAMPLE_FEE_STATUS_ORDER,
+  CURRENCIES,
+  type SampleFeeStatus,
+  type SampleStatus
+} from '../../../shared/types'
+import { renderSample } from '../../../shared/documents'
+
+interface LineRow {
+  productId: number | null
+  styleNo: string
+  productName: string
+  composition: string
+  color: string
+  size: string
+  quantity: number
+  unitPrice: number
+}
+
+/**
+ * 打样单（样品单）—— 下单之前的打样环节。
+ * 公司垫的快递费、样品费在这里记账；样品单号、快递单号都能查。
+ */
+export default function Samples() {
+  const toast = useToast()
+  const navigate = useNavigate()
+  const [list, setList] = useState<any[]>([])
+  const [keyword, setKeyword] = useState('')
+  const [status, setStatus] = useState('')
+  const [editing, setEditing] = useState<any | null>(null)
+  const [preview, setPreview] = useState<{ html: string; no: string } | null>(null)
+  const [converting, setConverting] = useState<any | null>(null)
+  /** N-2：转单前必须问一句 PI 发不发（草稿单不进销售额/待收，忘了改状态就是对账事故） */
+  const [convPi, setConvPi] = useState<'' | 'draft' | 'sent'>('')
+
+  const load = async () => {
+    const rows = await window.api.samples.list({ keyword, status: status || undefined })
+    setList(rows)
+  }
+
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keyword, status])
+
+  const remove = async (s: any) => {
+    if (!confirm(`确认删除打样单 ${s.sampleNo}？`)) return
+    // 转过订单的打样单后端会拦住并抛中文错误，得弹出来，否则用户以为按钮坏了
+    try {
+      await window.api.samples.remove(s.id)
+      toast('已删除')
+      await load()
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
+  }
+
+  /** N-2：转单。必须先选 PI 发不发（跟报价转单一个问法），选错可转完再改 */
+  const doConvert = async (offset: boolean) => {
+    if (!convPi) {
+      toast('请先选一下：转出来的订单，PI 现在就发还是先存草稿？', 'error')
+      return
+    }
+    try {
+      const order = await window.api.samples.convert(converting.id, {
+        offsetSampleFee: offset,
+        paymentStatus: convPi as 'draft' | 'sent'
+      })
+      toast(
+        convPi === 'sent'
+          ? `已转成订单 ${order.orderNo}，状态「待确认」${offset ? '，样品费已抵扣' : '，样品费照收'}`
+          : `已转成订单 ${order.orderNo}（草稿，不进销售额也不进待收）；PI 发出后记得回订单改成「待确认」`
+      )
+      setConverting(null)
+      await load()
+      navigate(`/orders/${order.id}`)
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
+  }
+
+  return (
+    <>
+      <div className="topbar">
+        <h1>打样单</h1>
+        <div className="spacer" />
+        <button className="btn primary" onClick={() => setEditing({})}>
+          + 新建打样单
+        </button>
+      </div>
+
+      <div className="content">
+        <div className="toolbar">
+          <input
+            className="search"
+            placeholder="搜索样品单号 / 客户 / 款号 / 快递单号"
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+          />
+          <button className="btn" onClick={load}>
+            搜索
+          </button>
+          <select
+            style={{ width: 160 }}
+            value={status}
+            onChange={(e) => setStatus(e.target.value)}
+            title="按状态筛选"
+          >
+            <option value="">全部状态</option>
+            {SAMPLE_STATUS_ORDER.map((s) => (
+              <option key={s} value={s}>
+                {SAMPLE_STATUS_LABEL[s]}
+              </option>
+            ))}
+          </select>
+          <div className="spacer" />
+          <span className="faint">共 {list.length} 张打样单</span>
+        </div>
+
+        <div className="card">
+          <div className="card-body tight">
+            {list.length === 0 ? (
+              <Empty
+                text={
+                  keyword || status
+                    ? `当前筛选条件下没有打样单${status ? `（状态：${SAMPLE_STATUS_LABEL[status as SampleStatus] ?? status}）` : ''}${keyword ? `（关键词：${keyword}）` : ''}。单子没丢——把搜索框或状态清空就能看到全部。`
+                    : '还没有打样单。客户要打样的时候点右上角「新建打样单」。'
+                }
+              />
+            ) : (
+              <div className="table-wrap">
+                <table className="data">
+                  <thead>
+                    <tr>
+                      <th>样品单号</th>
+                      <th>客户</th>
+                      <th>日期</th>
+                      <th>款号</th>
+                      <th className="num">件数</th>
+                      {/* R1：双行表头去掉，副说明改 title，表头行高回到 36px */}
+                      <th className="num" title="样品费：应收客户">
+                        样品费
+                      </th>
+                      <th className="num" title="快递费：公司垫付">
+                        快递费
+                      </th>
+                      <th className="num" title="公司净垫：成本−已收回">
+                        公司净垫
+                      </th>
+                      <th className="num" title="待收：计入工作台">
+                        待收
+                      </th>
+                      <th>状态</th>
+                      <th>打样费收款</th>
+                      <th>快递单号</th>
+                      <th>寄出 / 签收</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {list.map((s) => (
+                      <tr key={s.id}>
+                        <td className="mono nowrap">{s.sampleNo}</td>
+                        <td className="cell-clip" title={s.customer?.company || ''}>
+                          {s.customer?.company}
+                        </td>
+                        <td className="nowrap faint">{fmtDate(s.sampleDate)}</td>
+                        <td
+                          className="mono clip-96"
+                          title={s.items.map((i: any) => i.styleNo).filter(Boolean).join('、')}
+                        >
+                          {s.items.map((i: any) => i.styleNo).filter(Boolean).join('、') || '—'}
+                        </td>
+                        <td className="num">{num(s.totalQuantity)}</td>
+                        <td className="num">{money(s.sampleFee)}</td>
+                        <td className="num">{money(s.expressFee)}</td>
+                        <td className="num">{money(s.netAdvance)}</td>
+                        <td className="num">
+                          {s.feeStatus === 'unpaid' && s.totalFee > 0 ? (
+                            s.rateMissing ? (
+                              <span className="tag amber" title="汇率未填，工作台待收里少算了这单，请编辑补上">⚠ 汇率未填</span>
+                            ) : (
+                              <span>{money(s.receivableBase)}</span>
+                            )
+                          ) : (
+                            <span className="faint">—</span>
+                          )}
+                        </td>
+                        <td>
+                          {/* R4-S5：列表页状态列一律只读 tag（和旁边「打样费收款」形态一致）。
+                              改状态的入口没堵：点「⋯」菜单里的「编辑」，弹窗里还是下拉框。 */}
+                          <SampleStatusTag status={s.status} />
+                        </td>
+                        <td>
+                          <span className={`tag ${s.feeStatus === 'paid' ? 'green' : s.feeStatus === 'offset' ? 'blue' : s.feeStatus === 'waived' ? 'grey' : 'amber'}`}>
+                            {SAMPLE_FEE_STATUS_LABEL[s.feeStatus as SampleFeeStatus] ?? s.feeStatus}
+                          </span>
+                        </td>
+                        <td className="mono clip-100" title={s.trackingNo || ''}>
+                          {s.trackingNo || '—'}
+                        </td>
+                        {/* N36：客户问「到了吗」列表一眼能答，不用点开编辑弹窗 */}
+                        <td className="nowrap faint">
+                          {s.shippedAt
+                            ? `${s.shippedAt.slice(0, 10).slice(5)} 寄${
+                                s.receivedAt ? ` / ${s.receivedAt.slice(0, 10).slice(5)} 收` : ' / 未收'
+                              }`
+                            : '未寄'}
+                        </td>
+                        <td className="cell-actions">
+                          {s.convertedOrderId ? (
+                            <button
+                              className="link"
+                              onClick={() => navigate(`/orders/${s.convertedOrderId}`)}
+                              title="已转成订单，点这里看订单"
+                            >
+                              看订单
+                            </button>
+                          ) : (
+                            <button
+                              className="link"
+                              onClick={() => {
+                                setConvPi('')
+                                setConverting(s)
+                              }}
+                            >
+                              转订单
+                            </button>
+                          )}
+                          <ActionMenu
+                            items={[
+                              { text: '编辑', onClick: () => setEditing(s) },
+                              {
+                                text: '预览打样单',
+                                onClick: async () => {
+                                  const settings = await window.api.settings.get()
+                                  setPreview({ html: renderSample({ sample: s, settings }), no: s.sampleNo })
+                                }
+                              },
+                              { text: '删除', danger: true, onClick: () => void remove(s) }
+                            ]}
+                          />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {converting ? (
+        <Modal
+          title={`打样单转订单 ${converting.sampleNo}`}
+          onClose={() => setConverting(null)}
+          footer={
+            <>
+              <button className="btn" onClick={() => setConverting(null)}>
+                取消
+              </button>
+              {/* 不抵扣：样品费照收，转出来的订单里没有抵扣行 */}
+              <button className="btn" onClick={() => void doConvert(false)}>
+                不抵扣，直接转
+              </button>
+              {/* 抵扣：样品费变成订单里的负费用行，打样单标记「下单抵扣」 */}
+              <button className="btn primary" onClick={() => void doConvert(true)}>
+                样品费抵扣，转订单
+              </button>
+            </>
+          }
+        >
+          <p style={{ marginTop: 0 }}>客户确认样品了，要转成正式订单吗？</p>
+          <div className="price-calc">
+            <div>
+              <span className="muted">客户</span>
+              <span>{converting.customer?.company}</span>
+            </div>
+            <div>
+              <span className="muted">款号</span>
+              <span>{converting.items.map((i: any) => i.styleNo).filter(Boolean).join('、') || '—'}</span>
+            </div>
+            <div>
+              <span className="muted">数量</span>
+              <span>{num(converting.totalQuantity)} 件（大货数量转单后自己改）</span>
+            </div>
+            <div>
+              <span className="muted">样品费</span>
+              <span>{money(converting.sampleFee)}</span>
+            </div>
+          </div>
+          <div className="field" style={{ marginTop: 12 }}>
+            <label>转出来的订单，PI 现在就发吗？*</label>
+            <label className="row" style={{ gap: 6, marginTop: 4 }}>
+              <input type="radio" name="smp-convert-pi" checked={convPi === 'sent'} onChange={() => setConvPi('sent')} />
+              <span>PI 现在就发 → 状态「待确认」，进销售额、进待收，工作台会提醒</span>
+            </label>
+            <label className="row" style={{ gap: 6, marginTop: 4 }}>
+              <input type="radio" name="smp-convert-pi" checked={convPi === 'draft'} onChange={() => setConvPi('draft')} />
+              <span>先存草稿 → 不进销售额也不进待收（系统当它不存在）；PI 发出后要回订单改成「待确认」</span>
+            </label>
+            <div className="hint">不选就点转单会拦住你——草稿单忘了改状态，月底对账会少一笔。</div>
+          </div>
+          <div className="alert info" style={{ marginTop: 12 }}>
+            「抵扣」= 样品费从订单金额里扣掉（单据上会印一行「样品费抵扣」，客户对账能看懂），
+            这张打样单会自动标成「下单抵扣」；「不抵扣」= 样品费另外向客户收。
+            选错也没关系，转完在订单里改费用行就行。
+          </div>
+        </Modal>
+      ) : null}
+
+      {editing ? (
+        <SampleModal
+          draft={editing}
+          onClose={() => setEditing(null)}
+          onSaved={async () => {
+            setEditing(null)
+            toast(editing.id ? '打样单已修改' : '打样单已保存')
+            await load()
+          }}
+        />
+      ) : null}
+
+      {preview ? (
+        <Modal
+          title={`样品单预览 ${preview.no}`}
+          onClose={() => setPreview(null)}
+          size="xwide"
+          footer={
+            <>
+              <button className="btn" onClick={() => setPreview(null)}>
+                关闭
+              </button>
+              <button
+                className="btn primary"
+                onClick={async () => {
+                  const out = await window.api.window.printPdf({
+                    html: preview.html,
+                    fileName: `${preview.no}.pdf`
+                  })
+                  if (out) toast('PDF 已保存')
+                }}
+              >
+                另存为 PDF
+              </button>
+            </>
+          }
+        >
+          <div
+            style={{ background: '#fff', border: '1px solid #e2e6ee', padding: '10px', overflowX: 'auto' }}
+            dangerouslySetInnerHTML={{ __html: preview.html }}
+          />
+        </Modal>
+      ) : null}
+    </>
+  )
+}
+
+/* ================= 新建 / 编辑 ================= */
+
+function SampleModal({
+  draft,
+  onClose,
+  onSaved
+}: {
+  draft: any
+  onClose: () => void
+  onSaved: () => Promise<void>
+}) {
+  const toast = useToast()
+  const isEdit = !!draft.id
+  const [customers, setCustomers] = useState<any[]>([])
+  const [products, setProducts] = useState<any[]>([])
+  const [form, setForm] = useState({
+    customerId: draft.customerId ?? 0,
+    // N-3：单号可在保存前改，撞号会被拦住（留一个出口）
+    sampleNo: draft.sampleNo ?? '',
+    sampleDate: draft.sampleDate ?? today(),
+    courier: draft.courier ?? '',
+    trackingNo: draft.trackingNo ?? '',
+    expressFee: draft.expressFee ?? 0,
+    status: (draft.status ?? 'pending') as SampleStatus,
+    note: draft.note ?? '',
+    shippedAt: draft.shippedAt ?? '',
+    receivedAt: draft.receivedAt ?? '',
+    factoryCost: draft.factoryCost ?? 0,
+    feeStatus: (draft.feeStatus ?? 'unpaid') as SampleFeeStatus,
+    feeNote: draft.feeNote ?? '',
+    currency: draft.currency ?? 'USD',
+    exchangeRate: draft.exchangeRate ?? 0,
+    exchangeRateDate: draft.exchangeRateDate ?? ''
+  })
+  const [lines, setLines] = useState<LineRow[]>(
+    (draft.items ?? []).map((it: any) => ({
+      productId: it.productId ?? null,
+      styleNo: it.styleNo,
+      productName: it.productName,
+      composition: it.composition,
+      color: it.color,
+      size: it.size,
+      quantity: it.quantity,
+      unitPrice: it.unitPrice
+    }))
+  )
+
+  useEffect(() => {
+    void window.api.customers.list().then(setCustomers)
+    void window.api.products.list('').then(setProducts)
+  }, [])
+
+  const sampleFee = lines.reduce((s, l) => s + l.quantity * l.unitPrice, 0)
+  const totalQty = lines.reduce((s, l) => s + l.quantity, 0)
+
+  const setLine = (i: number, patch: Partial<LineRow>) =>
+    setLines((ls) => ls.map((l, k) => (k === i ? { ...l, ...patch } : l)))
+
+  /** 手打款号：商品库里有就把品名/成分带出来 */
+  const onStyleChange = (i: number, styleNo: string) => {
+    const hit = products.find((p) => p.styleNo === styleNo)
+    setLine(i, {
+      styleNo,
+      productId: hit?.id ?? null,
+      productName: hit?.name ?? '',
+      composition: hit?.composition ?? ''
+    })
+  }
+
+  const save = async () => {
+    if (!form.customerId) {
+      toast('请先选择客户', 'error')
+      return
+    }
+    const clean = lines.filter((l) => l.styleNo.trim() && l.quantity > 0)
+    if (clean.length === 0) {
+      toast('请至少填写一行样品明细', 'error')
+      return
+    }
+    try {
+      await window.api.samples.save({
+        id: draft.id,
+        customerId: form.customerId,
+        sampleNo: form.sampleNo,
+        sampleDate: form.sampleDate,
+        courier: form.courier,
+        trackingNo: form.trackingNo,
+        expressFee: Number(form.expressFee) || 0,
+        status: form.status,
+        note: form.note,
+        shippedAt: form.shippedAt,
+        receivedAt: form.receivedAt,
+        factoryCost: Number(form.factoryCost) || 0,
+        feeStatus: form.feeStatus,
+        feeNote: form.feeNote,
+        currency: form.currency,
+        exchangeRate: Number(form.exchangeRate) || 0,
+        exchangeRateDate: form.exchangeRateDate,
+        items: clean
+      })
+      await onSaved()
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
+  }
+
+  const selected = useMemo(
+    () => customers.find((c) => c.id === form.customerId),
+    [customers, form.customerId]
+  )
+
+  return (
+    <Modal
+      title={isEdit ? `编辑打样单 ${draft.sampleNo}` : '新建打样单'}
+      onClose={onClose}
+      size="xwide"
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            取消
+          </button>
+          <button className="btn primary" onClick={save}>
+            保存打样单
+          </button>
+        </>
+      }
+    >
+      <div className="field">
+        <label>样品单号（凭据号；留空 = 保存时自动编号）</label>
+        <input
+          value={form.sampleNo}
+          onChange={(e) => setForm({ ...form, sampleNo: e.target.value })}
+          placeholder="如 SMP20261021003，留空自动编"
+        />
+        <div className="hint">单号不能跟别的打样单重号——重了会红字拦住，在这里换个号再保存。</div>
+      </div>
+
+      <div className="field-row-3">
+        <div className="field">
+          <label>客户 *</label>
+          <select
+            value={form.customerId || ''}
+            onChange={(e) => setForm({ ...form, customerId: Number(e.target.value) })}
+          >
+            <option value="">请选择客户…</option>
+            {customers.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.company}
+                {c.country ? ` (${c.country})` : ''}
+              </option>
+            ))}
+          </select>
+          {selected?.address ? <div className="hint">{selected.address}</div> : null}
+        </div>
+        <div className="field">
+          <label>打样日期</label>
+          <input
+            type="date"
+            value={form.sampleDate}
+            onChange={(e) => setForm({ ...form, sampleDate: e.target.value })}
+          />
+        </div>
+        <div className="field">
+          <label>状态</label>
+          <select
+            value={form.status}
+            onChange={(e) => setForm({ ...form, status: e.target.value as SampleStatus })}
+          >
+            {SAMPLE_STATUS_ORDER.map((s) => (
+              <option key={s} value={s}>
+                {SAMPLE_STATUS_LABEL[s]}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="field-row-3">
+        <div className="field">
+          <label>快递公司</label>
+          <input
+            value={form.courier}
+            onChange={(e) => setForm({ ...form, courier: e.target.value })}
+            placeholder="如 顺丰 / DHL"
+          />
+        </div>
+        <div className="field">
+          <label>快递单号</label>
+          <input
+            value={form.trackingNo}
+            onChange={(e) => setForm({ ...form, trackingNo: e.target.value })}
+            placeholder="寄出后回填，客户问起来能查"
+          />
+        </div>
+        <div className="field">
+          <label>快递费（公司垫的钱）</label>
+          <input
+            type="number"
+            step="0.01"
+            value={form.expressFee}
+            onChange={(e) => setForm({ ...form, expressFee: Number(e.target.value) })}
+          />
+        </div>
+      </div>
+
+      <div className="field-row-3">
+        <div className="field">
+          <label>寄出日期（客户问「到了吗」一眼能答）</label>
+          <input
+            type="date"
+            value={form.shippedAt}
+            onChange={(e) => setForm({ ...form, shippedAt: e.target.value })}
+          />
+        </div>
+        <div className="field">
+          <label>客户签收日期</label>
+          <input
+            type="date"
+            value={form.receivedAt}
+            onChange={(e) => setForm({ ...form, receivedAt: e.target.value })}
+          />
+        </div>
+        <div className="field">
+          <label>工厂打样费（公司实际成本）</label>
+          <input
+            type="number"
+            step="0.01"
+            value={form.factoryCost}
+            onChange={(e) => setForm({ ...form, factoryCost: Number(e.target.value) })}
+            placeholder="付给工厂的打样费，年底算亏损用"
+          />
+        </div>
+      </div>
+
+      <div className="field-row-3">
+        <div className="field">
+          <label>打样费收款标记</label>
+          <select
+            value={form.feeStatus}
+            onChange={(e) => setForm({ ...form, feeStatus: e.target.value as SampleFeeStatus })}
+          >
+            {SAMPLE_FEE_STATUS_ORDER.map((f) => (
+              <option key={f} value={f}>
+                {SAMPLE_FEE_STATUS_LABEL[f]}
+              </option>
+            ))}
+          </select>
+          <div className="hint">只有「未收」会计进工作台待收款和催款提醒</div>
+        </div>
+        <div className="field">
+          <label>币种 / 汇率 / 汇率日期（未收时必填）</label>
+          <div className="row" style={{ gap: 6 }}>
+            <select
+              style={{ width: 84 }}
+              value={form.currency}
+              onChange={(e) => setForm({ ...form, currency: e.target.value })}
+            >
+              {CURRENCIES.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+            <input
+              type="number"
+              step="0.0001"
+              placeholder="汇率"
+              value={form.exchangeRate || ''}
+              onChange={(e) => setForm({ ...form, exchangeRate: Number(e.target.value) })}
+            />
+            <input
+              type="date"
+              title="汇率日期"
+              value={form.exchangeRateDate}
+              onChange={(e) => setForm({ ...form, exchangeRateDate: e.target.value })}
+            />
+          </div>
+        </div>
+        <div className="field">
+          <label>收款说明</label>
+          <input
+            value={form.feeNote}
+            onChange={(e) => setForm({ ...form, feeNote: e.target.value })}
+            placeholder="如「已下单抵扣 PO-xxx」"
+          />
+        </div>
+      </div>
+
+      <div className="row" style={{ margin: '10px 0 4px' }}>
+        <strong style={{ fontSize: 13 }}>样品明细</strong>
+        <div className="spacer" />
+        <button
+          className="btn sm"
+          onClick={() =>
+            setLines((ls) => [
+              ...ls,
+              {
+                productId: null,
+                styleNo: '',
+                productName: '',
+                composition: '',
+                color: '',
+                size: '',
+                quantity: 1,
+                unitPrice: 0
+              }
+            ])
+          }
+        >
+          + 加一行
+        </button>
+      </div>
+
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th style={{ width: '16%' }}>款号</th>
+              <th style={{ width: '20%' }}>品名</th>
+              <th style={{ width: '12%' }}>颜色</th>
+              <th style={{ width: '10%' }}>尺码</th>
+              <th className="num" style={{ width: '12%' }}>件数</th>
+              <th className="num" style={{ width: '14%' }}>样品单价</th>
+              <th className="num" style={{ width: '14%' }}>金额</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {lines.length === 0 ? (
+              <tr>
+                <td colSpan={8}>
+                  <Empty text="还没有明细。点「+ 加一行」把要打的款号写上。" />
+                </td>
+              </tr>
+            ) : (
+              lines.map((l, i) => (
+                <tr key={i}>
+                  <td>
+                    <input
+                      list="sample-style-list"
+                      value={l.styleNo}
+                      onChange={(e) => onStyleChange(i, e.target.value)}
+                      placeholder="款号"
+                    />
+                  </td>
+                  <td>
+                    <input value={l.productName} onChange={(e) => setLine(i, { productName: e.target.value })} />
+                  </td>
+                  <td>
+                    <input value={l.color} onChange={(e) => setLine(i, { color: e.target.value })} />
+                  </td>
+                  <td>
+                    <input value={l.size} onChange={(e) => setLine(i, { size: e.target.value })} />
+                  </td>
+                  <td className="num">
+                    <input
+                      type="number"
+                      style={{ width: 70, textAlign: 'right' }}
+                      value={l.quantity}
+                      onChange={(e) => setLine(i, { quantity: Number(e.target.value) })}
+                    />
+                  </td>
+                  <td className="num">
+                    <input
+                      type="number"
+                      step="0.01"
+                      style={{ width: 80, textAlign: 'right' }}
+                      value={l.unitPrice}
+                      onChange={(e) => setLine(i, { unitPrice: Number(e.target.value) })}
+                    />
+                  </td>
+                  <td className="num">{(l.quantity * l.unitPrice).toFixed(2)}</td>
+                  <td className="right">
+                    <button className="btn sm ghost danger" onClick={() => setLines((ls) => ls.filter((_, k) => k !== i))}>
+                      删除
+                    </button>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+          <tfoot>
+            <tr style={{ background: '#f8fafc', fontWeight: 700 }}>
+              <td colSpan={4}>样品费合计</td>
+              <td className="num">{num(totalQty)}</td>
+              <td></td>
+              <td className="num">{sampleFee.toFixed(2)}</td>
+              <td></td>
+            </tr>
+          </tfoot>
+        </table>
+        <datalist id="sample-style-list">
+          {products.map((p) => (
+            <option key={p.id} value={p.styleNo}>
+              {p.name}
+            </option>
+          ))}
+        </datalist>
+      </div>
+
+      <div className="price-calc mt">
+        <div>
+          <span className="muted">样品费（应收客户）</span>
+          <span>{money(sampleFee)}</span>
+        </div>
+        <div>
+          <span className="muted">快递费（公司垫付）</span>
+          <span>{money(Number(form.expressFee) || 0)}</span>
+        </div>
+        <div>
+          <span className="muted">工厂打样费（公司成本）</span>
+          <span>{money(Number(form.factoryCost) || 0)}</span>
+        </div>
+        <div>
+          <span className="muted">公司总成本 = 工厂打样费 + 快递费</span>
+          <span>{money(Number(form.factoryCost || 0) + (Number(form.expressFee) || 0))}</span>
+        </div>
+        <div>
+          <span className="muted">已收回的样品费（已收 / 下单抵扣才计）</span>
+          <span className={form.feeStatus === 'paid' || form.feeStatus === 'offset' ? '' : 'faint'}>
+            {money(form.feeStatus === 'paid' || form.feeStatus === 'offset' ? sampleFee : 0)}
+          </span>
+        </div>
+        <div className="total">
+          <span>公司净垫 = 总成本 − 已收回样品费</span>
+          <span>
+            {money(
+              Number(form.factoryCost || 0) +
+                (Number(form.expressFee) || 0) -
+                (form.feeStatus === 'paid' || form.feeStatus === 'offset' ? sampleFee : 0)
+            )}
+          </span>
+        </div>
+      </div>
+      <div className="hint">
+        应收客户的钱 = 样品费 + 快递费（只有「未收」才计进工作台待收款）；
+        公司净垫 = 公司实际垫出去多少（客户免单就是真亏这么多）。
+      </div>
+
+      <div className="field" style={{ marginTop: 10 }}>
+        <label>备注</label>
+        <textarea rows={2} value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} />
+      </div>
+    </Modal>
+  )
+}

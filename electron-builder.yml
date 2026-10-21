@@ -1,0 +1,31 @@
+{
+  "appId": "com.ikan.trading",
+  "productName": "IKanBot",
+  "directories": {
+    "output": "release",
+    "buildResources": "build"
+  },
+  "icon": "build/icon.ico",
+  "files": ["out/**/*", "package.json"],
+  "electronDist": "node_modules/electron/dist",
+  "asarUnpack": ["node_modules/node-sqlite3-wasm/dist/*.wasm"],
+  "win": {
+    "target": [
+      { "target": "nsis", "arch": ["x64"] },
+      { "target": "portable", "arch": ["x64"] }
+    ],
+    "signAndEditExecutable": false,
+    "artifactName": "${productName}-${version}-${arch}.${ext}"
+  },
+  "afterPack": "scripts/after-pack.cjs",
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "IKanBot 外贸单据系统"
+  },
+  "portable": {
+    "artifactName": "${productName}-${version}-portable.${ext}"
+  }
+}

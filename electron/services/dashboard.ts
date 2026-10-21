@@ -1,0 +1,459 @@
+import { getDb } from '../db'
+import { mapDashboard, mapMonthlyReport } from '../db/mappers'
+import { getSettings } from './settings'
+import { listOrderMoney, totalReceivable } from './money'
+import { localDate } from '../../src/shared/date'
+import type { DashboardStats, MonthlyReportRow, Reminder } from '../../src/shared/types'
+
+function monthStart(): string {
+  const d = new Date()
+  return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().slice(0, 10)
+}
+
+export function dashboard(): DashboardStats {
+  const db = getDb()
+  const settings = getSettings()
+  const mStart = monthStart()
+
+  // 金额口径统一走 services/money.ts（唯一真源）：
+  // 货值 / 费用 / 含费用合计 / 待收 / 毛利 全部用同一套计算
+  // 草稿单、已失效、已作废不算正式订单：不进在途、待收、销售额、毛利、订单数
+  const all = listOrderMoney()
+  const monthRows = all.filter((r) => r.createdAt.slice(0, 10) >= mStart)
+
+  // 待收款金额 = Σ(含费用合计 − 已收)，折算成基准币
+  const pendingAmount = totalReceivable()
+
+  // 本月毛利：本月的单只要有一单成本没录全，毛利就不可信 → null（界面显示「—」）
+  const monthMissingCost = monthRows.some((r) => r.missingCostItems > 0)
+  const monthProfitRaw = monthRows.reduce((s, r) => s + (r.profitRaw * r.exchangeRate), 0)
+  const monthProfit = monthMissingCost ? null : monthProfitRaw
+
+  const row = db.get(
+    `SELECT
+      (SELECT COUNT(*) FROM orders WHERE payment_status NOT IN ('settled','expired','draft','void')) AS active_orders,
+      (SELECT COUNT(*) FROM orders WHERE ship_status NOT IN ('delivered') AND payment_status NOT IN ('draft','void')) AS pending_ship_orders,
+      (SELECT COUNT(*) FROM orders WHERE ship_status = 'delivered' AND date(updated_at) >= date(?)) AS completed_this_month,
+      (SELECT COALESCE(SUM(p.amount * o.exchange_rate), 0) FROM payments p
+         JOIN orders o ON o.id = p.order_id
+         WHERE date(p.paid_at) >= date(?) AND o.payment_status != 'draft') AS month_received,
+      (SELECT COUNT(*) FROM orders WHERE date(created_at) >= date(?) AND payment_status NOT IN ('draft','void')) AS month_new_orders`,
+    [mStart, mStart, mStart]
+  ) as Record<string, unknown>
+
+  return {
+    ...mapDashboard({
+      ...(row ?? {}),
+      pending_amount: pendingAmount,
+      month_sales: monthRows.reduce((s, r) => s + r.grandTotalBase, 0),
+      month_profit: monthProfitRaw
+    }),
+    monthProfit,
+    monthProfitReliable: !monthMissingCost,
+    currency: settings.baseCurrency
+  }
+}
+
+/**
+ * 待办提醒规则：
+ *  1. PI 已发送超过 N 天未确认 → 催确认
+ *  2. 客户已确认超过 N 天仍未收定金 → 催款
+ *  3. 距预计出货日 ≤ N 天仍未到"已包装" → 催备货
+ *  4. 已收过钱但未收齐，超过 N 天 → 催尾款
+ */
+export function reminders(): Reminder[] {
+  const db = getDb()
+  const s = getSettings()
+  const today = localDate()
+  const out: Reminder[] = []
+
+  const sentRows = db.all(
+    `SELECT o.id, o.order_no, o.updated_at, o.created_at, c.company AS customer_name
+     FROM orders o JOIN customers c ON c.id = o.customer_id
+     WHERE o.payment_status = 'sent'`
+  ) as Record<string, unknown>[]
+  for (const r of sentRows) {
+    const days = daysSince(String(r.updated_at) || String(r.created_at))
+    if (days >= s.remindConfirmDays) {
+      out.push({
+        orderId: Number(r.id),
+        orderNo: String(r.order_no),
+        customerName: String(r.customer_name),
+        kind: 'confirm',
+        message: `PI 已发出 ${days} 天，客户未确认`,
+        days
+      })
+    }
+  }
+
+  const payRows = db.all(
+    `SELECT o.id, o.order_no, o.updated_at, o.created_at, c.company AS customer_name
+     FROM orders o JOIN customers c ON c.id = o.customer_id
+     WHERE o.payment_status = 'confirmed'`
+  ) as Record<string, unknown>[]
+  for (const r of payRows) {
+    const days = daysSince(String(r.updated_at) || String(r.created_at))
+    if (days >= s.remindPaymentDays) {
+      out.push({
+        orderId: Number(r.id),
+        orderNo: String(r.order_no),
+        customerName: String(r.customer_name),
+        kind: 'payment',
+        message: `客户已确认 ${days} 天，定金未到账`,
+        days
+      })
+    }
+  }
+
+  const shipRows = db.all(
+    `SELECT o.id, o.order_no, o.expected_ship_date, c.company AS customer_name
+     FROM orders o JOIN customers c ON c.id = o.customer_id
+     WHERE o.expected_ship_date IS NOT NULL AND o.expected_ship_date != ''
+       AND o.ship_status NOT IN ('packed','shipped','cleared','delivered')`
+  ) as Record<string, unknown>[]
+  for (const r of shipRows) {
+    const due = String(r.expected_ship_date)
+    const diff = daysBetween(today, due)
+    if (diff <= s.remindShipDays) {
+      out.push({
+        orderId: Number(r.id),
+        orderNo: String(r.order_no),
+        customerName: String(r.customer_name),
+        kind: 'ship',
+        message: diff < 0 ? `预计出货日 ${due} 已逾期 ${-diff} 天` : `距预计出货日 ${due} 还有 ${diff} 天`,
+        days: diff
+      })
+    }
+  }
+
+  // 催尾款：已经收过定金但还没收齐，超过阈值就提醒
+  const balRows = db.all(
+    `SELECT o.id, o.order_no, o.updated_at, o.created_at, c.company AS customer_name, o.charges,
+            COALESCE((SELECT SUM(oi.quantity * oi.unit_price) FROM order_items oi WHERE oi.order_id = o.id), 0) AS total,
+            COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.order_id = o.id), 0) AS paid,
+            (SELECT MAX(p.paid_at) FROM payments p WHERE p.order_id = o.id) AS last_paid
+     FROM orders o JOIN customers c ON c.id = o.customer_id
+     WHERE o.payment_status IN ('partial','paid')`
+  ) as Record<string, unknown>[]
+  for (const r of balRows) {
+    // 应收总额 = 货值 + 费用（运费/保险也算客户欠的钱）
+    const chargesTotal = parseCharges(r.charges).reduce((s, c) => s + c.amount, 0)
+    const total = Number(r.total) + chargesTotal
+    const paid = Number(r.paid)
+    if (total <= 0 || paid <= 0 || paid >= total - 0.001) continue
+    const since = String(r.last_paid || r.updated_at || r.created_at)
+    const days = daysSince(since)
+    if (days < s.remindBalanceDays) continue
+    const remain = total - paid
+    out.push({
+      orderId: Number(r.id),
+      orderNo: String(r.order_no),
+      customerName: String(r.customer_name),
+      kind: 'balance',
+      message: `已收 ${paid.toFixed(2)} / 待收 ${remain.toFixed(2)}，尾款 ${days} 天未到账`,
+      days
+    })
+  }
+
+  // 催打样费（N23）：公司垫的样品费+快递费，超过阈值还没收 → 提醒。
+  // 注意：汇率没填的单折不准，不计入待收，但这里必须亮出来——否则就是又一个悄悄少算的数。
+  const sampleRows = db.all(
+    `SELECT s.id, s.sample_no, s.sample_date, s.created_at, s.currency, s.exchange_rate, s.express_fee, c.company AS customer_name,
+            COALESCE((SELECT SUM(si.quantity * si.unit_price) FROM sample_order_items si
+                      WHERE si.sample_order_id = s.id), 0) AS sample_fee
+     FROM sample_orders s JOIN customers c ON c.id = s.customer_id
+     WHERE s.fee_status = 'unpaid'`
+  ) as Record<string, unknown>[]
+  for (const r of sampleRows) {
+    const owed = Number(r.sample_fee ?? 0) + Number(r.express_fee ?? 0)
+    if (owed <= 0) continue
+    const since = String(r.sample_date || r.created_at || '')
+    const days = daysSince(since)
+    const rate = Number(r.exchange_rate ?? 0)
+    if (days < s.remindPaymentDays) continue
+    out.push({
+      orderId: 0,
+      orderNo: String(r.sample_no),
+      customerName: String(r.customer_name),
+      kind: 'sample',
+      message:
+        rate > 0
+          ? `打样费 ${owed.toFixed(2)} ${String(r.currency || 'USD')} 未收（折合 ${(owed * rate).toFixed(2)}），样品寄出 ${days} 天`
+          : `打样费 ${owed.toFixed(2)} ${String(r.currency || 'USD')} 未收，且汇率未填（工作台待收里少算了这单，请补汇率）`,
+      days,
+      sampleId: Number(r.id)
+    })
+  }
+
+  out.sort((a, b) => a.kind.localeCompare(b.kind) || b.days - a.days)
+  return out
+}
+
+/** 解析费用行 JSON（运费/保险等） */
+function parseCharges(v: unknown): { label: string; amount: number }[] {
+  try {
+    const parsed = JSON.parse(String(v ?? '[]'))
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .map((c: any) => ({ label: String(c?.label ?? ''), amount: Number(c?.amount ?? 0) }))
+      .filter((c: { label: string; amount: number }) => c.label)
+  } catch {
+    return []
+  }
+}
+
+function daysSince(iso: string): number {  if (!iso) return 0
+  const t = new Date(iso).getTime()
+  if (Number.isNaN(t)) return 0
+  return Math.floor((Date.now() - t) / 86400000)
+}
+
+function daysBetween(a: string, b: string): number {
+  const ta = new Date(a + 'T00:00:00').getTime()
+  const tb = new Date(b + 'T00:00:00').getTime()
+  return Math.round((tb - ta) / 86400000)
+}
+
+/**
+ * 按月统计报表（金额统一折算为基准币）。
+ * 销售额/成本/毛利按订单创建月份归集；收款按实际收款月份归集。
+ *
+ * 口径统一走 services/money.ts：货值 / 成本 / 毛利都跟订单详情、客户页、工作台同一套。
+ * 成本没录全的月份，毛利一律给 null（不可信），不许拿 0 成本凑一个漂亮的数。
+ */
+export function monthlyReport(): MonthlyReportRow[] {
+  const db = getDb()
+  // 销售额 / 成本 / 毛利：按订单创建月份（用 money.ts 的同一套计算）
+  // 销售额 = 含费用合计（与 PI 上的 TOTAL 一致，老板对账不用自己加运费）
+  const rows = listOrderMoney()
+  interface MonthAcc {
+    month: string
+    orders: number
+    sales: number
+    cost: number
+    profit: number
+    received: number
+    missingCostOrders: number
+  }
+  const byMonth = new Map<string, MonthAcc>()
+  for (const r of rows) {
+    const cur: MonthAcc = byMonth.get(r.month) ?? {
+      month: r.month,
+      orders: 0,
+      sales: 0,
+      cost: 0,
+      profit: 0,
+      received: 0,
+      missingCostOrders: 0
+    }
+    cur.orders += 1
+    cur.sales += r.grandTotalBase
+    cur.cost += r.totalCost * r.exchangeRate
+    cur.profit += r.profitRaw * r.exchangeRate
+    if (r.missingCostItems > 0) cur.missingCostOrders += 1
+    byMonth.set(r.month, cur)
+  }
+
+  // 收款：按实际收款月份归集
+  const payRows = db.all(
+    `SELECT strftime('%Y-%m', p.paid_at) AS month,
+            COALESCE(SUM(p.amount * o.exchange_rate), 0) AS received
+     FROM payments p JOIN orders o ON o.id = p.order_id
+     WHERE o.payment_status NOT IN ('draft','void')
+     GROUP BY month`
+  ) as Record<string, unknown>[]
+  for (const p of payRows) {
+    const m = String(p.month)
+    const cur: MonthAcc = byMonth.get(m) ?? {
+      month: m,
+      orders: 0,
+      sales: 0,
+      cost: 0,
+      profit: 0,
+      received: 0,
+      missingCostOrders: 0
+    }
+    cur.received += Number(p.received ?? 0)
+    byMonth.set(m, cur)
+  }
+
+  return [...byMonth.values()]
+    .sort((a, b) => (a.month < b.month ? 1 : -1))
+    .map((r) =>
+      mapMonthlyReport({
+        month: r.month,
+        orders: r.orders,
+        sales: r.sales,
+        cost: r.cost,
+        // 成本没录全的月份：毛利不可信 → null（界面上显示「—」）
+        profit: r.missingCostOrders > 0 ? null : r.profit,
+        received: r.received,
+        missing_cost_orders: r.missingCostOrders
+      })
+    )
+}
+
+/** 导出 Excel（CSV，UTF-8 BOM，Excel 直接可打开） */
+export function exportCsv(kind: 'orders' | 'payments' | 'items'): string {
+  const db = getDb()
+  const base = getSettings().baseCurrency
+  if (kind === 'orders') {
+    // 金额口径走 services/money.ts（唯一真源）：货值 / 费用 / 含费用合计 / 已收 / 待收
+    const rows = listOrderMoney({ includeVoided: true })
+    const header = [
+      '订单号',
+      'PI号',
+      '客户',
+      '国家',
+      '币种',
+      '汇率',
+      '收款状态',
+      '出货状态',
+      '贸易术语',
+      '装运港',
+      '目的港',
+      '付款方式',
+      '客户PO号',
+      '预计出货日',
+      '创建日期',
+      '货值(原币)',
+      '费用合计(原币)',
+      '含费用合计(原币)',
+      '已收金额(原币)',
+      '待收金额(原币)',
+      `含费用合计(${base})`,
+      `已收金额(${base})`,
+      `待收金额(${base})`
+    ]
+    const lines = rows.map((r) => {
+      const rate = r.exchangeRate
+      return [
+        r.orderNo,
+        r.piNo,
+        r.customerName,
+        r.country,
+        r.currency,
+        rate,
+        r.paymentStatus,
+        r.shipStatus,
+        r.incoterm,
+        r.portOfLoading,
+        r.portOfDestination,
+        r.paymentMethod,
+        r.customerPo,
+        r.expectedShipDate ?? '',
+        r.createdAt.slice(0, 10),
+        r.goodsValue.toFixed(2),
+        r.chargesTotal.toFixed(2),
+        r.grandTotal.toFixed(2),
+        r.paidAmount.toFixed(2),
+        r.receivable.toFixed(2),
+        (r.grandTotal * rate).toFixed(2),
+        (r.paidAmount * rate).toFixed(2),
+        (r.receivable * rate).toFixed(2)
+      ].join(',')
+    })
+    return toCsv(header, lines)
+  }
+
+  if (kind === 'items') {
+    // 按款号×颜色×尺码 的明细台账：退税、对账、报关核数用
+    const rows = db.all(
+      `SELECT o.order_no, o.pi_no, c.company, c.country, o.currency, o.exchange_rate,
+              o.payment_status, o.ship_status, o.created_at,
+              oi.style_no, oi.product_name, oi.color, oi.size, oi.quantity, oi.unit_price,
+              (oi.quantity * oi.unit_price) AS amount
+       FROM order_items oi
+       JOIN orders o ON o.id = oi.order_id
+       JOIN customers c ON c.id = o.customer_id
+       WHERE o.payment_status NOT IN ('draft','expired')
+       ORDER BY o.created_at DESC, oi.style_no, oi.color, oi.size`
+    ) as Record<string, unknown>[]
+    const header = [
+      '订单号',
+      'PI号',
+      '客户',
+      '国家',
+      '款号',
+      '品名',
+      '颜色',
+      '尺码',
+      '数量',
+      '单价',
+      '金额(原币)',
+      '币种',
+      '汇率',
+      `金额(${base})`,
+      '收款状态',
+      '出货状态',
+      '创建日期'
+    ]
+    const lines = rows.map((r) => {
+      const rate = Number(r.exchange_rate)
+      const amount = Number(r.amount)
+      return [
+        r.order_no,
+        r.pi_no,
+        r.company,
+        r.country,
+        r.style_no,
+        r.product_name,
+        r.color,
+        r.size,
+        Number(r.quantity),
+        Number(r.unit_price).toFixed(2),
+        amount.toFixed(2),
+        r.currency,
+        rate,
+        (amount * rate).toFixed(2),
+        r.payment_status,
+        r.ship_status,
+        String(r.created_at).slice(0, 10)
+      ].join(',')
+    })
+    return toCsv(header, lines)
+  }
+
+  const rows = db.all(
+    `SELECT p.paid_at, o.order_no, o.pi_no, c.company, o.currency, o.exchange_rate, p.amount, p.method, p.bank_ref, p.note
+     FROM payments p JOIN orders o ON o.id=p.order_id JOIN customers c ON c.id=o.customer_id
+     ORDER BY p.paid_at DESC`
+  ) as Record<string, unknown>[]
+  const header = [
+    '收款日期',
+    '订单号',
+    'PI号',
+    '客户',
+    '币种',
+    '金额(原币)',
+    `金额(${base})`,
+    '方式',
+    '银行流水号',
+    '备注'
+  ]
+  const lines = rows.map((r) =>
+    [
+      r.paid_at,
+      r.order_no,
+      r.pi_no,
+      r.company,
+      r.currency,
+      Number(r.amount).toFixed(2),
+      (Number(r.amount) * Number(r.exchange_rate)).toFixed(2),
+      r.method,
+      r.bank_ref,
+      r.note
+    ].join(',')
+  )
+  return toCsv(header, lines)
+}
+
+function toCsv(header: string[], lines: string[]): string {
+  const esc = (v: unknown) => {
+    const s = String(v ?? '')
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+  }
+  return (
+    '﻿' + [header.map(esc).join(','), ...lines.map((l) => l)].join('\r\n') + '\r\n'
+  )
+}

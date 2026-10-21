@@ -1,0 +1,462 @@
+import { useEffect, useState } from 'react'
+import { Modal, useToast, today, money } from '../ui'
+import {
+  CURRENCIES,
+  INCOTERMS,
+  PAYMENT_METHOD_LABEL,
+  type Currency,
+  type Incoterm,
+  type PaymentMethod
+} from '../../../shared/types'
+
+interface EditForm {
+  customerId: number
+  piNo: string
+  currency: Currency
+  exchangeRate: number
+  exchangeRateDate: string
+  incoterm: Incoterm
+  portOfLoading: string
+  portOfDestination: string
+  paymentMethod: PaymentMethod
+  depositRatio: number
+  validUntil: string
+  expectedShipDate: string
+  expectedArrivalDate: string
+  customerPo: string
+  note: string
+  factory: string
+  factoryDueDate: string
+  cutOffDate: string
+  etdDate: string
+  vessel: string
+  sealNo: string
+}
+
+/**
+ * 订单编辑：修改 PI 上会体现的订单级字段。
+ * 单价/数量在「商品明细」里直接改，这里改客户、币种、条款、日期等。
+ */
+export default function EditOrderModal({
+  order,
+  settings,
+  onClose,
+  onSaved
+}: {
+  order: any
+  settings: any
+  onClose: () => void
+  onSaved: () => Promise<void>
+}) {
+  const toast = useToast()
+  const [customers, setCustomers] = useState<any[]>([])
+  const [ports, setPorts] = useState<{ loading: string[]; destination: string[] }>({
+    loading: [],
+    destination: []
+  })
+  const [charges, setCharges] = useState<{ label: string; amount: number }[]>(
+    (order.charges ?? []).map((c: any) => ({ label: String(c.label), amount: Number(c.amount) || 0 }))
+  )
+  const [form, setForm] = useState<EditForm>({
+    customerId: order.customerId,
+    piNo: order.piNo ?? '',
+    currency: order.currency,
+    exchangeRate: order.exchangeRate,
+    exchangeRateDate: order.exchangeRateDate ?? '',
+    incoterm: order.incoterm,
+    portOfLoading: order.portOfLoading ?? '',
+    portOfDestination: order.portOfDestination ?? '',
+    paymentMethod: order.paymentMethod,
+    depositRatio: order.depositRatio,
+    validUntil: order.validUntil ?? '',
+    expectedShipDate: order.expectedShipDate ?? '',
+    expectedArrivalDate: order.expectedArrivalDate ?? '',
+    customerPo: order.customerPo ?? '',
+    note: order.note ?? '',
+    factory: order.factory ?? '',
+    factoryDueDate: order.factoryDueDate ?? '',
+    cutOffDate: order.cutOffDate ?? '',
+    etdDate: order.etdDate ?? '',
+    vessel: order.vessel ?? '',
+    sealNo: order.sealNo ?? ''
+  })
+  const chargesTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
+
+  useEffect(() => {
+    void window.api.customers.list().then(setCustomers)
+    void window.api.orders.ports().then(setPorts)
+  }, [])
+
+  const save = async () => {
+    try {
+      await window.api.orders.update(order.id, {
+        customerId: form.customerId,
+        piNo: form.piNo.trim(),
+        currency: form.currency,
+        exchangeRate: Number(form.exchangeRate) || 1,
+        exchangeRateDate: form.exchangeRateDate || null,
+        baseCurrency: settings?.baseCurrency ?? 'CNY',
+        incoterm: form.incoterm,
+        portOfLoading: form.portOfLoading,
+        portOfDestination: form.portOfDestination,
+        paymentMethod: form.paymentMethod,
+        depositRatio: form.depositRatio,
+        validUntil: form.validUntil || null,
+        expectedShipDate: form.expectedShipDate || null,
+        expectedArrivalDate: form.expectedArrivalDate || null,
+        customerPo: form.customerPo,
+        note: form.note,
+        factory: form.factory,
+        factoryDueDate: form.factoryDueDate || null,
+        cutOffDate: form.cutOffDate || null,
+        etdDate: form.etdDate || null,
+        vessel: form.vessel,
+        sealNo: form.sealNo,
+        charges: charges.filter((c) => c.label.trim())
+      })
+      toast('订单已更新')
+      await onSaved()
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
+  }
+
+  const extendValidity = (days: number) => {
+    const base = form.validUntil ? new Date(form.validUntil + 'T00:00:00') : new Date()
+    base.setDate(base.getDate() + days)
+    setForm({ ...form, validUntil: base.toISOString().slice(0, 10) })
+  }
+
+  return (
+    <Modal
+      title={`编辑订单 ${order.orderNo}`}
+      onClose={onClose}
+      size="wide"
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            取消
+          </button>
+          <button className="btn primary" onClick={save}>
+            保存修改
+          </button>
+        </>
+      }
+    >
+      <div className="field-row">
+        <div className="field">
+          <label>客户 *</label>
+          <select
+            value={form.customerId || ''}
+            onChange={(e) => setForm({ ...form, customerId: Number(e.target.value) })}
+          >
+            <option value="">请选择客户…</option>
+            {customers.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.company}
+                {c.country ? ` (${c.country})` : ''}
+              </option>
+            ))}
+          </select>
+          <div className="hint">改客户后，PI 上的收件信息会跟着变</div>
+        </div>
+        <div className="field">
+          <label>PI 号</label>
+          <input value={form.piNo} onChange={(e) => setForm({ ...form, piNo: e.target.value })} />
+          <div className="hint">对外的单据编号，可改</div>
+        </div>
+      </div>
+
+      <div className="field-row-3">
+        <div className="field">
+          <label>币种</label>
+          <select
+            value={form.currency}
+            onChange={(e) => setForm({ ...form, currency: e.target.value as Currency })}
+          >
+            {CURRENCIES.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="field">
+          <label>汇率（1 {form.currency} = ? {settings?.baseCurrency ?? 'CNY'}）</label>
+          <input
+            type="number"
+            step="0.0001"
+            value={form.exchangeRate}
+            onChange={(e) => setForm({ ...form, exchangeRate: Number(e.target.value) })}
+          />
+          <div className="hint">
+            汇率锁定日期：{form.exchangeRateDate || '未记录'}
+            <input
+              type="date"
+              style={{ width: 140, marginLeft: 8 }}
+              value={form.exchangeRateDate}
+              onChange={(e) => setForm({ ...form, exchangeRateDate: e.target.value })}
+            />
+          </div>
+        </div>
+        <div className="field">
+          <label>贸易术语</label>
+          <select
+            value={form.incoterm}
+            onChange={(e) => setForm({ ...form, incoterm: e.target.value as Incoterm })}
+          >
+            {INCOTERMS.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="field-row-3">
+        <div className="field">
+          <label>装运港</label>
+          <input
+            list="edit-ports-loading"
+            value={form.portOfLoading}
+            onChange={(e) => setForm({ ...form, portOfLoading: e.target.value })}
+            placeholder="如 Ningbo"
+          />
+          <datalist id="edit-ports-loading">
+            {ports.loading.map((p) => (
+              <option key={p} value={p} />
+            ))}
+          </datalist>
+        </div>
+        <div className="field">
+          <label>目的港</label>
+          <input
+            list="edit-ports-dest"
+            value={form.portOfDestination}
+            onChange={(e) => setForm({ ...form, portOfDestination: e.target.value })}
+            placeholder="如 Hamburg"
+          />
+          <datalist id="edit-ports-dest">
+            {ports.destination.map((p) => (
+              <option key={p} value={p} />
+            ))}
+          </datalist>
+        </div>
+        <div className="field">
+          <label>付款方式</label>
+          <select
+            value={form.paymentMethod}
+            onChange={(e) => setForm({ ...form, paymentMethod: e.target.value as PaymentMethod })}
+          >
+            {Object.entries(PAYMENT_METHOD_LABEL).map(([k, v]) => (
+              <option key={k} value={k}>
+                {v}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="field-row-3">
+        <div className="field">
+          <label>定金比例</label>
+          <select
+            value={String(form.depositRatio)}
+            onChange={(e) => setForm({ ...form, depositRatio: Number(e.target.value) })}
+          >
+            <option value="0">无定金</option>
+            <option value="0.2">20%</option>
+            <option value="0.3">30%</option>
+            <option value="0.4">40%</option>
+            <option value="0.5">50%</option>
+            <option value="1">全额</option>
+          </select>
+        </div>
+        <div className="field">
+          <label>PI 有效期</label>
+          <input
+            type="date"
+            value={form.validUntil}
+            onChange={(e) => setForm({ ...form, validUntil: e.target.value })}
+          />
+          <div className="row" style={{ marginTop: 5, gap: 5 }}>
+            <button className="btn sm" onClick={() => extendValidity(7)}>
+              +7天
+            </button>
+            <button className="btn sm" onClick={() => extendValidity(15)}>
+              +15天
+            </button>
+            <button className="btn sm" onClick={() => extendValidity(30)}>
+              +30天
+            </button>
+            <button className="btn sm" onClick={() => setForm({ ...form, validUntil: today() })}>
+              今天
+            </button>
+          </div>
+        </div>
+        <div className="field">
+          <label>客户 PO 号</label>
+          <input
+            value={form.customerPo}
+            onChange={(e) => setForm({ ...form, customerPo: e.target.value })}
+          />
+        </div>
+      </div>
+
+      <div className="field-row">
+        <div className="field">
+          <label>预计出货日</label>
+          <input
+            type="date"
+            value={form.expectedShipDate}
+            onChange={(e) => setForm({ ...form, expectedShipDate: e.target.value })}
+          />
+        </div>
+        <div className="field">
+          <label>预计到港日</label>
+          <input
+            type="date"
+            value={form.expectedArrivalDate}
+            onChange={(e) => setForm({ ...form, expectedArrivalDate: e.target.value })}
+          />
+        </div>
+      </div>
+
+      <h3 style={{ fontSize: 13, margin: '12px 0 4px' }}>工厂与船期</h3>
+      <div className="field-row-3">
+        <div className="field">
+          <label>加工厂</label>
+          <input
+            value={form.factory}
+            onChange={(e) => setForm({ ...form, factory: e.target.value })}
+            placeholder="如 袜厂王老板"
+          />
+        </div>
+        <div className="field">
+          <label>工厂交货日</label>
+          <input
+            type="date"
+            value={form.factoryDueDate}
+            onChange={(e) => setForm({ ...form, factoryDueDate: e.target.value })}
+          />
+        </div>
+        <div className="field">
+          <label>截关日</label>
+          <input
+            type="date"
+            value={form.cutOffDate}
+            onChange={(e) => setForm({ ...form, cutOffDate: e.target.value })}
+          />
+        </div>
+      </div>
+      <div className="field-row-3">
+        <div className="field">
+          <label>实际开船日</label>
+          <input
+            type="date"
+            value={form.etdDate}
+            onChange={(e) => setForm({ ...form, etdDate: e.target.value })}
+          />
+        </div>
+        <div className="field">
+          <label>船名航次</label>
+          <input
+            value={form.vessel}
+            onChange={(e) => setForm({ ...form, vessel: e.target.value })}
+            placeholder="如 MAERSK V.034E"
+          />
+        </div>
+        <div className="field">
+          <label>封条号</label>
+          <input
+            value={form.sealNo}
+            onChange={(e) => setForm({ ...form, sealNo: e.target.value })}
+            placeholder="如 CN1234567"
+          />
+        </div>
+      </div>
+
+      <h3 style={{ fontSize: 13, margin: '12px 0 4px' }}>费用（运费 / 保险费 / 其他）</h3>
+      <div className="row" style={{ marginBottom: 5 }}>
+        <span className="hint">CIF / CFR / FOB 天天变，运费保险在这里改，PI 和 CI 会一起变</span>
+        <div className="spacer" />
+        <button className="btn sm" onClick={() => setCharges((cs) => [...cs, { label: '运费 Freight', amount: 0 }])}>
+          + 加费用
+        </button>
+      </div>
+      {charges.length === 0 ? (
+        <div className="hint">还没有费用行（PI 上只有货值）</div>
+      ) : (
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th>费用名称</th>
+                <th className="num" style={{ width: '32%' }}>
+                  金额（{form.currency}）
+                </th>
+                <th style={{ width: 70 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {charges.map((c, i) => (
+                <tr key={i}>
+                  <td>
+                    <input
+                      value={c.label}
+                      onChange={(e) =>
+                        setCharges((cs) => cs.map((x, k) => (k === i ? { ...x, label: e.target.value } : x)))
+                      }
+                    />
+                  </td>
+                  <td className="num">
+                    <input
+                      type="number"
+                      step="0.01"
+                      style={{ width: 110, textAlign: 'right' }}
+                      value={c.amount}
+                      onChange={(e) =>
+                        setCharges((cs) =>
+                          cs.map((x, k) => (k === i ? { ...x, amount: Number(e.target.value) } : x))
+                        )
+                      }
+                    />
+                  </td>
+                  <td className="right">
+                    <button
+                      className="btn sm ghost danger"
+                      onClick={() => setCharges((cs) => cs.filter((_, k) => k !== i))}
+                    >
+                      删除
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr style={{ background: '#f8fafc', fontWeight: 700 }}>
+                <td>费用合计</td>
+                <td className="num">{chargesTotal.toFixed(2)}</td>
+                <td></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+      <div className="hint" style={{ marginTop: 4 }}>
+        含费用合计 {money((order.totalAmount ?? 0) + chargesTotal, form.currency)}
+      </div>
+
+      <div className="field">
+        <label>备注（会打印在 PI 上）</label>
+        <textarea
+          rows={3}
+          value={form.note}
+          onChange={(e) => setForm({ ...form, note: e.target.value })}
+          placeholder="如：左胸印 Logo，黑色款加急，7 月 10 日前交货。"
+        />
+      </div>
+    </Modal>
+  )
+}
