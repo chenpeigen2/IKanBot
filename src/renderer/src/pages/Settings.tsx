@@ -2,14 +2,21 @@ import { useEffect, useState } from 'react'
 import { useToast } from '../ui'
 import { imageUrl } from '../imageUrl'
 import { CURRENCIES, type Currency } from '../../../shared/types'
+import type { UpdateStatus } from '../../../shared/api'
 
 export default function Settings() {
   const toast = useToast()
   const [s, setS] = useState<any>(null)
   const [backupPath, setBackupPath] = useState('')
+  const [update, setUpdate] = useState<UpdateStatus | null>(null)
 
   useEffect(() => {
     void window.api.settings.get().then(setS)
+  }, [])
+
+  // 订阅自动更新事件
+  useEffect(() => {
+    return window.api.updater.on((info) => setUpdate(info))
   }, [])
 
   if (!s) return <div className="content">加载中…</div>
@@ -324,6 +331,131 @@ export default function Settings() {
               </button>
             </div>
             {backupPath ? <div className="hint mono">{backupPath}</div> : null}
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="card-head">
+            <h2>软件更新</h2>
+          </div>
+          <div className="card-body">
+            <div className="field-row">
+              <div className="field">
+                <label>当前版本</label>
+                <div className="row" style={{ gap: 12, alignItems: 'center' }}>
+                  <span className="mono" style={{ fontSize: 16 }}>
+                    {update?.currentVersion ?? '—'}
+                  </span>
+                  <button
+                    className="btn"
+                    disabled={!update || update.status === 'checking' || update.status === 'downloading'}
+                    onClick={async () => {
+                      const r = await window.api.updater.check()
+                      setUpdate(r)
+                      if (r.status === 'error' && r.message) toast(r.message, 'error')
+                    }}
+                  >
+                    检查更新
+                  </button>
+                  {update?.status === 'available' ? (
+                    <button
+                      className="btn primary"
+                      onClick={async () => {
+                        const r = await window.api.updater.download()
+                        setUpdate(r)
+                      }}
+                    >
+                      下载 v{update.version}
+                    </button>
+                  ) : null}
+                  {update?.status === 'downloaded' ? (
+                    <button
+                      className="btn primary"
+                      onClick={() => void window.api.updater.install()}
+                    >
+                      重启安装 v{update.version}
+                    </button>
+                  ) : null}
+                </div>
+                <div className="hint">
+                  有新版时会显示下载按钮，下载完点"重启安装"，程序会自己关了自己装完再打开。
+                </div>
+              </div>
+            </div>
+
+            {/* 状态反馈 */}
+            {update?.status === 'checking' ? (
+              <div className="alert info">正在检查更新…</div>
+            ) : null}
+            {update?.status === 'not-available' ? (
+              <div className="alert info">
+                已经是最新版本（v{update.version ?? update.currentVersion}）。
+              </div>
+            ) : null}
+            {update?.status === 'available' ? (
+              <div className="alert warn">
+                发现新版本 <strong>v{update.version}</strong>
+                {update.releaseDate ? <span className="faint">（{String(update.releaseDate).slice(0, 10)}）</span> : null}
+                {update.releaseNotes ? (
+                  <div className="hint" style={{ marginTop: 6, whiteSpace: 'pre-wrap' }}>
+                    {update.releaseNotes}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {update?.status === 'downloading' ? (
+              <div className="alert info">
+                <div style={{ marginBottom: 6 }}>
+                  正在下载 v{update.version ?? ''}…{' '}
+                  <strong>{update.percent ?? 0}%</strong>
+                  {update.transferred != null && update.total != null ? (
+                    <span className="faint">
+                      {' '}
+                      （{Math.round(update.transferred / 1024 / 1024)}MB /{' '}
+                      {Math.round(update.total / 1024 / 1024)}MB）
+                    </span>
+                  ) : null}
+                </div>
+                <div
+                  style={{
+                    height: 6,
+                    background: '#e2e6ee',
+                    borderRadius: 3,
+                    overflow: 'hidden'
+                  }}
+                >
+                  <div
+                    style={{
+                      width: `${update.percent ?? 0}%`,
+                      height: '100%',
+                      background: 'var(--accent)',
+                      transition: 'width .2s'
+                    }}
+                  />
+                </div>
+              </div>
+            ) : null}
+            {update?.status === 'downloaded' ? (
+              <div className="alert info">
+                已下载完成，点上面"重启安装 v{update.version}"即可。
+              </div>
+            ) : null}
+            {update?.status === 'error' ? (
+              <div className="alert warn">{update.message ?? '出错了'}</div>
+            ) : null}
+
+            <div className="hint" style={{ marginTop: 10 }}>
+              更新来自 GitHub Releases，需要能访问 github.com。如果下载慢，
+              <button
+                className="btn sm"
+                style={{ marginLeft: 6 }}
+                onClick={() =>
+                  void window.api.shell.openExternal('https://github.com/chenpeigen2/IKanBot/releases')
+                }
+              >
+                去 GitHub 手动下载
+              </button>
+            </div>
           </div>
         </div>
       </div>

@@ -6,6 +6,28 @@
     "buildResources": "build"
   },
   "icon": "build/icon.ico",
+  "extraResources": [
+    {
+      "from": "build/icon.ico",
+      "to": "icon.ico"
+    },
+    {
+      "from": "electron/resources/tray.png",
+      "to": "tray.png"
+    },
+    {
+      "from": "electron/resources/tray-16.png",
+      "to": "tray-16.png"
+    },
+    {
+      "from": "electron/resources/tray-32.png",
+      "to": "tray-32.png"
+    },
+    {
+      "from": "electron/resources/tray-48.png",
+      "to": "tray-48.png"
+    }
+  ],
   "files": ["out/**/*", "package.json"],
   "electronDist": "node_modules/electron/dist",
   "asarUnpack": ["node_modules/node-sqlite3-wasm/dist/*.wasm"],
@@ -27,5 +49,14 @@
   },
   "portable": {
     "artifactName": "${productName}-${version}-portable.${ext}"
-  }
+  },
+  "publish": [
+    {
+      "provider": "github",
+      "owner": "chenpeigen2",
+      "repo": "IKanBot",
+      "releaseType": "release",
+      "channel": "latest"
+    }
+  ]
 }

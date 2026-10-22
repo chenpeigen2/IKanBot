@@ -20,6 +20,7 @@
     "agent:iterate": "echo run via pi subagent"
   },
   "dependencies": {
+    "electron-updater": "^6.8.9",
     "node-sqlite3-wasm": "^0.8.61"
   },
   "devDependencies": {

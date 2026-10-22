@@ -94,6 +94,10 @@ const api: IKanApi = {
     reveal: (filePath?: string) => call<string>('docs:reveal', filePath),
     openFile: (filePath: string) => call<string>('docs:openFile', filePath)
   },
+  /** 用系统浏览器打开外链 */
+  shell: {
+    openExternal: (url: string) => call<boolean>('shell:openExternal', url)
+  },
   pl: {
     list: (orderId: number) => call<any[]>('pl:list', orderId),
     create: (input: any) => call<any[]>('pl:create', input),
@@ -134,6 +138,20 @@ const api: IKanApi = {
     printPdf: (payload: { html: string; fileName: string; silent?: boolean }) =>
       call<string>('window:printPdf', payload),
     print: () => call<boolean>('window:print')
+  },
+  updater: {
+    /** 检查更新 */
+    check: () => call<any>('updater:check'),
+    /** 下载更新 */
+    download: () => call<any>('updater:download'),
+    /** 重启并安装已下载的更新 */
+    install: () => call<boolean>('updater:install'),
+    /** 订阅更新事件（进度/状态） */
+    on: (cb: (info: any) => void) => {
+      const listener = (_e: unknown, info: any) => cb(info)
+      ipcRenderer.on('updater:event', listener)
+      return () => ipcRenderer.removeListener('updater:event', listener)
+    }
   }
 }
 

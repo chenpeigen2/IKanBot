@@ -1,8 +1,9 @@
 import { app, BrowserWindow, Tray, Menu, globalShortcut, shell, nativeImage } from 'electron'
 import { join } from 'path'
-import { writeFileSync, mkdirSync } from 'fs'
+import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs'
 import { openDb, closeDb } from '../db'
 import { registerIpc } from '../ipc'
+import { initUpdater } from '../services/updater'
 import { autoBackupOnStart } from '../services/backup'
 import { TRAY_ICON_BASE64 } from '../resources/trayIcon'
 
@@ -47,6 +48,9 @@ function createWindow(): void {
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
+
+  // 自动更新：需要窗口实例才能推进度
+  initUpdater(mainWindow)
 
   if (shotRoute) {
     // 看门狗：截图模式无论如何必须在 90 秒内退出，不能把调用方挂死
@@ -109,7 +113,33 @@ function showMainWindow(): void {
 }
 
 function createTray(): void {
-  const icon = nativeImage.createFromDataURL(TRAY_ICON_BASE64)
+  // 托盘图标 = 应用图标的托盘版（深蓝底 + 粗 I + 缝衣针），与应用图标同一视觉语言。
+  //
+  // 提供 16/32/48 三档：DPI 100% 用 16，高分屏（150%/200%）自动用 32/48，
+  // 高分辨率下托盘图标更大更清楚，不会像 256 缩下来那样糊成一团。
+  const resDir = process.resourcesPath
+  const devDir = join(app.getAppPath(), '..', 'electron', 'resources')
+  const load = (name: string): Buffer | null => {
+    for (const dir of [resDir, devDir]) {
+      const p = join(dir, name)
+      try {
+        if (existsSync(p)) return readFileSync(p)
+      } catch {
+        /* 试下一个 */
+      }
+    }
+    return null
+  }
+
+  const buf16 = load('tray-16.png')
+  let icon = buf16 ? nativeImage.createFromBuffer(buf16) : nativeImage.createEmpty()
+  if (icon.isEmpty()) icon = nativeImage.createFromDataURL(TRAY_ICON_BASE64)
+
+  const buf32 = load('tray-32.png')
+  if (buf32) icon.addRepresentation({ scaleFactor: 2, width: 32, height: 32, buffer: buf32 })
+  const buf48 = load('tray-48.png')
+  if (buf48) icon.addRepresentation({ scaleFactor: 3, width: 48, height: 48, buffer: buf48 })
+
   tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon)
   const menu = Menu.buildFromTemplate([
     {

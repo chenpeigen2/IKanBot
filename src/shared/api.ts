@@ -135,4 +135,36 @@ export interface IKanApi {
     printPdf(payload: { html: string; fileName: string; silent?: boolean }): Promise<string>
     print(): Promise<boolean>
   }
+  /** 应用内自动更新 */
+  updater: {
+    check(): Promise<UpdateStatus>
+    download(): Promise<UpdateStatus>
+    install(): Promise<boolean>
+    on(cb: (info: UpdateStatus) => void): () => void
+  }
+  /** 用系统浏览器打开外链 */
+  shell: {
+    openExternal(url: string): Promise<boolean>
+  }
+}
+
+/** 自动更新状态 */
+export interface UpdateStatus {
+  status:
+    | 'idle'
+    | 'checking'
+    | 'available'
+    | 'not-available'
+    | 'downloading'
+    | 'downloaded'
+    | 'error'
+  version?: string
+  releaseNotes?: string
+  releaseDate?: string
+  percent?: number
+  transferred?: number
+  total?: number
+  speed?: number
+  message?: string
+  currentVersion: string
 }

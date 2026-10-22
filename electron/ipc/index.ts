@@ -12,6 +12,7 @@ import * as dashboard from '../services/dashboard'
 import * as settingsSvc from '../services/settings'
 import * as docsSvc from '../services/docs'
 import { createBackup } from '../services/backup'
+import { registerUpdaterIpc } from '../services/updater'
 import { copyFileSync } from 'fs'
 import { randomUUID } from 'crypto'
 
@@ -27,6 +28,16 @@ function handle<T>(channel: string, fn: (...args: any[]) => T | Promise<T>): voi
 }
 
 export function registerIpc(): void {
+  /* ---- 自动更新 ---- */
+  registerUpdaterIpc()
+
+  /* ---- 打开外部链接 ---- */
+  handle('shell:openExternal', (url: string) => {
+    if (!/^https?:\/\//.test(url)) return false
+    void shell.openExternal(url)
+    return true
+  })
+
   /* ---- 商品 ---- */
   handle('products:list', (keyword?: string, includeInactive?: boolean) =>
     products.listProducts(keyword, includeInactive)
