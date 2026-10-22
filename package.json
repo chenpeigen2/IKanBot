@@ -1,6 +1,6 @@
 {
   "name": "ikanbot",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "外贸商品录入与 PI/PL 单据生成系统",
   "main": "./out/main/index.js",
   "author": "IKanBot",
