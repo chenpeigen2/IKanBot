@@ -14,33 +14,46 @@
   --space-6: 24px;
   --space-8: 32px;
 
-  /* ---------- 字号层级（只用整数，禁止半像素） ---------- */
+  /* ---------- 字号层级（只用整数，禁止半像素） ----------
+     v2：把「标题层」和「正文层」拉开。
+     正文层（表格、表单、辅助文字）一个字没动 —— 那是管眼睛的部分；
+     标题层整体上移一级，页面才有主次，不然 14px 的卡片标题和 13px 的
+     表格正文只差 1px，看着就是平的。 */
   --text-xs: 11px;
   --text-sm: 12px;
   --text-base: 13px;
-  --text-md: 14px;
-  --text-lg: 16px;
-  --text-xl: 18px;
-  --text-display: 24px;
-  --text-display-sm: 20px;
+  --text-md: 16px;
+  --text-lg: 18px;
+  --text-xl: 22px;
+  --text-display-sm: 24px;
+  --text-display: 28px;
   --lh-tight: 1.2;
   --lh-normal: 1.5;
   --lh-loose: 1.6;
 
-  /* ---------- 表面与文字 ---------- */
-  --bg: #f4f6f9;
+  /* 表格行高。必须由单元格的文字行框撑出来，不能写 tr { height } */
+  --row-h-table: 40px;
+
+  /* ---------- 表面与文字 ----------
+     v2：整条灰阶收进同一个冷色温（色相 ≈ 218），白不再是纯白。
+     以前 #ffffff 卡片压在 #f4f6f9 底上，两套不相干的冷白，
+     卡片看着像贴纸；现在底色更深更冷、有饱和度，卡片自然浮起来。 */
+  --bg: #eef1f7;
   --surface: #ffffff;
-  --surface-2: #f8fafc;
-  --surface-3: #eef1f6;
-  --border: #e2e6ee;
-  --border-strong: #cfd6e3;
-  --divider: #eef1f6;
-  --text: #1c2333;
-  --text-dim: #667085;
-  --text-faint: #5c6878;
+  --surface-2: #f5f8fc;
+  --surface-3: #e7ecf4;
+  --border: #e0e6f0;
+  --border-strong: #c3ccdb;
+  --divider: #eaeff7;
+  --text: #151b29;
+  --text-dim: #566175;
+  --text-faint: #636d80;
   --text-inverse: #ffffff;
 
-  /* ---------- 语义色 ---------- */
+  /* ---------- 语义色（v2 冻结） ----------
+     主色与五色状态色一个字没动：绿=钱、灰=货、琥珀=待办，
+     这套映射是上一轮分家分出来的，动了会伤到辨识度。
+     只有中性灰两个（--neutral-soft / --neutral-text）跟着灰阶走。 */
   --accent: #2f6fed;
   --accent-hover: #2158c9;
   --accent-soft: #eaf1fe;
@@ -50,27 +63,35 @@
   --warning-soft: #fdf2dd;
   --danger: #a53024;
   --danger-soft: #fdeceb;
-  --neutral-soft: #eef1f6;
-  --neutral-text: #5a6577;
+  --neutral-soft: #e9edf4;
+  --neutral-text: #55617a;
 
-  /* ---------- 暗色侧边栏 ---------- */
-  --sidebar-bg: #131a2a;
-  --sidebar-text: #b9c2d4;
-  --sidebar-text-dim: #8b97ad;
-  --sidebar-border: rgba(255, 255, 255, 0.07);
-  --sidebar-active-bg: rgba(47, 111, 237, 0.16);
+  /* ---------- 暗色侧边栏（v2：更冷更沉，与内容区拉开） ---------- */
+  --sidebar-bg: #101725;
+  --sidebar-text: #c3cbdb;
+  --sidebar-text-dim: #8e9ab1;
+  --sidebar-border: rgba(255, 255, 255, 0.08);
+  --sidebar-active-bg: rgba(47, 111, 237, 0.18);
 
-  /* ---------- 圆角 / 阴影 / 焦点 ---------- */
+  /* ---------- 圆角 / 阴影 / 焦点 ----------
+     v2：阴影拆成 4 档。以前全站只有两档（卡片一律 --shadow-1、
+     弹窗一律 --shadow-2），所有卡片的浮起感完全一样，所以整页是平的。
+     4 档分别对应：静置卡片 / 浮层 / 悬停抬升 / 最高层（单据预览的纸）。 */
   --radius-sm: 4px;
   --radius-md: 6px;
-  --radius-lg: 8px;
-  --radius-xl: 10px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
   --radius-pill: 999px;
-  --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.08);
-  --shadow-2: 0 8px 28px rgba(16, 24, 40, 0.14);
+  --shadow-1: 0 1px 2px rgba(21, 27, 41, 0.05), 0 2px 8px -2px rgba(21, 27, 41, 0.06);
+  --shadow-2: 0 2px 4px rgba(21, 27, 41, 0.04), 0 12px 28px -6px rgba(21, 27, 41, 0.14);
+  --shadow-3: 0 2px 4px rgba(21, 27, 41, 0.05), 0 10px 22px -6px rgba(21, 27, 41, 0.12);
+  --shadow-4: 0 24px 56px -16px rgba(21, 27, 41, 0.26);
   --focus-ring: 0 0 0 3px var(--accent-soft);
 
   --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+
+  /* 单据预览的底色：白纸压在上面才立得住 */
+  --doc-preview-bg: #2b3346;
 }
 
 * {
@@ -107,10 +128,12 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* 侧栏和内容区之间加一道极窄的高光，边界不再是一条生硬的缝 */
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.05);
 }
 
 .brand {
-  padding: var(--space-4);
+  padding: var(--space-5) var(--space-4) var(--space-4);
   border-bottom: 1px solid var(--sidebar-border);
 }
 
@@ -118,7 +141,7 @@ body {
   font-size: var(--text-lg);
   font-weight: 700;
   color: var(--text-inverse);
-  letter-spacing: 0.4px;
+  letter-spacing: 0.3px;
 }
 
 .brand-sub {
@@ -129,32 +152,53 @@ body {
 
 .nav {
   flex: 1;
-  padding: var(--space-2) 0;
+  padding: var(--space-3) 0;
   overflow-y: auto;
 }
 
+/* 导航项：v2 从「整条高亮 + 左侧直条」改成「圆角块 + 左侧胶囊指示」。
+   直条贴在屏幕边缘时很生硬，圆角块让它像一个可以按下去的东西。 */
 .nav-item {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-4);
+  margin: 1px var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
   cursor: pointer;
   color: var(--sidebar-text);
   font-size: var(--text-base);
-  border-left: 3px solid transparent;
   user-select: none;
+  position: relative;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.nav-item::before {
+  content: '';
+  position: absolute;
+  left: calc(var(--space-2) * -1 + 1px);
+  top: 50%;
+  width: 3px;
+  height: 0;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  transform: translateY(-50%);
+  transition: height 0.18s ease;
 }
 
 .nav-item:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(255, 255, 255, 0.06);
   color: var(--text-inverse);
 }
 
 .nav-item.active {
   background: var(--sidebar-active-bg);
-  border-left-color: var(--accent);
   color: var(--text-inverse);
   font-weight: 600;
+}
+
+.nav-item.active::before {
+  height: 16px;
 }
 
 /* 导航图标：固定 16×16 盒，不参与文字基线对齐 */
@@ -184,11 +228,13 @@ body {
   font-weight: 600;
 }
 
+/* 侧栏底部：像一条快捷键提示，而不是一行孤零零的字 */
 .sidebar-foot {
   padding: var(--space-3) var(--space-4);
   border-top: 1px solid var(--sidebar-border);
   font-size: var(--text-sm);
   color: var(--sidebar-text-dim);
+  letter-spacing: 0.02em;
 }
 
 .main {
@@ -197,10 +243,12 @@ body {
   flex-direction: column;
 }
 
+/* 顶栏：半透明 + 模糊，内容从下面滚过去时像压在玻璃上 */
 .topbar {
-  background: var(--surface);
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(14px) saturate(1.6);
   border-bottom: 1px solid var(--border);
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-4) var(--space-5);
   display: flex;
   align-items: center;
   gap: var(--space-3);
@@ -213,16 +261,37 @@ body {
   font-size: var(--text-xl);
   margin: 0;
   font-weight: 650;
+  letter-spacing: -0.01em;
 }
 
 .topbar .spacer {
   flex: 1;
 }
 
-/* 内容区左右留白收到 16px：多列表格（订单 13 列 / 打样单 14 列）不再横向溢出 */
+/* 内容区上下留白 24px：表格不横向溢出，卡片比原来更"透气"。
+   左右仍是 16px（--space-4）——这 8px 别的地方省不出来：
+   打样单表 14 列，宽度每少 8px，快递单号就少露两个字符。 */
 .content {
-  padding: var(--space-5) var(--space-4) var(--space-8);
+  padding: var(--space-6) var(--space-4) var(--space-8);
   flex: 1;
+}
+
+/* 换页时整页轻轻落定一次，160ms 之内走完，不拖泥带水。
+   位移方向只能是「从上往下落」（translateY 负值）：
+   .content 是 flex: 1，正好把 .main 剩下的高度填满，
+   再往下顶 6px 就会给 .main 挤出一条竖滚动条 ——
+   竖条一出现，内容区窄 17px，13 列的订单表立刻放不下，
+   底下就多出一条空横滚动条，而 transform 变化不触发重排，这条空滚动条还赖着不走。 */
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+.main .topbar,
+.main .content {
+  animation: page-in 0.16s ease-out both;
 }
 
 /* ---------- 通用 ---------- */
@@ -240,11 +309,22 @@ body {
   align-items: center;
   gap: var(--space-1);
   white-space: nowrap;
+  /* 按钮也有厚度：一点极浅的投影 + 按下时的位移 */
+  box-shadow: 0 1px 2px rgba(21, 27, 41, 0.05);
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease,
+    box-shadow 0.15s ease, transform 0.15s ease;
 }
 
 .btn:hover:not(:disabled) {
   border-color: var(--accent);
   color: var(--accent);
+  box-shadow: 0 3px 8px -2px rgba(21, 27, 41, 0.1);
+  transform: translateY(-1px);
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 1px 2px rgba(21, 27, 41, 0.06);
 }
 
 .btn:disabled {
@@ -252,16 +332,21 @@ body {
   cursor: not-allowed;
 }
 
+/* 主按钮是全站唯一允许用渐变的地方：一道从亮到暗的竖向渐变，
+   加一条内高光，让它看起来是一块有厚度的实体，而不是一块色纸。 */
 .btn.primary {
-  background: var(--accent);
+  background: linear-gradient(180deg, #3d79ef 0%, var(--accent) 100%);
   border-color: var(--accent);
   color: var(--text-inverse);
+  box-shadow: 0 1px 2px rgba(21, 27, 41, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.16);
 }
 
 .btn.primary:hover:not(:disabled) {
-  background: var(--accent-hover);
+  background: linear-gradient(180deg, #4a83f1 0%, var(--accent-hover) 100%);
   border-color: var(--accent-hover);
   color: var(--text-inverse);
+  box-shadow: 0 4px 12px -2px rgba(21, 27, 41, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  transform: translateY(-1px);
 }
 
 .btn.danger {
@@ -284,10 +369,13 @@ body {
 .btn.ghost {
   border-color: transparent;
   background: transparent;
+  box-shadow: none;
 }
 
 .btn.ghost:hover:not(:disabled) {
   background: var(--surface-3);
+  box-shadow: none;
+  transform: none;
 }
 
 .btn.ghost.danger {
@@ -310,12 +398,20 @@ body {
   right: 0;
   top: calc(100% + var(--space-1));
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-2);
   min-width: 140px;
   padding: var(--space-1) 0;
   z-index: 60;
+  animation: menu-in 0.14s ease-out;
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
 }
 
 /* 行内「⋯」菜单：挂在 body 上，按视口坐标定位（不被表格滚动容器裁掉） */
@@ -361,6 +457,9 @@ textarea {
   background: var(--surface);
   color: var(--text);
   width: 100%;
+  /* 输入框是"凹"进去的：一道极浅的内阴影，比一条硬边更像可以打字的槽 */
+  box-shadow: inset 0 1px 2px rgba(21, 27, 41, 0.045);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 input:focus,
@@ -368,7 +467,15 @@ select:focus,
 textarea:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: var(--focus-ring);
+  box-shadow: var(--focus-ring), inset 0 1px 2px rgba(21, 27, 41, 0.03);
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  background: var(--surface-2);
+  color: var(--text-faint);
+  cursor: not-allowed;
 }
 
 input[type='checkbox'],
@@ -455,15 +562,15 @@ label {
 
 /* 区块上边距（表头与内容之间） */
 .sec-top {
-  padding: var(--space-3) var(--space-4) 0;
+  padding: var(--space-4) var(--space-5) 0;
 }
 
 /* 小节标题行（"商品明细" + 右侧按钮） */
 .sec-head {
   display: flex;
   align-items: center;
-  margin: var(--space-3) 0 var(--space-1);
-  font-size: 13px;
+  margin: var(--space-4) 0 var(--space-2);
+  font-size: var(--text-base);
   font-weight: 700;
 }
 
@@ -608,23 +715,30 @@ input.num {
   grid-template-columns: repeat(3, 1fr);
 }
 
-/* ---------- 卡片 ---------- */
+/* ---------- 卡片 ----------
+   v2：卡片不再只是「白底 + 一圈细边」，而是靠阴影分层浮在页面上。
+   静置 --shadow-1，悬停抬 1px 换成 --shadow-3 —— 整页的卡片就有了前后关系。 */
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  /* 阴影更柔：多张卡叠在一起时，硬阴影会显得脏 */
-  box-shadow: 0 1px 2px rgba(21, 32, 58, 0.04), 0 1px 3px rgba(21, 32, 58, 0.03);
-  margin-bottom: var(--space-4);
+  box-shadow: var(--shadow-1);
+  margin-bottom: var(--space-5);
   overflow: hidden;
+  transition: box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.card:hover {
+  box-shadow: var(--shadow-3);
+  transform: translateY(-1px);
 }
 
 .card-head {
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-4) var(--space-5);
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
-  min-height: 44px;
+  min-height: 52px;
   gap: var(--space-2);
 }
 
@@ -633,6 +747,7 @@ input.num {
   margin: 0;
   font-size: var(--text-md);
   font-weight: 650;
+  letter-spacing: -0.01em;
 }
 
 .card-head .spacer {
@@ -640,7 +755,7 @@ input.num {
 }
 
 .card-body {
-  padding: var(--space-4);
+  padding: var(--space-5);
 }
 
 .card-body.tight {
@@ -651,17 +766,42 @@ input.num {
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: var(--space-3);
-  margin-bottom: var(--space-4);
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
 }
 
 .stat {
+  position: relative;
+  overflow: hidden;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: var(--space-4);
-  /* 与卡片同一套阴影，整页看起来是一套东西 */
-  box-shadow: 0 1px 2px rgba(21, 32, 58, 0.04), 0 1px 3px rgba(21, 32, 58, 0.03);
+  padding: var(--space-5);
+  box-shadow: var(--shadow-1);
+  transition: box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.stat:hover {
+  box-shadow: var(--shadow-3);
+  transform: translateY(-1px);
+}
+
+/* 唯一那张上了色的卡，顶部给一条 3px 的语义色带 —— 一屏四个方块里，
+   哪个是要动手的那一个，一眼就能挑出来。 */
+.stat.accent::after,
+.stat.amber::after {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 3px;
+}
+
+.stat.accent::after {
+  background: var(--accent);
+}
+
+.stat.amber::after {
+  background: var(--warning);
 }
 
 .stat-label {
@@ -669,7 +809,7 @@ input.num {
   color: var(--text-dim);
   margin-bottom: var(--space-2);
   font-weight: 500;
-  letter-spacing: 0.01em;
+  letter-spacing: 0.02em;
 }
 
 .stat-value {
@@ -689,7 +829,7 @@ input.num {
 .stat-hint {
   font-size: var(--text-sm);
   color: var(--text-faint);
-  margin-top: var(--space-1);
+  margin-top: var(--space-2);
 }
 
 /* 统计卡副行：多个数用 flex 分开，不要用「·」挤在一行（R4-P2） */
@@ -697,6 +837,14 @@ input.num {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-1) var(--space-3);
+}
+
+/* 窗口拉窄（1366 笔记本、1100 最小宽）时，「CNY 112,076.25」这种长金额
+   在 28px 下会顶出卡片——退一档字号，不动别处。 */
+@media (max-width: 1300px) {
+  .stat-value {
+    font-size: var(--text-display-sm);
+  }
 }
 
 /* 统计卡上色是语义，不是"给这张卡找个颜色"（R4-S1）：
@@ -712,7 +860,9 @@ input.num {
   color: var(--warning);
 }
 
-/* ---------- 表格 ---------- */
+/* ---------- 表格 ----------
+   v2：行高从 36 放宽到 40（横向内边距一个字没动，表格宽度不变，
+   所以 13 列的订单表不会多出滚动条）。密度没损失，呼吸感回来了。 */
 .table-wrap {
   overflow-x: auto;
   max-width: 100%;
@@ -732,12 +882,14 @@ table.data th {
   color: var(--text-dim);
   font-weight: 600;
   font-size: var(--text-sm);
-  /* 字距拉开一点，表头更像"分类标签"而不是挤在一起的一串字 */
+  /* 表头字距 */
   letter-spacing: 0.02em;
   white-space: nowrap;
-  position: sticky;
-  top: 0;
-  z-index: 1;
+  /* 这里原来有 position: sticky，但一直没生效过：
+     sticky 的滚动容器是 .table-wrap（overflow-x: auto 让 overflow-y 也算成 auto），
+     而 .table-wrap 没有高度上限、从来不纵向滚，表头自然钉不住。
+     真要让表头钉住，得给 .table-wrap 一个 max-height 让它自己滚 —— 那是另一件事，
+     在那之前，留着这条声明只是让人以为表头会固定。 */
 }
 
 table.data td {
@@ -746,9 +898,16 @@ table.data td {
   vertical-align: middle;
 }
 
+/* 行高 40px（36 → 40）：横向内边距一个字没动，表格宽度不变，
+   所以 13 列的订单表不会多出滚动条。密度没损失，呼吸感回来了。 */
+table.data tbody tr {
+  height: var(--row-h-table);
+  transition: background 0.12s ease;
+}
+
 /* 斑马纹：表格宽的时候，靠横线找行很累，隔行淡底能快速定位 */
 table.data tbody tr:nth-child(even) {
-  background: rgba(21, 32, 58, 0.015);
+  background: rgba(21, 27, 41, 0.02);
 }
 
 table.data tbody tr:hover {
@@ -810,11 +969,23 @@ table.data th.num {
    规则：同一行里的动作必须"分得开"——文字链之间留 12px 间距，删除一律红色。
    ≥3 个动作时收进「⋯」菜单，只留 1 个最高频动作在外面。 */
 .cell-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  justify-content: flex-end;
+  /* 这一格必须还是 table-cell。
+     原来这里是 display: flex —— 一个 td 一旦不是表格单元，它就退出了
+     border-collapse 的边框合并，自己的下边框画在比同行矮一截的位置，
+     于是每一行的分隔线到了操作列就断成一个台阶。
+     改回 table-cell + 文字右对齐，分隔线才是一条完整的。 */
+  text-align: right;
   white-space: nowrap;
+}
+
+.cell-actions > * {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+}
+
+.cell-actions > * + * {
+  margin-left: var(--space-3);
 }
 
 .link {
@@ -926,15 +1097,17 @@ table.data th.num {
   position: relative;
 }
 
+/* v2：虚线框底色换成一层极浅的冷灰，图形不再是一块贴在白底上的空洞 */
 .empty::before {
   content: '';
   display: block;
-  width: 34px;
-  height: 34px;
-  margin: 0 auto var(--space-3);
+  width: 44px;
+  height: 44px;
+  margin: 0 auto var(--space-4);
   border: 2px dashed var(--border-strong);
   border-radius: var(--radius-lg);
-  opacity: 0.7;
+  background: var(--surface-2);
+  opacity: 0.8;
 }
 
 .empty-title {
@@ -957,7 +1130,12 @@ table.data th.num {
   color: var(--text-faint);
 }
 
-/* ---------- 标签 ---------- */
+/* ---------- 标签 ----------
+   v2：每个标签加一圈同色系的深发丝边。纯色块贴在白底上边界发虚，
+   有了这圈边，标签才像一枚一枚的实体筹码，而不是印上去的色块。
+   用 inset 阴影而不是 border —— 阴影不占布局宽度，
+   表格列宽一个像素都不会被它挤歪。
+   底色/文字色一个字没动（状态色是冻结的），只加描边。 */
 .tag {
   display: inline-block;
   height: 20px;
@@ -967,27 +1145,33 @@ table.data th.num {
   font-weight: 600;
   white-space: nowrap;
   line-height: 20px;
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
 
 .tag.grey {
   background: var(--neutral-soft);
   color: var(--neutral-text);
+  box-shadow: inset 0 0 0 1px #d3dae7;
 }
 .tag.blue {
   background: var(--accent-soft);
   color: var(--accent-hover);
+  box-shadow: inset 0 0 0 1px #cadef9;
 }
 .tag.green {
   background: var(--success-soft);
   color: var(--success);
+  box-shadow: inset 0 0 0 1px #c0e3d3;
 }
 .tag.amber {
   background: var(--warning-soft);
   color: var(--warning);
+  box-shadow: inset 0 0 0 1px #eeddaf;
 }
 .tag.red {
   background: var(--danger-soft);
   color: var(--danger);
+  box-shadow: inset 0 0 0 1px #f2c6c1;
 }
 
 /* ---------- 搜索 / 工具条 ---------- */
@@ -995,7 +1179,7 @@ table.data th.num {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  margin-bottom: var(--space-4);
+  margin-bottom: var(--space-5);
   flex-wrap: wrap;
 }
 
@@ -1011,7 +1195,7 @@ table.data th.num {
   display: flex;
   gap: var(--space-1);
   border-bottom: 1px solid var(--border);
-  padding: 0 var(--space-4);
+  padding: 0 var(--space-5);
   background: var(--surface);
   border-radius: var(--radius-lg) var(--radius-lg) 0 0;
   overflow-x: auto;
@@ -1038,22 +1222,38 @@ table.data th.num {
   font-weight: 600;
 }
 
-/* ---------- 弹窗 ---------- */
+/* ---------- 弹窗 ----------
+   v2：遮罩更深一点、模糊重一点，弹窗从背景里"浮"出来而不是盖上去；
+   入场是一段 160ms 的淡入 + 上浮，一眼看到它从哪儿来。 */
 .modal-mask {
   position: fixed;
   inset: 0;
-  /* 遮罩加一点模糊，弹窗从背景里"浮"出来而不是盖上去 */
-  background: rgba(16, 24, 40, 0.38);
-  backdrop-filter: blur(2px);
+  background: rgba(15, 21, 34, 0.44);
+  backdrop-filter: blur(3px);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 100;
   padding: var(--space-6);
+  animation: mask-in 0.16s ease-out;
+}
+
+@keyframes mask-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
 }
 
 .modal {
   background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-2);
   width: 100%;
@@ -1061,6 +1261,7 @@ table.data th.num {
   max-height: 90vh;
   display: flex;
   flex-direction: column;
+  animation: modal-in 0.18s cubic-bezier(0.22, 0.8, 0.3, 1);
 }
 
 .modal.wide {
@@ -1072,7 +1273,7 @@ table.data th.num {
 }
 
 .modal-head {
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-4) var(--space-5);
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
@@ -1085,13 +1286,13 @@ table.data th.num {
 }
 
 .modal-body {
-  padding: var(--space-4);
+  padding: var(--space-5);
   overflow-y: auto;
   flex: 1;
 }
 
 .modal-foot {
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-3) var(--space-5);
   border-top: 1px solid var(--border);
   display: flex;
   gap: var(--space-2);
@@ -1100,13 +1301,15 @@ table.data th.num {
   border-radius: 0 0 var(--radius-xl) var(--radius-xl);
 }
 
-/* ---------- 提示条 ---------- */
+/* ---------- 提示条 ----------
+   v2：左边加一道 3px 语义色竖条，一整条消息不再是一块糊在一起的浅色底。 */
 .alert {
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-md);
   font-size: var(--text-sm);
-  margin-bottom: var(--space-4);
+  margin-bottom: var(--space-5);
   border: 1px solid transparent;
+  border-left-width: 3px;
 }
 
 .alert.error {
@@ -1251,13 +1454,22 @@ table.data th.num {
   white-space: nowrap;
 }
 
-/* ---------- 单据预览（打印区之外的应用外壳） ---------- */
+/* ---------- 单据预览（打印区之外的应用外壳） ----------
+   v2：只改「装纸的那层」——预览底色换成冷调深灰，白纸压在上面更立得住。
+   纸面本身（.doc-page）的字号、表格线一律不动。 */
 .doc-preview {
-  background: var(--text-dim);
+  background: var(--doc-preview-bg);
   padding: var(--space-6);
   overflow: auto;
   display: flex;
   justify-content: center;
+}
+
+/* 预览里的那张纸：单据 HTML 自带 PRINT_CSS，纸面本身是透明的，
+   白底得在这里补上。只作用于屏幕预览——导出的 PDF 是另一份文档，
+   只带 PRINT_CSS，单据样式一个字没动。 */
+.doc-preview .page {
+  background: #fff;
 }
 
 /* ---------- 打印单据（独立一套，1:1 印到 A4，不受 token 约束） ---------- */
@@ -1733,6 +1945,17 @@ table.data th.num {
   }
   .app {
     display: block;
+  }
+}
+
+/* 有人把系统里的"减少动态效果"打开时，一律不动 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }
 

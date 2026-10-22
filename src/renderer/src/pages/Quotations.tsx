@@ -649,7 +649,7 @@ function QuotationDetailModal({
       {preview ? (
         <Modal title={`报价单预览 ${quotation.qNo}`} onClose={() => setPreview(null)} size="xwide">
           <div
-            style={{ background: '#fff', border: '1px solid #e2e6ee', padding: '10px', overflowX: 'auto' }}
+            className="doc-preview"
             dangerouslySetInnerHTML={{ __html: preview.html }}
           />
         </Modal>

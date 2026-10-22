@@ -198,7 +198,7 @@ export function renderPi(ctx: DocContext): string {
         <td class="num">${(it.quantity * it.unitPrice).toFixed(2)}</td>
         ${
           isFirstOfStyle
-            ? `<td class="num sub-total" style="font-size:8.5pt;white-space:nowrap">小计 ${styleTotal.toFixed(2)}</td>`
+            ? `<td class="num sub-total" style="font-size:8.5pt;white-space:nowrap">${styleTotal.toFixed(2)}</td>`
             : '<td class="sub-total"></td>'
         }
       </tr>`
@@ -531,7 +531,7 @@ export function renderQuotation(ctx: QuotationDocContext): string {
         <td class="num">${(it.quantity * it.unitPrice).toFixed(2)}</td>
         ${
           isFirstOfStyle
-            ? `<td class="num sub-total" style="font-size:8.5pt;white-space:nowrap">小计 ${styleTotal.toFixed(2)}</td>`
+            ? `<td class="num sub-total" style="font-size:8.5pt;white-space:nowrap">${styleTotal.toFixed(2)}</td>`
             : '<td class="sub-total"></td>'
         }
       </tr>`
@@ -712,7 +712,7 @@ export function renderCi(ctx: DocContext, opts: CiOptions = {}): string {
         <td class="num">${(it.quantity * it.unitPrice).toFixed(2)}</td>
         ${
           isFirstOfStyle
-            ? `<td class="num sub-total" style="font-size:8.5pt;white-space:nowrap">小计 ${styleTotal.toFixed(2)}</td>`
+            ? `<td class="num sub-total" style="font-size:8.5pt;white-space:nowrap">${styleTotal.toFixed(2)}</td>`
             : '<td class="sub-total"></td>'
         }
       </tr>`

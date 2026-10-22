@@ -596,7 +596,7 @@ export default function OrderDetail() {
           }
         >
           <div
-            style={{ background: '#fff', border: '1px solid #e2e6ee', padding: '10px', overflowX: 'auto' }}
+            className="doc-preview"
             dangerouslySetInnerHTML={{ __html: preview.html }}
           />
         </Modal>
