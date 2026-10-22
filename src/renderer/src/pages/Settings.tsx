@@ -314,11 +314,6 @@ export default function Settings() {
             <h2>数据备份</h2>
           </div>
           <div className="card-body">
-            <div className="alert info">
-              数据全部保存在本机，<strong>完整路径</strong>如下（打包版在{' '}
-              <span className="mono">%APPDATA%\IKanBot\data\</span>，开发版在项目{' '}
-              <span className="mono">data\</span> 目录）。
-            </div>
             <div className="hint" style={{ marginBottom: 8 }}>
               主数据库：<span className="mono">{dataDir ? `${dataDir}\\ikanbot.db` : '…'}</span>
             </div>
