@@ -24,13 +24,7 @@ const NAV: { to: string; label: string; icon: NavIconName; end?: boolean }[] = [
 
 export default function App() {
   const [reminderCount, setReminderCount] = useState(0)
-  const [appVersion, setAppVersion] = useState('')
   const navigate = useNavigate()
-
-  useEffect(() => {
-    // 从主进程拿真实版本号（侧边栏显示用）
-    void window.api.updater.version().then(setAppVersion)
-  }, [])
 
   useEffect(() => {
     const load = async () => {
@@ -70,11 +64,7 @@ export default function App() {
               </NavLink>
             ))}
           </nav>
-          <div className="sidebar-foot">
-            Ctrl+Shift+H 隐藏窗口
-            <br />
-            {appVersion ? `v${appVersion}` : ''}
-          </div>
+          <div className="sidebar-foot">Ctrl+Shift+H 隐藏窗口</div>
         </aside>
 
         <main className="main">
