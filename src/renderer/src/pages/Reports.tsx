@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useToast, money, Empty, Button } from '../ui'
+import { useToast, money, Empty, Button, Card } from '../ui'
 import type { MonthlyReportRow } from '../../../shared/types'
 
 export default function Reports() {
@@ -108,13 +108,9 @@ export default function Reports() {
           </div>
         ) : null}
 
-        <div className="card">
-          <div className="card-head">
-            <h2>月度汇总</h2>
-            <div className="spacer" />
-            <span className="faint">按订单创建月份</span>
-          </div>
-          <div className="card-body tight">
+        <Card title="月度汇总"
+          actions={<span className="faint">按订单创建月份</span>}
+          bodyClass="tight">
             {loading ? (
               <div className="empty loading">加载中…</div>
             ) : rows.length === 0 ? (
@@ -157,8 +153,7 @@ export default function Reports() {
                 </table>
               </div>
             )}
-          </div>
-        </div>
+        </Card>
       </div>
     </>
   )

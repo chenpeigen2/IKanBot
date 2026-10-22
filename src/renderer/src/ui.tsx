@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, createContext, useContext, useRef } from 'react'
+import { useEffect, useState, useCallback, createContext, useContext, useRef, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
 /* ---------------- 轻量 UI 组件 ---------------- */
@@ -41,8 +41,24 @@ export function Modal({
   )
 }
 
-export function Empty({ text }: { text: string }) {
-  return <div className="empty">{text}</div>
+export function Empty({
+  text,
+  hint,
+  action
+}: {
+  text: string
+  /** 补充说明：告诉用户下一步该做什么 */
+  hint?: string
+  /** 引导操作按钮 */
+  action?: ReactNode
+}) {
+  return (
+    <div className="empty">
+      <div className="empty-title">{text}</div>
+      {hint ? <div className="empty-hint">{hint}</div> : null}
+      {action ? <div className="empty-action">{action}</div> : null}
+    </div>
+  )
 }
 
 /* ---------------- 溢出菜单（页头「更多」） ---------------- */

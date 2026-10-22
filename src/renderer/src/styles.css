@@ -660,13 +660,16 @@ input.num {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: var(--space-4);
-  box-shadow: var(--shadow-1);
+  /* 与卡片同一套阴影，整页看起来是一套东西 */
+  box-shadow: 0 1px 2px rgba(21, 32, 58, 0.04), 0 1px 3px rgba(21, 32, 58, 0.03);
 }
 
 .stat-label {
   font-size: var(--text-sm);
   color: var(--text-dim);
-  margin-bottom: var(--space-1);
+  margin-bottom: var(--space-2);
+  font-weight: 500;
+  letter-spacing: 0.01em;
 }
 
 .stat-value {
@@ -674,7 +677,8 @@ input.num {
   line-height: var(--lh-tight);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-  letter-spacing: -0.5px;
+  /* 大数字字距略收，视觉更紧凑 */
+  letter-spacing: -0.02em;
 }
 
 .stat-value.small {
@@ -918,6 +922,34 @@ table.data th.num {
   text-align: center;
   color: var(--text-dim);
   font-size: var(--text-base);
+  /* 空状态给个轻量的图形提示，比一片白字更像"这里该有东西" */
+  position: relative;
+}
+
+.empty::before {
+  content: '';
+  display: block;
+  width: 34px;
+  height: 34px;
+  margin: 0 auto var(--space-3);
+  border: 2px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  opacity: 0.7;
+}
+
+.empty-title {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.empty-hint {
+  margin-top: var(--space-1);
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+}
+
+.empty-action {
+  margin-top: var(--space-4);
 }
 
 /* 「加载中」和「没数据」不是一回事：颜色要能分开（规范 §5.8） */
@@ -992,6 +1024,8 @@ table.data th.num {
   border-bottom: 2px solid transparent;
   white-space: nowrap;
   font-size: var(--text-base);
+  /* 未选中的页签减淡一点，选中与未选中的对比更清楚 */
+  transition: color 0.12s ease, border-color 0.12s ease;
 }
 
 .tab:hover {
@@ -1008,7 +1042,9 @@ table.data th.num {
 .modal-mask {
   position: fixed;
   inset: 0;
-  background: rgba(16, 24, 40, 0.42);
+  /* 遮罩加一点模糊，弹窗从背景里"浮"出来而不是盖上去 */
+  background: rgba(16, 24, 40, 0.38);
+  backdrop-filter: blur(2px);
   display: flex;
   align-items: center;
   justify-content: center;
