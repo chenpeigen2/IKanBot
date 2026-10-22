@@ -101,24 +101,35 @@ function createWindow(): void {
   }
 }
 
+function showMainWindow(): void {
+  if (mainWindow) {
+    mainWindow.show()
+    mainWindow.focus()
+  }
+}
+
 function createTray(): void {
   const icon = nativeImage.createFromDataURL(TRAY_ICON_BASE64)
   tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon)
   const menu = Menu.buildFromTemplate([
     {
       label: '显示主窗口',
-      click: () => {
-        if (mainWindow) {
-          mainWindow.show()
-          mainWindow.focus()
-        }
-      }
+      click: () => showMainWindow()
     },
     { type: 'separator' },
     { label: '退出', click: () => app.quit() }
   ])
   tray.setToolTip('IKanBot')
   tray.setContextMenu(menu)
+
+  // 左键单击托盘图标 → 显示窗口（不是右键菜单才显示）
+  tray.on('click', () => {
+    if (mainWindow?.isVisible()) {
+      mainWindow.focus()
+    } else {
+      showMainWindow()
+    }
+  })
 }
 
 app.whenReady().then(() => {
@@ -131,6 +142,10 @@ app.whenReady().then(() => {
   // 一键隐藏到托盘
   globalShortcut.register('CommandOrControl+Shift+H', () => {
     mainWindow?.hide()
+  })
+  // 一键从托盘恢复（和隐藏配对，免得藏起来只能点托盘）
+  globalShortcut.register('CommandOrControl+Shift+J', () => {
+    showMainWindow()
   })
 
   app.on('activate', () => {
