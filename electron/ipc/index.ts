@@ -1,7 +1,7 @@
 import { ipcMain, dialog, shell, BrowserWindow } from 'electron'
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
-import { imagesDir, docsDir } from '../db'
+import { imagesDir, docsDir, dataDir } from '../db'
 import * as products from '../services/products'
 import * as customers from '../services/customers'
 import * as orders from '../services/orders'
@@ -37,6 +37,11 @@ export function registerIpc(): void {
     void shell.openExternal(url)
     return true
   })
+
+  /* ---- 数据目录完整路径（给设置页展示） ---- */
+  handle('app:dataDir', () => dataDir())
+  handle('app:imagesDir', () => imagesDir())
+  handle('app:backupsDir', () => join(dataDir(), 'backups'))
 
   /* ---- 商品 ---- */
   handle('products:list', (keyword?: string, includeInactive?: boolean) =>
@@ -202,11 +207,11 @@ export function registerIpc(): void {
     return file
   })
   handle('backup:reveal', async () => {
-    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
-    const res = await dialog.showOpenDialog(win, { properties: ['openDirectory'] })
-    if (res.canceled) return ''
-    shell.openPath(res.filePaths[0])
-    return res.filePaths[0]
+    // 直接打开备份目录（不弹选择框），让用户看到备份文件
+    const dir = join(dataDir(), 'backups')
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    await shell.openPath(dir)
+    return dir
   })
   handle('export:csv', async (kind: 'orders' | 'payments' | 'items') => {
     const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]

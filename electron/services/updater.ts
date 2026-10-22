@@ -49,6 +49,19 @@ export function isUpdaterAvailable(): boolean {
 let mainWindow: BrowserWindow | null = null
 let downloadedUpdate = false
 
+/** 更新日志写到数据目录，排查"检查更新没反应"用 */
+function logUpdate(msg: string): void {
+  try {
+    const fs = require('fs')
+    const path = require('path')
+    const { dataDir } = require('../db')
+    const f = path.join(dataDir(), 'updater.log')
+    fs.appendFileSync(f, `[${new Date().toISOString()}] ${msg}\n`)
+  } catch {
+    /* 日志失败不影响主流程 */
+  }
+}
+
 export function initUpdater(win: BrowserWindow): void {
   mainWindow = win
 
@@ -65,7 +78,13 @@ export function initUpdater(win: BrowserWindow): void {
 
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true
-  autoUpdater.logger = null
+  // 把更新日志写到文件，方便排查"检查更新没反应"这类问题
+  autoUpdater.logger = {
+    info: (m: string) => logUpdate(`[info] ${m}`),
+    warn: (m: string) => logUpdate(`[warn] ${m}`),
+    error: (m: string) => logUpdate(`[error] ${m}`),
+    debug: (m: string) => logUpdate(`[debug] ${m}`)
+  }
 
   const send = (payload: Partial<UpdateInfo>) => {
     if (!mainWindow || mainWindow.isDestroyed()) return
@@ -173,6 +192,8 @@ export function registerUpdaterIpc(): void {
     autoUpdater.quitAndInstall(false, true)
     return true
   })
+
+  ipcMain.handle('updater:version', (): string => app.getVersion())
 
   ipcMain.handle('updater:state', (): UpdateInfo => ({
     status: 'idle',

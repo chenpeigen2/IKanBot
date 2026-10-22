@@ -9,9 +9,17 @@ export default function Settings() {
   const [s, setS] = useState<any>(null)
   const [backupPath, setBackupPath] = useState('')
   const [update, setUpdate] = useState<UpdateStatus | null>(null)
+  const [dataDir, setDataDir] = useState('')
+  const [backupsDir, setBackupsDir] = useState('')
 
   useEffect(() => {
     void window.api.settings.get().then(setS)
+    void window.api.app.dataDir().then(setDataDir)
+    void window.api.app.backupsDir().then(setBackupsDir)
+    // 初始拿一次当前版本，避免"检查更新"按钮因为 update 为 null 而一直禁用
+    void window.api.updater.version().then((v) => {
+      setUpdate((prev) => ({ status: 'idle', currentVersion: v, ...(prev ?? {}) }))
+    })
   }, [])
 
   // 订阅自动更新事件
@@ -307,8 +315,21 @@ export default function Settings() {
           </div>
           <div className="card-body">
             <div className="alert info">
-              数据全部保存在本机 <span className="mono">data/ikanbot.db</span>，图片在{' '}
-              <span className="mono">data/images/</span>。程序每天启动时会自动备份一次，保留最近 30 份。
+              数据全部保存在本机，<strong>完整路径</strong>如下（打包版在{' '}
+              <span className="mono">%APPDATA%\IKanBot\data\</span>，开发版在项目{' '}
+              <span className="mono">data\</span> 目录）。
+            </div>
+            <div className="hint" style={{ marginBottom: 8 }}>
+              主数据库：<span className="mono">{dataDir ? `${dataDir}\\ikanbot.db` : '…'}</span>
+            </div>
+            <div className="hint" style={{ marginBottom: 8 }}>
+              图片目录：<span className="mono">{dataDir ? `${dataDir}\\images` : '…'}</span>
+            </div>
+            <div className="hint" style={{ marginBottom: 12 }}>
+              备份目录：<span className="mono">{backupsDir || '…'}</span>
+            </div>
+            <div className="hint">
+              程序每天启动时会自动备份一次，保留最近 30 份。
             </div>
             <div className="row">
               <button
@@ -348,7 +369,7 @@ export default function Settings() {
                   </span>
                   <button
                     className="btn"
-                    disabled={!update || update.status === 'checking' || update.status === 'downloading'}
+                    disabled={update?.status === 'checking' || update?.status === 'downloading'}
                     onClick={async () => {
                       const r = await window.api.updater.check()
                       setUpdate(r)

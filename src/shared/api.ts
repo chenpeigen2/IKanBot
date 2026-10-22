@@ -138,6 +138,8 @@ export interface IKanApi {
   /** 应用内自动更新 */
   updater: {
     check(): Promise<UpdateStatus>
+    /** 当前版本号 */
+    version(): Promise<string>
     download(): Promise<UpdateStatus>
     install(): Promise<boolean>
     on(cb: (info: UpdateStatus) => void): () => void
@@ -145,6 +147,12 @@ export interface IKanApi {
   /** 用系统浏览器打开外链 */
   shell: {
     openExternal(url: string): Promise<boolean>
+  }
+  /** 数据目录完整路径 */
+  app: {
+    dataDir(): Promise<string>
+    imagesDir(): Promise<string>
+    backupsDir(): Promise<string>
   }
 }
 

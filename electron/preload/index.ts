@@ -98,6 +98,12 @@ const api: IKanApi = {
   shell: {
     openExternal: (url: string) => call<boolean>('shell:openExternal', url)
   },
+  /** 数据目录完整路径 */
+  app: {
+    dataDir: () => call<string>('app:dataDir'),
+    imagesDir: () => call<string>('app:imagesDir'),
+    backupsDir: () => call<string>('app:backupsDir')
+  },
   pl: {
     list: (orderId: number) => call<any[]>('pl:list', orderId),
     create: (input: any) => call<any[]>('pl:create', input),
@@ -142,6 +148,8 @@ const api: IKanApi = {
   updater: {
     /** 检查更新 */
     check: () => call<any>('updater:check'),
+    /** 当前版本号 */
+    version: () => call<string>('updater:version'),
     /** 下载更新 */
     download: () => call<any>('updater:download'),
     /** 重启并安装已下载的更新 */
