@@ -18,6 +18,11 @@ EXTRA_JS="${3:-}"
 # 清理上一轮可能残留的进程
 taskkill //F //IM electron.exe //T >/dev/null 2>&1
 
+# 有些环境（CI / 沙箱）会把 ELECTRON_RUN_AS_NODE 设成 1，
+# 那样 electron 会退化成普通 node 跑，`require('electron')` 拿到的是二进制路径字符串，
+# 表现为 `electron.app` undefined、main 进程直接崩、一张图都拍不出来。
+unset ELECTRON_RUN_AS_NODE
+
 export MSYS_NO_PATHCONV=1
 export MSYS2_ARG_CONV_EXCL='*'
 export IKAN_SHOT="$ROUTE"
