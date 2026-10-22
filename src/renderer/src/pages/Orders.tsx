@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Modal, useToast, money, num, Empty, fmtDate, today, PaymentTag, ShipTag } from '../ui'
+import { Modal, useToast, money, num, Empty, fmtDate, today, PaymentTag, ShipTag, Button } from '../ui'
 import {
   CURRENCIES,
   INCOTERMS,
@@ -50,12 +50,12 @@ export default function Orders() {
       <div className="topbar">
         <h1>订单</h1>
         <div className="spacer" />
-        <button className="btn" onClick={() => window.api.exporter.csv('orders')}>
+        <Button  onClick={() => window.api.exporter.csv('orders')}>
           导出 Excel
-        </button>
-        <button className="btn primary" onClick={() => setShowCreate(true)}>
+        </Button>
+        <Button variant="primary"  onClick={() => setShowCreate(true)}>
           + 新建订单
-        </button>
+        </Button>
       </div>
 
       <div className="content">
@@ -66,9 +66,9 @@ export default function Orders() {
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
           />
-          <button className="btn" onClick={load}>
+          <Button  onClick={load}>
             搜索
-          </button>
+          </Button>
           <select
             style={{ width: 160 }}
             value={sort}
@@ -361,12 +361,12 @@ function CreateOrderModal({
       size="wide"
       footer={
         <>
-          <button className="btn" onClick={onClose}>
+          <Button  onClick={onClose}>
             取消
-          </button>
-          <button className="btn primary" onClick={save}>
+          </Button>
+          <Button variant="primary"  onClick={save}>
             创建并添加商品
-          </button>
+          </Button>
         </>
       }
     >
@@ -422,8 +422,8 @@ function CreateOrderModal({
           </div>
           {lastRate ? (
             <div className="row" style={{ marginTop: 4, gap: 5 }}>
-              <button
-                className="btn sm"
+              <Button size="sm"
+                
                 onClick={() =>
                   setForm({
                     ...form,
@@ -434,7 +434,7 @@ function CreateOrderModal({
               >
                 填入上次用的 {lastRate.rate}
                 {lastRate.date ? `（${lastRate.date}）` : ''}
-              </button>
+              </Button>
             </div>
           ) : null}
           <div style={{ marginTop: 6 }}>

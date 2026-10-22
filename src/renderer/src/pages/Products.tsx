@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Modal, useToast, money, Empty } from '../ui'
+import { Modal, useToast, money, Empty, Button } from '../ui'
 import { imageUrl } from '../imageUrl'
 import type { Product, ProductImage } from '../../../shared/types'
 
@@ -168,9 +168,9 @@ export default function Products() {
       <div className="topbar">
         <h1>商品库</h1>
         <div className="spacer" />
-        <button className="btn primary" onClick={openNew}>
+        <Button variant="primary"  onClick={openNew}>
           + 新增商品
-        </button>
+        </Button>
       </div>
 
       <div className="content">
@@ -182,9 +182,9 @@ export default function Products() {
             onChange={(e) => setKeyword(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && load()}
           />
-          <button className="btn" onClick={() => load()}>
+          <Button  onClick={() => load()}>
             搜索
-          </button>
+          </Button>
           <div className="spacer" />
           <span className="faint">共 {list.length} 个款号</span>
         </div>
@@ -259,12 +259,12 @@ export default function Products() {
           size="wide"
           footer={
             <>
-              <button className="btn" onClick={() => setDraft(null)}>
+              <Button  onClick={() => setDraft(null)}>
                 取消
-              </button>
-              <button className="btn primary" onClick={save}>
+              </Button>
+              <Button variant="primary"  onClick={save}>
                 保存
-              </button>
+              </Button>
             </>
           }
         >
@@ -394,15 +394,15 @@ export default function Products() {
                     }
                   }}
                 />
-                <button
-                  className="btn"
+                <Button
+                  
                   onClick={() => {
                     addTag('sizes', sizeInput)
                     setSizeInput('')
                   }}
                 >
                   添加
-                </button>
+                </Button>
               </div>
               <div className="chip-list">
                 {draft.sizes.map((s) => (
@@ -431,15 +431,15 @@ export default function Products() {
                     }
                   }}
                 />
-                <button
-                  className="btn"
+                <Button
+                  
                   onClick={() => {
                     addTag('colors', colorInput)
                     setColorInput('')
                   }}
                 >
                   添加
-                </button>
+                </Button>
               </div>
               <div className="chip-list">
                 {draft.colors.map((c) => (

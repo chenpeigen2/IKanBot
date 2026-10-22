@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Modal, useToast, money, num, Empty, fmtDate, today, ActionMenu, SampleStatusTag } from '../ui'
+import { Modal, useToast, money, num, Empty, fmtDate, today, ActionMenu, SampleStatusTag, Button, SampleFeeTag } from '../ui'
 import {
   SAMPLE_STATUS_LABEL,
   SAMPLE_STATUS_ORDER,
@@ -90,9 +90,9 @@ export default function Samples() {
       <div className="topbar">
         <h1>打样单</h1>
         <div className="spacer" />
-        <button className="btn primary" onClick={() => setEditing({})}>
+        <Button variant="primary"  onClick={() => setEditing({})}>
           + 新建打样单
-        </button>
+        </Button>
       </div>
 
       <div className="content">
@@ -103,11 +103,11 @@ export default function Samples() {
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
           />
-          <button className="btn" onClick={load}>
+          <Button  onClick={load}>
             搜索
-          </button>
+          </Button>
           <select
-            style={{ width: 160 }}
+            className="col-tag"
             value={status}
             onChange={(e) => setStatus(e.target.value)}
             title="按状态筛选"
@@ -198,9 +198,7 @@ export default function Samples() {
                           <SampleStatusTag status={s.status} />
                         </td>
                         <td>
-                          <span className={`tag ${s.feeStatus === 'paid' ? 'green' : s.feeStatus === 'offset' ? 'blue' : s.feeStatus === 'waived' ? 'grey' : 'amber'}`}>
-                            {SAMPLE_FEE_STATUS_LABEL[s.feeStatus as SampleFeeStatus] ?? s.feeStatus}
-                          </span>
+                          <SampleFeeTag status={s.feeStatus} />
                         </td>
                         <td className="mono clip-100" title={s.trackingNo || ''}>
                           {s.trackingNo || '—'}
@@ -263,17 +261,17 @@ export default function Samples() {
           onClose={() => setConverting(null)}
           footer={
             <>
-              <button className="btn" onClick={() => setConverting(null)}>
+              <Button  onClick={() => setConverting(null)}>
                 取消
-              </button>
+              </Button>
               {/* 不抵扣：样品费照收，转出来的订单里没有抵扣行 */}
-              <button className="btn" onClick={() => void doConvert(false)}>
+              <Button  onClick={() => void doConvert(false)}>
                 不抵扣，直接转
-              </button>
+              </Button>
               {/* 抵扣：样品费变成订单里的负费用行，打样单标记「下单抵扣」 */}
-              <button className="btn primary" onClick={() => void doConvert(true)}>
+              <Button variant="primary"  onClick={() => void doConvert(true)}>
                 样品费抵扣，转订单
-              </button>
+              </Button>
             </>
           }
         >
@@ -296,19 +294,19 @@ export default function Samples() {
               <span>{money(converting.sampleFee)}</span>
             </div>
           </div>
-          <div className="field" style={{ marginTop: 12 }}>
+          <div className="field mt-3">
             <label>转出来的订单，PI 现在就发吗？*</label>
-            <label className="row" style={{ gap: 6, marginTop: 4 }}>
+            <label className="row mt-1 gap-1">
               <input type="radio" name="smp-convert-pi" checked={convPi === 'sent'} onChange={() => setConvPi('sent')} />
               <span>PI 现在就发 → 状态「待确认」，进销售额、进待收，工作台会提醒</span>
             </label>
-            <label className="row" style={{ gap: 6, marginTop: 4 }}>
+            <label className="row mt-1 gap-1">
               <input type="radio" name="smp-convert-pi" checked={convPi === 'draft'} onChange={() => setConvPi('draft')} />
               <span>先存草稿 → 不进销售额也不进待收（系统当它不存在）；PI 发出后要回订单改成「待确认」</span>
             </label>
             <div className="hint">不选就点转单会拦住你——草稿单忘了改状态，月底对账会少一笔。</div>
           </div>
-          <div className="alert info" style={{ marginTop: 12 }}>
+          <div className="alert info mt-3">
             「抵扣」= 样品费从订单金额里扣掉（单据上会印一行「样品费抵扣」，客户对账能看懂），
             这张打样单会自动标成「下单抵扣」；「不抵扣」= 样品费另外向客户收。
             选错也没关系，转完在订单里改费用行就行。
@@ -335,11 +333,11 @@ export default function Samples() {
           size="xwide"
           footer={
             <>
-              <button className="btn" onClick={() => setPreview(null)}>
+              <Button  onClick={() => setPreview(null)}>
                 关闭
-              </button>
-              <button
-                className="btn primary"
+              </Button>
+              <Button variant="primary"
+                
                 onClick={async () => {
                   const out = await window.api.window.printPdf({
                     html: preview.html,
@@ -349,7 +347,7 @@ export default function Samples() {
                 }}
               >
                 另存为 PDF
-              </button>
+              </Button>
             </>
           }
         >
@@ -481,12 +479,12 @@ function SampleModal({
       size="xwide"
       footer={
         <>
-          <button className="btn" onClick={onClose}>
+          <Button  onClick={onClose}>
             取消
-          </button>
-          <button className="btn primary" onClick={save}>
+          </Button>
+          <Button variant="primary"  onClick={save}>
             保存打样单
-          </button>
+          </Button>
         </>
       }
     >
@@ -651,11 +649,11 @@ function SampleModal({
         </div>
       </div>
 
-      <div className="row" style={{ margin: '10px 0 4px' }}>
-        <strong style={{ fontSize: 13 }}>样品明细</strong>
+      <div className="row sec-head">
+        <strong className="sec-head">样品明细</strong>
         <div className="spacer" />
-        <button
-          className="btn sm"
+        <Button size="sm"
+          
           onClick={() =>
             setLines((ls) => [
               ...ls,
@@ -673,7 +671,7 @@ function SampleModal({
           }
         >
           + 加一行
-        </button>
+        </Button>
       </div>
 
       <div className="table-wrap">
@@ -720,7 +718,7 @@ function SampleModal({
                   <td className="num">
                     <input
                       type="number"
-                      style={{ width: 70, textAlign: 'right' }}
+                      className="col-num-sm"
                       value={l.quantity}
                       onChange={(e) => setLine(i, { quantity: Number(e.target.value) })}
                     />
@@ -729,23 +727,23 @@ function SampleModal({
                     <input
                       type="number"
                       step="0.01"
-                      style={{ width: 80, textAlign: 'right' }}
+                      className="col-num-sm"
                       value={l.unitPrice}
                       onChange={(e) => setLine(i, { unitPrice: Number(e.target.value) })}
                     />
                   </td>
                   <td className="num">{(l.quantity * l.unitPrice).toFixed(2)}</td>
                   <td className="right">
-                    <button className="btn sm ghost danger" onClick={() => setLines((ls) => ls.filter((_, k) => k !== i))}>
+                    <Button variant="danger" size="sm"  onClick={() => setLines((ls) => ls.filter((_, k) => k !== i))}>
                       删除
-                    </button>
+                    </Button>
                   </td>
                 </tr>
               ))
             )}
           </tbody>
           <tfoot>
-            <tr style={{ background: '#f8fafc', fontWeight: 700 }}>
+            <tr className="tfoot-strong">
               <td colSpan={4}>样品费合计</td>
               <td className="num">{num(totalQty)}</td>
               <td></td>
@@ -802,7 +800,7 @@ function SampleModal({
         公司净垫 = 公司实际垫出去多少（客户免单就是真亏这么多）。
       </div>
 
-      <div className="field" style={{ marginTop: 10 }}>
+      <div className="field mt-2">
         <label>备注</label>
         <textarea rows={2} value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} />
       </div>

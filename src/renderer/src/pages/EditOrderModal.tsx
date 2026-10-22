@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Modal, useToast, today, money } from '../ui'
+import { Modal, useToast, today, money, Button } from '../ui'
 import {
   CURRENCIES,
   INCOTERMS,
@@ -134,12 +134,12 @@ export default function EditOrderModal({
       size="wide"
       footer={
         <>
-          <button className="btn" onClick={onClose}>
+          <Button  onClick={onClose}>
             取消
-          </button>
-          <button className="btn primary" onClick={save}>
+          </Button>
+          <Button variant="primary"  onClick={save}>
             保存修改
-          </button>
+          </Button>
         </>
       }
     >
@@ -281,18 +281,18 @@ export default function EditOrderModal({
             onChange={(e) => setForm({ ...form, validUntil: e.target.value })}
           />
           <div className="row" style={{ marginTop: 5, gap: 5 }}>
-            <button className="btn sm" onClick={() => extendValidity(7)}>
+            <Button size="sm"  onClick={() => extendValidity(7)}>
               +7天
-            </button>
-            <button className="btn sm" onClick={() => extendValidity(15)}>
+            </Button>
+            <Button size="sm"  onClick={() => extendValidity(15)}>
               +15天
-            </button>
-            <button className="btn sm" onClick={() => extendValidity(30)}>
+            </Button>
+            <Button size="sm"  onClick={() => extendValidity(30)}>
               +30天
-            </button>
-            <button className="btn sm" onClick={() => setForm({ ...form, validUntil: today() })}>
+            </Button>
+            <Button size="sm"  onClick={() => setForm({ ...form, validUntil: today() })}>
               今天
-            </button>
+            </Button>
           </div>
         </div>
         <div className="field">
@@ -381,9 +381,9 @@ export default function EditOrderModal({
       <div className="row" style={{ marginBottom: 5 }}>
         <span className="hint">CIF / CFR / FOB 天天变，运费保险在这里改，PI 和 CI 会一起变</span>
         <div className="spacer" />
-        <button className="btn sm" onClick={() => setCharges((cs) => [...cs, { label: '运费 Freight', amount: 0 }])}>
+        <Button size="sm"  onClick={() => setCharges((cs) => [...cs, { label: '运费 Freight', amount: 0 }])}>
           + 加费用
-        </button>
+        </Button>
       </div>
       {charges.length === 0 ? (
         <div className="hint">还没有费用行（PI 上只有货值）</div>
@@ -396,7 +396,7 @@ export default function EditOrderModal({
                 <th className="num" style={{ width: '32%' }}>
                   金额（{form.currency}）
                 </th>
-                <th style={{ width: 70 }}></th>
+                <th className="col-num-sm"></th>
               </tr>
             </thead>
             <tbody>
@@ -414,7 +414,7 @@ export default function EditOrderModal({
                     <input
                       type="number"
                       step="0.01"
-                      style={{ width: 110, textAlign: 'right' }}
+                      className="col-num-lg"
                       value={c.amount}
                       onChange={(e) =>
                         setCharges((cs) =>
@@ -424,18 +424,18 @@ export default function EditOrderModal({
                     />
                   </td>
                   <td className="right">
-                    <button
-                      className="btn sm ghost danger"
+                    <Button variant="danger" size="sm"
+                      
                       onClick={() => setCharges((cs) => cs.filter((_, k) => k !== i))}
                     >
                       删除
-                    </button>
+                    </Button>
                   </td>
                 </tr>
               ))}
             </tbody>
             <tfoot>
-              <tr style={{ background: '#f8fafc', fontWeight: 700 }}>
+              <tr className="tfoot-strong">
                 <td>费用合计</td>
                 <td className="num">{chargesTotal.toFixed(2)}</td>
                 <td></td>
@@ -444,7 +444,7 @@ export default function EditOrderModal({
           </table>
         </div>
       )}
-      <div className="hint" style={{ marginTop: 4 }}>
+      <div className="hint mt-1">
         含费用合计 {money((order.totalAmount ?? 0) + chargesTotal, form.currency)}
       </div>
 

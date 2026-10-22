@@ -386,108 +386,21 @@ export function fmtDateTime(iso: string | null | undefined): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
-/* ---------------- 状态标签 ---------------- */
+// 状态标签已收敛到 ui/StatusTag.tsx（统一语义色映射），这里转出保持旧 import 路径可用
+export {
+  StatusTag,
+  PaymentTag,
+  ShipTag,
+  QuotationStatusTag,
+  SampleStatusTag,
+  SampleFeeTag,
+  SAMPLE_FEE_LABEL,
+  type StatusTone
+} from './ui/StatusTag'
 
-import {
-  PAYMENT_STATUS_LABEL,
-  SHIP_STATUS_LABEL,
-  QUOTATION_STATUS_LABEL,
-  SAMPLE_STATUS_LABEL,
-  type PaymentStatus,
-  type ShipStatus,
-  type QuotationStatus,
-  type SampleStatus
-} from '../../shared/types'
-
-const PAY_TAG: Record<PaymentStatus, string> = {
-  draft: 'grey',
-  sent: 'amber',
-  confirmed: 'blue',
-  partial: 'amber',
-  paid: 'green',
-  settled: 'green',
-  expired: 'red',
-  void: 'grey'
-}
-
-/** 出货状态一律中性灰（R4-S2）：
- *  颜色按维度分家——收款维度用 PAY_TAG（灰/琥珀/蓝/绿/红），
- *  出货维度不占用这些色相，否则一屏里"已收款"（钱）和"已签收"（货）会同绿。
- *  出货进度靠文字区分；已完成的两档加一个 ✓，不用颜色也能一眼认出来。 */
-const SHIP_TAG: Record<ShipStatus, string> = {
-  not_prepared: 'grey',
-  preparing: 'grey',
-  packed: 'grey',
-  shipped: 'grey',
-  cleared: 'grey',
-  delivered: 'grey'
-}
-
-/** 出货已完成的两档：加 ✓ 作形状标记（色弱/黑白打印也能分） */
-const SHIP_DONE: ShipStatus[] = ['cleared', 'delivered']
-
-/* ---------- 其它维度的状态（颜色不跨维度复用） ----------
-   R4-S2 原则：同一屏里"一个颜色只准说一件事"。
-   · 收款维度：PAY_TAG（彩色）
-   · 货的进度（出货 / 打样进度）：中性灰 + ✓，不抢绿色的"钱"语义
-   · 报价单：状态 = 单据流程（中性灰），结果 = 结论（彩色）  */
-
-/** 报价单状态：单据流程，中性灰；「已转订单」加 ✓（终态用形状区分，不用颜色）。
- *  报价页旁边就有一列彩色的「结果」（待回=琥珀 / 成交=绿 / 没成交=灰），
- *  同一屏里一个颜色只准说一件事，所以状态列不再抢彩色。 */
-const QUOTE_TAG: Record<QuotationStatus, string> = {
-  draft: 'grey',
-  sent: 'grey',
-  confirmed: 'grey',
-  converted: 'grey',
-  expired: 'red'
-}
-
-/** 打样单状态：货的进度，中性灰；「已签收」加 ✓。
- *  绿色在本页只给「打样费收款」（钱），不拿来表示货到了。 */
-const SAMPLE_TAG: Record<SampleStatus, string> = {
-  pending: 'grey',
-  sent: 'grey',
-  received: 'grey',
-  cancelled: 'grey'
-}
-
-export function PaymentTag({ status }: { status: PaymentStatus }) {
-  return <span className={`tag ${PAY_TAG[status] ?? 'grey'}`}>{PAYMENT_STATUS_LABEL[status] ?? status}</span>
-}
-
-export function ShipTag({ status }: { status: ShipStatus }) {
-  const done = SHIP_DONE.includes(status)
-  return (
-    <span className={`tag ${SHIP_TAG[status] ?? 'grey'}`} title={done ? '货已签收' : undefined}>
-      {done ? '✓ ' : ''}
-      {SHIP_STATUS_LABEL[status] ?? status}
-    </span>
-  )
-}
-
-/** 报价单状态：只读标签（R4-S5：列表页状态列不再用下拉框） */
-export function QuotationStatusTag({ status }: { status: QuotationStatus }) {
-  return (
-    <span
-      className={`tag ${QUOTE_TAG[status] ?? 'grey'}`}
-      title="改状态：点这一行打开报价单详情"
-    >
-      {status === 'converted' ? '✓ ' : ''}
-      {QUOTATION_STATUS_LABEL[status] ?? status}
-    </span>
-  )
-}
-
-/** 打样单状态：只读标签（R4-S5） */
-export function SampleStatusTag({ status }: { status: SampleStatus }) {
-  return (
-    <span
-      className={`tag ${SAMPLE_TAG[status] ?? 'grey'}`}
-      title="改状态：点这一行「⋯」菜单里的「编辑」"
-    >
-      {status === 'received' ? '✓ ' : ''}
-      {SAMPLE_STATUS_LABEL[status] ?? status}
-    </span>
-  )
-}
+// 组件库统一出口（直接指到各组件文件，避免 ./ui/index.ts 再导回本文件造成循环）
+export { Button, type ButtonVariant, type ButtonSize } from './ui/Button'
+export { Card, CardBody } from './ui/Card'
+export { Field, Input, Select, Textarea } from './ui/Field'
+export { Alert, type AlertKind } from './ui/Alert'
+export { Row, Spacer, FieldRow, KeyValue, TableWrap, DataTable, Progress } from './ui/Layout'

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useToast } from '../ui'
+import { useToast, Card, Button } from '../ui'
 import { imageUrl } from '../imageUrl'
 import { CURRENCIES, type Currency } from '../../../shared/types'
 import type { UpdateStatus } from '../../../shared/api'
@@ -70,19 +70,13 @@ export default function Settings() {
       <div className="topbar">
         <h1>设置</h1>
         <div className="spacer" />
-        <button className="btn primary" onClick={save}>
+        <Button variant="primary"  onClick={save}>
           保存设置
-        </button>
+        </Button>
       </div>
 
       <div className="content">
-        <div className="card">
-          <div className="card-head">
-            <h2>公司信息</h2>
-            <div className="spacer" />
-            <span className="faint">打印在 PI / PL 抬头</span>
-          </div>
-          <div className="card-body">
+        <Card title="公司信息" actions={<span className="faint">打印在 PI / PL 抬头</span>}>
             <div className="field">
               <label>公司名称</label>
               <input
@@ -133,23 +127,21 @@ export default function Settings() {
                     <img src={imageUrl(s.company.logoFile)} alt="logo" />
                   </div>
                 ) : null}
-                <button className="btn" onClick={importLogo}>
+                <Button  onClick={importLogo}>
                   {s.company.logoFile ? '更换 Logo' : '导入 Logo'}
-                </button>
+                </Button>
               </div>
             </div>
-          </div>
-        </div>
+        </Card>
 
-        <div className="card">
-          <div className="card-head">
-            <h2>收款账户</h2>
-            <div className="spacer" />
-            <button className="btn sm" onClick={addBank}>
+        <Card
+          title="收款账户"
+          actions={
+            <Button size="sm" onClick={addBank}>
               + 添加账户
-            </button>
-          </div>
-          <div className="card-body">
+            </Button>
+          }
+        >
             {s.banks.length === 0 ? (
               <div className="hint">还没有银行账户。添加后 PI 会自动印上收款信息。</div>
             ) : (
@@ -158,9 +150,9 @@ export default function Settings() {
                   <div className="row mb">
                     <strong>{b.currency}</strong>
                     <div className="spacer" />
-                    <button className="btn sm ghost danger" onClick={() => removeBank(b.currency)}>
+                    <Button variant="danger" size="sm"  onClick={() => removeBank(b.currency)}>
                       移除
-                    </button>
+                    </Button>
                   </div>
                   <div className="field-row">
                     <div className="field">
@@ -211,14 +203,9 @@ export default function Settings() {
                 </div>
               ))
             )}
-          </div>
-        </div>
+        </Card>
 
-        <div className="card">
-          <div className="card-head">
-            <h2>业务默认值</h2>
-          </div>
-          <div className="card-body">
+        <Card title="业务默认值">
             <div className="field-row-3">
               <div className="field">
                 <label>PI 有效期（天）</label>
@@ -306,14 +293,9 @@ export default function Settings() {
                 <div className="hint">装箱单未填毛重时按此系数估算</div>
               </div>
             </div>
-          </div>
-        </div>
+        </Card>
 
-        <div className="card">
-          <div className="card-head">
-            <h2>数据备份</h2>
-          </div>
-          <div className="card-body">
+        <Card title="数据备份">
             <div className="hint" style={{ marginBottom: 8 }}>
               主数据库：<span className="mono">{dataDir ? `${dataDir}\\ikanbot.db` : '…'}</span>
             </div>
@@ -327,8 +309,8 @@ export default function Settings() {
               程序每天启动时会自动备份一次，保留最近 30 份。
             </div>
             <div className="row">
-              <button
-                className="btn primary"
+              <Button variant="primary"
+                
                 onClick={async () => {
                   const f = await window.api.backup.create()
                   if (f) {
@@ -338,23 +320,18 @@ export default function Settings() {
                 }}
               >
                 立即备份
-              </button>
-              <button className="btn" onClick={async () => {
+              </Button>
+              <Button  onClick={async () => {
                 const d = await window.api.backup.reveal()
                 if (d) setBackupPath(d)
               }}>
                 打开备份目录
-              </button>
+              </Button>
             </div>
             {backupPath ? <div className="hint mono">{backupPath}</div> : null}
-          </div>
-        </div>
+        </Card>
 
-        <div className="card">
-          <div className="card-head">
-            <h2>软件更新</h2>
-          </div>
-          <div className="card-body">
+        <Card title="软件更新">
             <div className="field-row">
               <div className="field">
                 <label>当前版本</label>
@@ -362,8 +339,8 @@ export default function Settings() {
                   <span className="mono" style={{ fontSize: 16 }}>
                     {update?.currentVersion ?? '—'}
                   </span>
-                  <button
-                    className="btn"
+                  <Button
+                    
                     disabled={update?.status === 'checking' || update?.status === 'downloading'}
                     onClick={async () => {
                       const r = await window.api.updater.check()
@@ -372,25 +349,25 @@ export default function Settings() {
                     }}
                   >
                     检查更新
-                  </button>
+                  </Button>
                   {update?.status === 'available' ? (
-                    <button
-                      className="btn primary"
+                    <Button variant="primary"
+                      
                       onClick={async () => {
                         const r = await window.api.updater.download()
                         setUpdate(r)
                       }}
                     >
                       下载 v{update.version}
-                    </button>
+                    </Button>
                   ) : null}
                   {update?.status === 'downloaded' ? (
-                    <button
-                      className="btn primary"
+                    <Button variant="primary"
+                      
                       onClick={() => void window.api.updater.install()}
                     >
                       重启安装 v{update.version}
-                    </button>
+                    </Button>
                   ) : null}
                 </div>
                 <div className="hint">
@@ -462,18 +439,17 @@ export default function Settings() {
 
             <div className="hint" style={{ marginTop: 10 }}>
               更新来自 GitHub Releases，需要能访问 github.com。如果下载慢，
-              <button
-                className="btn sm"
+              <Button size="sm"
+                
                 style={{ marginLeft: 6 }}
                 onClick={() =>
                   void window.api.shell.openExternal('https://github.com/chenpeigen2/IKanBot/releases')
                 }
               >
                 去 GitHub 手动下载
-              </button>
+              </Button>
             </div>
-          </div>
-        </div>
+        </Card>
       </div>
     </>
   )

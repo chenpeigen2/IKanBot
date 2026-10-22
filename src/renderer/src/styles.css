@@ -430,13 +430,193 @@ label {
   min-width: 0;
 }
 
+/* 常用的固定间距（替代散落的内联 marginTop） */
+.mt-1 {
+  margin-top: var(--space-1);
+}
+.mt-2 {
+  margin-top: var(--space-2);
+}
+.mt-3 {
+  margin-top: var(--space-3);
+}
+.mt-4 {
+  margin-top: var(--space-4);
+}
+
+.gap-1 {
+  gap: var(--space-1);
+}
+.gap-2 {
+  gap: var(--space-2);
+}
+
+/* ---------- 重复内联样式的收敛 ---------- */
+
+/* 区块上边距（表头与内容之间） */
+.sec-top {
+  padding: var(--space-3) var(--space-4) 0;
+}
+
+/* 小节标题行（"商品明细" + 右侧按钮） */
+.sec-head {
+  display: flex;
+  align-items: center;
+  margin: var(--space-3) 0 var(--space-1);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* 表格行内的小输入框（数字、日期） */
+.cell-input {
+  width: 72px;
+  padding: 3px 4px;
+  text-align: right;
+}
+
+.cell-input-sm {
+  width: 56px;
+  padding: 3px 3px;
+}
+
+/* 表格合计行 */
+.tfoot-strong {
+  background: var(--surface-2);
+  font-weight: 700;
+}
+
+/* 键值对里的标签宽度统一 */
+.kv-grid > div {
+  min-width: 0;
+}
+
+/* ---------- 表格列宽（语义化，跨页面统一） ----------
+   以前每张表自己写 style={{ width: 70 }} / 80 / 90 / 110，
+   同一个"数量"列在不同页面宽度不同，一屏看过去参差不齐。
+   现在按用途定档：谁需要数字列就用 .col-num，不用再手写像素。 */
+.col-num {
+  width: 88px;
+  text-align: right;
+}
+
+.col-num-sm {
+  width: 68px;
+  text-align: right;
+}
+
+.col-num-lg {
+  width: 110px;
+  text-align: right;
+}
+
+.col-date {
+  width: 108px;
+}
+
+.col-tag {
+  width: 96px;
+}
+
+.col-action {
+  width: 150px;
+}
+
+/* ---------- UI 组件库新增 ---------- */
+
+/* 按钮：柔和变体（次要但需要存在感的动作） */
+.btn.subtle {
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--text);
+}
+.btn.subtle:hover:not(:disabled) {
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+}
+
+/* 按钮：占满一行 */
+.btn.block {
+  display: flex;
+  width: 100%;
+  justify-content: center;
+}
+
+/* 按钮图标 */
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 5px;
+}
+
+/* 表单：必填标记 */
+.field .req {
+  color: var(--danger);
+}
+
+/* 表单：标签右侧的补充说明 */
+.field .label-extra {
+  margin-left: 6px;
+  font-weight: 400;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+/* 表单：错误提示 */
+.field-error {
+  margin-top: var(--space-1);
+  font-size: 11.5px;
+  color: var(--danger);
+}
+
+/* 数字输入框：右对齐 */
+.input.num,
+input.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 进度条（自动更新下载） */
+.progress {
+  margin-top: var(--space-2);
+}
+
+.progress-label {
+  margin-bottom: 5px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.progress-track {
+  height: 6px;
+  overflow: hidden;
+  background: var(--surface-3);
+  border-radius: 3px;
+}
+
+.progress-bar {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.2s ease;
+}
+
+/* 键值网格：多列（订单详情条款区） */
+.kv-grid.kv-1 {
+  grid-template-columns: 1fr;
+}
+.kv-grid.kv-3 {
+  grid-template-columns: repeat(3, 1fr);
+}
+
 /* ---------- 卡片 ---------- */
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-1);
+  /* 阴影更柔：多张卡叠在一起时，硬阴影会显得脏 */
+  box-shadow: 0 1px 2px rgba(21, 32, 58, 0.04), 0 1px 3px rgba(21, 32, 58, 0.03);
   margin-bottom: var(--space-4);
+  overflow: hidden;
 }
 
 .card-head {
@@ -444,6 +624,7 @@ label {
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
+  min-height: 44px;
   gap: var(--space-2);
 }
 
@@ -541,13 +722,18 @@ table.data {
 
 table.data th {
   text-align: left;
-  padding: var(--space-2);
+  padding: var(--space-2) var(--space-2);
   background: var(--surface-2);
   border-bottom: 1px solid var(--border);
   color: var(--text-dim);
   font-weight: 600;
   font-size: var(--text-sm);
+  /* 字距拉开一点，表头更像"分类标签"而不是挤在一起的一串字 */
+  letter-spacing: 0.02em;
   white-space: nowrap;
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 
 table.data td {
@@ -556,8 +742,18 @@ table.data td {
   vertical-align: middle;
 }
 
+/* 斑马纹：表格宽的时候，靠横线找行很累，隔行淡底能快速定位 */
+table.data tbody tr:nth-child(even) {
+  background: rgba(21, 32, 58, 0.015);
+}
+
 table.data tbody tr:hover {
-  background: var(--surface-2);
+  background: var(--accent-soft);
+}
+
+/* 数字列：稍重一点，扫数时更抓眼 */
+table.data td.num {
+  font-weight: 550;
 }
 
 table.data tbody tr.clickable {

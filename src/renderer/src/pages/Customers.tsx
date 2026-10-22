@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Modal, useToast, money, Empty, fmtDate, PaymentTag, ShipTag } from '../ui'
+import { Modal, useToast, money, Empty, fmtDate, PaymentTag, ShipTag, Button } from '../ui'
 import { INCOTERMS, PAYMENT_METHOD_LABEL, type PaymentMethod } from '../../../shared/types'
 import type { Customer } from '../../../shared/types'
 
@@ -99,9 +99,9 @@ export default function Customers() {
       <div className="topbar">
         <h1>客户</h1>
         <div className="spacer" />
-        <button className="btn primary" onClick={() => setDraft({ ...blank })}>
+        <Button variant="primary"  onClick={() => setDraft({ ...blank })}>
           + 新增客户
-        </button>
+        </Button>
       </div>
 
       <div className="content">
@@ -113,9 +113,9 @@ export default function Customers() {
             onChange={(e) => setKeyword(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && load()}
           />
-          <button className="btn" onClick={() => load()}>
+          <Button  onClick={() => load()}>
             搜索
-          </button>
+          </Button>
           <div className="spacer" />
           <span className="faint">共 {list.length} 个客户</span>
         </div>
@@ -194,12 +194,12 @@ export default function Customers() {
           size="wide"
           footer={
             <>
-              <button className="btn" onClick={() => setDraft(null)}>
+              <Button  onClick={() => setDraft(null)}>
                 取消
-              </button>
-              <button className="btn primary" onClick={save}>
+              </Button>
+              <Button variant="primary"  onClick={save}>
                 保存
-              </button>
+              </Button>
             </>
           }
         >

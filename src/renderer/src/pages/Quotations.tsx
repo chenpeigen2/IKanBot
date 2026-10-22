@@ -1,17 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import {
-  Modal,
-  useToast,
-  money,
-  num,
-  Empty,
-  fmtDate,
-  fmtDateTime,
-  today,
-  ActionMenu,
-  QuotationStatusTag
-} from '../ui'
+import { Modal, useToast, money, num, Empty, fmtDate, fmtDateTime, today, ActionMenu, QuotationStatusTag, Button } from '../ui'
 import {
   CURRENCIES,
   INCOTERMS,
@@ -105,9 +94,9 @@ export default function Quotations() {
       <div className="topbar">
         <h1>报价</h1>
         <div className="spacer" />
-        <button className="btn primary" onClick={() => setEditing({})}>
+        <Button variant="primary"  onClick={() => setEditing({})}>
           + 新建报价单
-        </button>
+        </Button>
       </div>
 
       <div className="content">
@@ -118,9 +107,9 @@ export default function Quotations() {
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
           />
-          <button className="btn" onClick={load}>
+          <Button  onClick={load}>
             搜索
-          </button>
+          </Button>
           <div className="spacer" />
           <span className="faint">共 {list.length} 张报价单</span>
         </div>
@@ -255,15 +244,15 @@ export default function Quotations() {
           onClose={() => setConvertTarget(null)}
           footer={
             <>
-              <button className="btn" onClick={() => setConvertTarget(null)}>
+              <Button  onClick={() => setConvertTarget(null)}>
                 取消
-              </button>
-              <button className="btn" onClick={() => void convert(convertTarget, 'draft')}>
+              </Button>
+              <Button  onClick={() => void convert(convertTarget, 'draft')}>
                 先存草稿
-              </button>
-              <button className="btn primary" onClick={() => void convert(convertTarget, 'sent')}>
+              </Button>
+              <Button variant="primary"  onClick={() => void convert(convertTarget, 'sent')}>
                 PI 现在就发（待确认）
-              </button>
+              </Button>
             </>
           }
         >
@@ -391,20 +380,20 @@ function QuotationDetailModal({
         size="xwide"
         footer={
           <>
-            <button className="btn" onClick={onClose}>
+            <Button  onClick={onClose}>
               关闭
-            </button>
-            <button className="btn" onClick={() => onEdit(quotation)}>
+            </Button>
+            <Button  onClick={() => onEdit(quotation)}>
               编辑
-            </button>
+            </Button>
             {quotation.convertedOrderId ? (
-              <button className="btn primary" onClick={() => navigate(`/orders/${quotation.convertedOrderId}`)}>
+              <Button variant="primary"  onClick={() => navigate(`/orders/${quotation.convertedOrderId}`)}>
                 看已转的订单
-              </button>
+              </Button>
             ) : (
-              <button className="btn primary" onClick={() => onConvert(quotation)}>
+              <Button variant="primary"  onClick={() => onConvert(quotation)}>
                 转成订单
-              </button>
+              </Button>
             )}
           </>
         }
@@ -524,7 +513,7 @@ function QuotationDetailModal({
               ))}
             </tbody>
             <tfoot>
-              <tr style={{ background: '#f8fafc', fontWeight: 700 }}>
+              <tr className="tfoot-strong">
                 <td colSpan={4}>合计</td>
                 <td className="num">{num(quotation.totalQuantity)}</td>
                 <td></td>
@@ -534,7 +523,7 @@ function QuotationDetailModal({
           </table>
         </div>
 
-        <div className="field-row" style={{ marginTop: 12 }}>
+        <div className="field-row mt-3">
           <div className="field">
             <label>报价结果</label>
             <select value={quotation.result} onChange={(e) => void setResult(e.target.value as QuotationResult)}>
@@ -555,7 +544,7 @@ function QuotationDetailModal({
           </div>
         ) : null}
 
-        <div style={{ marginTop: 12 }}>
+        <div className="mt-3">
           <h3 style={{ fontSize: 13, margin: '0 0 6px' }}>单据存档（出过的每一版）</h3>
           <div className="table-wrap" style={{ marginBottom: 14 }}>
             <table className="data">
@@ -583,8 +572,8 @@ function QuotationDetailModal({
                       <td className="num">{Number(d.amount).toFixed(2)}</td>
                       <td className="faint nowrap">{fmtDateTime(d.createdAt)}</td>
                       <td className="right nowrap">
-                        <button
-                          className="btn sm ghost"
+                        <Button variant="ghost" size="sm"
+                          
                           onClick={async () => {
                             try {
                               await window.api.docs.openFile(d.filePath)
@@ -594,9 +583,9 @@ function QuotationDetailModal({
                           }}
                         >
                           打开
-                        </button>
-                        <button
-                          className="btn sm ghost"
+                        </Button>
+                        <Button variant="ghost" size="sm"
+                          
                           onClick={async () => {
                             try {
                               await window.api.docs.reveal(d.filePath)
@@ -606,7 +595,7 @@ function QuotationDetailModal({
                           }}
                         >
                           所在文件夹
-                        </button>
+                        </Button>
                       </td>
                     </tr>
                   ))
@@ -644,16 +633,16 @@ function QuotationDetailModal({
           </div>
         </div>
 
-        <div className="row" style={{ marginTop: 10 }}>
-          <button className="btn" onClick={openPreview}>
+        <div className="row mt-2">
+          <Button  onClick={openPreview}>
             预览报价单
-          </button>
-          <button className="btn" onClick={saveToSystem} disabled={!preview}>
+          </Button>
+          <Button  onClick={saveToSystem} disabled={!preview}>
             存到系统
-          </button>
-          <button className="btn" onClick={saveAs} disabled={!preview}>
+          </Button>
+          <Button  onClick={saveAs} disabled={!preview}>
             另存为 PDF
-          </button>
+          </Button>
         </div>
       </Modal>
 
@@ -848,12 +837,12 @@ function QuotationModal({
         size="xwide"
         footer={
           <>
-            <button className="btn" onClick={onClose}>
+            <Button  onClick={onClose}>
               取消
-            </button>
-            <button className="btn primary" onClick={save}>
+            </Button>
+            <Button variant="primary"  onClick={save}>
               保存报价单
-            </button>
+            </Button>
           </>
         }
       >
@@ -903,8 +892,8 @@ function QuotationModal({
             </div>
             {lastRate ? (
               <div className="row" style={{ marginTop: 4, gap: 5 }}>
-                <button
-                  className="btn sm"
+                <Button size="sm"
+                  
                   onClick={() =>
                     setForm({
                       ...form,
@@ -915,7 +904,7 @@ function QuotationModal({
                 >
                   填入上次用的 {lastRate.rate}
                   {lastRate.date ? `（${lastRate.date}）` : ''}
-                </button>
+                </Button>
               </div>
             ) : null}
             <div style={{ marginTop: 6 }}>
@@ -1010,11 +999,11 @@ function QuotationModal({
               onChange={(e) => setForm({ ...form, validUntil: e.target.value })}
             />
             <div className="row" style={{ marginTop: 5, gap: 5 }}>
-              <button className="btn sm" onClick={() => setForm({ ...form, validUntil: today() })}>
+              <Button size="sm"  onClick={() => setForm({ ...form, validUntil: today() })}>
                 今天
-              </button>
-              <button
-                className="btn sm"
+              </Button>
+              <Button size="sm"
+                
                 onClick={() => {
                   const d = new Date()
                   d.setDate(d.getDate() + 15)
@@ -1022,7 +1011,7 @@ function QuotationModal({
                 }}
               >
                 +15天
-              </button>
+              </Button>
             </div>
           </div>
           <div className="field">
@@ -1031,14 +1020,14 @@ function QuotationModal({
           </div>
         </div>
 
-        <div className="row" style={{ margin: '10px 0 4px' }}>
-          <strong style={{ fontSize: 13 }}>商品明细</strong>
+        <div className="row sec-head">
+          <strong className="sec-head">商品明细</strong>
           <div className="spacer" />
-          <button className="btn sm" onClick={() => setShowPicker(true)}>
+          <Button size="sm"  onClick={() => setShowPicker(true)}>
             从商品库选款
-          </button>
-          <button
-            className="btn sm"
+          </Button>
+          <Button size="sm"
+            
             onClick={() =>
               setLines((ls) => [
                 ...ls,
@@ -1047,7 +1036,7 @@ function QuotationModal({
             }
           >
             + 手工加一行
-          </button>
+          </Button>
         </div>
 
         <div className="table-wrap">
@@ -1104,7 +1093,7 @@ function QuotationModal({
                     <td className="num">
                       <input
                         type="number"
-                        style={{ width: 70, textAlign: 'right' }}
+                        className="col-num-sm"
                         value={l.quantity}
                         onChange={(e) => setLine(i, { quantity: Number(e.target.value) })}
                       />
@@ -1113,23 +1102,23 @@ function QuotationModal({
                       <input
                         type="number"
                         step="0.01"
-                        style={{ width: 80, textAlign: 'right' }}
+                        className="col-num-sm"
                         value={l.unitPrice}
                         onChange={(e) => setLine(i, { unitPrice: Number(e.target.value) })}
                       />
                     </td>
                     <td className="num">{(l.quantity * l.unitPrice).toFixed(2)}</td>
                     <td className="right">
-                      <button className="btn sm ghost danger" onClick={() => setLines((ls) => ls.filter((_, k) => k !== i))}>
+                      <Button variant="danger" size="sm"  onClick={() => setLines((ls) => ls.filter((_, k) => k !== i))}>
                         删除
-                      </button>
+                      </Button>
                     </td>
                   </tr>
                 ))
               )}
             </tbody>
             <tfoot>
-              <tr style={{ background: '#f8fafc', fontWeight: 700 }}>
+              <tr className="tfoot-strong">
                 <td colSpan={4}>货值合计</td>
                 <td className="num">{num(lines.reduce((s, l) => s + l.quantity, 0))}</td>
                 <td></td>
@@ -1147,15 +1136,15 @@ function QuotationModal({
           </datalist>
         </div>
 
-        <div className="row" style={{ margin: '10px 0 4px' }}>
-          <strong style={{ fontSize: 13 }}>费用（运费 / 保险费 / 其他）</strong>
+        <div className="row sec-head">
+          <strong className="sec-head">费用（运费 / 保险费 / 其他）</strong>
           <div className="spacer" />
-          <button
-            className="btn sm"
+          <Button size="sm"
+            
             onClick={() => setCharges((cs) => [...cs, { label: '运费 Freight', amount: 0 }])}
           >
             + 加费用
-          </button>
+          </Button>
         </div>
         {charges.map((c, i) => (
           <div className="field-row" key={i} style={{ alignItems: 'flex-end' }}>
@@ -1182,9 +1171,9 @@ function QuotationModal({
               />
             </div>
             <div className="field" style={{ flex: 0, minWidth: 60 }}>
-              <button className="btn sm ghost danger" onClick={() => setCharges((cs) => cs.filter((_, k) => k !== i))}>
+              <Button variant="danger" size="sm"  onClick={() => setCharges((cs) => cs.filter((_, k) => k !== i))}>
                 删除
-              </button>
+              </Button>
             </div>
           </div>
         ))}
@@ -1204,7 +1193,7 @@ function QuotationModal({
           </div>
         </div>
 
-        <div className="field" style={{ marginTop: 10 }}>
+        <div className="field mt-2">
           <label>备注</label>
           <textarea rows={2} value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} />
         </div>
@@ -1338,12 +1327,12 @@ function ProductPickerModal({
       size="xwide"
       footer={
         <>
-          <button className="btn" onClick={onClose}>
+          <Button  onClick={onClose}>
             取消
-          </button>
-          <button className="btn primary" onClick={submit}>
+          </Button>
+          <Button variant="primary"  onClick={submit}>
             加入明细
-          </button>
+          </Button>
         </>
       }
     >

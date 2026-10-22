@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Modal, useToast, money, num, fmtDate, fmtDateTime, Empty, PaymentTag, ShipTag, Menu } from '../ui'
+import {
+  Modal, useToast, money, num, fmtDate, fmtDateTime, Empty, Menu,
+  Button, PaymentTag, ShipTag
+} from '../ui'
 import {
   PAYMENT_METHOD_LABEL,
   PAYMENT_STATUS_LABEL,
@@ -230,9 +233,9 @@ export default function OrderDetail() {
   return (
     <>
       <div className="topbar">
-        <button className="btn ghost" onClick={() => navigate('/orders')}>
+        <Button variant="ghost"  onClick={() => navigate('/orders')}>
           ← 返回
-        </button>
+        </Button>
         <h1 className="mono">{order.orderNo}</h1>
         <span className="faint mono">{order.piNo}</span>
         <PaymentTag status={order.paymentStatus} />
@@ -240,12 +243,12 @@ export default function OrderDetail() {
         <div className="spacer" />
         {/* R1-④：页头只留 2 种按钮形态（描边 + 主按钮），
             「作废此单」「删除订单」收进「⋯」菜单，不再是裸文字链接 */}
-        <button className="btn" onClick={() => setShowCi(true)}>
+        <Button  onClick={() => setShowCi(true)}>
           商业发票 CI
-        </button>
-        <button className="btn primary" onClick={openPi}>
+        </Button>
+        <Button variant="primary"  onClick={openPi}>
           生成 PI
-        </button>
+        </Button>
         <Menu
           label="⋯"
           items={[
@@ -329,9 +332,9 @@ export default function OrderDetail() {
             <div className="card-head">
               <h3>客户与条款</h3>
               <div className="spacer" />
-              <button className="btn sm" onClick={() => setShowEdit(true)}>
+              <Button size="sm"  onClick={() => setShowEdit(true)}>
                 编辑
-              </button>
+              </Button>
             </div>
             <div className="card-body">
               <div className="kv-grid">
@@ -419,13 +422,13 @@ export default function OrderDetail() {
                     <span className="v">
                       {order.charges.map((c: any) => `${c.label} ${Number(c.amount).toFixed(2)}`).join('，')}
                       {!editCharges ? (
-                        <button
-                          className="btn sm ghost"
+                        <Button variant="ghost" size="sm"
+                          
                           style={{ marginLeft: 8 }}
                           onClick={() => setEditCharges(true)}
                         >
                           改费用
-                        </button>
+                        </Button>
                       ) : null}
                     </span>
                   </div>
@@ -438,7 +441,7 @@ export default function OrderDetail() {
                 ) : null}
               </div>
               {editCharges ? (
-                <div style={{ marginTop: 10 }}>
+                <div className="mt-2">
                   <ChargesEditor
                     order={order}
                     onClose={() => setEditCharges(false)}
@@ -485,9 +488,9 @@ export default function OrderDetail() {
                 ) : (
                   <div className="row">
                     <PaymentTag status={order.paymentStatus} />
-                    <button className="btn sm ghost" onClick={() => setEditPayment(true)}>
+                    <Button variant="ghost" size="sm"  onClick={() => setEditPayment(true)}>
                       改状态
-                    </button>
+                    </Button>
                   </div>
                 )}
                 <div className="hint">收到定金/尾款时系统会自动流转，这里是手动覆盖。</div>
@@ -513,9 +516,9 @@ export default function OrderDetail() {
                 ) : (
                   <div className="row">
                     <ShipTag status={order.shipStatus} />
-                    <button className="btn sm ghost" onClick={() => setEditShip(true)}>
+                    <Button variant="ghost" size="sm"  onClick={() => setEditShip(true)}>
                       改状态
-                    </button>
+                    </Button>
                   </div>
                 )}
               </div>
@@ -580,15 +583,15 @@ export default function OrderDetail() {
           size="xwide"
           footer={
             <>
-              <button className="btn" onClick={() => setPreview(null)}>
+              <Button  onClick={() => setPreview(null)}>
                 关闭
-              </button>
-              <button className="btn" onClick={savePdf}>
+              </Button>
+              <Button  onClick={savePdf}>
                 另存为 PDF
-              </button>
-              <button className="btn primary" onClick={saveToSystem}>
+              </Button>
+              <Button variant="primary"  onClick={saveToSystem}>
                 存到系统
-              </button>
+              </Button>
             </>
           }
         >
@@ -635,11 +638,11 @@ function ChargesEditor({
   return (
     <div style={{ border: '1px solid #e2e6ee', borderRadius: 6, padding: 10 }}>
       <div className="row" style={{ marginBottom: 6 }}>
-        <strong style={{ fontSize: 13 }}>费用（运费 / 保险费 / 其他）</strong>
+        <strong className="sec-head">费用（运费 / 保险费 / 其他）</strong>
         <div className="spacer" />
-        <button className="btn sm" onClick={() => setCharges((cs) => [...cs, { label: '运费 Freight', amount: 0 }])}>
+        <Button size="sm"  onClick={() => setCharges((cs) => [...cs, { label: '运费 Freight', amount: 0 }])}>
           + 加费用
-        </button>
+        </Button>
       </div>
       <div className="table-wrap">
         <table className="data">
@@ -649,7 +652,7 @@ function ChargesEditor({
               <th className="num" style={{ width: '30%' }}>
                 金额（{order.currency}）
               </th>
-              <th style={{ width: 70 }}></th>
+              <th className="col-num-sm"></th>
             </tr>
           </thead>
           <tbody>
@@ -674,7 +677,7 @@ function ChargesEditor({
                     <input
                       type="number"
                       step="0.01"
-                      style={{ width: 110, textAlign: 'right' }}
+                      className="col-num-lg"
                       value={c.amount}
                       onChange={(e) =>
                         setCharges((cs) =>
@@ -684,19 +687,19 @@ function ChargesEditor({
                     />
                   </td>
                   <td className="right">
-                    <button
-                      className="btn sm ghost danger"
+                    <Button variant="danger" size="sm"
+                      
                       onClick={() => setCharges((cs) => cs.filter((_, k) => k !== i))}
                     >
                       删除
-                    </button>
+                    </Button>
                   </td>
                 </tr>
               ))
             )}
           </tbody>
           <tfoot>
-            <tr style={{ background: '#f8fafc', fontWeight: 700 }}>
+            <tr className="tfoot-strong">
               <td>费用合计</td>
               <td className="num">{total.toFixed(2)}</td>
               <td></td>
@@ -704,15 +707,15 @@ function ChargesEditor({
           </tfoot>
         </table>
       </div>
-      <div className="row" style={{ marginTop: 8 }}>
+      <div className="row mt-2">
         <div className="hint">含费用合计 {money(order.totalAmount + total, order.currency)}</div>
         <div className="spacer" />
-        <button className="btn sm" onClick={onClose}>
+        <Button size="sm"  onClick={onClose}>
           取消
-        </button>
-        <button className="btn sm primary" onClick={() => void save()}>
+        </Button>
+        <Button variant="primary" size="sm"  onClick={() => void save()}>
           保存费用
-        </button>
+        </Button>
       </div>
     </div>
   )
@@ -744,12 +747,12 @@ function CiModal({
       onClose={onClose}
       footer={
         <>
-          <button className="btn" onClick={onClose}>
+          <Button  onClick={onClose}>
             取消
-          </button>
-          <button className="btn primary" onClick={() => onPreview(clean)}>
+          </Button>
+          <Button variant="primary"  onClick={() => onPreview(clean)}>
             生成 CI 预览
-          </button>
+          </Button>
         </>
       }
     >
@@ -758,15 +761,15 @@ function CiModal({
         <br />
         运费、保险费已经按订单上的费用行带出来了（PI 上印的就是这同一套数字），确认一眼就行。
       </div>
-      <div className="row" style={{ margin: '10px 0 4px' }}>
-        <strong style={{ fontSize: 13 }}>费用（运费 / 保险费 / 其他）</strong>
+      <div className="row sec-head">
+        <strong className="sec-head">费用（运费 / 保险费 / 其他）</strong>
         <div className="spacer" />
-        <button
-          className="btn sm"
+        <Button size="sm"
+          
           onClick={() => setCharges((cs) => [...cs, { label: '运费 Freight', amount: 0 }])}
         >
           + 加费用
-        </button>
+        </Button>
       </div>
       {charges.length === 0 ? (
         <div className="hint">这张单没有费用行，CI 合计 = 货值。</div>
@@ -779,7 +782,7 @@ function CiModal({
                 <th className="num" style={{ width: '30%' }}>
                   金额（{order.currency}）
                 </th>
-                <th style={{ width: 70 }}></th>
+                <th className="col-num-sm"></th>
               </tr>
             </thead>
             <tbody>
@@ -797,7 +800,7 @@ function CiModal({
                     <input
                       type="number"
                       step="0.01"
-                      style={{ width: 110, textAlign: 'right' }}
+                      className="col-num-lg"
                       value={c.amount}
                       onChange={(e) =>
                         setCharges((cs) =>
@@ -807,12 +810,12 @@ function CiModal({
                     />
                   </td>
                   <td className="right">
-                    <button
-                      className="btn sm ghost danger"
+                    <Button variant="danger" size="sm"
+                      
                       onClick={() => setCharges((cs) => cs.filter((_, k) => k !== i))}
                     >
                       删除
-                    </button>
+                    </Button>
                   </td>
                 </tr>
               ))}
@@ -870,11 +873,11 @@ function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<voi
 
   return (
     <>
-      <div className="toolbar" style={{ padding: '12px 16px 0' }}>
+      <div className="toolbar sec-top">
         <div className="spacer" />
-        <button className="btn primary" onClick={() => setShowAdd(true)}>
+        <Button variant="primary"  onClick={() => setShowAdd(true)}>
           + 添加商品
-        </button>
+        </Button>
       </div>
 
       {order.items.length === 0 ? (
@@ -907,7 +910,7 @@ function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<voi
                     <input
                       list={`colors-${it.id}`}
                       value={it.color}
-                      style={{ width: 90 }}
+                      className="col-num"
                       onBlur={async (e) => {
                         const v = e.target.value
                         if (v === it.color) return
@@ -925,7 +928,7 @@ function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<voi
                     <input
                       list={`sizes-${it.id}`}
                       value={it.size}
-                      style={{ width: 70 }}
+                      className="col-num-sm"
                       onBlur={async (e) => {
                         const v = e.target.value
                         if (v === it.size) return
@@ -942,7 +945,7 @@ function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<voi
                   <td className="num">
                     <input
                       type="number"
-                      style={{ width: 80, textAlign: 'right' }}
+                      className="col-num-sm"
                       defaultValue={it.quantity}
                       onBlur={async (e) => {
                         const v = Number(e.target.value)
@@ -956,7 +959,7 @@ function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<voi
                     <input
                       type="number"
                       step="0.01"
-                      style={{ width: 90, textAlign: 'right' }}
+                      className="col-num"
                       defaultValue={it.unitPrice}
                       onBlur={async (e) => {
                         const v = Number(e.target.value)
@@ -971,7 +974,7 @@ function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<voi
                     <input
                       type="number"
                       step="0.01"
-                      style={{ width: 92, textAlign: 'right' }}
+                      className="col-num"
                       defaultValue={it.unitCost ?? ''}
                       placeholder="未录，点这里补"
                       onBlur={async (e) => {
@@ -989,8 +992,8 @@ function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<voi
                     {it.unitCost == null ? '—' : (it.quantity * (it.unitPrice - it.unitCost)).toFixed(2)}
                   </td>
                   <td className="right">
-                    <button
-                      className="btn sm ghost danger"
+                    <Button variant="danger" size="sm"
+                      
                       onClick={async () => {
                         if (
                           !confirm(
@@ -1005,13 +1008,13 @@ function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<voi
                       }}
                     >
                       删除
-                    </button>
+                    </Button>
                   </td>
                 </tr>
               ))}
             </tbody>
             <tfoot>
-              <tr style={{ background: '#f8fafc', fontWeight: 700 }}>
+              <tr className="tfoot-strong">
                 <td colSpan={4}>合计</td>
                 <td className="num">{num(order.totalQuantity)}</td>
                 <td></td>
@@ -1122,12 +1125,12 @@ function AddItemsModal({
       size="xwide"
       footer={
         <>
-          <button className="btn" onClick={onClose}>
+          <Button  onClick={onClose}>
             取消
-          </button>
-          <button className="btn primary" onClick={submit}>
+          </Button>
+          <Button variant="primary"  onClick={submit}>
             添加到订单
-          </button>
+          </Button>
         </>
       }
     >
@@ -1345,9 +1348,9 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
             <input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} />
           </div>
         </div>
-        <button className="btn primary" onClick={add}>
+        <Button variant="primary"  onClick={add}>
           记录收款
-        </button>
+        </Button>
       </div>
 
       <div className="table-wrap">
@@ -1378,8 +1381,8 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
                   <td className="mono">{p.bankRef || '—'}</td>
                   <td className="faint">{p.note}</td>
                   <td className="right">
-                    <button
-                      className="btn sm ghost danger"
+                    <Button variant="danger" size="sm"
+                      
                       onClick={async () => {
                         if (!confirm('删除这条收款记录？')) return
                         await window.api.orders.deletePayment(order.id, p.id)
@@ -1387,7 +1390,7 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
                       }}
                     >
                       删除
-                    </button>
+                    </Button>
                   </td>
                 </tr>
               ))
@@ -1414,11 +1417,11 @@ function PackingTab({
 
   return (
     <>
-      <div className="toolbar" style={{ padding: '12px 16px 0' }}>
+      <div className="toolbar sec-top">
         <div className="spacer" />
-        <button className="btn primary" onClick={() => setShowCreate(true)}>
+        <Button variant="primary"  onClick={() => setShowCreate(true)}>
           + 新建装箱单
-        </button>
+        </Button>
       </div>
 
       {order.packingLists.length === 0 ? (
@@ -1426,16 +1429,16 @@ function PackingTab({
       ) : (
         order.packingLists.map((pl: any) => (
           <div key={pl.id} style={{ borderBottom: '1px solid #eef1f6' }}>
-            <div className="toolbar" style={{ padding: '12px 16px 0' }}>
+            <div className="toolbar sec-top">
               <strong className="mono">{pl.plNo}</strong>
               {pl.containerNo ? <span className="tag blue">柜号 {pl.containerNo}</span> : null}
               <span className="faint">{pl.lines.length} 箱</span>
               <div className="spacer" />
-              <button className="btn sm" onClick={() => onPreview(pl.id)}>
+              <Button size="sm"  onClick={() => onPreview(pl.id)}>
                 预览
-              </button>
-              <button
-                className="btn sm ghost danger"
+              </Button>
+              <Button variant="danger" size="sm"
+                
                 onClick={async () => {
                   if (!confirm(`删除装箱单 ${pl.plNo}？`)) return
                   await window.api.pl.remove(order.id, pl.id)
@@ -1443,7 +1446,7 @@ function PackingTab({
                 }}
               >
                 删除
-              </button>
+              </Button>
             </div>
             <div className="table-wrap">
               <table className="data">
@@ -1466,7 +1469,7 @@ function PackingTab({
                     <tr key={l.id}>
                       <td>
                         <input
-                          style={{ width: 70 }}
+                          className="col-num-sm"
                           defaultValue={l.boxNo}
                           onBlur={async (e) => {
                             await window.api.pl.updateLine(order.id, pl.id, l.id, { boxNo: e.target.value })
@@ -1483,7 +1486,7 @@ function PackingTab({
                         <input
                           type="number"
                           step="0.01"
-                          style={{ width: 78, textAlign: 'right' }}
+                          className="col-num-sm"
                           defaultValue={l.netWeight ?? ''}
                           onBlur={async (e) => {
                             const v = e.target.value === '' ? null : Number(e.target.value)
@@ -1499,7 +1502,7 @@ function PackingTab({
                             <input
                               key={k}
                               type="number"
-                              style={{ width: 52, padding: '4px 3px' }}
+                              className="cell-input-sm"
                               defaultValue={l[k] ?? ''}
                               onBlur={async (e) => {
                                 const v = e.target.value === '' ? null : Number(e.target.value)
@@ -1511,15 +1514,15 @@ function PackingTab({
                         </div>
                       </td>
                       <td className="right">
-                        <button
-                          className="btn sm ghost danger"
+                        <Button variant="danger" size="sm"
+                          
                           onClick={async () => {
                             await window.api.pl.deleteLine(order.id, pl.id, l.id)
                             await onChange()
                           }}
                         >
                           删除
-                        </button>
+                        </Button>
                       </td>
                     </tr>
                   ))}
@@ -1644,15 +1647,15 @@ function CreatePlModal({
       size="xwide"
       footer={
         <>
-          <button className="btn" onClick={onClose}>
+          <Button  onClick={onClose}>
             取消
-          </button>
-          <button className="btn" onClick={build}>
+          </Button>
+          <Button  onClick={build}>
             重新生成箱明细
-          </button>
-          <button className="btn primary" onClick={submit}>
+          </Button>
+          <Button variant="primary"  onClick={submit}>
             生成装箱单
-          </button>
+          </Button>
         </>
       }
     >
@@ -1692,12 +1695,12 @@ function CreatePlModal({
         </div>
       </div>
 
-      <div className="row" style={{ margin: '10px 0 4px' }}>
-        <strong style={{ fontSize: 13 }}>按款号设箱规（不同款号箱规不一样时用）</strong>
+      <div className="row sec-head">
+        <strong className="sec-head">按款号设箱规（不同款号箱规不一样时用）</strong>
         <div className="spacer" />
-        <button className="btn sm" onClick={applyFromLibrary}>
+        <Button size="sm"  onClick={applyFromLibrary}>
           按商品库套用
-        </button>
+        </Button>
       </div>
       <div className="table-wrap" style={{ maxHeight: 160, overflowY: 'auto' }}>
         <table className="data">
@@ -1718,7 +1721,7 @@ function CreatePlModal({
                   <td className="num">
                     <input
                       type="number"
-                      style={{ width: 70, textAlign: 'right' }}
+                      className="col-num-sm"
                       value={cfg.pieces ?? ''}
                       onChange={(e) =>
                         setStyleCfg({ ...styleCfg, [s.styleNo]: { ...cfg, pieces: e.target.value } })
@@ -1729,7 +1732,7 @@ function CreatePlModal({
                     <input
                       type="number"
                       step="0.001"
-                      style={{ width: 80, textAlign: 'right' }}
+                      className="col-num-sm"
                       value={cfg.unitNet ?? ''}
                       onChange={(e) =>
                         setStyleCfg({ ...styleCfg, [s.styleNo]: { ...cfg, unitNet: e.target.value } })
@@ -1742,7 +1745,7 @@ function CreatePlModal({
                         <input
                           key={k}
                           type="number"
-                          style={{ width: 52, padding: '4px 3px' }}
+                          className="cell-input-sm"
                           value={cfg[k] ?? ''}
                           onChange={(e) =>
                             setStyleCfg({ ...styleCfg, [s.styleNo]: { ...cfg, [k]: e.target.value } })
@@ -1854,8 +1857,8 @@ function TimelineTab({ events, docVersions }: { events: any[]; docVersions: any[
                     <td className="num">{d.amount.toFixed(2)}</td>
                     <td className="faint nowrap">{fmtDateTime(d.createdAt)}</td>
                     <td className="right nowrap">
-                      <button
-                        className="btn sm ghost"
+                      <Button variant="ghost" size="sm"
+                        
                         onClick={async () => {
                           // N34：每一版直接打开看，不用去文件夹里认文件名
                           try {
@@ -1866,9 +1869,9 @@ function TimelineTab({ events, docVersions }: { events: any[]; docVersions: any[
                         }}
                       >
                         打开
-                      </button>
-                      <button
-                        className="btn sm ghost"
+                      </Button>
+                      <Button variant="ghost" size="sm"
+                        
                         onClick={async () => {
                           // 打开这一版所在的文件夹（不是整个 docs 根目录）
                           try {
@@ -1879,7 +1882,7 @@ function TimelineTab({ events, docVersions }: { events: any[]; docVersions: any[
                         }}
                       >
                         所在文件夹
-                      </button>
+                      </Button>
                     </td>
                   </tr>
                 ))}
@@ -1940,13 +1943,13 @@ function PhotosTab({ order, onChange }: { order: any; onChange: () => Promise<vo
   return (
     <div className="card-body">
       <div className="row mb">
-        <select value={kind} onChange={(e) => setKind(e.target.value as 'inspection' | 'container')} style={{ width: 160 }}>
+        <select value={kind} onChange={(e) => setKind(e.target.value as 'inspection' | 'container')} className="col-tag">
           <option value="inspection">验货照</option>
           <option value="container">柜照</option>
         </select>
-        <button className="btn primary" onClick={upload}>
+        <Button variant="primary"  onClick={upload}>
           上传照片
-        </button>
+        </Button>
         <div className="spacer" />
         {/* R4-P9：正文里不出现仓库路径（data/images/），
             换成对业务员有用的一句话 */}
@@ -1962,8 +1965,8 @@ function PhotosTab({ order, onChange }: { order: any; onChange: () => Promise<vo
               <img src={imageUrl(p.fileName)} alt={p.note || p.kind} />
               <div className="photo-foot">
                 <span className="faint">{p.kind === 'container' ? '柜照' : '验货照'}</span>
-                <button
-                  className="btn sm ghost danger"
+                <Button variant="danger" size="sm"
+                  
                   onClick={async () => {
                     if (!confirm('删除这张照片？')) return
                     await window.api.orders.delPhoto(order.id, p.id)
@@ -1971,7 +1974,7 @@ function PhotosTab({ order, onChange }: { order: any; onChange: () => Promise<vo
                   }}
                 >
                   删除
-                </button>
+                </Button>
               </div>
             </div>
           ))}

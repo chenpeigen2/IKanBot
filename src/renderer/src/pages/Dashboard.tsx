@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { money, moneyOrDash, num, fmtDate, PaymentTag, ShipTag } from '../ui'
+import { money, moneyOrDash, num, fmtDate, PaymentTag, ShipTag, Button } from '../ui'
 import type { DashboardStats, Reminder } from '../../../shared/types'
 
 /** 待办类型的中文短标签（2 个字，扫一眼就知道该干什么） */
@@ -47,12 +47,12 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
       <div className="topbar">
         <h1>工作台</h1>
         <div className="spacer" />
-        <button className="btn" onClick={() => onNavigate('/orders')}>
+        <Button  onClick={() => onNavigate('/orders')}>
           查看全部订单
-        </button>
-        <button className="btn primary" onClick={() => onNavigate('/orders?new=1')}>
+        </Button>
+        <Button variant="primary"  onClick={() => onNavigate('/orders?new=1')}>
           + 新建订单
-        </button>
+        </Button>
       </div>
 
       <div className="content">
@@ -162,9 +162,9 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
           <div className="card-head">
             <h2>最近订单</h2>
             <div className="spacer" />
-            <button className="btn sm" onClick={() => onNavigate('/orders')}>
+            <Button size="sm"  onClick={() => onNavigate('/orders')}>
               全部
-            </button>
+            </Button>
           </div>
           <div className="card-body tight">
             {recent.length === 0 ? (

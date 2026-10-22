@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useToast, money, Empty } from '../ui'
+import { useToast, money, Empty, Button } from '../ui'
 import type { MonthlyReportRow } from '../../../shared/types'
 
 export default function Reports() {
@@ -39,24 +39,24 @@ export default function Reports() {
       <div className="topbar">
         <h1>报表</h1>
         <div className="spacer" />
-        <button className="btn" onClick={async () => {
+        <Button  onClick={async () => {
           const f = await window.api.exporter.csv('orders')
           if (f) toast('已导出订单台账')
         }}>
           导出订单台账
-        </button>
-        <button className="btn" onClick={async () => {
+        </Button>
+        <Button  onClick={async () => {
           const f = await window.api.exporter.csv('payments')
           if (f) toast('已导出收款台账')
         }}>
           导出收款台账
-        </button>
-        <button className="btn" onClick={async () => {
+        </Button>
+        <Button  onClick={async () => {
           const f = await window.api.exporter.csv('items')
           if (f) toast('已导出品号明细台账')
         }}>
           导出品号明细台账
-        </button>
+        </Button>
       </div>
 
       <div className="content">
