@@ -2,7 +2,7 @@
  * 渲染进程与主进程之间的 API 契约。
  * preload 暴露的 window.api 必须满足此接口。
  */
-import type { CustomerReceivable, ExportKind, MonthlyReportRow } from './types'
+import type { CustomerReceivable, ExportKind, MonthlyReportRow, PackingAmount } from './types'
 
 export interface IKanApi {
   products: {
@@ -132,6 +132,11 @@ export interface IKanApi {
     updateLine(orderId: number, plId: number, lineId: number, patch: any): Promise<any[]>
     addLine(orderId: number, plId: number, line: any): Promise<any[]>
     deleteLine(orderId: number, plId: number, lineId: number): Promise<any[]>
+    /** 作废留档 / 撤销作废：作废的批次不参与状态、件数和本批金额 */
+    void(orderId: number, plId: number, reason?: string): Promise<any[]>
+    unvoid(orderId: number, plId: number): Promise<any[]>
+    /** 每个批次的纸面金额（本批货值 + 分摊费用） */
+    amounts(orderId: number): Promise<PackingAmount[]>
   }
   dashboard: {
     stats(): Promise<any>

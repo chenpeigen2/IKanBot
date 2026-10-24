@@ -1,11 +1,15 @@
 import { getDb } from '../db'
-import type { ShipStatus, ShipSummary } from '../../src/shared/types'
+import { logEvent } from './events'
+import { SHIP_STATUS_LABEL } from '../../src/shared/types'
+import type { BatchShipStatus, ShipStatus, ShipSummary } from '../../src/shared/types'
 
 /**
  * 出货状态真源：批次（装箱单）+ 件数。
  *
  * 订单上的 ship_status 只是缓存：
  *  - 没有任何批次 → 不推导，订单继续手工状态；
+ *  - 作废的批次（订舱取消、整批发错）压根不进这份账：状态、件数、金额都不算它的，
+ *    但记录和纸面存档一条不删——发过客户的箱单必须还能查得到；
  *  - 只要还有迁移前的老批次（ship_status 为 NULL）→ 也不推导。老批次不知道走到哪一步了，
  *    把它当「已包装」会凭空把一张已签收的老单拉回备货，只能等它补上状态再接管；
  *  - 全部批次都有状态 → 订单状态由批次和件数算出来，回写缓存供列表/看板复用。
@@ -32,7 +36,7 @@ const SHIPPED = 3
 interface Batch {
   id: number
   plNo: string
-  status: ShipStatus | null
+  status: BatchShipStatus | null
   quantity: number
 }
 
@@ -41,7 +45,7 @@ function loadBatches(orderId: number): Batch[] {
     `SELECT pl.id, pl.pl_no, pl.ship_status, COALESCE(SUM(l.quantity), 0) AS qty
      FROM packing_lists pl
      LEFT JOIN packing_list_lines l ON l.packing_list_id = pl.id
-     WHERE pl.order_id = ?
+     WHERE pl.order_id = ? AND pl.voided_at IS NULL
      GROUP BY pl.id
      ORDER BY pl.id`,
     [orderId]
@@ -50,7 +54,7 @@ function loadBatches(orderId: number): Batch[] {
     .map((r) => ({
       id: Number(r.id),
       plNo: String(r.pl_no ?? ''),
-      status: (r.ship_status == null ? null : String(r.ship_status)) as ShipStatus | null,
+      status: (r.ship_status == null ? null : String(r.ship_status)) as BatchShipStatus | null,
       quantity: Number(r.qty ?? 0)
     }))
     // 空批次（没有明细）不进汇总，否则删到只剩空壳会永远卡在某个状态
@@ -105,14 +109,43 @@ function deriveStatus(ordered: number, batches: Batch[]): ShipStatus | null {
 }
 
 /**
+ * 工厂已交多少件（已包装及以后）。工作台的「工厂交期到了还没交够」只能按这个算：
+ * 光建了装箱单、批次还标着未备货/备货中，不能算工厂把货交出来了。
+ * 口径只在这里写一份——以前 dashboard 用「状态非空」自己算了一遍，
+ * 结果被改回备货中的批次还算工厂已交，催单直接不响。
+ */
+export function factoryDeliveredQuantity(orderId: number): number {
+  return loadBatches(orderId)
+    .filter((b) => RANK[(b.status ?? 'packed') as ShipStatus] >= RANK.packed)
+    .reduce((s, b) => s + b.quantity, 0)
+}
+
+/**
  * 回写订单状态缓存。只改 ship_status，不碰 updated_at——
  * 改备注/补柜号不能把老单算进「本月完成」。
  */
 export function applyShipStatus(orderId: number): ShipStatus | null {
   const summary = shipmentSummary(orderId)
   if (summary.derivedStatus === null) return null
-  getDb().run('UPDATE orders SET ship_status = ? WHERE id = ?', [summary.derivedStatus, orderId])
-  return summary.derivedStatus
+  const db = getDb()
+  const cur = (db.get('SELECT ship_status FROM orders WHERE id = ?', [orderId]) as { ship_status?: string } | null)
+    ?.ship_status
+  const next = summary.derivedStatus
+  db.run('UPDATE orders SET ship_status = ? WHERE id = ?', [next, orderId])
+  // 整单状态由批次推着走，跃迁要进操作历史：日后说「哪天算已出运」得有一条凭据。
+  // 只在真的换了状态才写——改一格箱重也会走到这里，不然历史会被刷屏。
+  if (String(cur ?? '') !== next) {
+    logEvent(
+      orderId,
+      'ship_status',
+      cur ? String(cur) : null,
+      next,
+      `出货状态由装箱单批次汇总：${cur ? SHIP_STATUS_LABEL[cur as ShipStatus] ?? String(cur) : '未设置'} → ${
+        SHIP_STATUS_LABEL[next]
+      }`
+    )
+  }
+  return next
 }
 
 /** 这张单的出货状态是否已由批次接管（接管后订单级状态只能到批次上改） */

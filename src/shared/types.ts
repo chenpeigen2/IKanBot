@@ -23,6 +23,9 @@ export type ShipStatus =
   | 'delivered' // 已签收
   | 'partial_shipped' // 部分出运（只由批次汇总得出，不能手选）
 
+/** 批次上能出现的出货状态：部分出运是整单汇总出来的，永远不会落在某一批上 */
+export type BatchShipStatus = Exclude<ShipStatus, 'partial_shipped'>
+
 export const PAYMENT_STATUS_LABEL: Record<PaymentStatus, string> = {
   draft: '草稿',
   sent: '待确认',
@@ -55,8 +58,8 @@ export const PAYMENT_STATUS_ORDER: PaymentStatus[] = [
   'void'
 ]
 
-/** 手工能选的状态（部分出运是批次汇总出来的，不出现在下拉里） */
-export const SHIP_STATUS_ORDER: ShipStatus[] = [
+/** 手工能选的状态（部分出运是批次汇总出来的，不出现在下拉里）——服务层校验也只用这一份，别处不再抄一个数组 */
+export const SHIP_STATUS_ORDER: BatchShipStatus[] = [
   'not_prepared',
   'preparing',
   'packed',
@@ -482,7 +485,7 @@ export interface PackingList {
   /** 批次/柜号 */
   containerNo: string
   /** null = 迁移前的老批次：不参与订单状态推导，沿用订单级手工状态 */
-  shipStatus: ShipStatus | null
+  shipStatus: BatchShipStatus | null
   vessel: string
   /** 计划开船日 */
   etdDate: string | null
@@ -495,9 +498,32 @@ export interface PackingList {
   blNo: string
   /** 全部批次签收的日期（本月完成按它归集，不跟 updated_at 走） */
   deliveredAt: string | null
+  /**
+   * 这批客户实际收到多少件：null = 没记录（视同全收，别拿 0 当「一件没收到」）。
+   * 短卸、破损扣款在数量层面留痕，不用只靠金额核销抹平。
+   */
+  receivedQty: number | null
+  /** 纸面单据日期（可补录）：空则用建单当天，海关/银行要求日期不得晚于提单日 */
+  docDate: string | null
+  /** 作废留档：订舱取消、整批发错时不删记录，纸面和存档都还在，只是不再参与汇总 */
+  voidedAt: string | null
   note: string
   createdAt: string
   lines: PackingListLine[]
+}
+
+/** 一个装箱批次的纸面金额（原币）：本批货值 + 按货值分摊的费用 */
+export interface PackingAmount {
+  plId: number
+  plNo: string
+  /** 本批件数 */
+  quantity: number
+  /** 本批货值 = Σ(箱内件数 × 订单该行单价) */
+  goods: number
+  /** 分摊到本批的运费/保险等费用（负数折让也按比例跟着走） */
+  charges: number
+  /** 本批含费用合计：分批出运的几张单据金额相加 = PI 含费用合计 */
+  total: number
 }
 
 /** 一张订单的出货汇总：状态由批次 + 件数推导 */

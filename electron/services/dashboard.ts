@@ -9,6 +9,7 @@ import {
   receivedByMonth,
   sampleReceivable
 } from './money'
+import { factoryDeliveredQuantity } from './shipping'
 import { isLocalDate, localDate, localDateOf, localMonthOf } from '../../src/shared/date'
 import { PAYMENT_METHOD_LABEL, PAYMENT_STATUS_LABEL, SHIP_STATUS_LABEL } from '../../src/shared/types'
 import type { DashboardStats, ExportKind, MonthlyReportRow, Reminder } from '../../src/shared/types'
@@ -65,13 +66,20 @@ export function dashboard(): DashboardStats {
       (SELECT COUNT(*) FROM (
          SELECT o2.id,
            CASE
-             WHEN EXISTS (SELECT 1 FROM packing_lists pl WHERE pl.order_id = o2.id AND pl.ship_status IS NOT NULL)
+             /* 批次接管的前提和 shipping.deriveStatus 一模一样：作废的不算，
+                还有一张升级前的老批次（状态为空）也不知道走到哪了，就不下结论 */
+             WHEN EXISTS (SELECT 1 FROM packing_lists pl
+                          WHERE pl.order_id = o2.id AND pl.voided_at IS NULL AND pl.ship_status IS NOT NULL)
+               AND NOT EXISTS (SELECT 1 FROM packing_lists pln
+                               WHERE pln.order_id = o2.id AND pln.voided_at IS NULL AND pln.ship_status IS NULL)
                THEN CASE
                  WHEN EXISTS (SELECT 1 FROM packing_lists pl2
-                              WHERE pl2.order_id = o2.id AND pl2.ship_status IS NOT NULL AND pl2.ship_status != 'delivered')
+                              WHERE pl2.order_id = o2.id AND pl2.voided_at IS NULL
+                                AND pl2.ship_status IS NOT NULL AND pl2.ship_status != 'delivered')
                    THEN NULL
                  ELSE (SELECT MAX(pl3.delivered_at) FROM packing_lists pl3
-                       WHERE pl3.order_id = o2.id AND pl3.ship_status = 'delivered' AND pl3.delivered_at IS NOT NULL)
+                       WHERE pl3.order_id = o2.id AND pl3.voided_at IS NULL
+                         AND pl3.ship_status = 'delivered' AND pl3.delivered_at IS NOT NULL)
                END
              WHEN o2.ship_status = 'delivered'
                THEN (SELECT date(MAX(e.at), 'localtime') FROM order_events e
@@ -228,7 +236,7 @@ export function reminders(): Reminder[] {
      FROM packing_lists pl
      JOIN orders o ON o.id = pl.order_id
      JOIN customers c ON c.id = o.customer_id
-     WHERE ${notGone.sql}`,
+     WHERE pl.voided_at IS NULL AND ${notGone.sql}`,
     notGone.params
   ) as Record<string, unknown>[]
 
@@ -381,14 +389,9 @@ export function reminders(): Reminder[] {
           orderId
         ]) as { q?: number })?.q ?? 0
       )
-      const deliveredQty = Number(
-        (db.get(
-          `SELECT COALESCE(SUM(l.quantity),0) AS q FROM packing_list_lines l
-           JOIN packing_lists pl ON pl.id = l.packing_list_id
-           WHERE pl.order_id = ? AND pl.ship_status IS NOT NULL`,
-          [orderId]
-        ) as { q?: number })?.q ?? 0
-      )
+      // 口径只认 shipping 里那一份「工厂已交货件数」：以前这里自己写 SQL 用
+      // 「状态非空」判定，结果被改回备货中的批次还算工厂已交，催单直接不响
+      const deliveredQty = factoryDeliveredQuantity(orderId)
       const diff = daysTo(factoryRaw)
       const gone = ['shipped', 'cleared', 'delivered'].includes(String(r.ship_status))
       if (diff === null) {

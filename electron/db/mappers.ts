@@ -278,6 +278,9 @@ export function mapPackingList(r: Row, lines: PackingListLine[]): PackingList {
     sealNo: str(r.seal_no),
     blNo: str(r.bl_no),
     deliveredAt: optStr(r.delivered_at),
+    receivedQty: r.received_qty == null ? null : num(r.received_qty),
+    docDate: optStr(r.doc_date),
+    voidedAt: optStr(r.voided_at),
     note: str(r.note),
     createdAt: str(r.created_at),
     lines

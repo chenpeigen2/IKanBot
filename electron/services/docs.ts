@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'fs'
 import { isAbsolute, join, relative, resolve, sep } from 'path'
 import { dataDir, docsDir, getDb } from '../db'
-import { logEvent } from './orders'
+import { logEvent } from './events'
 import type { DocKind } from '../../src/shared/types'
 
 export interface DocVersion {

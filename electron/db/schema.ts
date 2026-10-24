@@ -445,5 +445,22 @@ ALTER TABLE products ADD COLUMN factory_no TEXT NOT NULL DEFAULT '';
 -- 拿 updated_at 会导致改个备注就把等待天数清零，拖了三个月的报价永远催不出来。
 ALTER TABLE quotations ADD COLUMN sent_at TEXT;
 `
+  },
+  {
+    version: 14,
+    name: 'batch_credentials',
+    sql: `
+-- 客户实收件数：短卸、破损扣款要在数量层面留痕，不能只靠金额核销把差异抹平。
+-- NULL = 没记录，视同全收（跟 ship_status 的老批次空值一个处理方式，别拿 0 当「一件没收到」）。
+ALTER TABLE packing_lists ADD COLUMN received_qty REAL;
+
+-- 这批的纸面单据日期：箱单日期要落在出运前后一两天、且不得晚于提单日，
+-- 不能被「今天点上方的那一下」钉死。空 = 用建单当天。
+ALTER TABLE packing_lists ADD COLUMN doc_date TEXT;
+
+-- 批次作废留档：订舱被货代取消、整批发错时，纸面箱单可能已经发到客户邮箱了。
+-- 只能「消失」是不行的——作废的批次不参与汇总、不占箱号，但记录和存档一条不动。
+ALTER TABLE packing_lists ADD COLUMN voided_at TEXT;
+`
   }
 ]

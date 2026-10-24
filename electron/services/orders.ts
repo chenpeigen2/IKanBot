@@ -3,9 +3,10 @@ import { mapOrder, mapOrderItem, mapPayment, mapPackingList, mapPackingListLine,
 import { getSettings } from './settings'
 import { computeOrderMoney, costInOrderCurrency, parseCharges } from './money'
 import { applyShipStatus, isShipStatusDerived, shipmentSummary } from './shipping'
+import { logEvent } from './events'
 import { localDate, addDays, isLocalDate } from '../../src/shared/date'
 import { billPartyOf, emptyParty, parseParty, patchParty, shipPartyOf, stringifyParty } from '../../src/shared/party'
-import { SETTLEMENT_KIND_LABEL, SHIP_STATUS_LABEL } from '../../src/shared/types'
+import { SETTLEMENT_KIND_LABEL, SHIP_STATUS_LABEL, SHIP_STATUS_ORDER } from '../../src/shared/types'
 import type {
   Currency,
   Incoterm,
@@ -661,7 +662,8 @@ function packedQty(orderId: number, sku: { styleNo: string; color: string; size:
       getDb().get(
         `SELECT COALESCE(SUM(l.quantity), 0) AS qty
          FROM packing_list_lines l JOIN packing_lists pl ON pl.id = l.packing_list_id
-         WHERE pl.order_id = ? AND l.style_no = ? AND l.color = ? AND l.size = ?`,
+         WHERE pl.order_id = ? AND pl.voided_at IS NULL
+           AND l.style_no = ? AND l.color = ? AND l.size = ?`,
         [orderId, sku.styleNo, sku.color, sku.size]
       ) as { qty?: number } | null
     )?.qty ?? 0
@@ -813,7 +815,7 @@ export function replaceOrderItems(orderId: number, items: OrderItemInput[]): Ord
       db.get(
         `SELECT COALESCE(SUM(l.quantity), 0) AS qty
          FROM packing_list_lines l JOIN packing_lists pl ON pl.id = l.packing_list_id
-         WHERE pl.order_id = ?`,
+         WHERE pl.order_id = ? AND pl.voided_at IS NULL`,
         [orderId]
       ) as { qty?: number } | null
     )?.qty ?? 0
@@ -869,7 +871,8 @@ export function summarizeSkus(orderId: number): SkuSummary[] {
             COALESCE((
               SELECT SUM(pll.quantity) FROM packing_list_lines pll
               JOIN packing_lists pl ON pl.id = pll.packing_list_id
-              WHERE pl.order_id = oi.order_id AND pll.style_no = oi.style_no
+              WHERE pl.order_id = oi.order_id AND pl.voided_at IS NULL
+                AND pll.style_no = oi.style_no
                 AND pll.color = oi.color AND pll.size = oi.size
             ), 0) AS packed_quantity
      FROM order_items oi
@@ -1210,6 +1213,13 @@ export function setShipStatus(orderId: number, next: ShipStatus, note = ''): Ord
     | { ship_status: string }
     | null
   if (!cur) throw new Error('订单不存在')
+  // 手工状态只能用这一份枚举：把「部分出运」这种派生值钉在订单上，
+  // 没有批次兜底时它就永久挂着，列表和导出会显示一个本不该出现在手工位的状态
+  if (!(SHIP_STATUS_ORDER as string[]).includes(next)) {
+    throw new Error(
+      `出货状态「${next}」不能手工设置——「部分出运」只由装箱单批次汇总得出，要让它变就得到「装箱单」里推进对应批次`
+    )
+  }
   // 有批次之后，整单状态只能由批次汇总，手改会跟批次打架（比如尾批还在厂里却标已签收）
   if (isShipStatusDerived(orderId)) {
     throw new Error(
@@ -1231,21 +1241,6 @@ export function setPaymentStatus(orderId: number, next: PaymentStatus, note = ''
   db.run('UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?', [next, now(), orderId])
   logEvent(orderId, 'payment_status', cur.payment_status, next, note)
   return getOrder(orderId)!
-}
-
-/* ---------------- 事件日志 ---------------- */
-
-export function logEvent(
-  orderId: number,
-  kind: string,
-  fromStatus: string | null,
-  toStatus: string | null,
-  note: string
-): void {
-  getDb().run(
-    'INSERT INTO order_events(order_id, at, actor, kind, from_status, to_status, note) VALUES(?,?,?,?,?,?,?)',
-    [orderId, now(), '', kind, fromStatus, toStatus, note]
-  )
 }
 
 export function listEvents(orderId: number): OrderEvent[] {

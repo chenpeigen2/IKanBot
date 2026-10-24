@@ -12,6 +12,7 @@ import {
   SHIP_STATUS_ORDER,
   SETTLEMENT_KIND_LABEL,
   type PaymentStatus,
+  type PackingAmount,
   type ShipStatus,
   type PaymentMethod
 } from '../../../shared/types'
@@ -27,6 +28,8 @@ type PreviewState = {
   html: string
   docNo: string
   amount: number
+  /** 作废批次的留档预览：纸还能查，但不能再存成新版本（存档是发客户的凭据） */
+  voided?: boolean
   /** 预览时算出的下一版版次；存档时用它核对，纸面和库里必须同号 */
   rev: number
   title: string
@@ -125,6 +128,7 @@ export default function OrderDetail() {
   const openPl = async (plId: number) => {
     const pl = order.packingLists.find((p: any) => p.id === plId)
     if (!pl) return
+    const isVoid = !!pl.voidedAt
     // 纸面缺项不拦死，但要让人知道这一版会空着什么（不改版式，不补字段）
     const missing: string[] = []
     if (!pl.containerNo) missing.push('柜号')
@@ -134,6 +138,7 @@ export default function OrderDetail() {
     if (!(pl.sealNo || order.sealNo)) missing.push('封条号')
     if (pl.lines.some((l: any) => l.netWeight == null)) missing.push('净重')
     if (
+      !isVoid &&
       missing.length > 0 &&
       !confirm(`批次 ${pl.plNo} 还有没填的：${missing.join('、')}。纸面上会空着，仍要预览吗？`)
     ) {
@@ -142,15 +147,18 @@ export default function OrderDetail() {
     const images = await buildImages()
     const rev = await window.api.docs.nextVersion(pl.plNo, 'pl')
     const render = (pending: boolean) => renderPl({ order, settings, images, rev, pending }, pl)
+    // 存档金额按批次摊：三个批次各存自己那一份，加起来才等于 PI（服务层唯一口径 money.packingAmounts）
+    const amounts = await window.api.pl.amounts(order.id)
+    const thisAmount = amounts.find((a: PackingAmount) => a.plId === plId)?.total ?? 0
     setPreview({
       kind: 'pl',
       plId,
       html: render(true),
       docNo: pl.plNo,
-      // 存档金额统一用含费用合计（PI / PL 同一个函数：shared/documents.ts orderDocAmount）
-      amount: orderDocAmount(order),
+      amount: thisAmount,
+      voided: isVoid,
       rev,
-      title: `PL ${pl.plNo}`,
+      title: isVoid ? `PL ${pl.plNo}（已作废 · 仅留档）` : `PL ${pl.plNo}`,
       render
     })
   }
@@ -646,7 +654,7 @@ export default function OrderDetail() {
             {tab === 'items' ? <ItemsTab order={order} onChange={load} /> : null}
             {tab === 'payment' ? <PaymentTab order={order} onChange={load} /> : null}
             {tab === 'packing' ? (
-              <PackingTab order={order} onChange={load} onPreview={openPl} />
+              <PackingTab order={order} onChange={load} onPreview={openPl} grossFactor={Number(settings?.grossWeightFactor ?? 1.1)} />
             ) : null}
             {tab === 'timeline' ? <TimelineTab events={events} docVersions={docVersions} /> : null}
             {tab === 'photos' ? <PhotosTab order={order} onChange={load} /> : null}
@@ -695,12 +703,20 @@ export default function OrderDetail() {
               <Button  onClick={() => setPreview(null)}>
                 关闭
               </Button>
-              <Button  onClick={savePdf}>
-                另存为 PDF
-              </Button>
-              <Button variant="primary"  onClick={saveToSystem}>
-                存到系统
-              </Button>
+              {preview.voided ? (
+                <span className="faint" style={{ marginRight: 'auto' }}>
+                  这一批已作废，纸面只作留档查询，不能再存成新版本
+                </span>
+              ) : (
+                <>
+                  <Button  onClick={savePdf}>
+                    另存为 PDF
+                  </Button>
+                  <Button variant="primary"  onClick={saveToSystem}>
+                    存到系统
+                  </Button>
+                </>
+              )}
             </>
           }
         >
@@ -1944,18 +1960,125 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
 
 /* ================= 装箱单 ================= */
 
+/** 一批装出去多少件：明细一行就是一箱，同款拆多箱也逐行相加 */
+function batchQty(pl: any): number {
+  return (pl?.lines ?? []).reduce((s: number, l: any) => s + (Number(l.quantity) || 0), 0)
+}
+
+/**
+ * 一批的净重/毛重/体积合计，跟纸面 TOTAL 同一算法：
+ * 毛重没填的按净重×系数估；箱规三边齐了才算体积。给货代订舱报数时不用再按计算器。
+ */
+function batchWeights(pl: any, factor: number): { net: number; gross: number; cbm: number; estimated: boolean } {
+  let net = 0
+  let gross = 0
+  let cbm = 0
+  let estimated = false
+  for (const l of pl?.lines ?? []) {
+    const n = Number(l.netWeight) || 0
+    const raw = l.grossWeight == null ? null : Number(l.grossWeight)
+    const isEst = raw == null || (n > 0 && Math.abs(raw - n * factor) < 0.005)
+    net += n
+    gross += raw == null ? Number((n * factor).toFixed(2)) : raw
+    if (isEst) estimated = true
+    const L = Number(l.boxLength) || 0
+    const W = Number(l.boxWidth) || 0
+    const H = Number(l.boxHeight) || 0
+    if (L && W && H) cbm += (L * W * H) / 1000000
+  }
+  return { net, gross, cbm, estimated }
+}
+
+/**
+ * 这张订单已经用到的最大箱号序号（跨所有批次，作废的也算——箱号不能重复发）。
+ * 一单分三批出运时，客户仓库和提单上要用连续箱号；每批都从 NO.1 重排，
+ * 两份箱单都写着 NO.1–NO.20，提货时就说不清哪一箱属于哪一批。
+ */
+function maxBoxSeq(order: any): number {
+  let max = 0
+  for (const pl of order?.packingLists ?? []) {
+    for (const l of pl?.lines ?? []) {
+      const m = /(\d+)\s*$/.exec(String(l.boxNo ?? '').trim())
+      if (m) max = Math.max(max, Number(m[1]))
+    }
+  }
+  return max
+}
+
+/** 批次合计行：件数、重量、体积，跟箱单纸面一个口径 */
+function BatchTotals({ pl, factor }: { pl: any; factor: number }) {
+  const w = batchWeights(pl, factor)
+  return (
+    <tr className="tfoot-strong">
+      <td colSpan={5}>{`本批合计${w.estimated ? '（毛重含估算）' : ''}`}</td>
+      <td className="num">{batchQty(pl)}</td>
+      <td className="num">{w.net.toFixed(2)}</td>
+      <td className="num">{w.gross.toFixed(2)}</td>
+      <td>{`${w.cbm.toFixed(3)} m³`}</td>
+      <td></td>
+    </tr>
+  )
+}
+
 function PackingTab({
   order,
   onChange,
-  onPreview
+  onPreview,
+  grossFactor
 }: {
   order: any
   onChange: () => Promise<void>
   onPreview: (plId: number) => void
+  /** 毛重系数：合计行要按纸面同一口径估（净重×系数），不然屏幕上和箱单上两个数 */
+  grossFactor: number
 }) {
   const toast = useToast()
   const [showCreate, setShowCreate] = useState(false)
   const [editPl, setEditPl] = useState<any | null>(null)
+  const [addBoxPl, setAddBoxPl] = useState<any | null>(null)
+
+  // 每批的纸面金额：本批货值 + 按货值摊到的费用，由 money.ts 算一份。
+  // 分批出运时箱单/存档上不能再挂整单的数——三批各存一次「12000」，看的人以为卖了 36000。
+  const [amounts, setAmounts] = useState<Record<number, PackingAmount>>({})
+  useEffect(() => {
+    let alive = true
+    window.api.pl
+      .amounts(order.id)
+      .then((rows) => {
+        if (alive) setAmounts(Object.fromEntries(rows.map((a) => [a.plId, a])))
+      })
+      .catch(() => undefined)
+    return () => {
+      alive = false
+    }
+  }, [order.id, order.packingLists])
+
+  const voidBatch = async (pl: any) => {
+    if (
+      !confirm(
+        `作废装箱单 ${pl.plNo}？\n这一批不再参与出货状态、件数和本批金额；记录、箱明细和已经存好的 PDF 一条不删（发到客户手里的单据必须还查得到）。`
+      )
+    )
+      return
+    try {
+      await window.api.pl.void(order.id, pl.id)
+      toast(`${pl.plNo} 已作废留档`)
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
+    await onChange()
+  }
+
+  const unvoidBatch = async (pl: any) => {
+    if (!confirm(`撤销作废 ${pl.plNo}？这一批重新参与出货状态、件数和本批金额。`)) return
+    try {
+      await window.api.pl.unvoid(order.id, pl.id)
+      toast(`${pl.plNo} 已恢复`)
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
+    await onChange()
+  }
 
   // 已出运批次的箱明细是锁住的：报错要弹出来，输入框跟着回退到库里的值
   const saveLine = async (plId: number, lineId: number, patch: Record<string, unknown>, revert?: () => void) => {
@@ -1996,28 +2119,63 @@ function PackingTab({
               <strong className="mono">{pl.plNo}</strong>
               {pl.shipStatus ? <ShipTag status={pl.shipStatus} /> : <span className="faint">升级前的老批次</span>}
               {pl.containerNo ? <span className="tag blue">柜号 {pl.containerNo}</span> : null}
-              <span className="faint">{pl.lines.length} 箱</span>
+              <span className="faint">
+                {pl.lines.length} 箱 · {batchQty(pl)} 件
+              </span>
+              {amounts[pl.id] ? (
+                <span className="tag grey" title="本批货值 + 按货值摊到的运费/保险：分批的几张单据金额相加等于 PI">
+                  本批金额 {money(amounts[pl.id].total, order.currency)}
+                </span>
+              ) : null}
+              {pl.receivedQty != null ? (
+                <span
+                  className={Number(pl.receivedQty) < batchQty(pl) ? 'tag amber' : 'tag green'}
+                  title="客户实收件数：没填就按发数全收算"
+                >
+                  实收 {pl.receivedQty} 件
+                  {Number(pl.receivedQty) < batchQty(pl) ? `（短 ${batchQty(pl) - Number(pl.receivedQty)}）` : ''}
+                </span>
+              ) : null}
+              {pl.voidedAt ? <span className="tag red">已作废 · 仅留档</span> : null}
               <div className="spacer" />
-              <Button size="sm"  onClick={() => setEditPl(pl)}>
-                编辑批次
-              </Button>
+              {pl.voidedAt ? (
+                <Button size="sm"  onClick={() => unvoidBatch(pl)}>
+                  撤销作废
+                </Button>
+              ) : (
+                <>
+                  <Button size="sm"  onClick={() => setAddBoxPl(pl)}>
+                    + 加一箱
+                  </Button>
+                  <Button size="sm"  onClick={() => voidBatch(pl)}>
+                    作废
+                  </Button>
+                </>
+              )}
               <Button size="sm"  onClick={() => onPreview(pl.id)}>
-                预览
+                {pl.voidedAt ? '查看留档' : '预览'}
               </Button>
-              <Button variant="danger" size="sm"
-                
-                onClick={async () => {
-                  if (!confirm(`删除装箱单 ${pl.plNo}？`)) return
-                  try {
-                    await window.api.pl.remove(order.id, pl.id)
-                    await onChange()
-                  } catch (e) {
-                    toast((e as Error).message, 'error')
-                  }
-                }}
-              >
-                删除
-              </Button>
+              {pl.voidedAt ? null : (
+                <>
+                  <Button size="sm"  onClick={() => setEditPl(pl)}>
+                    编辑批次
+                  </Button>
+                  <Button variant="danger" size="sm"
+                    
+                    onClick={async () => {
+                      if (!confirm(`删除装箱单 ${pl.plNo}？`)) return
+                      try {
+                        await window.api.pl.remove(order.id, pl.id)
+                        await onChange()
+                      } catch (e) {
+                        toast((e as Error).message, 'error')
+                      }
+                    }}
+                  >
+                    删除
+                  </Button>
+                </>
+              )}
             </div>
             <div className="faint" style={{ fontSize: 12, padding: '0 0 6px' }}>
               {[
@@ -2032,7 +2190,8 @@ function PackingTab({
                 .filter(Boolean)
                 .join(' · ') || '船期未填，点「编辑批次」补录'}
             </div>
-            <div className="table-wrap">
+            {/* 作废 = 只读留档：明细不再可改，要接着发先「撤销作废」 */}
+            <div className="table-wrap" style={pl.voidedAt ? { opacity: 0.6 } : undefined}>
               <table className="data">
                 <thead>
                   <tr>
@@ -2152,11 +2311,26 @@ function PackingTab({
                     </tr>
                   ))}
                 </tbody>
+                <tfoot>
+                  <BatchTotals pl={pl} factor={grossFactor} />
+                </tfoot>
               </table>
             </div>
           </div>
         ))
       )}
+
+      {addBoxPl ? (
+        <AddBoxModal
+          order={order}
+          pl={addBoxPl}
+          onClose={() => setAddBoxPl(null)}
+          onDone={async () => {
+            setAddBoxPl(null)
+            await onChange()
+          }}
+        />
+      ) : null}
 
       {showCreate ? (
         <CreatePlModal
@@ -2184,6 +2358,108 @@ function PackingTab({
   )
 }
 
+/** 装柜现场补一箱：在这张批次里加一行，箱规与单位净重自动跟着同批同款的老箱走 */
+function AddBoxModal({
+  order,
+  pl,
+  onClose,
+  onDone
+}: {
+  order: any
+  pl: any
+  onClose: () => void
+  onDone: () => Promise<void>
+}) {
+  const toast = useToast()
+  // 只能补这一批已经装过的款：新的一款属于下一批，走「新建装箱单」，免得批次之间串货
+  const skus = useMemo(() => {
+    const map = new Map<string, { key: string; styleNo: string; productName: string; color: string; size: string }>()
+    for (const l of pl.lines ?? []) {
+      const key = [l.styleNo, l.color, l.size].join('|')
+      if (!map.has(key)) {
+        map.set(key, {
+          key,
+          styleNo: String(l.styleNo ?? ''),
+          productName: String(l.productName ?? ''),
+          color: String(l.color ?? ''),
+          size: String(l.size ?? '')
+        })
+      }
+    }
+    return [...map.values()]
+  }, [pl])
+  const [form, setForm] = useState({ key: skus[0]?.key ?? '', quantity: '', boxNo: `NO.${maxBoxSeq(order) + 1}` })
+
+  const save = async () => {
+    const sku = skus.find((s) => s.key === form.key)
+    if (!sku) {
+      toast('先选要补哪一款', 'error')
+      return
+    }
+    const qty = Number(form.quantity)
+    if (!Number.isInteger(qty) || qty <= 0) {
+      toast('这一箱的件数要填 1 件以上的整数——半件在箱单和报关上都说不清', 'error')
+      return
+    }
+    try {
+      await window.api.pl.addLine(order.id, pl.id, {
+        boxNo: form.boxNo.trim(),
+        styleNo: sku.styleNo,
+        productName: sku.productName,
+        color: sku.color,
+        size: sku.size,
+        quantity: qty
+      })
+      toast(`已加一箱 ${sku.styleNo} ${sku.color}/${sku.size} × ${qty}`)
+      await onDone()
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
+  }
+
+  return (
+    <Modal
+      title={`在 ${pl.plNo} 里加一箱`}
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose}>取消</Button>
+          <Button variant="primary" onClick={save}>
+            加这一箱
+          </Button>
+        </>
+      }
+    >
+      <div className="field">
+        <label>补哪一款（只在这批已装过的款里选）</label>
+        <select value={form.key} onChange={(e) => setForm({ ...form, key: e.target.value })}>
+          {skus.map((s) => (
+            <option key={s.key} value={s.key}>
+              {`${s.styleNo} ${s.color}/${s.size}`}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="field">
+        <label>这一箱件数</label>
+        <input
+          type="number"
+          value={form.quantity}
+          placeholder="装柜多出来的也按整件填"
+          onChange={(e) => setForm({ ...form, quantity: e.target.value })}
+        />
+      </div>
+      <div className="field">
+        <label>箱号</label>
+        <input value={form.boxNo} onChange={(e) => setForm({ ...form, boxNo: e.target.value })} />
+      </div>
+      <div className="hint">
+        净重按这一批同款箱的单件净重自动带上，箱规照抄，加完在明细里还能改。已经出运的批次箱明细锁着，加不进去——先把这批的状态改回「已包装」。
+      </div>
+    </Modal>
+  )
+}
+
 /** 批次信息：柜号、船期、封条、提单号与出运状态 */
 function EditBatchModal({
   order,
@@ -2208,7 +2484,10 @@ function EditBatchModal({
     sealNo: String(pl.sealNo ?? ''),
     blNo: String(pl.blNo ?? ''),
     note: String(pl.note ?? ''),
-    shipStatus: (pl.shipStatus ?? '') as ShipStatus | ''
+    shipStatus: (pl.shipStatus ?? '') as ShipStatus | '',
+    receivedQty: pl.receivedQty == null ? '' : String(pl.receivedQty),
+    docDate: String(pl.docDate ?? ''),
+    deliveredDate: String(pl.deliveredAt ?? '')
   })
 
   const save = async () => {
@@ -2222,7 +2501,10 @@ function EditBatchModal({
         sealNo: form.sealNo,
         blNo: form.blNo,
         note: form.note,
-        shipStatus: form.shipStatus || undefined
+        shipStatus: form.shipStatus || undefined,
+        receivedQty: form.receivedQty === '' ? null : Number(form.receivedQty),
+        docDate: form.docDate || null,
+        deliveredDate: form.deliveredDate || null
       })
       toast('批次信息已保存')
       await onDone()
@@ -2291,6 +2573,34 @@ function EditBatchModal({
           <label>ETA（预计到港）</label>
           <input type="date" value={form.etaDate} onChange={(e) => setForm({ ...form, etaDate: e.target.value })} />
         </div>
+      </div>
+      <div className="field-row-3">
+        <div className="field">
+          <label>实收数量（客户实际收到）</label>
+          <input
+            type="number"
+            value={form.receivedQty}
+            placeholder={`留空按发数 ${batchQty(pl)} 件全收`}
+            onChange={(e) => setForm({ ...form, receivedQty: e.target.value })}
+          />
+        </div>
+        <div className="field">
+          <label>单据日期（纸面 Date）</label>
+          <input type="date" value={form.docDate} onChange={(e) => setForm({ ...form, docDate: e.target.value })} />
+        </div>
+        <div className="field">
+          <label>签收日期</label>
+          <input
+            type="date"
+            value={form.deliveredDate}
+            disabled={form.shipStatus !== 'delivered'}
+            onChange={(e) => setForm({ ...form, deliveredDate: e.target.value })}
+          />
+        </div>
+      </div>
+      <div className="hint">
+        实收留空等于按发数全收；短卸、破损扣款就填客户实际收到的件数，差异会标在批次上。
+        单据日期空则用建单当天——箱单日期要落在出运前后、不晚于提单日。签收日期可以补录客户实际签收那天，不必记成今天。
       </div>
       <div className="field-row-3">
         <div className="field">
@@ -2374,7 +2684,8 @@ function CreatePlModal({
   const build = () => {
     const g = Math.max(1, Math.floor(Number(perBox) || 1))
     const out: any[] = []
-    let boxNo = 1
+    // 箱号接着这张单已有的批次排，不每批都从 NO.1 重来
+    let boxNo = maxBoxSeq(order) + 1
     for (const s of skus) {
       const qty = Math.floor(Number(shipQty[skuKey(s)] ?? s.remainingQuantity))
       if (!(qty > 0)) continue

@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IKanApi } from '../../src/shared/api'
-import type { CustomerReceivable, ExportKind, MonthlyReportRow } from '../../src/shared/types'
+import type { CustomerReceivable, ExportKind, MonthlyReportRow, PackingAmount } from '../../src/shared/types'
 
 type Result<T> = { ok: true; data: T } | { ok: false; error: string }
 
@@ -133,7 +133,12 @@ const api: IKanApi = {
       call<any[]>('pl:updateLine', orderId, plId, lineId, patch),
     addLine: (orderId: number, plId: number, line: any) => call<any[]>('pl:addLine', orderId, plId, line),
     deleteLine: (orderId: number, plId: number, lineId: number) =>
-      call<any[]>('pl:deleteLine', orderId, plId, lineId)
+      call<any[]>('pl:deleteLine', orderId, plId, lineId),
+    /** 作废留档：订舱取消、整批发错时不删记录，只是不再参与汇总 */
+    void: (orderId: number, plId: number, reason?: string) => call<any[]>('pl:void', orderId, plId, reason),
+    unvoid: (orderId: number, plId: number) => call<any[]>('pl:unvoid', orderId, plId),
+    /** 每批的纸面金额（本批货值 + 分摊费用），箱单存档与批次列表都用它 */
+    amounts: (orderId: number) => call<PackingAmount[]>('pl:amounts', orderId)
   },
   dashboard: {
     stats: () => call<any>('dashboard:stats'),

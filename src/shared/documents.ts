@@ -381,6 +381,8 @@ export function renderPl(ctx: DocContext, pl: PackingList): string {
   let totalVolume = 0
   let hasEstimatedGross = false
   const boxNos = new Set<string>()
+  /** 箱号空着的行也各算一箱：否则这几箱在「N 箱」合计里直接消失，箱单与提单件数就对不上 */
+  let unnumberedBoxes = 0
 
   const rows = pl.lines
     .map((l) => {
@@ -400,6 +402,7 @@ export function renderPl(ctx: DocContext, pl: PackingList): string {
           : null
       if (cbm != null) totalVolume += cbm
       if (l.boxNo) boxNos.add(l.boxNo)
+      else unnumberedBoxes += 1
       return `<tr>
         <td class="center">${esc(l.boxNo)}</td>
         <td>${esc(l.styleNo)}</td>
@@ -438,7 +441,7 @@ export function renderPl(ctx: DocContext, pl: PackingList): string {
       <div class="title-cn">装箱单</div>
       <div class="meta">
         <b>PL No.:</b> ${esc(pl.plNo)}${revLabel}<br>
-        <b>Date:</b> ${esc(localDateOf(pl.createdAt))}<br>
+        <b>Date:</b> ${esc(pl.docDate || localDateOf(pl.createdAt))}<br>
         <b>Order No.:</b> ${esc(order.orderNo)}<br>
         <b>PI No.:</b> ${esc(order.piNo)}
         ${pl.containerNo ? `<br><b>Container:</b> ${esc(pl.containerNo)}` : ''}
@@ -482,7 +485,9 @@ export function renderPl(ctx: DocContext, pl: PackingList): string {
     </tbody>
     <tfoot>
       <tr class="total">
-        <td colspan="5" class="center">TOTAL / 合计（${boxNos.size} 箱 / ${boxNos.size} cartons）</td>
+        <td colspan="5" class="center">TOTAL / 合计（${boxNos.size + unnumberedBoxes} 箱 / ${
+          boxNos.size + unnumberedBoxes
+        } cartons）</td>
         <td class="num">${fmtQty(totalQty)}</td>
         <td class="num">${totalNet.toFixed(2)}</td>
         <td class="num">${totalGross.toFixed(2)}</td>

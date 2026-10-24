@@ -212,6 +212,12 @@ export function registerIpc(): void {
   handle('pl:deleteLine', (orderId: number, plId: number, lineId: number) =>
     packing.deletePackingListLine(orderId, plId, lineId)
   )
+  handle('pl:void', (orderId: number, plId: number, reason?: string) =>
+    packing.voidPackingList(orderId, plId, reason ?? '')
+  )
+  handle('pl:unvoid', (orderId: number, plId: number) => packing.unvoidPackingList(orderId, plId))
+  // 本批金额：唯一实现在 money.ts，纸面箱单/存档/批次列表都从这一个数取
+  handle('pl:amounts', (orderId: number) => money.packingAmounts(orderId))
 
   /* ---- 首页与报表 ---- */
   handle('dashboard:stats', () => dashboard.dashboard())

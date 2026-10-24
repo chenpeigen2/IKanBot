@@ -26,7 +26,7 @@
  */
 import { getDb } from '../db'
 import { localMonthOf } from '../../src/shared/date'
-import type { CustomerReceivable, QuotationCharge } from '../../src/shared/types'
+import type { CustomerReceivable, PackingAmount, QuotationCharge } from '../../src/shared/types'
 
 /** 解析费用行 JSON（运费/保险等） */
 export function parseCharges(v: unknown): QuotationCharge[] {
@@ -395,6 +395,86 @@ export function listOrderMoney(filter: MoneyListFilter = {}): OrderMoneyRow[] {
       badDebtBase: m.badDebtOutstanding * rate
     }
   })
+}
+
+/**
+ * 每个装箱批次的纸面金额（原币）——分批出运时每批都要有自己的箱单/发票金额。
+ *
+ * 本批货值 = Σ(箱内件数 × 订单同款单价)；运费保险这类费用按货值比例摊到各批。
+ * 摊的分母用整单货值，所以只走了一半时，已出运的几批加起来就是那一半的钱，
+ * 不会替还没装走的货提前收钱。全部装完时把分摊的分币差补给最后一批，
+ * 保证各批金额相加正好等于 PI 的含费用合计（三份单据加起来对不上 PI，
+ * 报关和退税核销时这条差异最难解释）。
+ *
+ * 作废的批次一条不算：那批没走成，钱也不该记在它头上。
+ */
+export function packingAmounts(orderId: number): PackingAmount[] {
+  const db = getDb()
+  const itemRows = db.all(
+    'SELECT style_no, color, size, quantity, unit_price FROM order_items WHERE order_id = ?',
+    [orderId]
+  ) as Record<string, unknown>[]
+  const orderRow = db.get('SELECT charges FROM orders WHERE id = ?', [orderId]) as { charges?: unknown } | null
+  const money = computeOrderMoney({
+    items: itemRows.map((r) => ({
+      quantity: Number(r.quantity ?? 0),
+      unitPrice: Number(r.unit_price ?? 0),
+      unitCost: null
+    })),
+    charges: parseCharges(orderRow?.charges),
+    payments: [],
+    depositRatio: 0
+  })
+
+  // 同一款可能拆了好几行、单价还不一样：按数量加权，保证 Σ(件数 × 加权单价) 仍等于货值
+  const skuPrice = new Map<string, { qty: number; amount: number }>()
+  for (const r of itemRows) {
+    const key = [String(r.style_no ?? ''), String(r.color ?? ''), String(r.size ?? '')].join('|')
+    const cur = skuPrice.get(key) ?? { qty: 0, amount: 0 }
+    cur.qty += Number(r.quantity ?? 0)
+    cur.amount += Number(r.quantity ?? 0) * Number(r.unit_price ?? 0)
+    skuPrice.set(key, cur)
+  }
+  const unitOf = (key: string): number => {
+    const v = skuPrice.get(key)
+    return v && v.qty > 0 ? v.amount / v.qty : 0
+  }
+
+  const lineRows = db.all(
+    `SELECT pl.id AS pl_id, pl.pl_no, l.style_no, l.color, l.size, l.quantity
+     FROM packing_lists pl JOIN packing_list_lines l ON l.packing_list_id = pl.id
+     WHERE pl.order_id = ? AND pl.voided_at IS NULL
+     ORDER BY pl.id, l.id`,
+    [orderId]
+  ) as Record<string, unknown>[]
+  const byId = new Map<number, PackingAmount>()
+  for (const r of lineRows) {
+    const id = Number(r.pl_id)
+    const cur = byId.get(id) ?? { plId: id, plNo: String(r.pl_no ?? ''), quantity: 0, goods: 0, charges: 0, total: 0 }
+    const qty = Number(r.quantity ?? 0)
+    cur.quantity += qty
+    cur.goods += qty * unitOf([String(r.style_no ?? ''), String(r.color ?? ''), String(r.size ?? '')].join('|'))
+    byId.set(id, cur)
+  }
+  const list = [...byId.values()]
+  const r2 = (v: number): number => Math.round((Number(v) || 0) * 100) / 100
+
+  const goodsAll = money.goodsValue
+  const chargesTotal = money.chargesTotal
+  let shareSum = 0
+  for (const b of list) {
+    b.goods = r2(b.goods)
+    // 订单里没有这一款（升级前的老数据或敲错款号）时单价按 0：宁可少算，不编一个数出来
+    b.charges = goodsAll > 0 ? r2((chargesTotal * b.goods) / goodsAll) : 0
+    shareSum = r2(shareSum + b.charges)
+  }
+  const packedGoods = list.reduce((s, b) => s + b.goods, 0)
+  if (list.length > 0 && goodsAll > 0 && Math.abs(packedGoods - goodsAll) < 0.005) {
+    const last = list[list.length - 1]
+    last.charges = r2(last.charges + r2(chargesTotal - shareSum))
+  }
+  for (const b of list) b.total = r2(b.goods + b.charges)
+  return list
 }
 
 /**

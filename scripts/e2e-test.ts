@@ -11,7 +11,7 @@ import * as orders from '../electron/services/orders'
 import * as quotations from '../electron/services/quotations'
 import * as samples from '../electron/services/samples'
 import * as packing from '../electron/services/packing'
-import { shipmentSummary } from '../electron/services/shipping'
+import { shipmentSummary, factoryDeliveredQuantity } from '../electron/services/shipping'
 import * as dashboard from '../electron/services/dashboard'
 import * as money from '../electron/services/money'
 import { getSettings, saveSettings } from '../electron/services/settings'
@@ -3327,6 +3327,266 @@ eq(
 const wildMoney = money.listOrderMoney().find((x) => x.orderId === oWild.id)!
 const wildOwed = owed.find((o) => o.customerId === cWild.id)
 eq('有未结单的客户在榜上，敞口就是这单的待收（基准币）', wildOwed ? r2(wildOwed.goodsBase) : 0, r2(wildMoney.receivableBase))
+
+
+/* ---------------- R8 装箱与出货：入口闸门 + 批次凭据 ---------------- */
+section('R8 装箱闸门：件数、款号、重量在 service 入口就拦死')
+const r8g = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7 })
+await orders.addOrderItem(r8g.id, {
+  styleNo: 'R8G',
+  productName: '闸门款',
+  color: 'Sky',
+  size: 'L',
+  quantity: 100,
+  unitPrice: 10,
+  unitCost: 5
+})
+const r8err = (fn: () => unknown): string => {
+  try {
+    fn()
+    return ''
+  } catch (e) {
+    return (e as Error).message
+  }
+}
+const r8of = (qty: unknown) => [{ boxNo: 'NO.1', styleNo: 'R8G', color: 'Sky', size: 'L', quantity: qty }]
+const r8get = (orderId: number, plId: number) => packing.listPackingLists(orderId).find((p) => p.id === plId)!
+check(
+  '件数填 0 拦下，并告诉她该删行而不是填 0',
+  r8err(() => packing.createPackingList({ orderId: r8g.id, lines: r8of(0) })).includes('删掉那一行'),
+  r8err(() => packing.createPackingList({ orderId: r8g.id, lines: r8of(0) }))
+)
+check('半件拦下：箱单和报关单上都说不清', r8err(() => packing.createPackingList({ orderId: r8g.id, lines: r8of(2.5) })).includes('整件'))
+check(
+  '负数件拦下：一旦进来就把这一款的已装量压低，超装闸门跟着失效',
+  r8err(() => packing.createPackingList({ orderId: r8g.id, lines: r8of(-30) })).includes('1 件以上')
+)
+check('件数根本不是数字也拦下（IPC 是谁都能打的，不能只靠 UI）', r8err(() => packing.createPackingList({ orderId: r8g.id, lines: r8of('abc' as any) })).includes('不是数字'))
+check(
+  '款号留空拦下：没有款号的箱子归不进任何一款的已装量',
+  r8err(() => packing.createPackingList({ orderId: r8g.id, lines: [{ boxNo: 'NO.1', styleNo: '', color: 'Sky', size: 'L', quantity: 10 }] })).includes('款号')
+)
+check(
+  '净重填负数拦下（留空是允许的，纸面按系数估）',
+  r8err(() => packing.createPackingList({ orderId: r8g.id, lines: [{ boxNo: 'NO.1', styleNo: 'R8G', color: 'Sky', size: 'L', quantity: 10, netWeight: -3 }] })).includes('公斤数')
+)
+check(
+  '订单里没有的这一款不能凭空多装一款',
+  r8err(() => packing.createPackingList({ orderId: r8g.id, lines: [{ boxNo: 'NO.1', styleNo: 'R8X', color: 'Sky', size: 'L', quantity: 10 }] })).includes('订单里没有')
+)
+check('一箱都没有的空装箱单建不出来', r8err(() => packing.createPackingList({ orderId: r8g.id, lines: [] })).includes('至少要有一箱'))
+check(
+  '同一款拆成多箱也按合计校验：逐行放行、加起来超装的拦得住',
+  r8err(() =>
+    packing.createPackingList({
+      orderId: r8g.id,
+      lines: [
+        { boxNo: 'NO.1', styleNo: 'R8G', color: 'Sky', size: 'L', quantity: 60 },
+        { boxNo: 'NO.2', styleNo: 'R8G', color: 'Sky', size: 'L', quantity: 60 }
+      ]
+    })
+  ).includes('超了')
+)
+
+const r8PlsA = packing.createPackingList({
+  orderId: r8g.id,
+  lines: [
+    { boxNo: 'NO.1', styleNo: 'R8G', color: 'Sky', size: 'L', quantity: 40, netWeight: 20 },
+    { boxNo: 'NO.2', styleNo: 'R8G', color: 'Sky', size: 'L', quantity: 20, netWeight: 10 }
+  ]
+})
+const r8A = r8PlsA[0]
+eq('正常的一批建得出来（60 件落库）', r8A.lines.reduce((s, l) => s + l.quantity, 0), 60)
+const r8Factor = Number(getSettings().grossWeightFactor)
+check(
+  '毛重没手填时按 净重 × 系数 估出来',
+  Math.abs((r8A.lines[0].grossWeight ?? 0) - 20 * r8Factor) < 0.01,
+  `${r8A.lines[0].grossWeight} vs ${20 * r8Factor}`
+)
+const r8AfterAdd = packing.addPackingListLine(r8g.id, r8A.id, { styleNo: 'R8G', color: 'Sky', size: 'L', quantity: 10 })
+const r8AddLine = r8AfterAdd.find((p) => p.id === r8A.id)!.lines.find((l) => l.quantity === 10)!
+check(
+  '现场补一箱自动继承同款那箱的单位净重（20kg/40 件 → 10 件算 5kg），不用重敲',
+  Math.abs((r8AddLine.netWeight ?? 0) - 5) < 0.01,
+  String(r8AddLine.netWeight)
+)
+check('补的这箱也按系数带上毛重', Math.abs((r8AddLine.grossWeight ?? 0) - 5 * r8Factor) < 0.01, String(r8AddLine.grossWeight))
+
+section('R8 实收数量：短卸记得住，多收拦得住')
+const r8RecvErr = r8err(() => packing.updatePackingListInfo(r8g.id, r8A.id, { receivedQty: 90 }))
+check('实收不可能比这批发出去的还多，并指路去另开装箱单', r8RecvErr.includes('另开装箱单'), r8RecvErr)
+check('实收要 0 以上整数（半件客户也不会签收）', r8err(() => packing.updatePackingListInfo(r8g.id, r8A.id, { receivedQty: 30.5 })).includes('整数'))
+check('实收留空等于按发数全收，不是记成 0', r8err(() => packing.updatePackingListInfo(r8g.id, r8A.id, { receivedQty: '' as any })) === '')
+packing.updatePackingListInfo(r8g.id, r8A.id, { receivedQty: 68 })
+eq('短卸 2 件记下来了', r8get(r8g.id, r8A.id).receivedQty, 68)
+packing.updatePackingListInfo(r8g.id, r8A.id, { receivedQty: null })
+eq('清空实收回到「没记录」', r8get(r8g.id, r8A.id).receivedQty, null)
+packing.updatePackingListInfo(r8g.id, r8A.id, { receivedQty: 0 })
+eq('实收 0 件是合法事实（一件没收到），和留空不是一回事', r8get(r8g.id, r8A.id).receivedQty, 0)
+packing.updatePackingListInfo(r8g.id, r8A.id, { receivedQty: null })
+
+section('R8 单据日期与签收日期：补录的是那天的事，不是点这一下的今天')
+check(
+  '单据日期写「2026-13-01」直接拦下',
+  r8err(() => packing.updatePackingListInfo(r8g.id, r8A.id, { docDate: '2026-13-01' })).includes('不是合法日期')
+)
+check('ETD 写脏日期同样拦下（脏日期会把催单时钟带错）', r8err(() => packing.updatePackingListInfo(r8g.id, r8A.id, { etdDate: '13/05/2026' })).includes('不是合法日期'))
+packing.updatePackingListInfo(r8g.id, r8A.id, { docDate: '2026-10-08' })
+eq('单据日期存住了', r8get(r8g.id, r8A.id).docDate, '2026-10-08')
+const r8OrderFull = orders.getOrder(r8g.id)!
+const r8Paper = renderPl({ order: r8OrderFull, settings: getSettings(), images: {} }, r8get(r8g.id, r8A.id))
+check('纸面 Date 用的是补录的单据日期', r8Paper.includes('2026-10-08'))
+check('箱号留空的那几箱也计入「N 箱」合计（箱单和提单件数对得上）', r8Paper.includes('3 箱 / 3 cartons'), r8Paper.slice(r8Paper.indexOf('TOTAL'), r8Paper.indexOf('TOTAL') + 80))
+eq('还没签收时没有签收日期', r8get(r8g.id, r8A.id).deliveredAt, null)
+packing.updatePackingListInfo(r8g.id, r8A.id, { shipStatus: 'delivered' })
+eq('没填签收日期时按今天落档', r8get(r8g.id, r8A.id).deliveredAt, localDate())
+packing.updatePackingListInfo(r8g.id, r8A.id, { shipStatus: 'packed' })
+packing.updatePackingListInfo(r8g.id, r8A.id, { shipStatus: 'delivered', deliveredDate: '2026-10-09' })
+eq('补录签收用客户实际签收那一天', r8get(r8g.id, r8A.id).deliveredAt, '2026-10-09')
+
+section('R8 整单状态跃迁留痕：批次推着走，但历史不刷屏')
+const r8EvCount = (kind: string): number =>
+  Number((getDb().get('SELECT COUNT(*) AS n FROM order_events WHERE order_id = ? AND kind = ?', [r8g.id, kind]) as { n?: number })?.n ?? 0)
+const r8ShipEv1 = r8EvCount('ship_status')
+check('批次推进带来的整单状态跃迁写进了操作历史', r8ShipEv1 > 0, String(r8ShipEv1))
+packing.updatePackingListInfo(r8g.id, r8A.id, { containerNo: 'CONT-R8' })
+eq('改一格柜号（状态没变）不会重复刷状态跃迁记录', r8EvCount('ship_status'), r8ShipEv1)
+check(
+  '操作历史里这条跃迁写清是从哪个状态到哪个状态',
+  !!getDb().get(
+    'SELECT id FROM order_events WHERE order_id = ? AND kind = ? AND note LIKE ? LIMIT 1',
+    [r8g.id, 'ship_status', '%→%']
+  )
+)
+
+section('R8 工厂已交口径：批次退回备货中，催单会重新响')
+orders.updateOrder(r8g.id, {
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  piNo: r8g.piNo,
+  factoryDueDate: localDate()
+})
+const r8B = packing
+  .createPackingList({
+    orderId: r8g.id,
+    containerNo: 'CONT-R8-B',
+    lines: [{ boxNo: 'NO.1', styleNo: 'R8G', color: 'Sky', size: 'L', quantity: 30 }]
+  })
+  .find((p) => p.containerNo === 'CONT-R8-B')!
+eq('两批加起来装够 100 件', shipmentSummary(r8g.id).packedQuantity, 100)
+packing.updatePackingListInfo(r8g.id, r8B.id, { shipStatus: 'preparing' })
+eq('批次标成备货中就不算工厂已交（口径只有 shipping 那一份）', factoryDeliveredQuantity(r8g.id), 70)
+const r8Factory = dashboard.reminders().find((x) => x.orderId === r8g.id && x.message.includes('工厂已交'))
+check('工厂交期就是今天、还差 30 件 → 提醒会响，并写明已交 70 / 100', !!r8Factory && r8Factory.message.includes('70 / 100'), r8Factory?.message ?? '没有工厂提醒')
+
+section('R8 批次作废：留档不删，状态、件数、金额都不算它')
+const r8VoidEv0 = r8EvCount('pl_void')
+const r8AfterVoid = packing.voidPackingList(r8g.id, r8B.id, '货代取消订舱')
+const r8Voided = r8AfterVoid.find((p) => p.id === r8B.id)!
+check('作废只打标记：记录与箱明细一条没删（发过客户的箱单要查得到）', r8Voided.voidedAt != null && r8Voided.lines.length === 1)
+eq('作废批次不再参与件数汇总', shipmentSummary(r8g.id).packedQuantity, 70)
+eq('作废批次不再算工厂已交', factoryDeliveredQuantity(r8g.id), 70)
+eq('作废记了一笔操作历史', r8EvCount('pl_void') - r8VoidEv0, 1)
+check('已作废的批次再删会被拦下（作废不是让它消失）', r8err(() => packing.deletePackingList(r8g.id, r8B.id)).includes('已经作废留档'))
+check('已作废的批次不能改箱明细', r8err(() => packing.updatePackingListLine(r8g.id, r8B.id, r8Voided.lines[0].id, { quantity: 1 })).includes('已作废'))
+check('已作废的批次不能再加箱', r8err(() => packing.addPackingListLine(r8g.id, r8B.id, { styleNo: 'R8G', color: 'Sky', size: 'L', quantity: 5 })).includes('已作废'))
+check('已作废的批次不能删箱', r8err(() => packing.deletePackingListLine(r8g.id, r8B.id, r8Voided.lines[0].id)).includes('已作废'))
+check('已作废的批次不能改批次信息', r8err(() => packing.updatePackingListInfo(r8g.id, r8B.id, { containerNo: 'X' })).includes('已作废'))
+check(
+  '作废的那 30 件不再占超装额度：补开的 30 件建得出来',
+  (() => {
+    packing.createPackingList({
+      orderId: r8g.id,
+      containerNo: 'CONT-R8-C',
+      lines: [{ boxNo: 'NO.1', styleNo: 'R8G', color: 'Sky', size: 'L', quantity: 30 }]
+    })
+    return true
+  })()
+)
+const r8C = packing.listPackingLists(r8g.id).find((p) => p.containerNo === 'CONT-R8-C')!
+eq('补开后已装量正好回到 100 件', shipmentSummary(r8g.id).packedQuantity, 100)
+packing.deletePackingList(r8g.id, r8C.id)
+const r8UnvoidEv0 = r8EvCount('pl_unvoid')
+packing.unvoidPackingList(r8g.id, r8A.id)
+eq('撤销一张没作废的批次是无操作，不刷历史', r8EvCount('pl_unvoid'), r8UnvoidEv0)
+packing.unvoidPackingList(r8g.id, r8B.id)
+eq('撤销作废后重新参与汇总', shipmentSummary(r8g.id).packedQuantity, 100)
+eq('撤销作废记了一笔历史', r8EvCount('pl_unvoid') - r8UnvoidEv0, 1)
+check('重复作废会被拦下', (() => {
+  packing.voidPackingList(r8g.id, r8B.id)
+  return r8err(() => packing.voidPackingList(r8g.id, r8B.id)).includes('已经是作废状态')
+})())
+packing.unvoidPackingList(r8g.id, r8B.id)
+
+section('R8 手工状态只能用这一份枚举')
+const r8Manual = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7 })
+check(
+  '「部分出运」是汇总出来的，钉在订单上会被拦下并指路到装箱单',
+  r8err(() => orders.setShipStatus(r8Manual.id, 'partial_shipped' as any)).includes('装箱单')
+)
+check('没定义过的状态码进不来', r8err(() => orders.setShipStatus(r8Manual.id, 'flying' as any)).includes('不能手工设置'))
+check('合法的手工状态照旧能设', orders.setShipStatus(r8Manual.id, 'not_prepared').shipStatus, 'not_prepared')
+
+section('R8 本批金额：三批加起来正好等于 PI')
+const r8a = orders.createOrder({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  charges: [{ label: '海运运费 Freight', amount: 100 }]
+})
+for (const [sn, col, sz] of [
+  ['R8A', 'Red', 'S'],
+  ['R8B', 'Blue', 'M'],
+  ['R8C', 'Green', 'L']
+] as const) {
+  await orders.addOrderItem(r8a.id, {
+    styleNo: sn,
+    productName: `分摊款 ${sn}`,
+    color: col,
+    size: sz,
+    quantity: 100,
+    unitPrice: 1,
+    unitCost: 0.5
+  })
+}
+for (const [sn, col, sz] of [
+  ['R8A', 'Red', 'S'],
+  ['R8B', 'Blue', 'M'],
+  ['R8C', 'Green', 'L']
+] as const) {
+  packing.createPackingList({ orderId: r8a.id, lines: [{ boxNo: 'NO.1', styleNo: sn, color: col, size: sz, quantity: 100 }] })
+}
+const r8Amt = money.packingAmounts(r8a.id)
+eq('每个批次各算自己那一份钱（运费按货值比例摊）', r8Amt.map((a) => a.total), [133.33, 133.33, 133.34])
+eq('本批件数一并带上', r8Amt.map((a) => a.quantity), [100, 100, 100])
+const r8Pi = orderDocAmount(orders.getOrder(r8a.id)!)
+check(
+  '装齐时分摊的分币补给最后一批：三批金额加起来正好等于 PI 含费用合计',
+  Math.abs(r8Amt.reduce((s, a) => s + a.total, 0) - r8Pi) < 0.005,
+  `${r8Amt.reduce((s, a) => s + a.total, 0)} vs ${r8Pi}`
+)
+packing.voidPackingList(r8a.id, r8Amt[2].plId, '这批没走成')
+const r8AmtPartial = money.packingAmounts(r8a.id)
+eq('作废批次的钱不算在它头上（只剩两批）', r8AmtPartial.map((a) => a.total), [133.33, 133.33])
+check(
+  '只走了一半时不替还没装走的货提前收运费（两批加起来只有 266.66，不是 400）',
+  Math.abs(r8AmtPartial.reduce((s, a) => s + a.total, 0) - 266.66) < 0.005
+)
+
+section('R8 批次凭据落进库表（v14）')
+const r8Cols = (getDb().all('PRAGMA table_info(packing_lists)') as { name: string }[]).map((c) => c.name)
+check(
+  '实收数量 / 单据日期 / 作废时间三列都加上了',
+  ['received_qty', 'doc_date', 'voided_at'].every((c) => r8Cols.includes(c)),
+  r8Cols.join(',')
+)
+eq('迁移版本停在 v14', Number((getDb().get('PRAGMA user_version') as { user_version?: number })?.user_version ?? 0), 14)
+eq(
+  '作废批次仍留在装箱单列表里（只多一个 voidedAt，纸面存档不丢）',
+  packing.listPackingLists(r8a.id).filter((p) => p.voidedAt != null).length,
+  1
+)
 
 
 /* ---------------- 汇总 ---------------- */
