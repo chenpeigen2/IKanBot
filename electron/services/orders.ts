@@ -1,11 +1,13 @@
 import { getDb, nextNo } from '../db'
 import { mapOrder, mapOrderItem, mapPayment, mapPackingList, mapPackingListLine, mapEvent, mapSkuSummary, mapOrderPhoto, mapCustomer, mapSettlement } from '../db/mappers'
 import { getSettings } from './settings'
-import { computeOrderMoney, costInOrderCurrency, parseCharges } from './money'
+import { computeOrderMoney, costInOrderCurrency, moneyForOrders, parseCharges } from './money'
+import { likeAny } from './search'
 import { applyShipStatus, isShipStatusDerived, shipmentSummary } from './shipping'
 import { logEvent } from './events'
-import { localDate, addDays, isLocalDate } from '../../src/shared/date'
+import { addDays, daysBetween, isLocalDate, localDate, localDayAfterUtc, localDayStartUtc } from '../../src/shared/date'
 import { billPartyOf, emptyParty, parseParty, patchParty, shipPartyOf, stringifyParty } from '../../src/shared/party'
+import { isBillingStatus } from '../../src/shared/billing'
 import { SETTLEMENT_KIND_LABEL, SHIP_STATUS_LABEL, SHIP_STATUS_ORDER } from '../../src/shared/types'
 import type {
   Currency,
@@ -13,6 +15,8 @@ import type {
   Order,
   OrderDetail,
   OrderEvent,
+  OrderListPage,
+  OrderListRow,
   OrderPhoto,
   PackingList,
   PartySnapshot,
@@ -82,30 +86,135 @@ export interface OrderItemInput {
   costBase?: number | null
 }
 
-export type OrderSort = 'created_desc' | 'created_asc' | 'amount_desc' | 'amount_asc' | 'ship_asc'
+export type OrderSort =
+  | 'created_desc'
+  | 'created_asc'
+  | 'amount_desc'
+  | 'amount_asc'
+  | 'ship_asc'
+  /** 待收（折基准币）高→低：催款先看最大的 */
+  | 'owed_desc'
+  /** 逾期最久的排前面，没逾期的按创建时间 */
+  | 'overdue_first'
 
-export function listOrders(filter: {
+/** 订单列表的筛选条件 */
+export interface OrderListFilter {
   keyword?: string
   paymentStatus?: string
   shipStatus?: string
   customerId?: number
+  /** 本地日 YYYY-MM-DD（含这一天） */
   from?: string
+  /** 本地日 YYYY-MM-DD（含这一天） */
   to?: string
   sort?: OrderSort
-}): OrderDetail[] {
-  const db = getDb()
+}
+
+/** 排序要看的几列：订单详情和瘦身列表行都有，比较器只写一遍 */
+interface SortKeys {
+  id: number
+  createdAt: string
+  /** 货值（原币） */
+  totalAmount: number
+  exchangeRate: number
+  /** 待收（原币） */
+  remaining: number
+  expectedShipDate: string | null
+  shipStatus: ShipStatus
+}
+
+/** 出运之后的状态：货已经走了，交期不再算逾期 */
+const SHIPPED_STATUSES: ShipStatus[] = ['shipped', 'cleared', 'delivered']
+
+/**
+ * 逾期天数（本地日）。
+ * 没填预计出货日、货已经出运/清关/签收、或还没到期 → null（不是 0，0 会被当成「今天到期」）。
+ */
+function daysLateOf(row: { expectedShipDate: string | null; shipStatus: ShipStatus }): number | null {
+  if (!row.expectedShipDate || SHIPPED_STATUSES.includes(row.shipStatus)) return null
+  const late = daysBetween(row.expectedShipDate, localDate())
+  return late > 0 ? late : null
+}
+
+/**
+ * 列表排序（订单列表与瘦身列表共用同一个比较器）。
+ * 金额跨币种比较一律折成基准币，否则 7.1 的 CNY 单会压过 10 万美元的 USD 单。
+ */
+function sortRows<T extends SortKeys>(list: T[], sort: OrderSort): T[] {
+  const base = (o: T) => o.totalAmount * o.exchangeRate
+  const byCreated = (a: T, b: T) =>
+    a.createdAt === b.createdAt ? b.id - a.id : a.createdAt < b.createdAt ? 1 : -1
+  switch (sort) {
+    case 'created_asc':
+      return [...list].sort((a, b) => -byCreated(a, b))
+    case 'amount_desc':
+      return [...list].sort((a, b) => base(b) - base(a) || byCreated(a, b))
+    case 'amount_asc':
+      return [...list].sort((a, b) => base(a) - base(b) || byCreated(a, b))
+    case 'ship_asc':
+      return [...list].sort((a, b) => {
+        const av = a.expectedShipDate ?? '9999-12-31'
+        const bv = b.expectedShipDate ?? '9999-12-31'
+        return av === bv ? byCreated(a, b) : av < bv ? -1 : 1
+      })
+    case 'owed_desc':
+      return [...list].sort(
+        (a, b) => b.remaining * b.exchangeRate - a.remaining * a.exchangeRate || byCreated(a, b)
+      )
+    case 'overdue_first':
+      return [...list].sort(
+        (a, b) => (daysLateOf(b) ?? -1) - (daysLateOf(a) ?? -1) || byCreated(a, b)
+      )
+    case 'created_desc':
+    default:
+      return [...list].sort(byCreated)
+  }
+}
+
+/** 搜索框的关键词命中范围：单据本身 + 明细款号 + 批次柜号/提单号 + 收款流水号 */
+function keywordClause(kw: string): { sql: string; params: Bind[] } {
+  const own = likeAny(
+    [
+      'o.order_no',
+      'o.pi_no',
+      'o.customer_po',
+      'c.company',
+      'o.port_of_loading',
+      'o.port_of_destination',
+      'o.factory',
+      'o.vessel',
+      'o.seal_no'
+    ],
+    kw
+  )
+  const items = likeAny(['oi.style_no', 'oi.product_name', 'oi.color', 'oi.size'], kw)
+  const batches = likeAny(['pl.pl_no', 'pl.container_no', 'pl.bl_no', 'pl.vessel', 'pl.seal_no'], kw)
+  const pays = likeAny(['p.bank_ref'], kw)
+  return {
+    sql:
+      `(${own.sql}
+        OR EXISTS (SELECT 1 FROM order_items oi WHERE oi.order_id = o.id AND (${items.sql}))
+        OR EXISTS (SELECT 1 FROM packing_lists pl WHERE pl.order_id = o.id AND pl.voided_at IS NULL AND (${batches.sql}))
+        OR EXISTS (SELECT 1 FROM payments p WHERE p.order_id = o.id AND (${pays.sql})))`,
+    params: [...own.params, ...items.params, ...batches.params, ...pays.params]
+  }
+}
+
+/**
+ * 列表 WHERE（订单列表与瘦身列表共用，两边筛出来的单必须一模一样）。
+ *
+ * 日期区间：created_at 存的是 UTC 时间戳，以前用 date(created_at) 比较是按 UTC 日切，
+ * UTC+8 晚上 8 点后建的单会被算到前一天，报表和工作台又按本地日归集——
+ * 同一段时间，列表和报表数不一样。现在两端都换成本地日的 UTC 边界。
+ */
+function listWhere(filter: OrderListFilter): { sql: string; params: Bind[] } {
   const where: string[] = []
   const params: Bind[] = []
   const kw = (filter.keyword ?? '').trim()
   if (kw) {
-    // 搜索范围：订单号 / PI号 / 客户PO / 客户名 / 款号 / 颜色 / 尺码
-    where.push(
-      `(o.order_no LIKE ? OR o.pi_no LIKE ? OR o.customer_po LIKE ? OR c.company LIKE ?
-        OR EXISTS (SELECT 1 FROM order_items oi WHERE oi.order_id = o.id
-          AND (oi.style_no LIKE ? OR oi.color LIKE ? OR oi.size LIKE ?)))`
-    )
-    const k = `%${kw}%`
-    params.push(k, k, k, k, k, k, k)
+    const clause = keywordClause(kw)
+    where.push(clause.sql)
+    params.push(...clause.params)
   }
   if (filter.paymentStatus) {
     where.push('o.payment_status = ?')
@@ -123,41 +232,160 @@ export function listOrders(filter: {
     params.push(filter.customerId)
   }
   if (filter.from) {
-    where.push('date(o.created_at) >= ?')
-    params.push(filter.from)
+    const gte = localDayStartUtc(filter.from)
+    if (!gte) throw new Error('开始日期要填完整（例如 2026-10-01）。')
+    where.push('o.created_at >= ?')
+    params.push(gte)
   }
   if (filter.to) {
-    where.push('date(o.created_at) <= ?')
-    params.push(filter.to)
+    const lt = localDayAfterUtc(filter.to)
+    if (!lt) throw new Error('结束日期要填完整（例如 2026-10-31）。')
+    where.push('o.created_at < ?')
+    params.push(lt)
   }
-  const sql = `SELECT o.* FROM orders o JOIN customers c ON c.id = o.customer_id
-    ${where.length ? 'WHERE ' + where.join(' AND ') : ''}`
-  const rows = db.all(sql, params) as Record<string, unknown>[]
-  const list = rows.map((r) => hydrate(mapOrder(r), r))
-  return sortOrders(list, filter.sort ?? 'created_desc')
+  return { sql: where.length ? 'WHERE ' + where.join(' AND ') : '', params }
 }
 
-/** 排序：金额需按各订单自身币种比较，故先折算为基准币再比 */
-function sortOrders(list: OrderDetail[], sort: OrderSort): OrderDetail[] {
-  const base = (o: OrderDetail) => o.totalAmount * o.exchangeRate
-  const byCreated = (a: OrderDetail, b: OrderDetail) =>
-    a.createdAt === b.createdAt ? b.id - a.id : a.createdAt < b.createdAt ? 1 : -1
-  switch (sort) {
-    case 'created_asc':
-      return [...list].sort((a, b) => -byCreated(a, b))
-    case 'amount_desc':
-      return [...list].sort((a, b) => base(b) - base(a))
-    case 'amount_asc':
-      return [...list].sort((a, b) => base(a) - base(b))
-    case 'ship_asc':
-      return [...list].sort((a, b) => {
-        const av = a.expectedShipDate ?? '9999-12-31'
-        const bv = b.expectedShipDate ?? '9999-12-31'
-        return av === bv ? byCreated(a, b) : av < bv ? -1 : 1
+/**
+ * 全量展开的订单列表：每张单都要展开明细 / 收款 / 装箱 / 抬头。
+ * 页面列表不许用它（用 listOrderRows），这里留给脚本和口径校验当参照。
+ */
+export function listOrders(filter: OrderListFilter = {}): OrderDetail[] {
+  const db = getDb()
+  const w = listWhere(filter)
+  const rows = db.all(
+    `SELECT o.* FROM orders o JOIN customers c ON c.id = o.customer_id ${w.sql}`,
+    w.params
+  ) as Record<string, unknown>[]
+  return sortRows(rows.map((r) => hydrate(mapOrder(r), r)), filter.sort ?? 'created_desc')
+}
+
+/**
+ * 订单列表（瘦身版）：整页固定几条查询，不再逐单展开。
+ *
+ * 以前 300 张单点一下列表要等 2.7 秒（每张单 9 条查询），
+ * 列表上那些字段其实一条明细都不需要。
+ * 金额仍走 moneyForOrders → computeOrderMoney，与详情/单据/报表同一口径。
+ *
+ * 排序要先看全筛选集才能排（金额、待收、逾期都不是数据库里的列），
+ * 所以先算完再切页；总数按筛选条件给，分页拿的是它而不是本页行数。
+ */
+export function listOrderRows(
+  filter: OrderListFilter & { limit?: number; offset?: number } = {}
+): OrderListPage {
+  const db = getDb()
+  const w = listWhere(filter)
+  const rows = db.all(
+    `SELECT o.id, o.order_no, o.pi_no, o.customer_po, o.currency, o.exchange_rate, o.base_currency,
+            o.payment_status, o.ship_status, o.port_of_loading, o.port_of_destination,
+            o.factory, o.vessel, o.seal_no, o.etd_date, o.cut_off_date, o.expected_ship_date,
+            o.valid_until, o.charges, o.deposit_ratio, o.created_at,
+            o.customer_id, c.company AS customer_company, c.country AS customer_country
+     FROM orders o JOIN customers c ON c.id = o.customer_id
+     ${w.sql}`,
+    w.params
+  ) as Record<string, unknown>[]
+
+  const moneyBy = moneyForOrders(
+    rows.map((r) => ({
+      id: Number(r.id),
+      charges: r.charges,
+      depositRatio: Number(r.deposit_ratio ?? 0)
+    }))
+  )
+  const ids = rows.map((r) => Number(r.id))
+  const ph = ids.map(() => '?').join(',')
+  const packBy = new Map<number, { qty: number; batches: number; containers: string }>()
+  const styleBy = new Map<number, { styles: number; first: string }>()
+  if (ids.length > 0) {
+    // 已装箱件数、批次数与柜号：作废批次和空批次都不算（和 shipmentSummary 一个口径）
+    const packRows = db.all(
+      `SELECT pl.order_id AS order_id, COUNT(*) AS batches,
+              COALESCE(SUM(t.qty), 0) AS qty,
+              GROUP_CONCAT(DISTINCT NULLIF(t.container_no, '')) AS containers
+       FROM (
+         SELECT pl2.id, pl2.order_id, pl2.container_no, COALESCE(SUM(l.quantity), 0) AS qty
+         FROM packing_lists pl2
+         LEFT JOIN packing_list_lines l ON l.packing_list_id = pl2.id
+         WHERE pl2.order_id IN (${ph}) AND pl2.voided_at IS NULL
+         GROUP BY pl2.id
+         HAVING COALESCE(SUM(l.quantity), 0) > 0
+       ) t JOIN packing_lists pl ON pl.id = t.id
+       GROUP BY pl.order_id`,
+      ids
+    ) as Record<string, unknown>[]
+    for (const r of packRows)
+      packBy.set(Number(r.order_id), {
+        qty: Number(r.qty ?? 0),
+        batches: Number(r.batches ?? 0),
+        containers: String(r.containers ?? '')
       })
-    case 'created_desc':
-    default:
-      return [...list].sort(byCreated)
+    const styleRows = db.all(
+      `SELECT order_id, COUNT(DISTINCT TRIM(style_no)) AS styles, MIN(style_no) AS first_style
+       FROM order_items WHERE order_id IN (${ph}) GROUP BY order_id`,
+      ids
+    ) as Record<string, unknown>[]
+    for (const r of styleRows)
+      styleBy.set(Number(r.order_id), { styles: Number(r.styles ?? 0), first: String(r.first_style ?? '') })
+  }
+
+  const list: OrderListRow[] = rows.map((r) => {
+    const id = Number(r.id)
+    const m = moneyBy.get(id)!
+    const rate = Number(r.exchange_rate ?? 1)
+    const pack = packBy.get(id) ?? { qty: 0, batches: 0, containers: '' }
+    const style = styleBy.get(id) ?? { styles: 0, first: '' }
+    const shipStatus = String(r.ship_status ?? 'not_prepared') as ShipStatus
+    return {
+      id,
+      orderNo: String(r.order_no ?? ''),
+      piNo: String(r.pi_no ?? ''),
+      customerPo: String(r.customer_po ?? ''),
+      currency: String(r.currency ?? 'USD') as Currency,
+      exchangeRate: rate,
+      baseCurrency: String(r.base_currency ?? 'CNY') as Currency,
+      paymentStatus: String(r.payment_status ?? '') as PaymentStatus,
+      shipStatus,
+      customer: { id: Number(r.customer_id), company: String(r.customer_company ?? ''), country: String(r.customer_country ?? '') },
+      portOfLoading: String(r.port_of_loading ?? ''),
+      portOfDestination: String(r.port_of_destination ?? ''),
+      factory: String(r.factory ?? ''),
+      vessel: String(r.vessel ?? ''),
+      sealNo: String(r.seal_no ?? ''),
+      etdDate: r.etd_date == null ? null : String(r.etd_date),
+      cutOffDate: r.cut_off_date == null ? null : String(r.cut_off_date),
+      expectedShipDate: r.expected_ship_date == null ? null : String(r.expected_ship_date),
+      validUntil: r.valid_until == null ? null : String(r.valid_until),
+      createdAt: String(r.created_at ?? ''),
+      totalAmount: m.goodsValue,
+      chargesTotal: m.chargesTotal,
+      grandTotal: m.grandTotal,
+      paidAmount: m.paidAmount,
+      remaining: m.receivable,
+      remainingBase: m.receivable * rate,
+      totalQuantity: m.totalQuantity,
+      packedQuantity: pack.qty,
+      batchCount: pack.batches,
+      containerNos: pack.containers,
+      chargesCount: parseCharges(r.charges).length,
+      styleCount: style.styles,
+      firstStyleNo: style.first,
+      missingCostItems: m.missingCostItems,
+      daysLate: daysLateOf({ expectedShipDate: r.expected_ship_date == null ? null : String(r.expected_ship_date), shipStatus })
+    }
+  })
+
+  const sorted = sortRows(list, filter.sort ?? 'created_desc')
+  const offset = Math.max(0, Math.floor(Number(filter.offset ?? 0)) || 0)
+  const limit = Number(filter.limit)
+  const page = Number.isFinite(limit) && limit > 0 ? sorted.slice(offset, offset + Math.floor(limit)) : sorted
+  // 合计按整个筛选集算（不是本页），否则翻一页换一个总数，等于给了个假数
+  const billing = sorted.filter((r) => isBillingStatus(r.paymentStatus))
+  return {
+    rows: page,
+    total: sorted.length,
+    owedBaseTotal: billing.reduce((s, r) => s + r.remainingBase, 0),
+    grandBaseTotal: billing.reduce((s, r) => s + r.grandTotal * r.exchangeRate, 0)
   }
 }
 

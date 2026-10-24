@@ -13,6 +13,7 @@ import { getSettings } from './settings'
 import { createOrder, getOrder } from './orders'
 import { logEvent } from './events'
 import { costInOrderCurrency } from './money'
+import { likeAny } from './search'
 import type { OrderDetail } from '../../src/shared/types'
 import type {
   Customer,
@@ -122,26 +123,53 @@ function hydrate(s: SampleOrder): SampleOrderDetail {
     >[]
   ).map(mapSampleItem)
   const sampleFee = items.reduce((sum, i) => sum + i.quantity * i.unitPrice, 0)
-  // 公司净垫（N33）：公司总成本 = 工厂打样费 + 快递费；已收回的样品费（已收/下单抵扣）才能抵
-  const companyCost = Number(s.factoryCost ?? 0) + Number(s.expressFee ?? 0)
-  // 已收 = 样品费 + 快递费（客户一并付了）；下单抵扣只抵样品费，快递费仍是公司成本
-  const feeRecovered =
-    s.feeStatus === 'paid' ? sampleFee + s.expressFee : s.feeStatus === 'offset' ? sampleFee : 0
+  const rate = Number(s.exchangeRate ?? 0)
+  const hasRate = rate > 0
+  /**
+   * 列表上的金额必须同一币种，否则「净垫 130」这种数没人知道是美元还是人民币。
+   * 口径按钱的来路分：
+   *   工厂打样费（factoryCost）是公司自家人民币账，不参与换算；
+   *   样品费、快递费都跟着打样单币种走（单据上就印在这个币种下），有汇率才 × 汇率；
+   *   汇率没填 → 折不出来，一律 null（界面显示「—」，绝不拿 1 凑一个好看的数）。
+   * 未收待收必须真有汇率，否则工作台少算 → rateMissing 标出来让人补。
+   */
+  const toBase = (v: number): number | null => (hasRate ? v * rate : null)
+  const sampleFeeBase = toBase(sampleFee)
+  const expressFeeBase = toBase(Number(s.expressFee ?? 0))
+  const totalFeeBase =
+    sampleFeeBase == null || expressFeeBase == null ? null : sampleFeeBase + expressFeeBase
+  // 公司总成本（N33）= 工厂打样费（基准币）+ 快递费（折基准币）
+  const companyCostBase = expressFeeBase == null ? null : Number(s.factoryCost ?? 0) + expressFeeBase
+  // 已收回（N33）：只有「已收」「下单抵扣」才算收回；已收时客户连快递费一起付了
+  const feeRecoveredBase =
+    sampleFeeBase == null || expressFeeBase == null
+      ? null
+      : s.feeStatus === 'paid'
+        ? sampleFeeBase + expressFeeBase
+        : s.feeStatus === 'offset'
+          ? sampleFeeBase
+          : 0
+  const netAdvanceBase =
+    companyCostBase == null || feeRecoveredBase == null ? null : companyCostBase - feeRecoveredBase
   // 待收（N23）：未收才计；取消的单不收钱；汇率必须有，否则工作台会少算 → 标记 rateMissing 提示补
   const cancelled = s.status === 'cancelled'
-  const owed = s.feeStatus === 'unpaid' && !cancelled ? sampleFee + s.expressFee : 0
-  const rateMissing = owed > 0 && Number(s.exchangeRate ?? 0) <= 0
+  const owed = s.feeStatus === 'unpaid' && !cancelled ? sampleFee + Number(s.expressFee ?? 0) : 0
+  const rateMissing = owed > 0 && !hasRate
   return {
     ...s,
     customer: customerRow ? (mapCustomer(customerRow) as Customer) : null,
     items,
     totalQuantity: items.reduce((sum, i) => sum + i.quantity, 0),
     sampleFee,
-    totalFee: sampleFee + s.expressFee,
-    companyCost,
-    feeRecovered,
-    netAdvance: companyCost - feeRecovered,
-    receivableBase: rateMissing ? 0 : owed * Number(s.exchangeRate ?? 0),
+    totalFee: sampleFee + Number(s.expressFee ?? 0),
+    sampleFeeBase,
+    expressFeeBase,
+    totalFeeBase,
+    companyCostBase,
+    feeRecoveredBase,
+    netAdvanceBase,
+    // 待收（N23）：owed 已按 feeStatus / 取消筛过，这里只管折基准币
+    receivableBase: rateMissing ? 0 : owed * rate,
     rateMissing
   }
 }
@@ -152,13 +180,11 @@ export function listSamples(filter: { keyword?: string; customerId?: number; sta
   const params: (string | number)[] = []
   const kw = (filter.keyword ?? '').trim()
   if (kw) {
-    // 样品单号 / 客户 / 快递单号 / 款号 都能搜
-    where.push(
-      `(s.sample_no LIKE ? OR s.tracking_no LIKE ? OR c.company LIKE ?
-        OR EXISTS (SELECT 1 FROM sample_order_items si WHERE si.sample_order_id = s.id AND si.style_no LIKE ?))`
-    )
-    const k = `%${kw}%`
-    params.push(k, k, k, k)
+    // 样品单号 / 客户 / 快递公司 / 快递单号 / 款号 / 品名 / 颜色 都能搜
+    const own = likeAny(['s.sample_no', 's.tracking_no', 's.courier', 'c.company'], kw)
+    const items = likeAny(['si.style_no', 'si.product_name', 'si.color', 'si.size'], kw)
+    where.push(`(${own.sql} OR EXISTS (SELECT 1 FROM sample_order_items si WHERE si.sample_order_id = s.id AND (${items.sql})))`)
+    params.push(...own.params, ...items.params)
   }
   if (filter.customerId) {
     where.push('s.customer_id = ?')

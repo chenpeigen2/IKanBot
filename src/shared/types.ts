@@ -337,6 +337,80 @@ export interface OrderDetail extends Order {
   shipTo: PartySnapshot
 }
 
+/**
+ * 订单列表上的一行（瘦身版）。
+ *
+ * 列表不再逐单展开明细/收款/装箱/抬头：每张单 9 条查询、几百张单点一下要等两秒，
+ * 而且列表根本不显示那些字段。金额仍然由 services/money.ts 批量算，
+ * 与订单详情、单据、报表同一个口径。
+ */
+export interface OrderListRow {
+  id: number
+  orderNo: string
+  piNo: string
+  customerPo: string
+  currency: Currency
+  /** 1 外币 = exchangeRate 基准币 */
+  exchangeRate: number
+  baseCurrency: Currency
+  paymentStatus: PaymentStatus
+  shipStatus: ShipStatus
+  /** 客户（列表只显示公司名 + 国家） */
+  customer: { id: number; company: string; country: string } | null
+  portOfLoading: string
+  portOfDestination: string
+  factory: string
+  vessel: string
+  sealNo: string
+  /** 实际开船日 */
+  etdDate: string | null
+  /** 截关日 */
+  cutOffDate: string | null
+  expectedShipDate: string | null
+  validUntil: string | null
+  createdAt: string
+  /** 货值（原币） */
+  totalAmount: number
+  chargesTotal: number
+  /** 含费用合计（PI 上的 TOTAL，原币） */
+  grandTotal: number
+  paidAmount: number
+  /** 待收（原币，多收为 0） */
+  remaining: number
+  /** 待收折基准币：跨币种排序和「合计待收」用这个 */
+  remainingBase: number
+  totalQuantity: number
+  /** 已装箱件数（作废批次不计） */
+  packedQuantity: number
+  /** 有效批次数 */
+  batchCount: number
+  /** 各批柜号（逗号拼接，作废批次不算）；没填为空串 */
+  containerNos: string
+  /** 费用行数（列表只用来提示「含运费保险」，不展开明细） */
+  chargesCount: number
+  /** 款号数 */
+  styleCount: number
+  /** 首个款号（列表上的款号摘要） */
+  firstStyleNo: string
+  /** 成本没录的行数：>0 时毛利不可信 */
+  missingCostItems: number
+  /**
+   * 交期逾期天数（今天 − 预计出货日，正数 = 已经过了）；
+   * 没填预计出货日、或已经出运/清关/签收的单为 null。
+   */
+  daysLate: number | null
+}
+
+/** 一页订单列表 + 筛选后的总数与合计（合计按筛选集算，不能拿本页行数充数） */
+export interface OrderListPage {
+  rows: OrderListRow[]
+  total: number
+  /** 筛选集里还在催款的单的待收合计（基准币） */
+  owedBaseTotal: number
+  /** 筛选集里还在催款的单的含费用合计（基准币） */
+  grandBaseTotal: number
+}
+
 /** 历史成交价：客户问「上次那款多少钱」时立刻答得上 */
 export interface StylePriceRow {
   styleNo: string
@@ -779,14 +853,25 @@ export interface SampleOrderDetail extends SampleOrder {
   totalQuantity: number
   /** 样品费合计（应收客户的钱） */
   sampleFee: number
-  /** 样品费 + 快递费（客户欠公司的总额） */
+  /** 样品费 + 快递费（客户欠公司的总额，原币） */
   totalFee: number
-  /** 公司总成本 = 工厂打样费 + 快递费（N33） */
-  companyCost: number
-  /** 公司已收回的打样费（paid/offset 才算收回；unpaid/waived 没收回） */
-  feeRecovered: number
-  /** 公司净垫 = 公司总成本 − 已收回打样费（N33：真实垫了多少钱） */
-  netAdvance: number
+  /*
+   * 下面五个都是基准币（列表就印这一套，一屏一个币种才看得懂）。
+   * 工厂打样费本来就按基准币记账；样品费/快递费跟单据币种走，按本单汇率折算。
+   * 汇率没填 → null，界面显示「—」，不许拿 1 凑一个好看的数。
+   */
+  /** 样品费折基准币（无汇率为 null） */
+  sampleFeeBase: number | null
+  /** 快递费折基准币（跟单据币种，无汇率为 null） */
+  expressFeeBase: number | null
+  /** 应收客户总额折基准币 = 样品费 + 快递费 */
+  totalFeeBase: number | null
+  /** 公司总成本 = 工厂打样费（基准币）+ 快递费（折基准币）（N33） */
+  companyCostBase: number | null
+  /** 公司已收回的打样费（paid/offset 才算收回；unpaid/waived 没收回），基准币 */
+  feeRecoveredBase: number | null
+  /** 公司净垫 = 公司总成本 − 已收回打样费（N33：真实垫了多少钱），基准币 */
+  netAdvanceBase: number | null
   /** 待收（应收客户金额，折算基准币；feeStatus≠unpaid 或汇率缺失时为 0） */
   receivableBase: number
   /** 汇率未填但有应收（危险：工作台会少算，要提示补） */

@@ -53,3 +53,22 @@ export function daysBetween(a: string, b: string): number {
   const tb = new Date(b + 'T00:00:00').getTime()
   return Math.round((tb - ta) / 86400000)
 }
+
+/**
+ * 本地日 00:00 → 数据库时间戳（UTC ISO 串），给「>= 起」用。
+ * 不是合法本地日期返回 null。
+ */
+export function localDayStartUtc(dateStr: string | null | undefined): string | null {
+  if (!isLocalDate(dateStr)) return null
+  return new Date(dateStr + 'T00:00:00').toISOString()
+}
+
+/**
+ * 本地日的次日 00:00 → UTC 串，给「< 止」用（右端含当天最后一秒）。
+ * 数据库里 created_at 存的是 UTC，直接 date(created_at) 比较是按 UTC 日切：
+ * UTC+8 晚上 8 点后建的单会被算到前一天，区间两端各漏一天的尾巴。
+ */
+export function localDayAfterUtc(dateStr: string | null | undefined): string | null {
+  if (!isLocalDate(dateStr)) return null
+  return new Date(addDays(dateStr as string, 1) + 'T00:00:00').toISOString()
+}

@@ -43,7 +43,7 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
         if (!alive) return
         setStats(s)
         setReminders(r)
-        setRecent(o.slice(0, 10))
+        setRecent(o.rows.slice(0, 10))
       } finally {
         if (alive) setLoading(false)
       }

@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IKanApi } from '../../src/shared/api'
-import type { CustomerReceivable, ExportKind, MonthlyReportRow, PackingAmount } from '../../src/shared/types'
+import type { CustomerReceivable, ExportKind, MonthlyReportRow, OrderListPage, PackingAmount } from '../../src/shared/types'
 
 type Result<T> = { ok: true; data: T } | { ok: false; error: string }
 
@@ -42,7 +42,8 @@ const api: IKanApi = {
       call<any[]>('customers:stylePriceHistory', filter)
   },
   orders: {
-    list: (filter: any) => call<any[]>('orders:list', filter),
+    /** 瘦身列表：{ rows, total, owedBaseTotal, grandBaseTotal }，字段见 shared/types 的 OrderListPage */
+    list: (filter: any) => call<OrderListPage>('orders:list', filter),
     get: (id: number) => call<any>('orders:get', id),
     create: (input: any) => call<any>('orders:create', input),
     update: (id: number, input: any) => call<any>('orders:update', id, input),

@@ -332,6 +332,43 @@ export function NavIcon({ name }: { name: NavIconName }) {
 type ToastItem = { id: number; text: string; kind: 'ok' | 'error' }
 const ToastCtx = createContext<(text: string, kind?: 'ok' | 'error') => void>(() => {})
 
+/**
+ * 明细行的前端身份。
+ * 未保存的行没有数据库 id，用数组下标当 React key 会串位：
+ * 删掉中间一行后，后面所有行整体前移，焦点和输入法里的半个字全落错格子——
+ * 用户看到的就是「款号跑到别的颜色上」。所以行建出来就钉一个用完即弃的稳定标记。
+ * 只给 UI 用，提交前从明细载荷里去掉（各编辑器在组 payload 时只挑业务字段）。
+ */
+export function clientKey(): string {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+}
+
+/**
+ * 输入防抖：搜索框每敲一个字就打一次查询，敲得快时一秒能发七八次。
+ */
+export function useDebounced<T>(value: T, delayMs = 250): T {
+  const [debounced, setDebounced] = useState(value)
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delayMs)
+    return () => clearTimeout(t)
+  }, [value, delayMs])
+  return debounced
+}
+
+/**
+ * 请求竞态门。
+ * 慢的那次查询可能比新的那次先回来，结果就是把旧关键词的列表盖在新关键词上——
+ * 用户看到的是「搜了个寂寞」。每次请求先 begin() 领一个号，回来时 isCurrent() 才允许落盘。
+ */
+export function useLoadGuard(): () => { isCurrent: () => boolean } {
+  const seq = useRef(0)
+  return () => {
+    seq.current += 1
+    const my = seq.current
+    return { isCurrent: () => seq.current === my }
+  }
+}
+
 export function useToast() {
   return useContext(ToastCtx)
 }

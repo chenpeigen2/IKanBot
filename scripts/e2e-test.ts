@@ -22,6 +22,8 @@ import * as docs from '../electron/services/docs'
 import { collectDir, createZip, readZip, verifyZip } from '../electron/services/zip'
 import { renderPi, renderPl, renderQuotation, renderCi, renderSample, orderDocAmount, ciDocAmount } from '../src/shared/documents'
 import { localDate, localMonthOf } from '../src/shared/date'
+import { isBillingStatus, shownRemaining } from '../src/shared/billing'
+import { likeContains } from '../electron/services/search'
 
 let passed = 0
 let failed = 0
@@ -978,9 +980,9 @@ eq('合计 = 样品费 + 快递费', sample.totalFee, 50 + 120)
 eq('件数', sample.totalQuantity, 3)
 eq('状态', sample.status, 'sent')
 eq('默认收款标记是未收', sample.feeStatus, 'unpaid')
-eq('公司总成本 = 工厂打样费(0) + 快递费', sample.companyCost, 120)
-eq('未收时已收回 = 0', sample.feeRecovered, 0)
-eq('公司净垫 = 成本 − 已收回 = 120', sample.netAdvance, 120)
+eq('公司总成本（基准币）= 工厂打样费(0) + 快递费 120×7.15', sample.companyCostBase, 120 * 7.15)
+eq('未收时已收回（基准币）= 0', sample.feeRecoveredBase, 0)
+eq('公司净垫（基准币）= 成本 858 − 已收回 0', sample.netAdvanceBase, 120 * 7.15)
 eq('待收（原币 170 × 7.15）折基准币', sample.receivableBase, 170 * 7.15)
 eq('汇率已填 → 不报 rateMissing', sample.rateMissing, false)
 eq('打样单记住了客户', sample.customer?.company, c1.company)
@@ -1048,7 +1050,8 @@ const smpPaid = samples.saveSample({
   items: [{ styleNo: 'A001', color: 'White', size: 'S', quantity: 1, unitPrice: 10 }]
 })
 eq('已收款标记不需要汇率', smpPaid.feeStatus, 'paid')
-eq('已收的样品费 + 快递费都算已收回', smpPaid.feeRecovered, 10 + 80)
+eq('已收的样品费 + 快递费都算已收回（基准币）', smpPaid.feeRecoveredBase, null)
+eq('已收单没填汇率：样品费折不出来，界面上是「—」', smpPaid.sampleFeeBase, null)
 eq('已收的打样单不计待收', smpPaid.receivableBase, 0)
 
 // N23：未收的打样费要进 totalReceivable（工作台口径）
@@ -1092,7 +1095,7 @@ const smpDates = samples.saveSample({
 })
 eq('寄出日期记住了', smpDates.shippedAt, '2026-10-22')
 eq('签收日期记住了', smpDates.receivedAt, '2026-10-25')
-eq('公司净垫 = 工厂 30 − 已收样品费 10（快递费已收，不再重复垫）', smpDates.netAdvance, 30 - 10)
+eq('没填汇率 → 净垫折不出来，不拿 1 凑数', smpDates.netAdvanceBase, null)
 
 // N24：打样转订单（不抵扣）
 const smpConv = samples.saveSample({
@@ -1161,7 +1164,7 @@ check('抵扣 → 订单里出现负费用行', !!offsetCharge, JSON.stringify(o
 eq('负费用行金额 = -样品费', offsetCharge?.amount, -15)
 const smpOffsetAfter = samples.getSample(smpOffset.id)!
 eq('抵扣后打样单标记为下单抵扣', smpOffsetAfter.feeStatus, 'offset')
-eq('抵扣的样品费算已收回', smpOffsetAfter.feeRecovered, 15)
+eq('抵扣的样品费算已收回（USD15 × 7.2 折基准币）', smpOffsetAfter.feeRecoveredBase, 15 * 7.2)
 eq('抵扣的打样单不计待收', smpOffsetAfter.receivableBase, 0)
 
 // N-4：抵扣转出来的 0 元单不许显示「赚钱」——毛利 = 含费用合计（实收口径）− 成本，负数就写负数
@@ -1479,6 +1482,38 @@ const csvIdx = {
 const csvRow = csvRows.find((r) => r.split(',')[csvIdx.no] === moneyOrder.orderNo)!
 eq('导出台账的待收 = 订单详情的待收', Number(csvRow.split(',')[csvIdx.remain]), detailRemaining)
 eq('导出台账的含费用合计 = 订单详情的含费用合计', Number(csvRow.split(',')[csvIdx.total]), mo.grandTotal)
+// —— R10：列表换瘦身行（listOrderRows），但必须和详情同一个口径、分页拿的是筛选集 ——
+{
+  const rowPage = orders.listOrderRows({ keyword: moneyOrder.orderNo })
+  eq('瘦身列表只回这一单', rowPage.total, 1)
+  eq('瘦身列表的待收 = 订单详情的待收（同一个 money.ts）', rowPage.rows[0].remaining, detailRemaining)
+  const bigPage = orders.listOrderRows({ limit: 2, offset: 0 })
+  eq('分页：本页最多 2 行', bigPage.rows.length, 2)
+  eq('分页：total 是筛选集，不是本页行数', bigPage.total, orders.listOrderRows({}).total)
+  const page2 = orders.listOrderRows({ limit: 2, offset: 2 })
+  check(
+    '分页：第二页不与第一页重叠',
+    !page2.rows.some((r) => bigPage.rows.some((x) => x.id === r.id))
+  )
+  const owedRows = orders.listOrderRows({ sort: 'owed_desc' }).rows
+  check(
+    '待收排序（基准币）单调不增',
+    owedRows.every((r, i) => i === 0 || owedRows[i - 1].remainingBase >= r.remainingBase)
+  )
+  eq('日期区间按本地日切：今天建的单落在 [今天, 今天] 里', orders.listOrderRows({ from: localDate(), to: localDate() }).rows.some((r) => r.id === moneyOrder.id), true)
+  check('日期区间收窄后不多于全量', orders.listOrderRows({ from: '2000-01-01', to: localDate() }).total <= orders.listOrderRows({}).total)
+  // 待收口径单一真源：不催款的单（草稿/失效/作废）界面一律「—」
+  eq('草稿单不催款', isBillingStatus('draft'), false)
+  eq('作废单不催款', isBillingStatus('void'), false)
+  eq('已发送的单要催款', isBillingStatus('sent'), true)
+  eq('不催款的单待收显示 0（界面画「—」）', shownRemaining('void', 500), 0)
+  eq('正常单待收原样显示', shownRemaining('sent', 500), 500)
+  eq('多收不算待收', shownRemaining('partial', -80), 0)
+  // 搜索关键词里的 % _ 是真字符，不是通配符
+  eq('LIKE 转义：搜 100% 不会匹配一切', orders.listOrderRows({ keyword: '100%' }).total, 0)
+  eq('LIKE 转义：下标不当通配符', likeContains('A_B'), '%A\\_B%')
+  eq('LIKE 转义：反斜杠本身也要转', likeContains('a\\b'), '%a\\\\b%')
+}
 // ⑥ PI / CI / 报价单 上的合计必须相等
 const piHtml = renderPi({ order: mo, settings: getSettings(), images: {} })
 check('PI 上合计 = 含费用合计', piHtml.includes(mo.grandTotal.toFixed(2)))

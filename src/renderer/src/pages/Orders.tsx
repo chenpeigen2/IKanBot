@@ -1,12 +1,28 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Modal, useToast, money, num, Empty, fmtDate, today, PaymentTag, ShipTag, Button } from '../ui'
+import {
+  Modal,
+  useToast,
+  money,
+  moneyOrDash,
+  num,
+  Empty,
+  fmtDate,
+  today,
+  PaymentTag,
+  ShipTag,
+  Button,
+  useDebounced,
+  useLoadGuard
+} from '../ui'
+import { isBillingStatus, shownRemaining } from '../../../shared/billing'
 import {
   CURRENCIES,
   INCOTERMS,
   PAYMENT_METHOD_LABEL,
   PAYMENT_STATUS_LABEL,
   SHIP_STATUS_LABEL,
+  SHIP_STATUS_ORDER,
   type Currency,
   type Incoterm,
   type PaymentMethod,
@@ -14,28 +30,58 @@ import {
   type ShipStatus
 } from '../../../shared/types'
 
+/** 一页多少张单：跟单员一屏能扫完的量，再多就没人在列表上看明细了 */
+const PAGE_SIZE = 50
+
 export default function Orders() {
   const navigate = useNavigate()
   const toast = useToast()
   const [params, setParams] = useSearchParams()
-  const [list, setList] = useState<any[]>([])
+  const [rows, setRows] = useState<any[]>([])
+  const [total, setTotal] = useState(0)
+  const [owedBase, setOwedBase] = useState(0)
+  const [grandBase, setGrandBase] = useState(0)
+  const [baseCurrency, setBaseCurrency] = useState('CNY')
   const [keyword, setKeyword] = useState('')
   const [statusTab, setStatusTab] = useState<string>('')
+  const [shipStatus, setShipStatus] = useState<string>('')
+  const [from, setFrom] = useState('')
+  const [to, setTo] = useState('')
   const [sort, setSort] = useState('created_desc')
+  const [page, setPage] = useState(0)
   const [showCreate, setShowCreate] = useState(params.get('new') === '1')
+  /** 敲太快不重复打后端；后到的旧结果不许盖住新关键词 */
+  const kw = useDebounced(keyword, 250)
+  const begin = useLoadGuard()
 
   const load = async () => {
-    const rows = await window.api.orders.list({
-      keyword,
+    const { isCurrent } = begin()
+    const pageData = await window.api.orders.list({
+      keyword: kw,
       paymentStatus: statusTab || undefined,
-      sort
+      shipStatus: shipStatus || undefined,
+      from: from || undefined,
+      to: to || undefined,
+      sort,
+      limit: PAGE_SIZE,
+      offset: page * PAGE_SIZE
     })
-    setList(rows)
+    if (!isCurrent()) return
+    setRows(pageData.rows)
+    setTotal(pageData.total)
+    setOwedBase(pageData.owedBaseTotal)
+    setGrandBase(pageData.grandBaseTotal)
+    if (pageData.rows[0]?.baseCurrency) setBaseCurrency(pageData.rows[0].baseCurrency)
   }
   useEffect(() => {
     void load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keyword, statusTab, sort])
+  }, [kw, statusTab, shipStatus, from, to, sort, page])
+
+  // 换了筛选条件就回到第一页，否则停在不存在的第 8 页上看着「没有订单」
+  useEffect(() => {
+    setPage(0)
+  }, [kw, statusTab, shipStatus, from, to, sort])
 
   const tabs = useMemo(
     () => [
@@ -44,6 +90,8 @@ export default function Orders() {
     ],
     []
   )
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  const hasFilter = Boolean(kw || statusTab || shipStatus || from || to)
 
   return (
     <>
@@ -62,13 +110,10 @@ export default function Orders() {
         <div className="toolbar">
           <input
             className="search"
-            placeholder="搜索订单号 / PI号 / 客户 / PO号 / 款号"
+            placeholder="搜索订单号 / PI / 客户 / PO / 款号颜色 / 工厂 / 船名 / 目的港 / 柜号 / 提单号 / 流水号"
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
           />
-          <Button  onClick={load}>
-            搜索
-          </Button>
           <select
             style={{ width: 160 }}
             value={sort}
@@ -77,12 +122,48 @@ export default function Orders() {
           >
             <option value="created_desc">创建时间（新→旧）</option>
             <option value="created_asc">创建时间（旧→新）</option>
-            <option value="amount_desc">金额（高→低）</option>
-            <option value="amount_asc">金额（低→高）</option>
+            <option value="amount_desc">货值（高→低）</option>
+            <option value="amount_asc">货值（低→高）</option>
+            <option value="owed_desc">待收（多→少）</option>
+            <option value="overdue_first">逾期（久→近）</option>
             <option value="ship_asc">预计出货日（近→远）</option>
           </select>
+          <select
+            style={{ width: 130 }}
+            value={shipStatus}
+            onChange={(e) => setShipStatus(e.target.value)}
+            title="按出货状态筛选"
+          >
+            <option value="">全部出货状态</option>
+            {SHIP_STATUS_ORDER.map((s) => (
+              <option key={s} value={s}>
+                {SHIP_STATUS_LABEL[s]}
+              </option>
+            ))}
+          </select>
+          <span className="faint">下单日期</span>
+          <input type="date" className="col-num-sm" value={from} onChange={(e) => setFrom(e.target.value)} />
+          <span className="faint">至</span>
+          <input type="date" className="col-num-sm" value={to} onChange={(e) => setTo(e.target.value)} />
+          {hasFilter ? (
+            <button
+              className="link"
+              onClick={() => {
+                setKeyword('')
+                setStatusTab('')
+                setShipStatus('')
+                setFrom('')
+                setTo('')
+              }}
+            >
+              清空筛选
+            </button>
+          ) : null}
           <div className="spacer" />
-          <span className="faint">共 {list.length} 单</span>
+          <span className="faint" title={`按筛选出来的全部订单算，折成基准币 ${baseCurrency}（不是只算这一页）`}>
+            共 {total} 单{pageCount > 1 ? ` · 第 ${page + 1}/${pageCount} 页` : ''}
+            {total > 0 ? ` · 待收合计 ${money(owedBase, baseCurrency)}` : ''}
+          </span>
         </div>
 
         <div className="card">
@@ -98,11 +179,11 @@ export default function Orders() {
             ))}
           </div>
           <div className="card-body tight">
-            {list.length === 0 ? (
+            {rows.length === 0 ? (
               <Empty
                 text={
-                  keyword || statusTab
-                    ? `当前筛选条件下没有订单${statusTab ? `（收款状态：${PAYMENT_STATUS_LABEL[statusTab as keyof typeof PAYMENT_STATUS_LABEL] ?? statusTab}）` : ''}${keyword ? `（关键词：${keyword}）` : ''}。单子没丢——把搜索框或状态页签清空就能看到全部。`
+                  hasFilter
+                    ? `当前筛选条件下没有订单${statusTab ? `（收款状态：${PAYMENT_STATUS_LABEL[statusTab as keyof typeof PAYMENT_STATUS_LABEL] ?? statusTab}）` : ''}${kw ? `（关键词：${kw}）` : ''}${from || to ? `（日期：${from || '不限'} ~ ${to || '不限'}）` : ''}。单子没丢——点「清空筛选」就能看到全部。`
                     : '还没有订单。点右上角「新建订单」开始录入。'
                 }
               />
@@ -114,20 +195,27 @@ export default function Orders() {
                       <th>订单号</th>
                       <th>PI号</th>
                       <th>客户</th>
+                      <th className="num">件数</th>
+                      <th className="num" title="已装进装箱单的件数（作废批次不算）">
+                        已装
+                      </th>
                       <th className="num">货值</th>
                       <th className="num">含费用合计</th>
-                      <th className="num">件数</th>
                       <th className="num">已收</th>
-                      <th className="num">待收</th>
+                      <th className="num" title="草稿 / 已失效 / 已作废的单不催款，这里显示「—」">
+                        待收
+                      </th>
                       <th>收款状态</th>
                       <th>出货状态</th>
                       <th>预计出货</th>
+                      <th title="实际开船日 / 截关日">船期</th>
+                      <th>柜号</th>
                       <th>创建日期</th>
                       <th></th>
                     </tr>
                   </thead>
                   <tbody>
-                    {list.map((o) => (
+                    {rows.map((o) => (
                       <tr
                         key={o.id}
                         className="clickable"
@@ -141,23 +229,31 @@ export default function Orders() {
                         <td className="mono nowrap clip-116 mono-sm" title={o.piNo}>
                           {o.piNo}
                         </td>
-                        <td className="nowrap">{o.customer?.company}</td>
+                        <td className="nowrap" title={o.portOfDestination ? `目的港 ${o.portOfDestination}` : undefined}>
+                          {o.customer?.company}
+                        </td>
+                        <td className="num">{num(o.totalQuantity)}</td>
+                        <td
+                          className={`num ${o.packedQuantity && o.packedQuantity < o.totalQuantity ? 'amber-num' : 'faint'}`}
+                          title={
+                            o.batchCount
+                              ? `${o.batchCount} 个批次${o.styleCount ? ` · ${o.styleCount} 款` : ''}`
+                              : '还没建装箱单'
+                          }
+                        >
+                          {o.packedQuantity ? num(o.packedQuantity) : '—'}
+                        </td>
                         <td className="num nowrap">{money(o.totalAmount, o.currency)}</td>
                         {/* R1-⑤：副说明改 title 提示，不再把行高从 38px 撑到 52px */}
                         <td
                           className="num nowrap"
-                          title={o.charges?.length ? '含运费保险' : undefined}
+                          title={o.chargesCount ? '含运费保险' : undefined}
                         >
                           {money(o.grandTotal, o.currency)}
                         </td>
-                        <td className="num">{num(o.totalQuantity)}</td>
                         <td className="num nowrap">{money(o.paidAmount, o.currency)}</td>
-                        <td className="num nowrap">
-                          {o.paymentStatus === 'void' ? (
-                            <span className="faint">—</span>
-                          ) : (
-                            money(o.remaining, o.currency)
-                          )}
+                        <td className="num nowrap" title={isBillingStatus(o.paymentStatus) ? undefined : '这张单不催款'}>
+                          {isBillingStatus(o.paymentStatus) ? money(shownRemaining(o.paymentStatus, o.remaining), o.currency) : <span className="faint">—</span>}
                         </td>
                         <td>
                           <PaymentTag status={o.paymentStatus} />
@@ -165,7 +261,22 @@ export default function Orders() {
                         <td>
                           <ShipTag status={o.shipStatus} />
                         </td>
-                        <td className="nowrap faint">{fmtDate(o.expectedShipDate) || '—'}</td>
+                        <td className="nowrap">
+                          {o.daysLate ? (
+                            <span className="tag amber" title={`预计出货日已过 ${o.daysLate} 天，货还没走`} role="button">
+                              逾期 {o.daysLate} 天
+                            </span>
+                          ) : (
+                            <span className="faint">{fmtDate(o.expectedShipDate) || '—'}</span>
+                          )}
+                        </td>
+                        <td className="nowrap mono-sm faint" title={`ETD ${fmtDate(o.etdDate) || '未填'} / 截关 ${fmtDate(o.cutOffDate) || '未填'}`}>
+                          {fmtDate(o.etdDate).slice(5) || '—'}
+                          {o.cutOffDate ? ` / ${fmtDate(o.cutOffDate).slice(5)}` : ''}
+                        </td>
+                        <td className="mono clip-96 mono-sm" title={o.containerNos || undefined}>
+                          {o.containerNos || <span className="faint">—</span>}
+                        </td>
                         <td className="nowrap faint">{fmtDate(o.createdAt)}</td>
                         <td className="cell-actions">
                           <button
@@ -199,7 +310,7 @@ export default function Orders() {
                                   `确认删除订单 ${o.orderNo}？\n\n` +
                                     `含费用合计 ${money(o.grandTotal, o.currency)}\n` +
                                     `已收 ${money(o.paidAmount, o.currency)}\n` +
-                                    `待收 ${money(o.remaining, o.currency)}\n\n` +
+                                    `待收 ${money(shownRemaining(o.paymentStatus, o.remaining), o.currency)}\n\n` +
                                     '有明细或收款的单删了凭据会一起没有，系统会拦你。请改用「作废」。'
                                 )
                               )
@@ -219,6 +330,34 @@ export default function Orders() {
                       </tr>
                     ))}
                   </tbody>
+                  <tfoot>
+                    <tr className="tfoot-strong">
+                      <td colSpan={8} className="right faint">
+                        {/* 合计按筛选出来的全部订单算（基准币），不是只算这一页 */}
+                        {`本页 ${rows.length} 单 · 筛选共 ${total} 单的`}
+                      </td>
+                      <td className="num nowrap">{moneyOrDash(owedBase, baseCurrency)}</td>
+                      <td colSpan={4} className="right faint">
+                        {`成交额 ${money(grandBase, baseCurrency)}`}
+                      </td>
+                      <td colSpan={3}>
+                        {pageCount > 1 ? (
+                          <span className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
+                            <Button size="sm" disabled={page === 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>
+                              上一页
+                            </Button>
+                            <Button
+                              size="sm"
+                              disabled={page + 1 >= pageCount}
+                              onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+                            >
+                              下一页
+                            </Button>
+                          </span>
+                        ) : null}
+                      </td>
+                    </tr>
+                  </tfoot>
                 </table>
               </div>
             )}

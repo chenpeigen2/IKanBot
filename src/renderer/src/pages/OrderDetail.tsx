@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   Modal, useToast, money, num, fmtDate, fmtDateTime, Empty, Menu,
-  Button, PaymentTag, ShipTag
+  Button, PaymentTag, ShipTag, clientKey
 } from '../ui'
 import {
   PAYMENT_METHOD_LABEL,
@@ -750,8 +750,8 @@ function ChargesEditor({
   onSaved: () => Promise<void>
 }) {
   const toast = useToast()
-  const [charges, setCharges] = useState<{ label: string; amount: number }[]>(
-    (order.charges ?? []).map((c: any) => ({ label: String(c.label), amount: Number(c.amount) || 0 }))
+  const [charges, setCharges] = useState<{ uid: string; label: string; amount: number }[]>(
+    (order.charges ?? []).map((c: any) => ({ uid: clientKey(), label: String(c.label), amount: Number(c.amount) || 0 }))
   )
   const total = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
 
@@ -759,7 +759,7 @@ function ChargesEditor({
     try {
       await window.api.orders.updateCharges(
         order.id,
-        charges.filter((c) => c.label.trim())
+        charges.filter((c) => c.label.trim()).map((c) => ({ label: c.label, amount: c.amount }))
       )
       toast('费用已改，PI / CI 上的合计同步变了')
       await onSaved()
@@ -773,7 +773,7 @@ function ChargesEditor({
       <div className="row" style={{ marginBottom: 6 }}>
         <strong className="sec-head">费用（运费 / 保险费 / 其他）</strong>
         <div className="spacer" />
-        <Button size="sm"  onClick={() => setCharges((cs) => [...cs, { label: '运费 Freight', amount: 0 }])}>
+        <Button size="sm"  onClick={() => setCharges((cs) => [...cs, { uid: clientKey(), label: '运费 Freight', amount: 0 }])}>
           + 加费用
         </Button>
       </div>
@@ -796,13 +796,13 @@ function ChargesEditor({
                 </td>
               </tr>
             ) : (
-              charges.map((c, i) => (
-                <tr key={i}>
+              charges.map((c) => (
+                <tr key={c.uid}>
                   <td>
                     <input
                       value={c.label}
                       onChange={(e) =>
-                        setCharges((cs) => cs.map((x, k) => (k === i ? { ...x, label: e.target.value } : x)))
+                        setCharges((cs) => cs.map((x) => (x.uid === c.uid ? { ...x, label: e.target.value } : x)))
                       }
                     />
                   </td>
@@ -814,7 +814,7 @@ function ChargesEditor({
                       value={c.amount}
                       onChange={(e) =>
                         setCharges((cs) =>
-                          cs.map((x, k) => (k === i ? { ...x, amount: Number(e.target.value) } : x))
+                          cs.map((x) => (x.uid === c.uid ? { ...x, amount: Number(e.target.value) } : x))
                         )
                       }
                     />
@@ -822,7 +822,7 @@ function ChargesEditor({
                   <td className="right">
                     <Button variant="danger" size="sm"
                       
-                      onClick={() => setCharges((cs) => cs.filter((_, k) => k !== i))}
+                      onClick={() => setCharges((cs) => cs.filter((x) => x.uid !== c.uid))}
                     >
                       删除
                     </Button>
@@ -866,8 +866,8 @@ function CiModal({
   onPreview: (charges: { label: string; amount: number }[]) => void
 }) {
   // 费用行默认按订单上的一行行带出来：CI 与 PI 必须是同一套数字
-  const [charges, setCharges] = useState<{ label: string; amount: number }[]>(
-    (order.charges ?? []).map((c: any) => ({ label: String(c.label), amount: Number(c.amount) || 0 }))
+  const [charges, setCharges] = useState<{ uid: string; label: string; amount: number }[]>(
+    (order.charges ?? []).map((c: any) => ({ uid: clientKey(), label: String(c.label), amount: Number(c.amount) || 0 }))
   )
   const chargeTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
   const total = order.totalAmount + chargeTotal
@@ -899,7 +899,7 @@ function CiModal({
         <div className="spacer" />
         <Button size="sm"
           
-          onClick={() => setCharges((cs) => [...cs, { label: '运费 Freight', amount: 0 }])}
+          onClick={() => setCharges((cs) => [...cs, { uid: clientKey(), label: '运费 Freight', amount: 0 }])}
         >
           + 加费用
         </Button>
@@ -919,13 +919,13 @@ function CiModal({
               </tr>
             </thead>
             <tbody>
-              {charges.map((c, i) => (
-                <tr key={i}>
+              {charges.map((c) => (
+                <tr key={c.uid}>
                   <td>
                     <input
                       value={c.label}
                       onChange={(e) =>
-                        setCharges((cs) => cs.map((x, k) => (k === i ? { ...x, label: e.target.value } : x)))
+                        setCharges((cs) => cs.map((x) => (x.uid === c.uid ? { ...x, label: e.target.value } : x)))
                       }
                     />
                   </td>
@@ -937,7 +937,7 @@ function CiModal({
                       value={c.amount}
                       onChange={(e) =>
                         setCharges((cs) =>
-                          cs.map((x, k) => (k === i ? { ...x, amount: Number(e.target.value) } : x))
+                          cs.map((x) => (x.uid === c.uid ? { ...x, amount: Number(e.target.value) } : x))
                         )
                       }
                     />
@@ -945,7 +945,7 @@ function CiModal({
                   <td className="right">
                     <Button variant="danger" size="sm"
                       
-                      onClick={() => setCharges((cs) => cs.filter((_, k) => k !== i))}
+                      onClick={() => setCharges((cs) => cs.filter((x) => x.uid !== c.uid))}
                     >
                       删除
                     </Button>
@@ -2913,10 +2913,10 @@ function CreatePlModal({
             </tr>
           </thead>
           <tbody>
-            {skus.map((s, i) => {
+            {skus.map((s) => {
               const key = skuKey(s)
               return (
-                <tr key={i}>
+                <tr key={key}>
                   <td className="mono">{s.styleNo}</td>
                   <td>{s.productName}</td>
                   <td>{s.color}</td>
@@ -2969,7 +2969,7 @@ function CreatePlModal({
             </thead>
             <tbody>
               {boxes.map((b, i) => (
-                <tr key={i}>
+                <tr key={`${b.boxNo}-${b.styleNo}-${b.color}-${b.size}-${i}`}>
                   <td>{b.boxNo}</td>
                   <td className="mono">{b.styleNo}</td>
                   <td>{b.color}</td>

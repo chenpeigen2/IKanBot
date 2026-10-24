@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Modal, useToast, money, num, Empty, fmtDate, today, ActionMenu, SampleStatusTag, Button, SampleFeeTag } from '../ui'
+import { Modal, useToast, money, moneyOrDash, num, Empty, fmtDate, today, ActionMenu, SampleStatusTag, Button, SampleFeeTag, clientKey } from '../ui'
 import {
   SAMPLE_STATUS_LABEL,
   SAMPLE_STATUS_ORDER,
@@ -13,6 +13,8 @@ import {
 import { renderSample } from '../../../shared/documents'
 
 interface LineRow {
+  /** 前端行身份，见 ui.tsx clientKey；提交时不带 */
+  uid: string
   productId: number | null
   styleNo: string
   productName: string
@@ -33,6 +35,8 @@ export default function Samples() {
   const toast = useToast()
   const navigate = useNavigate()
   const [list, setList] = useState<any[]>([])
+  /** 列表金额一律折基准币（B2）：币种名取自设置，表头好写明「约 CNY」 */
+  const [baseCurrency, setBaseCurrency] = useState('CNY')
   // 工作台点「打样」提醒带 ?kw=SMP-0001 跳进来：直接把那一单筛出来，别让人再搜一遍
   const [searchParams] = useSearchParams()
   const [keyword, setKeyword] = useState(searchParams.get('kw') ?? '')
@@ -52,6 +56,10 @@ export default function Samples() {
     void load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keyword, status])
+
+  useEffect(() => {
+    void window.api.settings.get().then((s) => setBaseCurrency(s?.baseCurrency ?? 'CNY'))
+  }, [])
 
   const remove = async (s: any) => {
     if (!confirm(`确认删除打样单 ${s.sampleNo}？`)) return
@@ -148,13 +156,13 @@ export default function Samples() {
                       <th>款号</th>
                       <th className="num">件数</th>
                       {/* R1：双行表头去掉，副说明改 title，表头行高回到 36px */}
-                      <th className="num" title="样品费：应收客户">
+                      <th className="num" title={`样品费（应收客户），按本单汇率折成 ${baseCurrency}；没填汇率显示「—」`}>
                         样品费
                       </th>
-                      <th className="num" title="快递费：公司垫付">
+                      <th className="num" title={`快递费（公司垫付、向客户收回），按本单汇率折成 ${baseCurrency}`}>
                         快递费
                       </th>
-                      <th className="num" title="公司净垫：成本−已收回">
+                      <th className="num" title={`公司净垫 = 工厂打样费（${baseCurrency}）+ 快递费 − 已收回；没填汇率折不出来`}>
                         公司净垫
                       </th>
                       <th className="num" title="待收：计入工作台">
@@ -182,15 +190,15 @@ export default function Samples() {
                           {s.items.map((i: any) => i.styleNo).filter(Boolean).join('、') || '—'}
                         </td>
                         <td className="num">{num(s.totalQuantity)}</td>
-                        <td className="num">{money(s.sampleFee)}</td>
-                        <td className="num">{money(s.expressFee)}</td>
-                        <td className="num">{money(s.netAdvance)}</td>
+                        <td className="num nowrap">{moneyOrDash(s.sampleFeeBase, baseCurrency)}</td>
+                        <td className="num nowrap">{moneyOrDash(s.expressFeeBase, baseCurrency)}</td>
+                        <td className="num nowrap">{moneyOrDash(s.netAdvanceBase, baseCurrency)}</td>
                         <td className="num">
                           {s.feeStatus === 'unpaid' && s.totalFee > 0 ? (
                             s.rateMissing ? (
                               <span className="tag amber" title="汇率未填，工作台待收里少算了这单，请编辑补上">⚠ 汇率未填</span>
                             ) : (
-                              <span>{money(s.receivableBase)}</span>
+                              <span>{money(s.receivableBase, baseCurrency)}</span>
                             )
                           ) : (
                             <span className="faint">—</span>
@@ -426,6 +434,7 @@ function SampleModal({
   })
   const [lines, setLines] = useState<LineRow[]>(
     (draft.items ?? []).map((it: any) => ({
+      uid: clientKey(),
       productId: it.productId ?? null,
       styleNo: it.styleNo,
       productName: it.productName,
@@ -447,13 +456,13 @@ function SampleModal({
   const sampleFee = lines.reduce((s, l) => s + l.quantity * l.unitPrice, 0)
   const totalQty = lines.reduce((s, l) => s + l.quantity, 0)
 
-  const setLine = (i: number, patch: Partial<LineRow>) =>
-    setLines((ls) => ls.map((l, k) => (k === i ? { ...l, ...patch } : l)))
+  const setLine = (uid: string, patch: Partial<LineRow>) =>
+    setLines((ls) => ls.map((l) => (l.uid === uid ? { ...l, ...patch } : l)))
 
   /** 手打款号：商品库里有就把品名/成分带出来 */
-  const onStyleChange = (i: number, styleNo: string) => {
+  const onStyleChange = (uid: string, styleNo: string) => {
     const hit = products.find((p) => p.styleNo === styleNo)
-    setLine(i, {
+    setLine(uid, {
       styleNo,
       productId: hit?.id ?? null,
       productName: hit?.name ?? '',
@@ -467,6 +476,7 @@ function SampleModal({
       return
     }
     const clean = lines.filter((l) => l.styleNo.trim() && l.quantity > 0)
+    const cleanItems = clean.map(({ uid: _uid, ...rest }) => rest)
     if (clean.length === 0) {
       toast('请至少填写一行样品明细', 'error')
       return
@@ -490,7 +500,7 @@ function SampleModal({
         currency: form.currency,
         exchangeRate: Number(form.exchangeRate) || 0,
         exchangeRateDate: form.exchangeRateDate,
-        items: clean
+        items: cleanItems
       })
       await onSaved()
     } catch (e) {
@@ -689,6 +699,7 @@ function SampleModal({
             setLines((ls) => [
               ...ls,
               {
+                uid: clientKey(),
                 productId: null,
                 styleNo: '',
                 productName: '',
@@ -733,31 +744,31 @@ function SampleModal({
                 </td>
               </tr>
             ) : (
-              lines.map((l, i) => (
-                <tr key={i}>
+              lines.map((l) => (
+                <tr key={l.uid}>
                   <td>
                     <input
                       list="sample-style-list"
                       value={l.styleNo}
-                      onChange={(e) => onStyleChange(i, e.target.value)}
+                      onChange={(e) => onStyleChange(l.uid, e.target.value)}
                       placeholder="款号"
                     />
                   </td>
                   <td>
-                    <input value={l.productName} onChange={(e) => setLine(i, { productName: e.target.value })} />
+                    <input value={l.productName} onChange={(e) => setLine(l.uid, { productName: e.target.value })} />
                   </td>
                   <td>
-                    <input value={l.color} onChange={(e) => setLine(i, { color: e.target.value })} />
+                    <input value={l.color} onChange={(e) => setLine(l.uid, { color: e.target.value })} />
                   </td>
                   <td>
-                    <input value={l.size} onChange={(e) => setLine(i, { size: e.target.value })} />
+                    <input value={l.size} onChange={(e) => setLine(l.uid, { size: e.target.value })} />
                   </td>
                   <td className="num">
                     <input
                       type="number"
                       className="col-num-sm"
                       value={l.quantity}
-                      onChange={(e) => setLine(i, { quantity: Number(e.target.value) })}
+                      onChange={(e) => setLine(l.uid, { quantity: Number(e.target.value) })}
                     />
                   </td>
                   <td className="num">
@@ -766,7 +777,7 @@ function SampleModal({
                       step="0.01"
                       className="col-num-sm"
                       value={l.unitPrice}
-                      onChange={(e) => setLine(i, { unitPrice: Number(e.target.value) })}
+                      onChange={(e) => setLine(l.uid, { unitPrice: Number(e.target.value) })}
                     />
                   </td>
                   <td className="num">{(l.quantity * l.unitPrice).toFixed(2)}</td>
@@ -778,12 +789,12 @@ function SampleModal({
                       value={l.goodsUnitPrice ?? ''}
                       placeholder="转单必填"
                       onChange={(e) =>
-                        setLine(i, { goodsUnitPrice: e.target.value === '' ? null : Number(e.target.value) })
+                        setLine(l.uid, { goodsUnitPrice: e.target.value === '' ? null : Number(e.target.value) })
                       }
                     />
                   </td>
                   <td className="right">
-                    <Button variant="danger" size="sm"  onClick={() => setLines((ls) => ls.filter((_, k) => k !== i))}>
+                    <Button variant="danger" size="sm"  onClick={() => setLines((ls) => ls.filter((x) => x.uid !== l.uid))}>
                       删除
                     </Button>
                   </td>

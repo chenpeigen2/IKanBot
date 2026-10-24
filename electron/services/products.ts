@@ -2,6 +2,7 @@ import { existsSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import { getDb, imagesDir } from '../db'
 import { mapProduct, mapProductImage } from '../db/mappers'
+import { likeAny } from './search'
 import type { Product, ProductImage } from '../../src/shared/types'
 
 export interface ProductInput {
@@ -78,9 +79,13 @@ export function listProducts(keyword = '', includeInactive = false): Product[] {
   const params: (string | number | null)[] = []
   if (!includeInactive) where.push('active = 1')
   if (keyword.trim()) {
-    where.push('(style_no LIKE ? OR name LIKE ? OR composition LIKE ? OR note LIKE ? OR factory LIKE ? OR factory_no LIKE ?)')
-    const k = `%${keyword.trim()}%`
-    params.push(k, k, k, k, k, k)
+    // 颜色/尺码/季节这些存在 JSON 列里，子串命中一样能搜到（跟单员就是按「海军蓝 M」找款的）
+    const hit = likeAny(
+      ['style_no', 'name', 'composition', 'note', 'factory', 'factory_no', 'colors', 'sizes', 'category', 'brand', 'season'],
+      keyword.trim()
+    )
+    where.push(`(${hit.sql})`)
+    params.push(...hit.params)
   }
   const sql = `SELECT * FROM products ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY style_no`
   return (db.all(sql, params) as Record<string, unknown>[]).map(mapProduct)

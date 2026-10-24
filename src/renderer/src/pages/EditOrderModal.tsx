@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Modal, useToast, today, money, Button } from '../ui'
+import { Modal, useToast, today, money, Button, clientKey } from '../ui'
 import {
   CURRENCIES,
   INCOTERMS,
@@ -55,8 +55,8 @@ export default function EditOrderModal({
     loading: [],
     destination: []
   })
-  const [charges, setCharges] = useState<{ label: string; amount: number }[]>(
-    (order.charges ?? []).map((c: any) => ({ label: String(c.label), amount: Number(c.amount) || 0 }))
+  const [charges, setCharges] = useState<{ uid: string; label: string; amount: number }[]>(
+    (order.charges ?? []).map((c: any) => ({ uid: clientKey(), label: String(c.label), amount: Number(c.amount) || 0 }))
   )
   const [form, setForm] = useState<EditForm>({
     customerId: order.customerId,
@@ -140,7 +140,7 @@ export default function EditOrderModal({
         etdDate: form.etdDate || null,
         vessel: form.vessel,
         sealNo: form.sealNo,
-        charges: charges.filter((c) => c.label.trim())
+        charges: charges.filter((c) => c.label.trim()).map((c) => ({ label: c.label, amount: c.amount }))
       })
       toast('订单已更新')
       await onSaved()
@@ -421,7 +421,7 @@ export default function EditOrderModal({
       <div className="row" style={{ marginBottom: 5 }}>
         <span className="hint">CIF / CFR / FOB 天天变，运费保险在这里改，PI 和 CI 会一起变</span>
         <div className="spacer" />
-        <Button size="sm"  onClick={() => setCharges((cs) => [...cs, { label: '运费 Freight', amount: 0 }])}>
+        <Button size="sm"  onClick={() => setCharges((cs) => [...cs, { uid: clientKey(), label: '运费 Freight', amount: 0 }])}>
           + 加费用
         </Button>
       </div>
@@ -440,13 +440,13 @@ export default function EditOrderModal({
               </tr>
             </thead>
             <tbody>
-              {charges.map((c, i) => (
-                <tr key={i}>
+              {charges.map((c) => (
+                <tr key={c.uid}>
                   <td>
                     <input
                       value={c.label}
                       onChange={(e) =>
-                        setCharges((cs) => cs.map((x, k) => (k === i ? { ...x, label: e.target.value } : x)))
+                        setCharges((cs) => cs.map((x) => (x.uid === c.uid ? { ...x, label: e.target.value } : x)))
                       }
                     />
                   </td>
@@ -458,7 +458,7 @@ export default function EditOrderModal({
                       value={c.amount}
                       onChange={(e) =>
                         setCharges((cs) =>
-                          cs.map((x, k) => (k === i ? { ...x, amount: Number(e.target.value) } : x))
+                          cs.map((x) => (x.uid === c.uid ? { ...x, amount: Number(e.target.value) } : x))
                         )
                       }
                     />
@@ -466,7 +466,7 @@ export default function EditOrderModal({
                   <td className="right">
                     <Button variant="danger" size="sm"
                       
-                      onClick={() => setCharges((cs) => cs.filter((_, k) => k !== i))}
+                      onClick={() => setCharges((cs) => cs.filter((x) => x.uid !== c.uid))}
                     >
                       删除
                     </Button>

@@ -1912,6 +1912,12 @@ table.data th.num {
   color: var(--text-faint);
 }
 
+/* 表格里「还没齐」的数（订单列表已装件数小于件数）：只上色不加粗，
+   语义和 .stat.amber 同一条——钱/货没到手才用琥珀 */
+.amber-num {
+  color: var(--warning);
+}
+
 .mono {
   font-family: var(--mono);
   font-size: var(--text-base);

@@ -1,6 +1,8 @@
 import { getDb } from '../db'
 import { mapCustomer, mapCustomerStats } from '../db/mappers'
+import { isBillingStatus, shownRemaining } from '../../src/shared/billing'
 import { EXCLUDED_STATUSES, listOrderMoney, sampleReceivable } from './money'
+import { likeAny } from './search'
 import type { Customer, CustomerStats, StylePriceRow } from '../../src/shared/types'
 
 export interface CustomerInput {
@@ -40,9 +42,9 @@ export function listCustomers(keyword = '', includeInactive = false): Customer[]
   // 停用的客户默认不出现在建单下拉里，但历史记录一条不动
   if (!includeInactive) where.push('active = 1')
   if (keyword.trim()) {
-    const k = `%${keyword.trim()}%`
-    where.push('(company LIKE ? OR contact LIKE ? OR email LIKE ? OR country LIKE ? OR attn LIKE ?)')
-    params.push(k, k, k, k, k)
+    const hit = likeAny(['company', 'contact', 'email', 'country', 'attn'], keyword.trim())
+    where.push(`(${hit.sql})`)
+    params.push(...hit.params)
   }
   const sql = `SELECT * FROM customers ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY company`
   const rows = db.all(sql, params) as Record<string, unknown>[]
@@ -262,8 +264,9 @@ export function customerOrderBriefs(customerId: number): {
     grandTotal: r.grandTotal,
     paid: r.paidAmount,
     // 草稿 / 已失效 / 已作废的单在历史里保留，但不再向客户催款，待收按 0 显示
-    remaining: EXCLUDED_STATUSES.includes(r.paymentStatus) ? 0 : r.receivable,
-    counted: !EXCLUDED_STATUSES.includes(r.paymentStatus),
+    // （口径见 src/shared/billing.ts，订单列表和客户页必须是同一个说法）
+    remaining: shownRemaining(r.paymentStatus, r.receivable),
+    counted: isBillingStatus(r.paymentStatus),
     createdAt: r.createdAt
   }))
 }

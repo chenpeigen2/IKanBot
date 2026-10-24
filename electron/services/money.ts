@@ -26,6 +26,7 @@
  */
 import { getDb } from '../db'
 import { localMonthOf } from '../../src/shared/date'
+import { NON_BILLING_STATUSES } from '../../src/shared/billing'
 import type { CustomerReceivable, PackingAmount, QuotationCharge } from '../../src/shared/types'
 
 /** 解析费用行 JSON（运费/保险等） */
@@ -256,8 +257,12 @@ export interface MoneyListFilter {
   month?: string
 }
 
-/** 不参与销售额 / 毛利 / 待收款的状态（草稿单、已失效、已作废） */
-export const EXCLUDED_STATUSES = ['draft', 'expired', 'void']
+/**
+ * 不参与销售额 / 毛利 / 待收款的状态（草稿单、已失效、已作废）。
+ * 集合本身在 src/shared/billing.ts——列表、客户页、催款提醒和这里必须同一份，
+ * 分成两处写过的结果就是三个页面对同一张单三种说法。
+ */
+export const EXCLUDED_STATUSES = NON_BILLING_STATUSES
 
 /**
  * 现金流口径：只排除草稿单（还没成为正式订单）。
@@ -272,6 +277,83 @@ export function notInStatuses(column: string, statuses: string[]): { sql: string
     sql: `${column} NOT IN (${statuses.map(() => '?').join(',')})`,
     params: [...statuses]
   }
+}
+
+/** 批量算金额时的一张单需要什么 */
+export interface MoneyRef {
+  /** orders.id */
+  id: number
+  /** orders.charges 原始 JSON（费用行） */
+  charges: unknown
+  /** orders.deposit_ratio */
+  depositRatio: number
+}
+
+/**
+ * 一批订单的金额：明细 / 收款 / 核销各一次 IN 查询，不逐单查。
+ *
+ * 列表页以前每张单跑 9 条查询，几百张单一点要等两秒多；
+ * 批量版本把整页压成 3 条，算法仍然是 computeOrderMoney 那一个。
+ */
+export function moneyForOrders(refs: MoneyRef[]): Map<number, OrderMoney> {
+  const out = new Map<number, OrderMoney>()
+  if (refs.length === 0) return out
+  const db = getDb()
+  const ids = refs.map((r) => r.id)
+  const ph = ids.map(() => '?').join(',')
+  const itemRows = db.all(
+    `SELECT order_id, quantity, unit_price, unit_cost FROM order_items WHERE order_id IN (${ph})`,
+    ids
+  ) as Record<string, unknown>[]
+  const payRows = db.all(`SELECT order_id, amount FROM payments WHERE order_id IN (${ph})`, ids) as Record<
+    string,
+    unknown
+  >[]
+  const settleRows = db.all(
+    `SELECT order_id, kind, amount FROM order_settlements WHERE order_id IN (${ph})`,
+    ids
+  ) as Record<string, unknown>[]
+
+  const settBy = new Map<number, SettlementInput[]>()
+  for (const r of settleRows) {
+    const id = Number(r.order_id)
+    const arr = settBy.get(id) ?? []
+    arr.push({ kind: String(r.kind ?? ''), amount: Number(r.amount ?? 0) })
+    settBy.set(id, arr)
+  }
+
+  const itemsBy = new Map<number, MoneyItem[]>()
+  for (const r of itemRows) {
+    const id = Number(r.order_id)
+    const arr = itemsBy.get(id) ?? []
+    arr.push({
+      quantity: Number(r.quantity ?? 0),
+      unitPrice: Number(r.unit_price ?? 0),
+      unitCost: r.unit_cost == null ? null : Number(r.unit_cost)
+    })
+    itemsBy.set(id, arr)
+  }
+  const paysBy = new Map<number, number[]>()
+  for (const r of payRows) {
+    const id = Number(r.order_id)
+    const arr = paysBy.get(id) ?? []
+    arr.push(Number(r.amount ?? 0))
+    paysBy.set(id, arr)
+  }
+
+  for (const ref of refs) {
+    out.set(
+      ref.id,
+      computeOrderMoney({
+        items: itemsBy.get(ref.id) ?? [],
+        charges: parseCharges(ref.charges),
+        payments: (paysBy.get(ref.id) ?? []).map((amount) => ({ amount })),
+        settlements: settBy.get(ref.id) ?? [],
+        depositRatio: ref.depositRatio
+      })
+    )
+  }
+  return out
 }
 
 /**
@@ -313,58 +395,18 @@ export function listOrderMoney(filter: MoneyListFilter = {}): OrderMoneyRow[] {
   ) as Record<string, unknown>[]
   if (rows.length === 0) return []
 
-  const ids = rows.map((r) => Number(r.id))
-  const ph = ids.map(() => '?').join(',')
-  const itemRows = db.all(
-    `SELECT order_id, quantity, unit_price, unit_cost FROM order_items WHERE order_id IN (${ph})`,
-    ids
-  ) as Record<string, unknown>[]
-  const payRows = db.all(
-    `SELECT order_id, amount FROM payments WHERE order_id IN (${ph})`,
-    ids
-  ) as Record<string, unknown>[]
-  const settleRows = db.all(
-    `SELECT order_id, kind, amount FROM order_settlements WHERE order_id IN (${ph})`,
-    ids
-  ) as Record<string, unknown>[]
-
-  const settBy = new Map<number, SettlementInput[]>()
-  for (const r of settleRows) {
-    const id = Number(r.order_id)
-    const arr = settBy.get(id) ?? []
-    arr.push({ kind: String(r.kind ?? ''), amount: Number(r.amount ?? 0) })
-    settBy.set(id, arr)
-  }
-
-  const itemsBy = new Map<number, MoneyItem[]>()
-  for (const r of itemRows) {
-    const id = Number(r.order_id)
-    const arr = itemsBy.get(id) ?? []
-    arr.push({
-      quantity: Number(r.quantity ?? 0),
-      unitPrice: Number(r.unit_price ?? 0),
-      unitCost: r.unit_cost == null ? null : Number(r.unit_cost)
-    })
-    itemsBy.set(id, arr)
-  }
-  const paysBy = new Map<number, number[]>()
-  for (const r of payRows) {
-    const id = Number(r.order_id)
-    const arr = paysBy.get(id) ?? []
-    arr.push(Number(r.amount ?? 0))
-    paysBy.set(id, arr)
-  }
+  const byId = moneyForOrders(
+    rows.map((r) => ({
+      id: Number(r.id),
+      charges: r.charges,
+      depositRatio: Number(r.deposit_ratio ?? 0)
+    }))
+  )
 
   return rows.map((r) => {
     const id = Number(r.id)
+    const m = byId.get(id) ?? computeOrderMoney({ items: [], charges: [], payments: [], depositRatio: 0 })
     const rate = Number(r.exchange_rate ?? 1)
-    const m = computeOrderMoney({
-      items: itemsBy.get(id) ?? [],
-      charges: parseCharges(r.charges),
-      payments: (paysBy.get(id) ?? []).map((amount) => ({ amount })),
-      settlements: settBy.get(id) ?? [],
-      depositRatio: Number(r.deposit_ratio ?? 0)
-    })
     const createdAt = String(r.created_at ?? '')
     return {
       ...m,

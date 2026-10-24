@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useToast, Card, Button } from '../ui'
+import { useToast, Card, Button, clientKey } from '../ui'
 import { imageUrl } from '../imageUrl'
 import { CURRENCIES } from '../../../shared/types'
 import type { BackupPreview, DataPaths, UpdateStatus } from '../../../shared/api'
@@ -22,6 +22,17 @@ function sinceWords(iso: string | null): string {
 
 const MB = 1024 * 1024
 
+/**
+ * 收款账户行的前端身份。
+ * 服务端存回来的账户没有 id，删掉中间一行时数组整体前移，
+ * 用下标当 key 会让下一行的半个字、焦点全落到刚删掉的那格上（E8 同款病）。
+ * uid 只在界面上用，settings.save 服务端按字段白名单收，多出来的 uid 落不了库。
+ */
+function withBankUids(r: any): any {
+  if (!r) return r
+  return { ...r, banks: (r.banks ?? []).map((b: any) => ({ uid: clientKey(), ...b })) }
+}
+
 export default function Settings() {
   const toast = useToast()
   const [s, setS] = useState<any>(null)
@@ -35,7 +46,7 @@ export default function Settings() {
   const [restoring, setRestoring] = useState(false)
 
   useEffect(() => {
-    void window.api.settings.get().then(setS)
+    void window.api.settings.get().then((r) => setS(withBankUids(r)))
     void window.api.settings.baseLocked().then(setBaseLocked)
     void window.api.app.paths().then(setPaths)
     // 一进来先问主进程要当前状态：进度那一份只认主进程存的，页面刷新也不会丢
@@ -52,7 +63,7 @@ export default function Settings() {
   const save = async () => {
     try {
       const r = await window.api.settings.save(s)
-      setS(r)
+      setS(withBankUids(r))
       toast('设置已保存')
     } catch (e) {
       toast((e as Error).message, 'error')
@@ -61,9 +72,9 @@ export default function Settings() {
 
   const setCompany = (k: string, v: string) => setS({ ...s, company: { ...s.company, [k]: v } })
 
-  // 收款账户按下标改：同一币种可能被误加过，用币种当 key 会一改改两行、一删删两行
-  const setBank = (i: number, k: string, v: string) =>
-    setS({ ...s, banks: s.banks.map((b: any, at: number) => (at === i ? { ...b, [k]: v } : b)) })
+  // 收款账户按 uid 改：币种可能被历史数据加过两遍，用币种当 key 会一改改两行；用下标又会在删中间一行时串到下一行
+  const setBank = (uid: string, k: string, v: string) =>
+    setS({ ...s, banks: s.banks.map((b: any) => (b.uid === uid ? { ...b, [k]: v } : b)) })
 
   const addBank = () => {
     const used = new Set<string>(s.banks.map((b: any) => b.currency))
@@ -76,12 +87,12 @@ export default function Settings() {
       ...s,
       banks: [
         ...s.banks,
-        { currency: free, bankName: '', accountName: '', accountNo: '', swift: '', address: '' }
+        { uid: clientKey(), currency: free, bankName: '', accountName: '', accountNo: '', swift: '', address: '' }
       ]
     })
   }
 
-  const removeBank = (i: number) => setS({ ...s, banks: s.banks.filter((_: any, at: number) => at !== i) })
+  const removeBank = (uid: string) => setS({ ...s, banks: s.banks.filter((b: any) => b.uid !== uid) })
 
   const importLogo = async () => {
     const name = await window.api.images.importLogo()
@@ -218,23 +229,22 @@ export default function Settings() {
           {s.banks.length === 0 ? (
             <div className="hint">还没有银行账户。添加后 PI 会自动印上收款信息。</div>
           ) : (
-            s.banks.map((b: any, i: number) => (
-              // 用下标当 key：同一币种万一被加过两遍，按币种当 key 会让 React 认错行
-              <div key={i} style={{ marginBottom: 16 }}>
+            s.banks.map((b: any) => (
+              <div key={b.uid} style={{ marginBottom: 16 }}>
                 <div className="row mb">
                   <select
                     value={b.currency}
                     title="这一账户收哪种币"
-                    onChange={(e) => setBank(i, 'currency', e.target.value)}
+                    onChange={(e) => setBank(b.uid, 'currency', e.target.value)}
                   >
                     {CURRENCIES.map((c) => (
-                      <option key={c} value={c} disabled={c !== b.currency && s.banks.some((o: any, at: number) => at !== i && o.currency === c)}>
+                      <option key={c} value={c} disabled={c !== b.currency && s.banks.some((o: any) => o.uid !== b.uid && o.currency === c)}>
                         {c}
                       </option>
                     ))}
                   </select>
                   <div className="spacer" />
-                  <Button variant="danger" size="sm" onClick={() => removeBank(i)}>
+                  <Button variant="danger" size="sm" onClick={() => removeBank(b.uid)}>
                     移除
                   </Button>
                 </div>
@@ -244,7 +254,7 @@ export default function Settings() {
                     <input
                       className="w-lg"
                       value={b.accountName}
-                      onChange={(e) => setBank(i, 'accountName', e.target.value)}
+                      onChange={(e) => setBank(b.uid, 'accountName', e.target.value)}
                     />
                   </div>
                   <div className="field">
@@ -252,25 +262,25 @@ export default function Settings() {
                     <input
                       className="w-lg"
                       value={b.bankName}
-                      onChange={(e) => setBank(i, 'bankName', e.target.value)}
+                      onChange={(e) => setBank(b.uid, 'bankName', e.target.value)}
                     />
                   </div>
                 </div>
                 <div className="field-row">
                   <div className="field">
                     <label>账号</label>
-                    <input className="w-md" value={b.accountNo} onChange={(e) => setBank(i, 'accountNo', e.target.value)} />
+                    <input className="w-md" value={b.accountNo} onChange={(e) => setBank(b.uid, 'accountNo', e.target.value)} />
                   </div>
                   <div className="field">
                     <label>SWIFT</label>
-                    <input className="w-md" value={b.swift} onChange={(e) => setBank(i, 'swift', e.target.value)} />
+                    <input className="w-md" value={b.swift} onChange={(e) => setBank(b.uid, 'swift', e.target.value)} />
                   </div>
                 </div>
                 <div className="field">
                   {/* R4-S6：银行地址会印在 PI 上给客户打款，原来 320px 把尾巴硬切了，
                         加宽到和「银行名称」同宽（w-lg 520px） */}
                   <label>银行地址</label>
-                  <input className="w-lg" value={b.address} onChange={(e) => setBank(i, 'address', e.target.value)} />
+                  <input className="w-lg" value={b.address} onChange={(e) => setBank(b.uid, 'address', e.target.value)} />
                 </div>
               </div>
             ))

@@ -10,6 +10,7 @@ import { getSettings } from './settings'
 import { createOrder, getOrder } from './orders'
 import { logEvent } from './events'
 import { computeOrderMoney, costInOrderCurrency } from './money'
+import { likeAny } from './search'
 import { billPartyOf, emptyParty, parseParty, patchParty, stringifyParty } from '../../src/shared/party'
 import { localDate, addDays } from '../../src/shared/date'
 import type {
@@ -240,12 +241,10 @@ export function listQuotations(filter: {
   const kw = (filter.keyword ?? '').trim()
   if (kw) {
     // 搜索范围：报价号 / 客户PO号 / 客户名 / 款号（客户问「上次那个款报多少」也能翻出来）
-    where.push(
-      `(q.q_no LIKE ? OR q.customer_po LIKE ? OR c.company LIKE ?
-        OR EXISTS (SELECT 1 FROM quotation_items qi WHERE qi.quotation_id = q.id AND qi.style_no LIKE ?))`
-    )
-    const k = `%${kw}%`
-    params.push(k, k, k, k)
+    const own = likeAny(['q.q_no', 'q.customer_po', 'c.company'], kw)
+    const items = likeAny(['qi.style_no', 'qi.product_name'], kw)
+    where.push(`(${own.sql} OR EXISTS (SELECT 1 FROM quotation_items qi WHERE qi.quotation_id = q.id AND (${items.sql})))`)
+    params.push(...own.params, ...items.params)
   }
   if (filter.customerId) {
     where.push('q.customer_id = ?')

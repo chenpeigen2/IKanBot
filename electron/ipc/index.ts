@@ -129,7 +129,15 @@ export function registerIpc(): void {
   )
 
   /* ---- 订单 ---- */
-  handle('orders:list', (filter: Parameters<typeof orders.listOrders>[0]) => orders.listOrders(filter))
+  /**
+   * 列表走瘦身版：整页固定几条查询，不再每张单展开 9 次。
+   * 返回 OrderListPage { rows, total, owedBaseTotal, grandBaseTotal }：
+   * total 是筛选后的总单数（分页要用它，不能拿本页行数充数），两个合计按整个筛选集算。
+   * 需要整单展开的地方用 orders:get（详情页），别在列表上 hydrate。
+   */
+  handle('orders:list', (filter: orders.OrderListFilter & { limit?: number; offset?: number }) =>
+    orders.listOrderRows(filter)
+  )
   handle('orders:get', (id: number) => orders.getOrder(id))
   handle('orders:create', (input: orders.OrderInput) => orders.createOrder(input))
   handle('orders:update', (id: number, input: orders.OrderInput) => orders.updateOrder(id, input))

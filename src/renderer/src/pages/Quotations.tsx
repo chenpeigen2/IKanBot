@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Modal, useToast, money, num, Empty, fmtDate, fmtDateTime, today, ActionMenu, QuotationStatusTag, Button } from '../ui'
+import { Modal, useToast, money, num, Empty, fmtDate, fmtDateTime, today, ActionMenu, QuotationStatusTag, Button, clientKey } from '../ui'
 import {
   CURRENCIES,
   INCOTERMS,
@@ -10,12 +10,15 @@ import {
   type Currency,
   type Incoterm,
   type PaymentMethod,
+  type QuotationCharge,
   type QuotationResult,
   type QuotationStatus
 } from '../../../shared/types'
 import { renderQuotation, type ImageMap } from '../../../shared/documents'
 
 interface LineRow {
+  /** 前端行身份，见 ui.tsx clientKey；提交时不带 */
+  uid: string
   productId: number | null
   styleNo: string
   productName: string
@@ -824,6 +827,7 @@ function QuotationModal({
   })
   const [lines, setLines] = useState<LineRow[]>(
     (draft.items ?? []).map((it: any) => ({
+      uid: clientKey(),
       productId: it.productId ?? null,
       styleNo: it.styleNo,
       productName: it.productName,
@@ -834,7 +838,9 @@ function QuotationModal({
       unitPrice: it.unitPrice
     }))
   )
-  const [charges, setCharges] = useState<{ label: string; amount: number }[]>(draft.charges ?? [])
+  const [charges, setCharges] = useState<{ uid: string; label: string; amount: number }[]>(
+    ((draft.charges ?? []) as QuotationCharge[]).map((c) => ({ uid: clientKey(), ...c }))
+  )
   const [lastRate, setLastRate] = useState<{ rate: number; date: string } | null>(null)
 
   useEffect(() => {
@@ -914,13 +920,13 @@ function QuotationModal({
   const goods = lines.reduce((s, l) => s + l.quantity * l.unitPrice, 0)
   const chargeTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
 
-  const setLine = (i: number, patch: Partial<LineRow>) => {
-    setLines((ls) => ls.map((l, k) => (k === i ? { ...l, ...patch } : l)))
+  const setLine = (uid: string, patch: Partial<LineRow>) => {
+    setLines((ls) => ls.map((l) => (l.uid === uid ? { ...l, ...patch } : l)))
   }
 
-  const onStyleChange = (i: number, styleNo: string) => {
+  const onStyleChange = (uid: string, styleNo: string) => {
     const hit = products.find((p) => p.styleNo === styleNo)
-    setLine(i, {
+    setLine(uid, {
       styleNo,
       productId: hit?.id ?? null,
       productName: hit?.name ?? '',
@@ -958,7 +964,7 @@ function QuotationModal({
         validUntil: form.validUntil || null,
         customerPo: form.customerPo,
         note: form.note,
-        charges: charges.filter((c) => c.label.trim()),
+        charges: charges.filter((c) => c.label.trim()).map((c) => ({ label: c.label, amount: c.amount })),
         items: clean.map((l) => ({
           productId: l.productId,
           styleNo: l.styleNo,
@@ -1186,7 +1192,7 @@ function QuotationModal({
             onClick={() =>
               setLines((ls) => [
                 ...ls,
-                { productId: null, styleNo: '', productName: '', composition: '', color: '', size: '', quantity: 0, unitPrice: 0 }
+                { uid: clientKey(), productId: null, styleNo: '', productName: '', composition: '', color: '', size: '', quantity: 0, unitPrice: 0 }
               ])
             }
           >
@@ -1216,25 +1222,25 @@ function QuotationModal({
                   </td>
                 </tr>
               ) : (
-                lines.map((l, i) => (
-                  <tr key={i}>
+                lines.map((l) => (
+                  <tr key={l.uid}>
                     <td>
                       <input
                         list="style-list"
                         value={l.styleNo}
-                        onChange={(e) => onStyleChange(i, e.target.value)}
+                        onChange={(e) => onStyleChange(l.uid, e.target.value)}
                         placeholder="款号"
                       />
                     </td>
                     <td>
-                      <input value={l.productName} onChange={(e) => setLine(i, { productName: e.target.value })} />
+                      <input value={l.productName} onChange={(e) => setLine(l.uid, { productName: e.target.value })} />
                     </td>
                     <td>
                       <PickField
                         value={l.color}
                         options={productOf(l)?.colors ?? []}
                         placeholder="颜色"
-                        onChange={(v) => setLine(i, { color: v })}
+                        onChange={(v) => setLine(l.uid, { color: v })}
                       />
                     </td>
                     <td>
@@ -1242,7 +1248,7 @@ function QuotationModal({
                         value={l.size}
                         options={productOf(l)?.sizes ?? []}
                         placeholder="尺码"
-                        onChange={(v) => setLine(i, { size: v })}
+                        onChange={(v) => setLine(l.uid, { size: v })}
                       />
                     </td>
                     <td className="num">
@@ -1250,7 +1256,7 @@ function QuotationModal({
                         type="number"
                         className="col-num-sm"
                         value={l.quantity}
-                        onChange={(e) => setLine(i, { quantity: Number(e.target.value) })}
+                        onChange={(e) => setLine(l.uid, { quantity: Number(e.target.value) })}
                       />
                     </td>
                     <td className="num">
@@ -1259,12 +1265,12 @@ function QuotationModal({
                         step="0.01"
                         className="col-num-sm"
                         value={l.unitPrice}
-                        onChange={(e) => setLine(i, { unitPrice: Number(e.target.value) })}
+                        onChange={(e) => setLine(l.uid, { unitPrice: Number(e.target.value) })}
                       />
                     </td>
                     <td className="num">{(l.quantity * l.unitPrice).toFixed(2)}</td>
                     <td className="right">
-                      <Button variant="danger" size="sm"  onClick={() => setLines((ls) => ls.filter((_, k) => k !== i))}>
+                      <Button variant="danger" size="sm"  onClick={() => setLines((ls) => ls.filter((x) => x.uid !== l.uid))}>
                         删除
                       </Button>
                     </td>
@@ -1296,19 +1302,19 @@ function QuotationModal({
           <div className="spacer" />
           <Button size="sm"
             
-            onClick={() => setCharges((cs) => [...cs, { label: '运费 Freight', amount: 0 }])}
+            onClick={() => setCharges((cs) => [...cs, { uid: clientKey(), label: '运费 Freight', amount: 0 }])}
           >
             + 加费用
           </Button>
         </div>
-        {charges.map((c, i) => (
-          <div className="field-row" key={i} style={{ alignItems: 'flex-end' }}>
+        {charges.map((c) => (
+          <div className="field-row" key={c.uid} style={{ alignItems: 'flex-end' }}>
             <div className="field" style={{ flex: 2 }}>
               <label>费用名称</label>
               <input
                 value={c.label}
                 onChange={(e) =>
-                  setCharges((cs) => cs.map((x, k) => (k === i ? { ...x, label: e.target.value } : x)))
+                  setCharges((cs) => cs.map((x) => (x.uid === c.uid ? { ...x, label: e.target.value } : x)))
                 }
               />
             </div>
@@ -1320,13 +1326,13 @@ function QuotationModal({
                 value={c.amount}
                 onChange={(e) =>
                   setCharges((cs) =>
-                    cs.map((x, k) => (k === i ? { ...x, amount: Number(e.target.value) } : x))
+                    cs.map((x) => (x.uid === c.uid ? { ...x, amount: Number(e.target.value) } : x))
                   )
                 }
               />
             </div>
             <div className="field" style={{ flex: 0, minWidth: 60 }}>
-              <Button variant="danger" size="sm"  onClick={() => setCharges((cs) => cs.filter((_, k) => k !== i))}>
+              <Button variant="danger" size="sm"  onClick={() => setCharges((cs) => cs.filter((x) => x.uid !== c.uid))}>
                 删除
               </Button>
             </div>
@@ -1476,6 +1482,7 @@ function ProductPickerModal({
       const cp = colorPrice[r.color]
       const unit = cp !== undefined && cp !== '' ? Number(cp) : Number(price) || 0
       out.push({
+        uid: clientKey(),
         productId: picked.id,
         styleNo: picked.styleNo,
         productName: picked.name,
