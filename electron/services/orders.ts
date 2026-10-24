@@ -3,7 +3,7 @@ import { mapOrder, mapOrderItem, mapPayment, mapPackingList, mapPackingListLine,
 import { getSettings } from './settings'
 import { computeOrderMoney, parseCharges } from './money'
 import { applyShipStatus, isShipStatusDerived, shipmentSummary } from './shipping'
-import { localDate, addDays } from '../../src/shared/date'
+import { localDate, addDays, isLocalDate } from '../../src/shared/date'
 import { SHIP_STATUS_LABEL } from '../../src/shared/types'
 import type {
   Currency,
@@ -302,6 +302,25 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
   const newRate = Number(input.exchangeRate ?? before.exchange_rate)
   if (!(newRate > 0)) throw new Error('汇率必须大于 0，清空汇率不能保存')
   const oldRate = Number(before.exchange_rate)
+  const newCurrency = (input.currency ?? String(before.currency ?? 'USD')) as Currency
+  const oldCurrency = String(before.currency ?? 'USD') as Currency
+  if (newCurrency !== oldCurrency) {
+    // 收款是按原币登记的凭据：改币种会让历史收款、银行流水和客户对账全部错位
+    const payCount = Number(
+      (db.get('SELECT COUNT(*) AS n FROM payments WHERE order_id = ?', [id]) as { n?: number } | null)?.n ?? 0
+    )
+    if (payCount > 0) {
+      throw new Error(
+        `这张单已经登记了 ${payCount} 笔收款，不能改币种——收款是按 ${oldCurrency} 记的，改了会和银行流水对不上。确实要换币种，请作废这张单后按正确币种重开。`
+      )
+    }
+    // 没改汇率就换币种，等于把 USD 的 7.1 套在 EUR 上，报表和毛利全错
+    if (newRate === oldRate) {
+      throw new Error(
+        `币种从 ${oldCurrency} 换成 ${newCurrency}，汇率不能沿用原来的 ${oldRate}；请按 ${newCurrency} 重新填写汇率再保存。`
+      )
+    }
+  }
   // 汇率变了就重新记锁定日期（未手动指定时）
   let rateDate = (before.exchange_rate_date as string | null) ?? null
   if (input.exchangeRateDate !== undefined) rateDate = input.exchangeRateDate
@@ -321,7 +340,7 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
      WHERE id=?`,
     [
       input.customerId,
-      input.currency ?? 'USD',
+      newCurrency,
       newRate,
       input.baseCurrency ?? getSettings().baseCurrency,
       input.incoterm ?? 'FOB',
@@ -713,28 +732,71 @@ export function addPayment(
   p: { paidAt: string; amount: number; method?: string; bankRef?: string; note?: string }
 ): OrderDetail {
   const db = getDb()
-  db.run(
-    `INSERT INTO payments(order_id, paid_at, amount, method, bank_ref, note, created_at) VALUES(?,?,?,?,?,?,?)`,
-    [
+  const paidAt = String(p.paidAt ?? '').trim()
+  // 空日期会让这笔钱从「本月收款」和月报里消失，只剩订单上的已收能看见
+  if (!isLocalDate(paidAt)) {
+    throw new Error('收款日期要填完整（例如 2026-10-24）。空日期的收款不会进本月收款和月报。')
+  }
+  const amount = Number(p.amount)
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error('收款金额必须是大于 0 的数。')
+  }
+  db.exec('BEGIN')
+  try {
+    db.run(
+      `INSERT INTO payments(order_id, paid_at, amount, method, bank_ref, note, created_at) VALUES(?,?,?,?,?,?,?)`,
+      [orderId, paidAt, amount, p.method ?? 'T/T', p.bankRef ?? '', p.note ?? '', now()]
+    )
+    logEvent(
       orderId,
-      p.paidAt,
-      p.amount,
-      p.method ?? 'T/T',
-      p.bankRef ?? '',
-      p.note ?? '',
-      now()
-    ]
-  )
-  logEvent(orderId, 'payment', null, null, `收款 ${p.amount}（${p.bankRef || p.method || 'T/T'}）`)
-  recomputePaymentStatus(orderId)
+      'payment',
+      null,
+      null,
+      `收款 ${amount.toFixed(2)}（${paidAt}${p.bankRef ? `，流水号 ${p.bankRef}` : `，${p.method ?? 'T/T'}`}）`
+    )
+    recomputePaymentStatus(orderId)
+    db.exec('COMMIT')
+  } catch (e) {
+    db.exec('ROLLBACK')
+    throw e
+  }
   return getOrder(orderId)!
 }
 
-export function deletePayment(orderId: number, paymentId: number): OrderDetail {
+export function deletePayment(orderId: number, paymentId: number, reason = ''): OrderDetail {
   const db = getDb()
-  db.run('DELETE FROM payments WHERE id = ? AND order_id = ?', [paymentId, orderId])
-  logEvent(orderId, 'payment_delete', null, null, `删除收款记录 #${paymentId}`)
-  recomputePaymentStatus(orderId)
+  const row = db.get(
+    `SELECT p.paid_at, p.amount, p.bank_ref, o.currency
+     FROM payments p JOIN orders o ON o.id = p.order_id
+     WHERE p.id = ? AND p.order_id = ?`,
+    [paymentId, orderId]
+  ) as Record<string, unknown> | null
+  if (!row) throw new Error('这条收款记录已经不存在了，刷新页面后再试。')
+  const why = String(reason ?? '').trim()
+  // 删掉的是钱到账的凭据，操作历史必须能回答「删了多少钱、哪一天、哪笔流水、为什么」
+  if (!why) {
+    throw new Error('删除收款要写原因（例如“金额录错”“客户退汇”），操作历史里要留痕。')
+  }
+  const amount = Number(row.amount ?? 0)
+  const currency = String(row.currency ?? '')
+  const bankRef = String(row.bank_ref ?? '')
+  const paidAt = String(row.paid_at ?? '')
+  db.exec('BEGIN')
+  try {
+    db.run('DELETE FROM payments WHERE id = ? AND order_id = ?', [paymentId, orderId])
+    logEvent(
+      orderId,
+      'payment_delete',
+      null,
+      null,
+      `删除收款 ${currency} ${amount.toFixed(2)}（${paidAt}${bankRef ? `，流水号 ${bankRef}` : ''}）原因：${why}`
+    )
+    recomputePaymentStatus(orderId)
+    db.exec('COMMIT')
+  } catch (e) {
+    db.exec('ROLLBACK')
+    throw e
+  }
   return getOrder(orderId)!
 }
 

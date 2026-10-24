@@ -30,6 +30,16 @@ export function localMonthOf(v: string | null | undefined): string {
   return localDateOf(v).slice(0, 7)
 }
 
+/**
+ * 是否严格的本地日期 YYYY-MM-DD。
+ * 不用 Date 直接判断：2026-02-31 会被顺延成 3 月 3 日，看起来能过。
+ */
+export function isLocalDate(v: string | null | undefined): boolean {
+  if (!v || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false
+  const d = new Date(v + 'T00:00:00')
+  return !Number.isNaN(d.getTime()) && localDate(d) === v
+}
+
 /** 在某个日期上加减天数，返回 YYYY-MM-DD */
 export function addDays(dateStr: string, days: number): string {
   const base = dateStr ? new Date(dateStr + 'T00:00:00') : new Date()

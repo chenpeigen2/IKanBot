@@ -363,6 +363,12 @@ export default function Customers() {
             <div className="stat amber">
               <div className="stat-label">未收金额</div>
               <div className="stat-value small">{money(detail.stats.outstanding, detail.base)}</div>
+              {detail.stats.outstandingSamples > 0 ? (
+                <div className="stat-hint">
+                  订单 {money(detail.stats.outstandingOrders, detail.base)} · 打样{' '}
+                  {money(detail.stats.outstandingSamples, detail.base)}
+                </div>
+              ) : null}
             </div>
           </div>
 

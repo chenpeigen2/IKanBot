@@ -180,6 +180,10 @@ export interface CustomerStats {
   totalProfit: number | null
   /** 未收金额（基准币）= Σ(含费用合计 − 已收) */
   outstanding: number
+  /** 未收金额里的订单部分（基准币），客户页用来拆开显示 */
+  outstandingOrders: number
+  /** 未收金额里的打样费部分（基准币），客户页用来拆开显示 */
+  outstandingSamples: number
   /** 成本没录全的订单数：这些单的毛利是假的，不能当成真毛利看 */
   missingCostOrders: number
 }

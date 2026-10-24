@@ -16,7 +16,7 @@ import {
 } from '../../../shared/types'
 import { renderPi, renderPl, renderCi, orderDocAmount, ciDocAmount, type ImageMap } from '../../../shared/documents'
 import { imageUrl } from '../imageUrl'
-import { localDate } from '../../../shared/date'
+import { isLocalDate, localDate } from '../../../shared/date'
 import EditOrderModal from './EditOrderModal'
 
 type PreviewState = {
@@ -1323,13 +1323,23 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
     bankRef: '',
     note: ''
   })
+  const [saving, setSaving] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<any | null>(null)
+  const [deleteReason, setDeleteReason] = useState('')
+  const [deleting, setDeleting] = useState(false)
 
   const add = async () => {
     const amt = Number(form.amount)
+    if (!isLocalDate(form.paidAt)) {
+      toast('请选择收款日期。空日期的收款不会进本月收款和月报。', 'error')
+      return
+    }
     if (!amt || amt <= 0) {
       toast('请填写收款金额', 'error')
       return
     }
+    if (saving) return
+    setSaving(true)
     try {
       await window.api.orders.addPayment(order.id, { ...form, amount: amt })
       toast('已记录收款')
@@ -1337,6 +1347,29 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
       await onChange()
     } catch (e) {
       toast((e as Error).message, 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const remove = async () => {
+    if (!deleteTarget || deleting) return
+    const why = deleteReason.trim()
+    if (!why) {
+      toast('请写一句删除原因，操作历史要留痕', 'error')
+      return
+    }
+    setDeleting(true)
+    try {
+      await window.api.orders.deletePayment(order.id, deleteTarget.id, why)
+      toast('已删除，操作历史里已留痕')
+      setDeleteTarget(null)
+      setDeleteReason('')
+      await onChange()
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -1345,9 +1378,15 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
       <div className="card-body">
         <div className="price-calc mb">
           <div>
-            <span className="muted">订单总额</span>
+            <span className="muted">货值</span>
             <span>{money(order.totalAmount, order.currency)}</span>
           </div>
+          {order.chargesTotal ? (
+            <div>
+              <span className="muted">含费用合计</span>
+              <span>{money(order.grandTotal, order.currency)}</span>
+            </div>
+          ) : null}
           <div>
             <span className="muted">定金（{Math.round(order.depositRatio * 100)}%）</span>
             <span>{money(order.depositAmount, order.currency)}</span>
@@ -1361,10 +1400,13 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
             <span>{money(order.remaining, order.currency)}</span>
           </div>
         </div>
+        {order.chargesTotal ? (
+          <div className="hint mb">定金和待收都按「含费用合计」算，运费保险也算在应收里。</div>
+        ) : null}
 
         <div className="field-row-3">
           <div className="field">
-            <label>收款日期</label>
+            <label>收款日期 *</label>
             <input
               type="date"
               value={form.paidAt}
@@ -1399,8 +1441,8 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
             <input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} />
           </div>
         </div>
-        <Button variant="primary"  onClick={add}>
-          记录收款
+        <Button variant="primary" onClick={add} disabled={saving}>
+          {saving ? '保存中…' : '记录收款'}
         </Button>
       </div>
 
@@ -1433,11 +1475,9 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
                   <td className="faint">{p.note}</td>
                   <td className="right">
                     <Button variant="danger" size="sm"
-                      
-                      onClick={async () => {
-                        if (!confirm('删除这条收款记录？')) return
-                        await window.api.orders.deletePayment(order.id, p.id)
-                        await onChange()
+                      onClick={() => {
+                        setDeleteReason('')
+                        setDeleteTarget(p)
                       }}
                     >
                       删除
@@ -1449,6 +1489,36 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
           </tbody>
         </table>
       </div>
+
+      {deleteTarget ? (
+        <Modal
+          title={`删除收款 ${money(deleteTarget.amount, order.currency)}`}
+          onClose={() => setDeleteTarget(null)}
+          footer={
+            <>
+              <Button onClick={() => setDeleteTarget(null)} disabled={deleting}>
+                取消
+              </Button>
+              <Button variant="danger" onClick={remove} disabled={deleting}>
+                {deleting ? '删除中…' : '确认删除'}
+              </Button>
+            </>
+          }
+        >
+          <p>
+            {fmtDate(deleteTarget.paidAt)} 收到的这笔钱会从「已收」里减掉，收款状态自动重算。
+            金额、日期、流水号和你写的原因都会留在操作历史里，不会凭空消失。
+          </p>
+          <div className="field">
+            <label>删除原因 *</label>
+            <input
+              value={deleteReason}
+              onChange={(e) => setDeleteReason(e.target.value)}
+              placeholder="例如：金额录错 / 客户退汇 / 重复登记"
+            />
+          </div>
+        </Modal>
+      ) : null}
     </>
   )
 }

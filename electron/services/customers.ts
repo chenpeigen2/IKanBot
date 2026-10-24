@@ -1,6 +1,6 @@
 import { getDb } from '../db'
 import { mapCustomer, mapCustomerStats } from '../db/mappers'
-import { listOrderMoney, totalReceivable } from './money'
+import { EXCLUDED_STATUSES, listOrderMoney, sampleReceivable } from './money'
 import type { Customer, CustomerStats } from '../../src/shared/types'
 
 export interface CustomerInput {
@@ -144,7 +144,9 @@ export function customerStats(customerId: number): CustomerStats {
   const rows = listOrderMoney({ customerId })
   const totalAmount = rows.reduce((s, r) => s + r.grandTotalBase, 0)
   // 未收走统一口径（money.ts）：订单待收 + 打样未收（N23：客户页不能比工作台少数一笔打样费）
-  const outstanding = totalReceivable({ customerId })
+  const outstandingOrders = rows.reduce((s, r) => s + r.receivableBase, 0)
+  const outstandingSamples = sampleReceivable(customerId)
+  const outstanding = outstandingOrders + outstandingSamples
   const missingCostOrders = rows.filter((r) => r.missingCostItems > 0).length
   const totalProfitRaw = rows.reduce((s, r) => s + r.profitRaw * r.exchangeRate, 0)
   return mapCustomerStats({
@@ -153,6 +155,8 @@ export function customerStats(customerId: number): CustomerStats {
     // 有成本没录全的订单 → 毛利不可信（null），不许拿 0 成本凑一个漂亮的数
     total_profit: missingCostOrders > 0 ? null : totalProfitRaw,
     outstanding,
+    outstanding_orders: outstandingOrders,
+    outstanding_samples: outstandingSamples,
     missing_cost_orders: missingCostOrders
   })
 }
@@ -185,7 +189,8 @@ export function customerOrderBriefs(customerId: number): {
     total: r.goodsValue,
     grandTotal: r.grandTotal,
     paid: r.paidAmount,
-    remaining: r.receivable,
+    // 草稿 / 已失效 / 已作废的单在历史里保留，但不再向客户催款，待收按 0 显示
+    remaining: EXCLUDED_STATUSES.includes(r.paymentStatus) ? 0 : r.receivable,
     createdAt: r.createdAt
   }))
 }

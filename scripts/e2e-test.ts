@@ -1338,6 +1338,8 @@ const moneyOrder = orders.createOrder({
     { label: '保险费 Insurance', amount: 30 }
   ]
 })
+// 这张单是拿来核对金额口径的，要按已发出的正式单算；草稿单按新规则不计待收
+orders.setPaymentStatus(moneyOrder.id, 'sent')
 await orders.addOrderItem(moneyOrder.id, {
   styleNo: 'A001',
   productName: '纯棉圆领T恤',
@@ -2171,6 +2173,121 @@ check('CI 不串批次的船期', !ciPaperOrder.includes('EVER GIVEN V.001'))
 section('订单列表能按款号搜')
 const byStyleOrders = orders.listOrders({ keyword: 'ZZ-999' })
 check('订单列表能按款号搜到', byStyleOrders.some((o) => o.id === r20.id))
+
+/* ---------------- R1：收款与应收守卫 ---------------- */
+section('收款与应收：日期、删款留痕、币种守卫、客户页口径')
+
+const r1Order = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.1 })
+await orders.addOrderItem(r1Order.id, {
+  styleNo: 'R1-GUARD',
+  productName: 'R1 守卫',
+  quantity: 10,
+  unitPrice: 10
+})
+const r1Paid = orders.addPayment(r1Order.id, {
+  paidAt: '2026-10-24',
+  amount: 20,
+  method: 'T/T',
+  bankRef: 'R1-BANK'
+})
+eq('R1 正常收款能登记', r1Paid.paidAmount, 20)
+const r1PayId = r1Paid.payments[0].id
+
+let r1DateErr = ''
+try {
+  orders.addPayment(r1Order.id, { paidAt: '', amount: 10 })
+} catch (e) {
+  r1DateErr = (e as Error).message
+}
+check('收款日期不能留空', r1DateErr.includes('日期'), r1DateErr)
+
+let r1FakeDateErr = ''
+try {
+  orders.addPayment(r1Order.id, { paidAt: '2026-02-31', amount: 10 })
+} catch (e) {
+  r1FakeDateErr = (e as Error).message
+}
+check('不存在的日期会被拦住', r1FakeDateErr.includes('日期'), r1FakeDateErr)
+
+let r1CurrencyErr = ''
+try {
+  orders.updateOrder(r1Order.id, { customerId: c1.id, currency: 'EUR', exchangeRate: 8 })
+} catch (e) {
+  r1CurrencyErr = (e as Error).message
+}
+check('有收款后改币种被拦住', r1CurrencyErr.includes('币种'), r1CurrencyErr)
+eq('被拦后订单币种没变', orders.getOrder(r1Order.id)!.currency, 'USD')
+
+const r1NoPay = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.1 })
+await orders.addOrderItem(r1NoPay.id, {
+  styleNo: 'R1-NOPAY',
+  productName: 'R1 未收款',
+  quantity: 1,
+  unitPrice: 10
+})
+let r1RateErr = ''
+try {
+  orders.updateOrder(r1NoPay.id, { customerId: c1.id, currency: 'EUR', exchangeRate: 7.1 })
+} catch (e) {
+  r1RateErr = (e as Error).message
+}
+check('换币种不能沿用旧币种汇率', r1RateErr.includes('汇率'), r1RateErr)
+const r1Changed = orders.updateOrder(r1NoPay.id, {
+  customerId: c1.id,
+  currency: 'EUR',
+  exchangeRate: 8
+})
+eq('换币种并重填汇率可以保存', r1Changed.currency, 'EUR')
+eq('换币种后汇率是新的', r1Changed.exchangeRate, 8)
+
+let r1DelErr = ''
+try {
+  orders.deletePayment(r1Order.id, r1PayId, '')
+} catch (e) {
+  r1DelErr = (e as Error).message
+}
+check('删除收款必须写原因', r1DelErr.includes('原因'), r1DelErr)
+const r1Deleted = orders.deletePayment(r1Order.id, r1PayId, '金额录错')
+eq('删款后已收归零', r1Deleted.paidAmount, 0)
+const r1DelEvent = orders.listEvents(r1Order.id).find((e) => e.kind === 'payment_delete')
+check(
+  '删款历史带金额、日期和流水号',
+  !!r1DelEvent &&
+    r1DelEvent.note.includes('20.00') &&
+    r1DelEvent.note.includes('2026-10-24') &&
+    r1DelEvent.note.includes('R1-BANK'),
+  r1DelEvent?.note ?? '没有删款事件'
+)
+check('删款历史带原因', !!r1DelEvent && r1DelEvent.note.includes('金额录错'), r1DelEvent?.note ?? '')
+
+const r1Draft = orders.createOrder({ customerId: c2.id, currency: 'USD', exchangeRate: 7 })
+await orders.addOrderItem(r1Draft.id, {
+  styleNo: 'R1-DRAFT',
+  productName: 'R1 草稿',
+  quantity: 5,
+  unitPrice: 100
+})
+const r1DraftRow = customers.customerOrderBriefs(c2.id).find((o) => o.id === r1Draft.id)!
+check('草稿单仍留在客户订单历史里', !!r1DraftRow)
+eq('草稿单待收按 0 算（没确认的单不催款）', r1DraftRow.remaining, 0)
+
+const r1Void = orders.createOrder({ customerId: c2.id, currency: 'USD', exchangeRate: 7 })
+await orders.addOrderItem(r1Void.id, {
+  styleNo: 'R1-VOID',
+  productName: 'R1 作废',
+  quantity: 5,
+  unitPrice: 100
+})
+orders.voidOrder(r1Void.id, '客户取消')
+const r1VoidRow = customers.customerOrderBriefs(c2.id).find((o) => o.id === r1Void.id)!
+eq('作废单待收按 0 算', r1VoidRow.remaining, 0)
+
+const r1Stats = customers.customerStats(c1.id)
+check(
+  '客户页未收拆成订单+打样，两者相加=未收总额',
+  Math.abs(r1Stats.outstandingOrders + r1Stats.outstandingSamples - r1Stats.outstanding) < 0.01,
+  `orders=${r1Stats.outstandingOrders} samples=${r1Stats.outstandingSamples} total=${r1Stats.outstanding}`
+)
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

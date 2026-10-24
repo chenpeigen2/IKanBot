@@ -90,12 +90,25 @@ export default function EditOrderModal({
 
   const save = async () => {
     const rate = Number(form.exchangeRate)
+    const paidCount = (order.payments ?? []).length
+    // 收款是按原币登记的：已经收过钱的单不许换币种，否则客户对账和银行流水都会错位
+    if (form.currency !== order.currency && paidCount > 0) {
+      toast(
+        `这张单已经登记了 ${paidCount} 笔收款，不能改币种——收款按 ${order.currency} 记的，改了会和银行流水对不上。确实要换币种，请作废这张单后按正确币种重开。`,
+        'error'
+      )
+      return
+    }
     if (!(rate > 0)) {
       toast('汇率必须填大于 0 的数。清空不能保存——整单金额会按错汇率折算', 'error')
       return
     }
+    // 换了币种却沿用旧币种的汇率，等于把 USD 的 7.1 套在 EUR 上
+    if (form.currency !== order.currency && rate === Number(order.exchangeRate)) {
+      toast('换币种后汇率不能沿用原来的数值，请按新币种重新填写汇率。', 'error')
+      return
+    }
     // 已经收过钱的单，换汇率等于把已收的钱重新折算，对账单会对不上 → 先问一声
-    const paidCount = (order.payments ?? []).length
     if (rate !== Number(order.exchangeRate) && paidCount > 0) {
       const ok = confirm(
         `这张单已经记过 ${paidCount} 笔收款。换汇率，已收的钱折成本位币也会跟着变，跟银行流水对账时对不上。\n\n确认按新汇率保存吗？`
@@ -186,7 +199,11 @@ export default function EditOrderModal({
           <label>币种</label>
           <select
             value={form.currency}
-            onChange={(e) => setForm({ ...form, currency: e.target.value as Currency })}
+            disabled={(order.payments ?? []).length > 0}
+            onChange={(e) =>
+              // 换币种就把汇率清掉，逼着按新币种重新填，不许沿用旧数值
+              setForm({ ...form, currency: e.target.value as Currency, exchangeRate: 0 })
+            }
           >
             {CURRENCIES.map((c) => (
               <option key={c} value={c}>
@@ -194,6 +211,11 @@ export default function EditOrderModal({
               </option>
             ))}
           </select>
+          <div className="hint">
+            {(order.payments ?? []).length > 0
+              ? '已登记收款，币种不能改——收款按原币记，改了和银行流水对不上。'
+              : '换币种后要按新币种重新填汇率'}
+          </div>
         </div>
         <div className="field">
           <label>汇率（1 {form.currency} = ? {settings?.baseCurrency ?? 'CNY'}）</label>

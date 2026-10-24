@@ -279,6 +279,8 @@ export function mapCustomerStats(r: Row): CustomerStats {
     totalAmount: num(r.total_amount),
     totalProfit: r.total_profit == null ? null : num(r.total_profit),
     outstanding: num(r.outstanding),
+    outstandingOrders: num(r.outstanding_orders),
+    outstandingSamples: num(r.outstanding_samples),
     missingCostOrders: num(r.missing_cost_orders)
   }
 }

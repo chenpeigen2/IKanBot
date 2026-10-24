@@ -38,7 +38,7 @@ export interface IKanApi {
     replaceItems(orderId: number, items: any[]): Promise<any>
     summarizeSkus(orderId: number): Promise<any[]>
     addPayment(orderId: number, p: any): Promise<any>
-    deletePayment(orderId: number, paymentId: number): Promise<any>
+    deletePayment(orderId: number, paymentId: number, reason: string): Promise<any>
     setShipStatus(orderId: number, status: string, note?: string): Promise<any>
     setPaymentStatus(orderId: number, status: string, note?: string): Promise<any>
     events(orderId: number): Promise<any[]>

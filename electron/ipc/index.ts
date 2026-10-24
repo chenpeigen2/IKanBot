@@ -91,8 +91,8 @@ export function registerIpc(): void {
   )
   handle('orders:summarizeSkus', (orderId: number) => orders.summarizeSkus(orderId))
   handle('orders:addPayment', (orderId: number, p: any) => orders.addPayment(orderId, p))
-  handle('orders:deletePayment', (orderId: number, paymentId: number) =>
-    orders.deletePayment(orderId, paymentId)
+  handle('orders:deletePayment', (orderId: number, paymentId: number, reason?: string) =>
+    orders.deletePayment(orderId, paymentId, reason ?? '')
   )
   handle('orders:setShipStatus', (orderId: number, status: any, note?: string) =>
     orders.setShipStatus(orderId, status, note)
