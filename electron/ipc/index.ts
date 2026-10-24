@@ -126,6 +126,7 @@ export function registerIpc(): void {
   handle('quotations:updateMeta', (id: number, meta: any) => quotations.updateQuotationMeta(id, meta))
   handle('quotations:events', (id: number) => quotations.listQuotationEvents(id))
   handle('quotations:convert', (id: number, opts?: any) => quotations.convertToOrder(id, opts ?? {}))
+  handle('quotations:versions', (id: number) => quotations.listQuotationVersions(id))
 
   /* ---- 打样单（样品单）---- */
   handle('samples:list', (filter?: any) => samples.listSamples(filter ?? {}))

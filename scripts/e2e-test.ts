@@ -589,6 +589,61 @@ check('按款号能搜到报价单', byStyle.some((q) => q.id === qEdit.id))
 const byNo = quotations.listQuotations({ keyword: qNoBefore })
 check('按报价号能搜到报价单', byNo.some((q) => q.id === qEdit.id))
 
+/* ---------------- R3：报价版本快照、按版本转单、过期沿用审批 ---------------- */
+section('R3 报价版本：按哪一版转，就按哪一版的钱')
+
+const versions = quotations.listQuotationVersions(qEdit.id)
+eq('改过一次 → 两个版本快照', versions.length, 2)
+eq('版本号从新到旧', versions.map((v) => v.revision).join(','), '2,1')
+const v1 = versions.find((v) => v.revision === 1)!
+eq('第 1 版合计 = 改前的钱', v1.grandTotal, 500 * 7.5 + 200 * 9.9)
+const v2 = versions.find((v) => v.revision === 2)!
+eq('第 2 版合计 = 改后的钱', v2.grandTotal, 700 * 7.5 + 200 * 9.9)
+
+// 客户翻出旧邮件说「就按第 1 版这个价」→ 必须能按第 1 版原样转
+const v1Order = quotations.convertToOrder(qEdit.id, { revision: 1 })
+eq('按第 1 版转单 → 订单合计 = 第 1 版快照', v1Order.grandTotal, v1.grandTotal)
+eq('按第 1 版转单 → 数量也是第 1 版的', v1Order.totalQuantity, 500 + 200)
+eq('订单记下了来源报价号', v1Order.sourceQuotationNo, qEdit.qNo)
+eq('订单记下了来源版本', v1Order.sourceRevision, 1)
+eq(
+  '订单明细单价 = 第 1 版的单价（不是第 2 版）',
+  v1Order.items.find((i) => i.styleNo === 'A001' && i.size === 'M')?.unitPrice,
+  7.5
+)
+
+// 过期报价：默认拦住；写清批准人和原因才允许沿用旧价
+const qExpired = quotations.saveQuotation({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7.15,
+  exchangeRateDate: '2026-09-01',
+  validUntil: '2026-01-01',
+  items: [{ styleNo: 'A001', quantity: 10, unitPrice: 7.5 }]
+})
+let expiredErr = ''
+try {
+  quotations.convertToOrder(qExpired.id)
+} catch (e) {
+  expiredErr = (e as Error).message
+}
+check('过期报价没批准人/原因不让转', expiredErr.includes('批准人') && expiredErr.includes('原因'), expiredErr)
+check('被拦住时没有偷偷生成订单', quotations.getQuotation(qExpired.id)?.convertedOrderId == null)
+const expiredOrder = quotations.convertToOrder(qExpired.id, {
+  override: { approvedBy: '周文娟', reason: '老客户翻单，老板同意按旧价做' }
+})
+check('填了批准人和原因 → 可以沿用旧价转单', expiredOrder.id > 0)
+check(
+  '订单备注写清了谁批准、为什么',
+  expiredOrder.note.includes('周文娟') && expiredOrder.note.includes('老客户翻单'),
+  expiredOrder.note
+)
+check(
+  '报价单操作历史记下了沿用审批',
+  quotations.listQuotationEvents(qExpired.id).some((e) => e.note.includes('周文娟')),
+  JSON.stringify(quotations.listQuotationEvents(qExpired.id))
+)
+
 /* ---------------- 报价单：费用转成订单的正式费用行 ---------------- */
 section('报价单费用转订单费用行')
 const qCharge = quotations.saveQuotation({
@@ -982,7 +1037,7 @@ const smpPaid = samples.saveSample({
   items: [{ styleNo: 'A001', color: 'White', size: 'S', quantity: 1, unitPrice: 10 }]
 })
 eq('已收款标记不需要汇率', smpPaid.feeStatus, 'paid')
-eq('已收的样品费算已收回', smpPaid.feeRecovered, 10)
+eq('已收的样品费 + 快递费都算已收回', smpPaid.feeRecovered, 10 + 80)
 eq('已收的打样单不计待收', smpPaid.receivableBase, 0)
 
 // N23：未收的打样费要进 totalReceivable（工作台口径）
@@ -1026,7 +1081,7 @@ const smpDates = samples.saveSample({
 })
 eq('寄出日期记住了', smpDates.shippedAt, '2026-10-22')
 eq('签收日期记住了', smpDates.receivedAt, '2026-10-25')
-eq('公司净垫 = 工厂 30 + 快递 20 − 已收回样品费 10', smpDates.netAdvance, 30 + 20 - 10)
+eq('公司净垫 = 工厂 30 − 已收样品费 10（快递费已收，不再重复垫）', smpDates.netAdvance, 30 - 10)
 
 // N24：打样转订单（不抵扣）
 const smpConv = samples.saveSample({
@@ -1036,7 +1091,7 @@ const smpConv = samples.saveSample({
   exchangeRate: 7.2,
   exchangeRateDate: '2026-10-21',
   items: [
-    { styleNo: 'A001', productName: '纯棉圆领T恤', color: 'Black', size: 'M', quantity: 2, unitPrice: 15, productId: p1.id }
+    { styleNo: 'A001', productName: '纯棉圆领T恤', color: 'Black', size: 'M', quantity: 2, unitPrice: 15, goodsUnitPrice: 8, productId: p1.id }
   ]
 })
 const convOrder = samples.convertSampleToOrder(smpConv.id, { offsetSampleFee: false })
@@ -1046,9 +1101,28 @@ eq('不抵扣 → 订单没有负费用行', (convOrder.charges ?? []).length, 0
 eq('转出订单的明细带过去了', convOrder.items.length, 1)
 eq('明细款号带过去了', convOrder.items[0].styleNo, 'A001')
 eq('明细件数带过去了', convOrder.items[0].quantity, 2)
+eq('转单用的是大货单价，不是打样单价', convOrder.items[0].unitPrice, 8)
 const smpConvAfter = samples.getSample(smpConv.id)!
 eq('打样单记住了转出的订单', smpConvAfter.convertedOrderId, convOrder.id)
 eq('不抵扣 → 收款标记不变', smpConvAfter.feeStatus, 'unpaid')
+eq('打样单记住了大货单价', smpConvAfter.items[0].goodsUnitPrice, 8)
+// R3：打样单价只是打样费，没填大货单价不许转（否则 15 美金打样价会变成大货价）
+const smpNoGoods = samples.saveSample({
+  customerId: c2.id,
+  expressFee: 0,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: '2026-10-21',
+  items: [{ styleNo: 'A-BULK', productName: '待报大货价', quantity: 1, unitPrice: 20 }]
+})
+let smpGoodsErr = ''
+try {
+  samples.convertSampleToOrder(smpNoGoods.id)
+} catch (e) {
+  smpGoodsErr = (e as Error).message
+}
+check('没填大货单价 → 打样单不能转订单', smpGoodsErr.includes('大货单价'), smpGoodsErr)
+check('被拦住时没有偷偷生成订单', samples.getSample(smpNoGoods.id)!.convertedOrderId === null)
 // 重复转单返回同一张
 const convAgain = samples.convertSampleToOrder(smpConv.id, { offsetSampleFee: false })
 eq('重复转单不新开订单', convAgain.id, convOrder.id)
@@ -1068,7 +1142,7 @@ const smpOffset = samples.saveSample({
   currency: 'USD',
   exchangeRate: 7.2,
   exchangeRateDate: '2026-10-21',
-  items: [{ styleNo: 'A002', productName: '涤纶 Polo 衫', color: 'Navy', size: 'L', quantity: 1, unitPrice: 15 }]
+  items: [{ styleNo: 'A002', productName: '涤纶 Polo 衫', color: 'Navy', size: 'L', quantity: 1, unitPrice: 15, goodsUnitPrice: 15 }]
 })
 const offsetOrder = samples.convertSampleToOrder(smpOffset.id, { offsetSampleFee: true, paymentStatus: 'sent' })
 const offsetCharge = (offsetOrder.charges ?? []).find((c: any) => c.amount < 0)
@@ -1135,7 +1209,7 @@ const smpPi = samples.saveSample({
   exchangeRate: 7.2,
   exchangeRateDate: '2026-10-21',
   feeStatus: 'paid',
-  items: [{ styleNo: 'A001', productName: '纯棉圆领T恤', color: 'Black', size: 'M', quantity: 1, unitPrice: 20 }]
+  items: [{ styleNo: 'A001', productName: '纯棉圆领T恤', color: 'Black', size: 'M', quantity: 1, unitPrice: 20, goodsUnitPrice: 8 }]
 })
 const piSentOrder = samples.convertSampleToOrder(smpPi.id, { offsetSampleFee: false, paymentStatus: 'sent' })
 eq('转单可直接落「待确认」（PI 现在就发）', piSentOrder.paymentStatus, 'sent')

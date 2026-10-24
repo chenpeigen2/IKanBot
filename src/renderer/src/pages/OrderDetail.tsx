@@ -372,6 +372,16 @@ export default function OrderDetail() {
                   <span className="k">客户 PO</span>
                   <span className="v">{order.customerPo || '—'}</span>
                 </div>
+                {order.sourceQuotationNo ? (
+                  <div>
+                    <span className="k">来源报价</span>
+                    <span className="v">
+                      {order.sourceQuotationNo}
+                      {order.sourceRevision ? ` · 第 ${order.sourceRevision} 版` : ''}
+                      <span className="faint">（转单时的价格快照，之后改报价不影响这张单）</span>
+                    </span>
+                  </div>
+                ) : null}
                 <div>
                   <span className="k">贸易条款</span>
                   <span className="v">

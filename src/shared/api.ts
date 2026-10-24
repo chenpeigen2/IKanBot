@@ -66,8 +66,17 @@ export interface IKanApi {
     updateMeta(id: number, meta: any): Promise<any>
     /** 报价单操作历史（改了什么） */
     events(id: number): Promise<any[]>
-    /** 报价单一键转订单 */
-    convert(id: number, opts?: { paymentStatus?: 'draft' | 'sent' }): Promise<any>
+    /** 报价单的历史版本（每次改价改条款都冻结一版） */
+    versions(id: number): Promise<any[]>
+    /** 报价单一键转订单：按指定版本原样带过去（不传版本号会被后端拒绝） */
+    convert(
+      id: number,
+      opts?: {
+        paymentStatus?: 'draft' | 'sent'
+        revision?: number
+        override?: { approvedBy?: string; reason?: string }
+      }
+    ): Promise<any>
   }
   samples: {
     list(filter?: any): Promise<any[]>

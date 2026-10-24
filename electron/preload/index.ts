@@ -74,7 +74,9 @@ const api: IKanApi = {
     remove: (id: number) => call<void>('quotations:delete', id),
     updateMeta: (id: number, meta: any) => call<any>('quotations:updateMeta', id, meta),
     events: (id: number) => call<any[]>('quotations:events', id),
-    convert: (id: number, opts?: { paymentStatus?: 'draft' | 'sent' }) => call<any>('quotations:convert', id, opts)
+    convert: (id: number, opts?: { paymentStatus?: 'draft' | 'sent'; revision?: number; override?: any }) =>
+      call<any>('quotations:convert', id, opts),
+    versions: (id: number) => call<any[]>('quotations:versions', id)
   },
   samples: {
     list: (filter?: any) => call<any[]>('samples:list', filter),

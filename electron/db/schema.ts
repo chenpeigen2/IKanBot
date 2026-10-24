@@ -378,5 +378,30 @@ CREATE TABLE order_settlements (
 );
 CREATE INDEX idx_order_settlements_order ON order_settlements(order_id);
 `
+  },
+  {
+    version: 10,
+    name: 'quotation_versions_and_sample_goods_price',
+    sql: `
+-- 报价版本快照：每次改价前冻结一版，客户按旧版回单时能按那一版转单。
+CREATE TABLE quotation_versions (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  quotation_id  INTEGER NOT NULL REFERENCES quotations(id) ON DELETE CASCADE,
+  revision      INTEGER NOT NULL,
+  snapshot_json TEXT NOT NULL,
+  goods_total   REAL NOT NULL DEFAULT 0,
+  grand_total   REAL NOT NULL DEFAULT 0,
+  created_at    TEXT NOT NULL,
+  UNIQUE(quotation_id, revision)
+);
+CREATE INDEX idx_quotation_versions_q ON quotation_versions(quotation_id);
+
+-- 订单记住自己由哪张报价单的哪一版转来：客户拿 PI 对报价时有据可查。
+ALTER TABLE orders ADD COLUMN source_quotation_id INTEGER;
+ALTER TABLE orders ADD COLUMN source_revision INTEGER;
+
+-- 打样单价是打样费，不是大货价；转单必须另填大货单价，绝不静默沿用样品价。
+ALTER TABLE sample_order_items ADD COLUMN goods_unit_price REAL;
+`
   }
 ]

@@ -19,7 +19,8 @@ import type {
   QuotationCharge,
   QuotationDetail,
   QuotationResult,
-  QuotationStatus
+  QuotationStatus,
+  QuotationVersionSummary
 } from '../../src/shared/types'
 
 function now(): string {
@@ -99,6 +100,120 @@ function hydrate(q: Quotation): QuotationDetail {
     chargesTotal: m.chargesTotal,
     grandTotal: m.grandTotal
   }
+}
+
+/* ---------------- 版本快照 ---------------- */
+
+export interface QuotationSnapshot {
+  qNo: string
+  customerId: number
+  currency: Currency
+  exchangeRate: number
+  exchangeRateDate: string | null
+  baseCurrency: Currency
+  incoterm: Incoterm
+  portOfLoading: string
+  portOfDestination: string
+  paymentMethod: PaymentMethod
+  depositRatio: number
+  validUntil: string | null
+  customerPo: string
+  note: string
+  charges: QuotationCharge[]
+  items: QuotationItemInput[]
+}
+
+/** 把报价单当前内容冻结成某一版（同一版只存一次，不覆盖） */
+function freezeQuotationVersion(qId: number, revision: number): void {
+  const db = getDb()
+  const row = db.get('SELECT * FROM quotations WHERE id = ?', [qId]) as Record<string, unknown> | null
+  if (!row) return
+  const items = (
+    db.all(
+      `SELECT product_id, style_no, product_name, composition, color, size, quantity, unit_price
+       FROM quotation_items WHERE quotation_id = ? ORDER BY id`,
+      [qId]
+    ) as Record<string, unknown>[]
+  ).map((r) => ({
+    productId: r.product_id == null ? null : Number(r.product_id),
+    styleNo: String(r.style_no ?? ''),
+    productName: String(r.product_name ?? ''),
+    composition: String(r.composition ?? ''),
+    color: String(r.color ?? ''),
+    size: String(r.size ?? ''),
+    quantity: Number(r.quantity ?? 0),
+    unitPrice: Number(r.unit_price ?? 0)
+  }))
+  let charges: QuotationCharge[] = []
+  try {
+    const parsed = JSON.parse(String(row.charges ?? '[]'))
+    if (Array.isArray(parsed)) charges = parsed
+  } catch {
+    charges = []
+  }
+  const snap: QuotationSnapshot = {
+    qNo: String(row.q_no ?? ''),
+    customerId: Number(row.customer_id),
+    currency: String(row.currency ?? 'USD') as Currency,
+    exchangeRate: Number(row.exchange_rate ?? 0),
+    exchangeRateDate: row.exchange_rate_date == null ? null : String(row.exchange_rate_date),
+    baseCurrency: String(row.base_currency ?? 'CNY') as Currency,
+    incoterm: String(row.incoterm ?? 'FOB') as Incoterm,
+    portOfLoading: String(row.port_of_loading ?? ''),
+    portOfDestination: String(row.port_of_destination ?? ''),
+    paymentMethod: String(row.payment_method ?? 'tt_deposit') as PaymentMethod,
+    depositRatio: Number(row.deposit_ratio ?? 0),
+    validUntil: row.valid_until == null ? null : String(row.valid_until),
+    customerPo: String(row.customer_po ?? ''),
+    note: String(row.note ?? ''),
+    charges,
+    items
+  }
+  const goodsTotal = items.reduce((s, i) => s + i.quantity * i.unitPrice, 0)
+  const grandTotal = goodsTotal + charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
+  db.run(
+    `INSERT OR IGNORE INTO quotation_versions(quotation_id, revision, snapshot_json, goods_total, grand_total, created_at)
+     VALUES(?,?,?,?,?,?)`,
+    [qId, revision, JSON.stringify(snap), goodsTotal, grandTotal, now()]
+  )
+}
+
+/** 老报价没有存档时，把当前内容补成「升级前的这一版」，不重算历史 */
+function ensureQuotationVersion(qId: number, revision: number): void {
+  const db = getDb()
+  const has = db.get('SELECT id FROM quotation_versions WHERE quotation_id = ? LIMIT 1', [qId])
+  if (!has) freezeQuotationVersion(qId, revision)
+}
+
+export function listQuotationVersions(id: number): QuotationVersionSummary[] {
+  const db = getDb()
+  const q = db.get('SELECT revision FROM quotations WHERE id = ?', [id]) as { revision?: number } | null
+  if (!q) throw new Error('报价单不存在')
+  ensureQuotationVersion(id, Number(q.revision ?? 1))
+  const rows = db.all(
+    `SELECT revision, goods_total, grand_total, snapshot_json, created_at
+     FROM quotation_versions WHERE quotation_id = ? ORDER BY revision DESC`,
+    [id]
+  ) as Record<string, unknown>[]
+  return rows.map((r) => {
+    let itemCount = 0
+    let validUntil = ''
+    try {
+      const snap = JSON.parse(String(r.snapshot_json ?? '{}')) as QuotationSnapshot
+      itemCount = Array.isArray(snap.items) ? snap.items.length : 0
+      validUntil = snap.validUntil ?? ''
+    } catch {
+      itemCount = 0
+    }
+    return {
+      revision: Number(r.revision ?? 0),
+      goodsTotal: Number(r.goods_total ?? 0),
+      grandTotal: Number(r.grand_total ?? 0),
+      createdAt: String(r.created_at ?? ''),
+      itemCount,
+      validUntil
+    }
+  })
 }
 
 export function listQuotations(filter: {
@@ -204,6 +319,18 @@ export function saveQuotation(input: QuotationInput): QuotationDetail {
     result = input.result ?? (before.result as QuotationResult)
     revision = Number(before.revision ?? 1) + 1
     changeNote = describeChange(oldItems, input.items, oldCharges, input.charges ?? [])
+    // 条款也是报价的一部分：改 FOB/CIF、付款方式、有效期、汇率必须留痕
+    const termBits: string[] = []
+    const nextIncoterm = input.incoterm ?? (before.incoterm as Incoterm)
+    const nextPayment = input.paymentMethod ?? (before.payment_method as PaymentMethod)
+    if (nextIncoterm !== before.incoterm) termBits.push(`贸易术语 ${before.incoterm} → ${nextIncoterm}`)
+    if (nextPayment !== before.payment_method) termBits.push(`付款方式 ${before.payment_method} → ${nextPayment}`)
+    if (validUntil !== before.valid_until) termBits.push(`有效期 ${before.valid_until || '未填'} → ${validUntil || '未填'}`)
+    if (Math.abs(oldRate - rate) > 0.0001) termBits.push(`汇率 ${oldRate} → ${rate}`)
+    if (termBits.length) changeNote = changeNote ? `${changeNote}；${termBits.join('；')}` : termBits.join('；')
+
+    // 改之前先把当前版冻结：客户手里那张纸必须能原样找回来
+    freezeQuotationVersion(qId, Number(before.revision ?? 1))
 
     db.run(
       `UPDATE quotations SET customer_id=?, currency=?, exchange_rate=?, exchange_rate_date=?, base_currency=?, incoterm=?,
@@ -284,6 +411,7 @@ export function saveQuotation(input: QuotationInput): QuotationDetail {
       ]
     )
   }
+  freezeQuotationVersion(qId, revision)
   logQuotationEvent(qId, input.id ? 'update' : 'create', changeNote || (input.id ? '修改报价单' : '新建报价单'))
   return getQuotation(qId)!
 }
@@ -418,7 +546,16 @@ export function updateQuotationMeta(
  * 报价单转订单：款号、颜色、尺码、数量、单价一个数字都不用重敲。
  * 转出来的订单是「草稿」状态，由业务员核对后再发 PI。
  */
-export function convertToOrder(id: number, opts: { paymentStatus?: 'draft' | 'sent' } = {}): OrderDetail {
+export function convertToOrder(
+  id: number,
+  opts: {
+    paymentStatus?: 'draft' | 'sent'
+    /** 按第几版转；不填 = 当前最新版 */
+    revision?: number
+    /** 过期报价要沿用：必须写清批准人和原因 */
+    override?: { approvedBy?: string; reason?: string }
+  } = {}
+): OrderDetail {
   const q = getQuotation(id)
   if (!q) throw new Error('报价单不存在')
   if (q.convertedOrderId) {
@@ -430,34 +567,70 @@ export function convertToOrder(id: number, opts: { paymentStatus?: 'draft' | 'se
     throw new Error('这张报价单没有汇率日期，请先编辑报价单把汇率日期补上再转订单')
   }
 
-  // 费用行（运费/保险等）直接变成订单的正式费用行，不再塞进备注
   const db = getDb()
-  // 订单头 + 明细 + 报价单标记要一次做完：中途失败整单回滚，
-  // 不留下「报价单标了已转、订单却是空的」半截数据
+  ensureQuotationVersion(id, Number(q.revision ?? 1))
+  const targetRevision = Number(opts.revision ?? q.revision ?? 1)
+  const versionRow = db.get('SELECT snapshot_json, grand_total FROM quotation_versions WHERE quotation_id = ? AND revision = ?', [
+    id,
+    targetRevision
+  ]) as { snapshot_json?: string; grand_total?: number } | null
+  if (!versionRow) {
+    throw new Error(
+      `报价单 ${q.qNo} 没有第 ${targetRevision} 版的存档（最早存档从升级后的修改开始）。请选一个已有版本，或重新保存后再转。`
+    )
+  }
+  let snap: QuotationSnapshot
+  try {
+    snap = JSON.parse(String(versionRow.snapshot_json ?? '')) as QuotationSnapshot
+  } catch {
+    throw new Error(`报价单 ${q.qNo} 第 ${targetRevision} 版的存档读不出来，不能拿它转单。请在报价页重新保存一版。`)
+  }
+  const snapGrand = Number(versionRow.grand_total ?? 0)
+
+  // 有效期是锁汇的承诺：过期、失效、丢单都必须有人明确批准才能沿用
+  const today = localDate()
+  const expired =
+    q.status === 'expired' ||
+    Boolean(snap.validUntil && snap.validUntil < today)
+  const approvedBy = String(opts.override?.approvedBy ?? '').trim()
+  const overrideReason = String(opts.override?.reason ?? '').trim()
+  if (expired && (!approvedBy || !overrideReason)) {
+    throw new Error(
+      `报价单 ${q.qNo} 的有效期是 ${snap.validUntil || '未填'}，已经过期。` +
+        `要按旧价转单，必须填写批准人和沿用原因；否则请先重报一版。`
+    )
+  }
+
+  const currentGrand = q.grandTotal
+  const diff = snapGrand - currentGrand
+  const overrideNote = expired
+    ? `报价已过期，经 ${approvedBy} 批准沿用（原因：${overrideReason}）`
+    : ''
+
   db.exec('BEGIN')
   try {
     const order = createOrder({
-      customerId: q.customerId,
-      currency: q.currency,
-      exchangeRate: q.exchangeRate,
-      exchangeRateDate: q.exchangeRateDate,
-      baseCurrency: q.baseCurrency,
-      incoterm: q.incoterm,
-      portOfLoading: q.portOfLoading,
-      portOfDestination: q.portOfDestination,
-      paymentMethod: q.paymentMethod,
-      depositRatio: q.depositRatio,
-      validUntil: q.validUntil,
-      customerPo: q.customerPo,
-      charges: q.charges,
-      note: q.note,
+      customerId: snap.customerId,
+      currency: snap.currency,
+      exchangeRate: snap.exchangeRate,
+      exchangeRateDate: snap.exchangeRateDate,
+      baseCurrency: snap.baseCurrency,
+      incoterm: snap.incoterm,
+      portOfLoading: snap.portOfLoading,
+      portOfDestination: snap.portOfDestination,
+      paymentMethod: snap.paymentMethod,
+      depositRatio: snap.depositRatio,
+      validUntil: snap.validUntil,
+      customerPo: snap.customerPo,
+      charges: snap.charges,
+      note: [`由报价单 ${snap.qNo} 第 ${targetRevision} 版转成`, snap.note].filter(Boolean).join('；'),
       // 转订单的落点状态：PI 已发 = 待确认（sent），否则草稿
       paymentStatus: opts.paymentStatus ?? 'sent'
     })
 
-    for (const it of q.items) {
+    for (const it of snap.items) {
       // 成本价：先按商品 id 找，找不到就按款号在商品库里找（手工加的行也能带上成本）
-      let productId = it.productId
+      let productId = it.productId ?? null
       let cost: number | null = null
       if (productId) {
         const p = db.get('SELECT id, cost_price FROM products WHERE id = ?', [productId]) as
@@ -480,24 +653,47 @@ export function convertToOrder(id: number, opts: { paymentStatus?: 'draft' | 'se
         [
           order.id,
           productId,
-          it.styleNo,
-          it.productName,
-          it.composition,
-          it.color,
-          it.size,
+          it.styleNo ?? '',
+          it.productName ?? '',
+          it.composition ?? '',
+          it.color ?? '',
+          it.size ?? '',
           it.quantity,
           it.unitPrice,
           cost
         ]
       )
     }
-    db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), order.id])
+    db.run('UPDATE orders SET source_quotation_id = ?, source_revision = ?, updated_at = ? WHERE id = ?', [
+      id,
+      targetRevision,
+      now(),
+      order.id
+    ])
+    if (overrideNote) {
+      db.run('UPDATE orders SET note = ? WHERE id = ?', [`${overrideNote}；${snap.note}`.replace(/^；/, ''), order.id])
+    }
+    const saved = getOrder(order.id)!
+    if (Math.abs(saved.grandTotal - snapGrand) > 0.005) {
+      throw new Error(
+        `按第 ${targetRevision} 版转单后金额对不上：存档合计 ${snapGrand.toFixed(2)}，订单算出来 ${saved.grandTotal.toFixed(2)}。已回滚，请检查报价明细。`
+      )
+    }
     logEvent(
       order.id,
       'quotation_convert',
       null,
       null,
-      `由报价单 ${q.qNo} 转成订单，商品明细原样带入（汇率 ${q.exchangeRate}，汇率日期 ${q.exchangeRateDate}）`
+      `由报价单 ${snap.qNo} 第 ${targetRevision} 版转成订单，商品明细原样带入（汇率 ${snap.exchangeRate}，汇率日期 ${snap.exchangeRateDate}）` +
+        (targetRevision !== Number(q.revision ?? 1)
+          ? `；当前最新第 ${q.revision} 版合计 ${currentGrand.toFixed(2)}，差额 ${diff.toFixed(2)}`
+          : '') +
+        (overrideNote ? `；${overrideNote}` : '')
+    )
+    logQuotationEvent(
+      id,
+      'convert',
+      `按第 ${targetRevision} 版转成订单 ${saved.orderNo}${overrideNote ? `；${overrideNote}` : ''}`
     )
 
     db.run('UPDATE quotations SET status=?, result=?, converted_order_id=?, updated_at=? WHERE id=?', [
@@ -508,7 +704,7 @@ export function convertToOrder(id: number, opts: { paymentStatus?: 'draft' | 'se
       id
     ])
     db.exec('COMMIT')
-    return getOrder(order.id)!
+    return saved
   } catch (e) {
     db.exec('ROLLBACK')
     throw e

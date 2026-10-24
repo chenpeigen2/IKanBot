@@ -178,6 +178,15 @@ function hydrate(order: Order): OrderDetail {
       unknown
     >[]
   ).map(mapSettlement)
+  const sourceQuotationNo = order.sourceQuotationId
+    ? String(
+        (
+          db.get('SELECT q_no FROM quotations WHERE id = ?', [order.sourceQuotationId]) as
+            | { q_no?: string }
+            | null
+        )?.q_no ?? ''
+      )
+    : ''
   const plRows = db.all('SELECT * FROM packing_lists WHERE order_id = ? ORDER BY id', [order.id]) as Record<
     string,
     unknown
@@ -224,6 +233,7 @@ function hydrate(order: Order): OrderDetail {
     badDebtOutstanding: m.badDebtOutstanding,
     writtenOff: m.writtenOff,
     settlements,
+    sourceQuotationNo,
     shipSummary: shipmentSummary(order.id)
   }
 }

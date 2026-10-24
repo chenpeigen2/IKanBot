@@ -41,6 +41,8 @@ export interface SampleItemInput {
   size?: string
   quantity: number
   unitPrice?: number
+  /** 转单用的大货单价；不填就不能转单，绝不拿打样单价冒充 */
+  goodsUnitPrice?: number | null
 }
 
 export interface SampleInput {
@@ -101,7 +103,8 @@ function mapSampleItem(r: Record<string, unknown>): SampleOrderItem {
     color: String(r.color ?? ''),
     size: String(r.size ?? ''),
     quantity: Number(r.quantity ?? 0),
-    unitPrice: Number(r.unit_price ?? 0)
+    unitPrice: Number(r.unit_price ?? 0),
+    goodsUnitPrice: r.goods_unit_price == null ? null : Number(r.goods_unit_price)
   }
 }
 
@@ -119,8 +122,9 @@ function hydrate(s: SampleOrder): SampleOrderDetail {
   const sampleFee = items.reduce((sum, i) => sum + i.quantity * i.unitPrice, 0)
   // 公司净垫（N33）：公司总成本 = 工厂打样费 + 快递费；已收回的样品费（已收/下单抵扣）才能抵
   const companyCost = Number(s.factoryCost ?? 0) + Number(s.expressFee ?? 0)
+  // 已收 = 样品费 + 快递费（客户一并付了）；下单抵扣只抵样品费，快递费仍是公司成本
   const feeRecovered =
-    s.feeStatus === 'paid' || s.feeStatus === 'offset' ? sampleFee : 0
+    s.feeStatus === 'paid' ? sampleFee + s.expressFee : s.feeStatus === 'offset' ? sampleFee : 0
   // 待收（N23）：未收才计；取消的单不收钱；汇率必须有，否则工作台会少算 → 标记 rateMissing 提示补
   const cancelled = s.status === 'cancelled'
   const owed = s.feeStatus === 'unpaid' && !cancelled ? sampleFee + s.expressFee : 0
@@ -314,8 +318,8 @@ export function saveSample(input: SampleInput): SampleOrderDetail {
       productId = hit?.id ?? null
     }
     db.run(
-      `INSERT INTO sample_order_items(sample_order_id, product_id, style_no, product_name, composition, color, size, quantity, unit_price)
-       VALUES(?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO sample_order_items(sample_order_id, product_id, style_no, product_name, composition, color, size, quantity, unit_price, goods_unit_price)
+       VALUES(?,?,?,?,?,?,?,?,?,?)`,
       [
         id,
         productId,
@@ -325,7 +329,8 @@ export function saveSample(input: SampleInput): SampleOrderDetail {
         it.color ?? '',
         it.size ?? '',
         it.quantity,
-        Number(it.unitPrice ?? 0)
+        Number(it.unitPrice ?? 0),
+        it.goodsUnitPrice == null || Number(it.goodsUnitPrice) <= 0 ? null : Number(it.goodsUnitPrice)
       ]
     )
   }
@@ -377,6 +382,16 @@ export function convertSampleToOrder(
     throw new Error('这张打样单没记汇率锁定日期。请先编辑打样单，把汇率锁定日期补上再转订单')
   }
 
+  // 打样单价是打样费，不是大货价。没填大货单价的款号必须拦住，
+  // 否则会把 15 美金/件的打样价当成大货价转出一张错三倍的 PI。
+  const missingGoodsPrice = s.items.filter(
+    (i) => !(Number(i.goodsUnitPrice) > 0)
+  )
+  if (missingGoodsPrice.length) {
+    const list = missingGoodsPrice.map((i) => i.styleNo || '(未填款号)').join('、')
+    throw new Error(`这些款号还没填大货单价：${list}。打样单价只是打样费，不能当大货价；请在打样单里补上大货单价再转。`)
+  }
+
   const customerDefaults = db_customerDefaults(s.customerId)
 
   // 样品费抵扣：变成订单里一条负数费用行，单据上印出来，客户对账看得懂
@@ -420,7 +435,18 @@ export function convertSampleToOrder(
       db.run(
         `INSERT INTO order_items(order_id, product_id, style_no, product_name, composition, color, size, quantity, unit_price, unit_cost)
          VALUES(?,?,?,?,?,?,?,?,?,?)`,
-        [order.id, productId, it.styleNo, it.productName, it.composition, it.color, it.size, it.quantity, it.unitPrice, cost]
+        [
+          order.id,
+          productId,
+          it.styleNo,
+          it.productName,
+          it.composition,
+          it.color,
+          it.size,
+          it.quantity,
+          Number(it.goodsUnitPrice),
+          cost
+        ]
       )
     }
     db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), order.id])

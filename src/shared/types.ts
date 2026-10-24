@@ -247,6 +247,10 @@ export interface Order {
   sealNo: string
   /** 正式费用行（运费/保险等），PI 上单独成行，不进备注 */
   charges: QuotationCharge[]
+  /** 由哪张报价单转来（null = 手工建单或打样转单） */
+  sourceQuotationId: number | null
+  /** 转单用的是报价单第几版 */
+  sourceRevision: number | null
   createdAt: string
   updatedAt: string
 }
@@ -286,6 +290,8 @@ export interface OrderDetail extends Order {
   writtenOff: number
   /** 核销 / 坏账 / 追回台账（只追加，撤销也留一条负数） */
   settlements: Settlement[]
+  /** 来源报价单号（客户拿 PI 对报价时能查） */
+  sourceQuotationNo: string
   /** 出货汇总（批次件数与推导状态） */
   shipSummary: ShipSummary
 }
@@ -309,6 +315,18 @@ export interface Settlement {
   /** 业务发生日 YYYY-MM-DD */
   at: string
   createdAt: string
+}
+
+/** 报价单某一版的存档摘要 */
+export interface QuotationVersionSummary {
+  revision: number
+  goodsTotal: number
+  grandTotal: number
+  createdAt: string
+  /** 这一版有几行明细 */
+  itemCount: number
+  /** 这一版的有效期（YYYY-MM-DD） */
+  validUntil: string
 }
 
 export const SETTLEMENT_KIND_LABEL: Record<SettlementKind, string> = {
@@ -582,8 +600,10 @@ export interface SampleOrderItem {
   color: string
   size: string
   quantity: number
-  /** 样品单价 */
+  /** 样品单价（打样费，不是大货价） */
   unitPrice: number
+  /** 转单用的大货单价；null = 还没填，转单必须拦住 */
+  goodsUnitPrice: number | null
 }
 
 /** 打样单（样品单） */

@@ -45,6 +45,10 @@ export default function Quotations() {
   const [editing, setEditing] = useState<any | null>(null)
   const [detail, setDetail] = useState<any | null>(null)
   const [convertTarget, setConvertTarget] = useState<any | null>(null)
+  const [convertVersions, setConvertVersions] = useState<any[]>([])
+  const [convertRevision, setConvertRevision] = useState<number | null>(null)
+  const [overrideBy, setOverrideBy] = useState('')
+  const [overrideReason, setOverrideReason] = useState('')
 
   const load = async () => {
     const rows = await window.api.quotations.list({
@@ -73,10 +77,32 @@ export default function Quotations() {
     }
   }
 
+  /** 打开转单弹窗：先把历史版本拉出来，默认选当前版 */
+  const openConvert = async (q: any) => {
+    setConvertTarget(q)
+    setConvertRevision(Number(q.revision ?? 1))
+    setOverrideBy('')
+    setOverrideReason('')
+    try {
+      setConvertVersions(await window.api.quotations.versions(q.id))
+    } catch {
+      setConvertVersions([])
+    }
+  }
+
   /** 转订单：问一句 PI 发不发，状态别默认落在草稿（草稿单系统不提醒） */
   const convert = async (q: any, paymentStatus: 'draft' | 'sent') => {
+    const expired = isConvertExpired
+    if (expired && (!overrideBy.trim() || !overrideReason.trim())) {
+      toast('这张报价已经过期，要沿用旧价必须填批准人和原因', 'error')
+      return
+    }
     try {
-      const order = await window.api.quotations.convert(q.id, { paymentStatus })
+      const order = await window.api.quotations.convert(q.id, {
+        paymentStatus,
+        revision: convertRevision ?? undefined,
+        override: expired ? { approvedBy: overrideBy.trim(), reason: overrideReason.trim() } : undefined
+      })
       setConvertTarget(null)
       if (paymentStatus === 'sent') {
         toast(`已转成订单 ${order.orderNo}，状态是「待确认」`)
@@ -88,6 +114,15 @@ export default function Quotations() {
       toast((e as Error).message, 'error')
     }
   }
+
+  const selectedVersion = convertVersions.find((v) => Number(v.revision) === Number(convertRevision))
+  const versionGrand = selectedVersion ? Number(selectedVersion.grandTotal) : Number(convertTarget?.grandTotal ?? 0)
+  const versionDiff = convertTarget ? versionGrand - Number(convertTarget.grandTotal ?? 0) : 0
+  const isConvertExpired = Boolean(
+    convertTarget &&
+      (convertTarget.status === 'expired' ||
+        (selectedVersion?.validUntil && selectedVersion.validUntil < today()))
+  )
 
   return (
     <>
@@ -179,7 +214,7 @@ export default function Quotations() {
                               看订单
                             </button>
                           ) : (
-                            <button className="link" onClick={() => setConvertTarget(q)}>
+                            <button className="link" onClick={() => void openConvert(q)}>
                               转订单
                             </button>
                           )}
@@ -239,7 +274,7 @@ export default function Quotations() {
             setDetail(null)
             setEditing(q)
           }}
-          onConvert={(q: any) => setConvertTarget(q)}
+          onConvert={(q: any) => void openConvert(q)}
         />
       ) : null}
 
@@ -264,6 +299,66 @@ export default function Quotations() {
           <div className="alert info">
             款号、颜色、尺码、数量、单价、运费保险一个数字都不用重敲，报价单的汇率和汇率日期也原样带过去。
           </div>
+
+          <div className="field">
+            <label>按哪一版转？</label>
+            <select
+              value={convertRevision ?? ''}
+              onChange={(e) => setConvertRevision(e.target.value === '' ? null : Number(e.target.value))}
+            >
+              {convertVersions.length === 0 ? (
+                <option value={convertRevision ?? ''}>当前第 {convertTarget.revision ?? 1} 版</option>
+              ) : (
+                convertVersions.map((v) => (
+                  <option key={v.revision} value={v.revision}>
+                    第 {v.revision} 版 · 合计 {Number(v.grandTotal).toFixed(2)} {convertTarget.currency}
+                    {Number(v.revision) === Number(convertTarget.revision) ? '（当前）' : ''}
+                    {v.validUntil ? ` · 有效期至 ${v.validUntil}` : ''}
+                  </option>
+                ))
+              )}
+            </select>
+            <div className="hint">
+              转账按选定版本原样带过去，不会拿最新版偷偷替换。老报价单升级前没有存档，只能按当前版转。
+            </div>
+            {selectedVersion && Math.abs(versionDiff) > 0.005 ? (
+              <div className="alert warn" style={{ marginTop: 6 }}>
+                这一版合计 {money(versionGrand, convertTarget.currency)}
+                ，比当前版（{money(convertTarget.grandTotal, convertTarget.currency)}）
+                {versionDiff > 0 ? '高' : '低'} {money(Math.abs(versionDiff), convertTarget.currency)}
+                。转出来的订单按这一版算。
+              </div>
+            ) : null}
+          </div>
+
+          {isConvertExpired ? (
+            <>
+              <div className="alert warn">
+                这张报价已经过期
+                {selectedVersion?.validUntil ? `（有效期至 ${selectedVersion.validUntil}）` : ''}。
+                客户要按旧价下单的话，必须写清谁批准、为什么沿用；否则请先重报一版。
+              </div>
+              <div className="field-row">
+                <div className="field">
+                  <label>批准人 *</label>
+                  <input
+                    value={overrideBy}
+                    onChange={(e) => setOverrideBy(e.target.value)}
+                    placeholder="如 周文娟 / 老板"
+                  />
+                </div>
+                <div className="field">
+                  <label>沿用原因 *</label>
+                  <input
+                    value={overrideReason}
+                    onChange={(e) => setOverrideReason(e.target.value)}
+                    placeholder="如 老客户翻单，同意沿用旧价"
+                  />
+                </div>
+              </div>
+            </>
+          ) : null}
+
           <div className="field">
             <label>PI 现在就发给客户吗？</label>
             <div className="hint">

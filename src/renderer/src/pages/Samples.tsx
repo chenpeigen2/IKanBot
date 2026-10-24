@@ -21,6 +21,8 @@ interface LineRow {
   size: string
   quantity: number
   unitPrice: number
+  /** 大货单价：转订单时的正式单价。打样单价只是打样费，不能拿来顶 */
+  goodsUnitPrice: number | null
 }
 
 /**
@@ -265,17 +267,34 @@ export default function Samples() {
                 取消
               </Button>
               {/* 不抵扣：样品费照收，转出来的订单里没有抵扣行 */}
-              <Button  onClick={() => void doConvert(false)}>
+              <Button
+                disabled={converting.items.some((i: any) => !(Number(i.goodsUnitPrice) > 0))}
+                onClick={() => void doConvert(false)}
+              >
                 不抵扣，直接转
               </Button>
               {/* 抵扣：样品费变成订单里的负费用行，打样单标记「下单抵扣」 */}
-              <Button variant="primary"  onClick={() => void doConvert(true)}>
+              <Button
+                variant="primary"
+                disabled={converting.items.some((i: any) => !(Number(i.goodsUnitPrice) > 0))}
+                onClick={() => void doConvert(true)}
+              >
                 样品费抵扣，转订单
               </Button>
             </>
           }
         >
           <p style={{ marginTop: 0 }}>客户确认样品了，要转成正式订单吗？</p>
+          {converting.items.some((i: any) => !(Number(i.goodsUnitPrice) > 0)) ? (
+            <div className="alert warn">
+              这些款号还没填大货单价：
+              {converting.items
+                .filter((i: any) => !(Number(i.goodsUnitPrice) > 0))
+                .map((i: any) => i.styleNo || '(未填款号)')
+                .join('、')}
+              。打样单价只是打样费，不能当大货价。请先关掉这里，点「编辑」补上大货单价再转单。
+            </div>
+          ) : null}
           <div className="price-calc">
             <div>
               <span className="muted">客户</span>
@@ -292,6 +311,14 @@ export default function Samples() {
             <div>
               <span className="muted">样品费</span>
               <span>{money(converting.sampleFee)}</span>
+            </div>
+            <div>
+              <span className="muted">大货单价（转单用）</span>
+              <span>
+                {converting.items
+                  .map((i: any) => `${i.styleNo || '(未填款号)'} ${i.goodsUnitPrice ?? '未填'}`)
+                  .join('、')}
+              </span>
             </div>
           </div>
           <div className="field mt-3">
@@ -404,7 +431,8 @@ function SampleModal({
       color: it.color,
       size: it.size,
       quantity: it.quantity,
-      unitPrice: it.unitPrice
+      unitPrice: it.unitPrice,
+      goodsUnitPrice: it.goodsUnitPrice ?? null
     }))
   )
 
@@ -665,7 +693,8 @@ function SampleModal({
                 color: '',
                 size: '',
                 quantity: 1,
-                unitPrice: 0
+                unitPrice: 0,
+                goodsUnitPrice: null
               }
             ])
           }
@@ -678,20 +707,25 @@ function SampleModal({
         <table className="data">
           <thead>
             <tr>
-              <th style={{ width: '16%' }}>款号</th>
-              <th style={{ width: '20%' }}>品名</th>
-              <th style={{ width: '12%' }}>颜色</th>
-              <th style={{ width: '10%' }}>尺码</th>
-              <th className="num" style={{ width: '12%' }}>件数</th>
-              <th className="num" style={{ width: '14%' }}>样品单价</th>
-              <th className="num" style={{ width: '14%' }}>金额</th>
+              <th style={{ width: '15%' }}>款号</th>
+              <th style={{ width: '17%' }}>品名</th>
+              <th style={{ width: '11%' }}>颜色</th>
+              <th style={{ width: '9%' }}>尺码</th>
+              <th className="num" style={{ width: '8%' }}>件数</th>
+              <th className="num" style={{ width: '12%' }} title="打样费单价，不是大货价">
+                样品单价
+              </th>
+              <th className="num" style={{ width: '11%' }}>金额</th>
+              <th className="num" style={{ width: '12%' }} title="转订单时带过去的大货单价，必填才能转单">
+                大货单价
+              </th>
               <th></th>
             </tr>
           </thead>
           <tbody>
             {lines.length === 0 ? (
               <tr>
-                <td colSpan={8}>
+                <td colSpan={9}>
                   <Empty text="还没有明细。点「+ 加一行」把要打的款号写上。" />
                 </td>
               </tr>
@@ -733,6 +767,18 @@ function SampleModal({
                     />
                   </td>
                   <td className="num">{(l.quantity * l.unitPrice).toFixed(2)}</td>
+                  <td className="num">
+                    <input
+                      type="number"
+                      step="0.01"
+                      className="col-num-sm"
+                      value={l.goodsUnitPrice ?? ''}
+                      placeholder="转单必填"
+                      onChange={(e) =>
+                        setLine(i, { goodsUnitPrice: e.target.value === '' ? null : Number(e.target.value) })
+                      }
+                    />
+                  </td>
                   <td className="right">
                     <Button variant="danger" size="sm"  onClick={() => setLines((ls) => ls.filter((_, k) => k !== i))}>
                       删除
@@ -748,6 +794,7 @@ function SampleModal({
               <td className="num">{num(totalQty)}</td>
               <td></td>
               <td className="num">{sampleFee.toFixed(2)}</td>
+              <td></td>
               <td></td>
             </tr>
           </tfoot>

@@ -136,6 +136,8 @@ export function mapOrder(r: Row): Order {
     vessel: str(r.vessel),
     sealNo: str(r.seal_no),
     charges: parseCharges(r.charges),
+    sourceQuotationId: optNum(r.source_quotation_id),
+    sourceRevision: optNum(r.source_revision),
     createdAt: str(r.created_at),
     updatedAt: str(r.updated_at)
   }
