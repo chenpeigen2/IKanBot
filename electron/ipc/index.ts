@@ -1,8 +1,8 @@
 import { ipcMain, dialog, shell, BrowserWindow } from 'electron'
 import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync } from 'fs'
-import { join, basename } from 'path'
+import { join, basename, resolve, sep } from 'path'
 import { tmpdir } from 'os'
-import { imagesDir, docsDir, dataDir } from '../db'
+import { imagesDir, docsDir, dataDir, backupsDir } from '../db'
 import * as products from '../services/products'
 import * as customers from '../services/customers'
 import * as orders from '../services/orders'
@@ -13,24 +13,14 @@ import * as dashboard from '../services/dashboard'
 import * as money from '../services/money'
 import * as settingsSvc from '../services/settings'
 import * as docsSvc from '../services/docs'
-import { createBackup } from '../services/backup'
+import { createBackup, inspectBackup, listBackups, pickBackup, restoreBackup } from '../services/backup'
 import { EXPORT_FILE_NAME } from '../../src/shared/types'
 import type { ExportKind } from '../../src/shared/types'
 import { localDate } from '../../src/shared/date'
 import { registerUpdaterIpc } from '../services/updater'
+import { handle } from './handle'
 import { copyFileSync } from 'fs'
 import { randomUUID } from 'crypto'
-
-/** 包装 handler，统一错误传递 */
-function handle<T>(channel: string, fn: (...args: any[]) => T | Promise<T>): void {
-  ipcMain.handle(channel, async (_e, ...args) => {
-    try {
-      return { ok: true, data: await fn(...args) }
-    } catch (e) {
-      return { ok: false, error: (e as Error).message }
-    }
-  })
-}
 
 /**
  * HTML → PDF。
@@ -87,6 +77,18 @@ export function registerIpc(): void {
   handle('app:dataDir', () => dataDir())
   handle('app:imagesDir', () => imagesDir())
   handle('app:backupsDir', () => join(dataDir(), 'backups'))
+  /**
+   * 一次把四个路径给出去。
+   * 在进程里用 join 拼好，渲染页只负责显示——以前界面里手写 `${dataDir}\\ikanbot.db`，
+   * 换个操作系统就是「C:\data\/backups」这种四不像，出问题时照着抄路径会抄到别处去。
+   */
+  handle('app:paths', () => ({
+    data: dataDir(),
+    db: join(dataDir(), 'ikanbot.db'),
+    images: imagesDir(),
+    docs: docsDir(),
+    backups: backupsDir()
+  }))
 
   /* ---- 商品 ---- */
   handle('products:list', (keyword?: string, includeInactive?: boolean) =>
@@ -228,6 +230,7 @@ export function registerIpc(): void {
   /* ---- 设置 ---- */
   handle('settings:get', () => settingsSvc.getSettings())
   handle('settings:save', (s: any) => settingsSvc.saveSettings(s))
+  handle('settings:baseLocked', () => settingsSvc.baseCurrencyLocked())
 
   /* ---- 图片 ---- */
   handle('images:pick', async (): Promise<string[]> => {
@@ -261,19 +264,31 @@ export function registerIpc(): void {
     copyFileSync(src, join(imagesDir(), name))
     return name
   })
+  /**
+   * 图片只能取数据图片目录里的直接文件。
+   * fileName 是渲染进程传上来的，原来直接 join——传 '../../xxx' 就能读到系统任意文件。
+   * 这里砍掉路径成分（只认文件名）并再确认结果确实落在图片目录内。
+   */
+  const safeImage = (fileName: string): string | null => {
+    if (!fileName) return null
+    const name = basename(String(fileName))
+    if (!name || name === '.' || name === '..') return null
+    const dir = resolve(imagesDir())
+    const p = resolve(dir, name)
+    if (!p.startsWith(dir + sep)) return null
+    return existsSync(p) ? p : null
+  }
   handle('images:url', (fileName: string) => {
-    if (!fileName) return ''
-    const p = join(imagesDir(), fileName)
-    if (!existsSync(p)) return ''
+    const p = safeImage(fileName)
+    if (!p) return ''
     return `file:///${p.replace(/\\/g, '/')}`
   })
   ipcMain.on('images:baseDir', (e) => {
     e.returnValue = imagesDir()
   })
   handle('images:readDataUrl', (fileName: string): string => {
-    if (!fileName) return ''
-    const p = join(imagesDir(), fileName)
-    if (!existsSync(p)) return ''
+    const p = safeImage(fileName)
+    if (!p) return ''
     const ext = p.split('.').pop()?.toLowerCase() ?? 'jpg'
     const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg'
     const buf = readFileSync(p)
@@ -285,6 +300,10 @@ export function registerIpc(): void {
     const file = await createBackup('manual')
     return file
   })
+  handle('backup:list', () => listBackups())
+  handle('backup:pick', () => pickBackup())
+  handle('backup:inspect', (path: string) => inspectBackup(path))
+  handle('backup:restore', async (path: string) => restoreBackup(path))
   handle('backup:reveal', async () => {
     // 直接打开备份目录（不弹选择框），让用户看到备份文件
     const dir = join(dataDir(), 'backups')

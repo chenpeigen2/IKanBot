@@ -4,6 +4,7 @@ import {
   type AppSettings,
   type OrderDetail,
   type PackingList,
+  type PackingListLine,
   type PartySnapshot,
   type QuotationCharge,
   type QuotationDetail,
@@ -102,6 +103,18 @@ function revFootHtml(rev: number, pending: boolean, dateText: string): string {
 /** 银行账户：按订单币种匹配，未匹配则取第一个 */
 function bankFor(settings: AppSettings, currency: string) {
   return settings.banks.find((b) => b.currency === currency) ?? settings.banks[0]
+}
+
+/**
+ * 这行的毛重是不是估的。
+ * 优先照库里记的 gross_est（装箱当时就定了性）；只有升级前的老数据没记过，
+ * 才退回「毛重恰好等于净重×系数」的老推断。
+ * 打印和界面两处共用这一个判断，免得纸面标了 est.、屏幕上却说实测。
+ */
+export function isGrossEstimated(line: PackingListLine, factor: number): boolean {
+  if (line.grossEst != null) return line.grossEst
+  const net = line.netWeight ?? 0
+  return line.grossWeight == null || (net > 0 && Math.abs(Number(line.grossWeight) - net * factor) < 0.005)
 }
 
 /**
@@ -390,8 +403,7 @@ export function renderPl(ctx: DocContext, pl: PackingList): string {
       const net = l.netWeight ?? 0
       const gross = l.grossWeight ?? Number((net * factor).toFixed(2))
       // 与「净重×系数」一致就当作系统推算值：报关行需要知道哪些毛重不是过磅实测的
-      const grossEstimated =
-        l.grossWeight == null || (net > 0 && Math.abs(Number(l.grossWeight) - net * factor) < 0.005)
+      const grossEstimated = isGrossEstimated(l, factor)
       if (grossEstimated) hasEstimatedGross = true
       totalNet += net
       totalGross += gross

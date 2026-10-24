@@ -551,6 +551,11 @@ export interface PackingListLine {
   netWeight: number | null
   /** 毛重 kg，null 表示按净重 ×1.1 自动算 */
   grossWeight: number | null
+  /**
+   * 毛重是不是估的：true=按净重×系数推算，false=过磅实测，null=老数据没记过。
+   * 落库时就定死，改毛重系数也不会让已出运单据上的 (est.) 标记翻面。
+   */
+  grossEst: boolean | null
   /** 箱规 长×宽×高 cm */
   boxLength: number | null
   boxWidth: number | null
@@ -610,6 +615,13 @@ export interface AppSettings {
   grossWeightFactor: number
   /** 基准币 */
   baseCurrency: Currency
+  /**
+   * 最近一次成功备份的时间（ISO 串）。空 = 从来没备份成功过。
+   * 这一项和下面那项由备份服务写，设置页改了不算（不然一保存就把备份凭据抹了）。
+   */
+  lastBackupAt: string | null
+  /** 最近一次备份失败的原因（人话）。空 = 没失败过 */
+  lastBackupError: string | null
 }
 
 /** 首页统计 */

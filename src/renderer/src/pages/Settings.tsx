@@ -1,25 +1,45 @@
 import { useEffect, useState } from 'react'
 import { useToast, Card, Button } from '../ui'
 import { imageUrl } from '../imageUrl'
-import { CURRENCIES, type Currency } from '../../../shared/types'
-import type { UpdateStatus } from '../../../shared/api'
+import { CURRENCIES } from '../../../shared/types'
+import type { BackupPreview, DataPaths, UpdateStatus } from '../../../shared/api'
+
+/** 把 ISO 时刻说成人话：今天的说几点，更早的说几天前 */
+function sinceWords(iso: string | null): string {
+  if (!iso) return '还没有过成功备份'
+  const t = new Date(iso)
+  if (Number.isNaN(t.getTime())) return '备份时间看不懂'
+  const mins = Math.floor((Date.now() - t.getTime()) / 60000)
+  const clock = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`
+  if (mins < 1) return '就在刚刚'
+  if (mins < 60) return `${mins} 分钟前`
+  if (mins < 60 * 24) return `${Math.floor(mins / 60)} 小时前`
+  const days = Math.floor(mins / (60 * 24))
+  return `${days} 天前（${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(
+    t.getDate()
+  ).padStart(2, '0')} ${clock}）`
+}
+
+const MB = 1024 * 1024
 
 export default function Settings() {
   const toast = useToast()
   const [s, setS] = useState<any>(null)
-  const [backupPath, setBackupPath] = useState('')
   const [update, setUpdate] = useState<UpdateStatus | null>(null)
-  const [dataDir, setDataDir] = useState('')
-  const [backupsDir, setBackupsDir] = useState('')
+  const [paths, setPaths] = useState<DataPaths | null>(null)
+  const [baseLocked, setBaseLocked] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [lastBackupFile, setLastBackupFile] = useState('')
+  const [restorePath, setRestorePath] = useState('')
+  const [restoreInfo, setRestoreInfo] = useState<BackupPreview | null>(null)
+  const [restoring, setRestoring] = useState(false)
 
   useEffect(() => {
     void window.api.settings.get().then(setS)
-    void window.api.app.dataDir().then(setDataDir)
-    void window.api.app.backupsDir().then(setBackupsDir)
-    // 初始拿一次当前版本，避免"检查更新"按钮因为 update 为 null 而一直禁用
-    void window.api.updater.version().then((v) => {
-      setUpdate((prev) => ({ status: 'idle', currentVersion: v, ...(prev ?? {}) }))
-    })
+    void window.api.settings.baseLocked().then(setBaseLocked)
+    void window.api.app.paths().then(setPaths)
+    // 一进来先问主进程要当前状态：进度那一份只认主进程存的，页面刷新也不会丢
+    void window.api.updater.state().then(setUpdate)
   }, [])
 
   // 订阅自动更新事件
@@ -39,23 +59,29 @@ export default function Settings() {
     }
   }
 
-  const setCompany = (k: string, v: string) =>
-    setS({ ...s, company: { ...s.company, [k]: v } })
+  const setCompany = (k: string, v: string) => setS({ ...s, company: { ...s.company, [k]: v } })
 
-  const setBank = (currency: Currency, k: string, v: string) =>
+  // 收款账户按下标改：同一币种可能被误加过，用币种当 key 会一改改两行、一删删两行
+  const setBank = (i: number, k: string, v: string) =>
+    setS({ ...s, banks: s.banks.map((b: any, at: number) => (at === i ? { ...b, [k]: v } : b)) })
+
+  const addBank = () => {
+    const used = new Set<string>(s.banks.map((b: any) => b.currency))
+    const free = CURRENCIES.find((c) => !used.has(c))
+    if (!free) {
+      toast('五个币种都已经有了，先移除一个再加', 'error')
+      return
+    }
     setS({
       ...s,
-      banks: s.banks.map((b: any) => (b.currency === currency ? { ...b, [k]: v } : b))
+      banks: [
+        ...s.banks,
+        { currency: free, bankName: '', accountName: '', accountNo: '', swift: '', address: '' }
+      ]
     })
+  }
 
-  const addBank = () =>
-    setS({
-      ...s,
-      banks: [...s.banks, { currency: 'USD', bankName: '', accountName: '', accountNo: '', swift: '', address: '' }]
-    })
-
-  const removeBank = (currency: Currency) =>
-    setS({ ...s, banks: s.banks.filter((b: any) => b.currency !== currency) })
+  const removeBank = (i: number) => setS({ ...s, banks: s.banks.filter((_: any, at: number) => at !== i) })
 
   const importLogo = async () => {
     const name = await window.api.images.importLogo()
@@ -65,73 +91,120 @@ export default function Settings() {
     }
   }
 
+  const runBackup = async () => {
+    setBusy(true)
+    try {
+      const f = await window.api.backup.create()
+      setLastBackupFile(f)
+      // 备份时间戳是备份服务写的，这里重新拉一次设置才拿得到
+      setS(await window.api.settings.get())
+      toast('备份已创建')
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const chooseRestoreFile = async () => {
+    try {
+      const f = await window.api.backup.pick()
+      if (!f) return
+      setRestorePath(f)
+      setRestoreInfo(await window.api.backup.inspect(f))
+    } catch (e) {
+      setRestorePath('')
+      setRestoreInfo(null)
+      toast((e as Error).message, 'error')
+    }
+  }
+
+  const doRestore = async () => {
+    if (!restoreInfo) return
+    const when = restoreInfo.takenAt ? new Date(restoreInfo.takenAt).toLocaleString() : '时间未知'
+    const summary =
+      `要用这一份恢复：\n` +
+      `  备份时间：${when}\n` +
+      `  订单 ${restoreInfo.orderCount ?? '?'} 张 / 收款 ${restoreInfo.paymentCount ?? '?'} 笔 / 文件 ${restoreInfo.entryCount} 个\n\n` +
+      `现在的订单、图片、单据存档会被整体替换成这一份的内容（当前数据会先自动备份一份，选错了还能退回来）。\n` +
+      `确定要替换吗？程序随后会重启一次。`
+    if (!confirm(summary)) return
+    setRestoring(true)
+    try {
+      await window.api.backup.restore(restoreInfo.path)
+      toast('恢复完成，程序正在重启…')
+    } catch (e) {
+      setRestoring(false)
+      toast((e as Error).message, 'error')
+    }
+  }
+
+  const installUpdate = async () => {
+    if (
+      !confirm(
+        `要装上 v${update?.version ?? ''} 吗？\n\n程序会先自动备份一次当前数据，然后退出并安装，装完自己再打开。\n备份没能做成时不会安装。`
+      )
+    )
+      return
+    const r = await window.api.updater.install()
+    if (!r.ok) toast(r.message ?? '安装没成功', 'error')
+  }
+
+  const day = (k: string, v: string) => setS({ ...s, [k]: v === '' ? '' : Number(v) })
+
   return (
     <>
       <div className="topbar">
         <h1>设置</h1>
         <div className="spacer" />
-        <Button variant="primary"  onClick={save}>
+        <Button variant="primary" onClick={save}>
           保存设置
         </Button>
       </div>
 
       <div className="content">
         <Card title="公司信息" actions={<span className="faint">打印在 PI / PL 抬头</span>}>
+          <div className="field">
+            <label>公司名称</label>
+            <input className="w-full" value={s.company.name} onChange={(e) => setCompany('name', e.target.value)} />
+          </div>
+          <div className="field">
+            <label>地址</label>
+            <input
+              className="w-full"
+              value={s.company.address}
+              onChange={(e) => setCompany('address', e.target.value)}
+            />
+          </div>
+          <div className="field-row-3">
             <div className="field">
-              <label>公司名称</label>
+              <label>电话</label>
+              <input className="w-md" value={s.company.phone} onChange={(e) => setCompany('phone', e.target.value)} />
+            </div>
+            <div className="field">
+              <label>邮箱</label>
+              <input className="w-md" value={s.company.email} onChange={(e) => setCompany('email', e.target.value)} />
+            </div>
+            <div className="field">
+              <label>网站</label>
               <input
-                className="w-full"
-                value={s.company.name}
-                onChange={(e) => setCompany('name', e.target.value)}
+                className="w-md"
+                value={s.company.website}
+                onChange={(e) => setCompany('website', e.target.value)}
               />
             </div>
-            <div className="field">
-              <label>地址</label>
-              <input
-                className="w-full"
-                value={s.company.address}
-                onChange={(e) => setCompany('address', e.target.value)}
-              />
+          </div>
+          <div className="field">
+            <label>公司 Logo</label>
+            <div className="row">
+              {s.company.logoFile ? (
+                <div className="img-thumb" style={{ width: 140, height: 60 }}>
+                  <img src={imageUrl(s.company.logoFile)} alt="logo" />
+                </div>
+              ) : null}
+              <Button onClick={importLogo}>{s.company.logoFile ? '更换 Logo' : '导入 Logo'}</Button>
             </div>
-            <div className="field-row-3">
-              <div className="field">
-                <label>电话</label>
-                <input
-                  className="w-md"
-                  value={s.company.phone}
-                  onChange={(e) => setCompany('phone', e.target.value)}
-                />
-              </div>
-              <div className="field">
-                <label>邮箱</label>
-                <input
-                  className="w-md"
-                  value={s.company.email}
-                  onChange={(e) => setCompany('email', e.target.value)}
-                />
-              </div>
-              <div className="field">
-                <label>网站</label>
-                <input
-                  className="w-md"
-                  value={s.company.website}
-                  onChange={(e) => setCompany('website', e.target.value)}
-                />
-              </div>
-            </div>
-            <div className="field">
-              <label>公司 Logo</label>
-              <div className="row">
-                {s.company.logoFile ? (
-                  <div className="img-thumb" style={{ width: 140, height: 60 }}>
-                    <img src={imageUrl(s.company.logoFile)} alt="logo" />
-                  </div>
-                ) : null}
-                <Button  onClick={importLogo}>
-                  {s.company.logoFile ? '更换 Logo' : '导入 Logo'}
-                </Button>
-              </div>
-            </div>
+          </div>
         </Card>
 
         <Card
@@ -142,313 +215,350 @@ export default function Settings() {
             </Button>
           }
         >
-            {s.banks.length === 0 ? (
-              <div className="hint">还没有银行账户。添加后 PI 会自动印上收款信息。</div>
-            ) : (
-              s.banks.map((b: any) => (
-                <div key={b.currency} style={{ marginBottom: 16 }}>
-                  <div className="row mb">
-                    <strong>{b.currency}</strong>
-                    <div className="spacer" />
-                    <Button variant="danger" size="sm"  onClick={() => removeBank(b.currency)}>
-                      移除
-                    </Button>
-                  </div>
-                  <div className="field-row">
-                    <div className="field">
-                      <label>账户名</label>
-                      <input
-                        className="w-lg"
-                        value={b.accountName}
-                        onChange={(e) => setBank(b.currency, 'accountName', e.target.value)}
-                      />
-                    </div>
-                    <div className="field">
-                      <label>银行名称</label>
-                      <input
-                        className="w-lg"
-                        value={b.bankName}
-                        onChange={(e) => setBank(b.currency, 'bankName', e.target.value)}
-                      />
-                    </div>
-                  </div>
-                  <div className="field-row">
-                    <div className="field">
-                      <label>账号</label>
-                      <input
-                        className="w-md"
-                        value={b.accountNo}
-                        onChange={(e) => setBank(b.currency, 'accountNo', e.target.value)}
-                      />
-                    </div>
-                    <div className="field">
-                      <label>SWIFT</label>
-                      <input
-                        className="w-md"
-                        value={b.swift}
-                        onChange={(e) => setBank(b.currency, 'swift', e.target.value)}
-                      />
-                    </div>
-                  </div>
+          {s.banks.length === 0 ? (
+            <div className="hint">还没有银行账户。添加后 PI 会自动印上收款信息。</div>
+          ) : (
+            s.banks.map((b: any, i: number) => (
+              // 用下标当 key：同一币种万一被加过两遍，按币种当 key 会让 React 认错行
+              <div key={i} style={{ marginBottom: 16 }}>
+                <div className="row mb">
+                  <select
+                    value={b.currency}
+                    title="这一账户收哪种币"
+                    onChange={(e) => setBank(i, 'currency', e.target.value)}
+                  >
+                    {CURRENCIES.map((c) => (
+                      <option key={c} value={c} disabled={c !== b.currency && s.banks.some((o: any, at: number) => at !== i && o.currency === c)}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="spacer" />
+                  <Button variant="danger" size="sm" onClick={() => removeBank(i)}>
+                    移除
+                  </Button>
+                </div>
+                <div className="field-row">
                   <div className="field">
-                    {/* R4-S6：银行地址会印在 PI 上给客户打款，原来 320px 把尾巴硬切了，
-                        加宽到和「银行名称」同宽（w-lg 520px） */}
-                    <label>银行地址</label>
+                    <label>账户名</label>
                     <input
                       className="w-lg"
-                      value={b.address}
-                      onChange={(e) => setBank(b.currency, 'address', e.target.value)}
+                      value={b.accountName}
+                      onChange={(e) => setBank(i, 'accountName', e.target.value)}
+                    />
+                  </div>
+                  <div className="field">
+                    <label>银行名称</label>
+                    <input
+                      className="w-lg"
+                      value={b.bankName}
+                      onChange={(e) => setBank(i, 'bankName', e.target.value)}
                     />
                   </div>
                 </div>
-              ))
-            )}
+                <div className="field-row">
+                  <div className="field">
+                    <label>账号</label>
+                    <input className="w-md" value={b.accountNo} onChange={(e) => setBank(i, 'accountNo', e.target.value)} />
+                  </div>
+                  <div className="field">
+                    <label>SWIFT</label>
+                    <input className="w-md" value={b.swift} onChange={(e) => setBank(i, 'swift', e.target.value)} />
+                  </div>
+                </div>
+                <div className="field">
+                  {/* R4-S6：银行地址会印在 PI 上给客户打款，原来 320px 把尾巴硬切了，
+                        加宽到和「银行名称」同宽（w-lg 520px） */}
+                  <label>银行地址</label>
+                  <input className="w-lg" value={b.address} onChange={(e) => setBank(i, 'address', e.target.value)} />
+                </div>
+              </div>
+            ))
+          )}
         </Card>
 
         <Card title="业务默认值">
-            <div className="field-row-3">
-              <div className="field">
-                <label>PI 有效期（天）</label>
-                <input
-                  type="number"
-                  value={s.piValidDays}
-                  onChange={(e) => setS({ ...s, piValidDays: Number(e.target.value) })}
-                />
-              </div>
-              <div className="field">
-                <label>默认定金比例</label>
-                <select
-                  value={String(s.defaultDepositRatio)}
-                  onChange={(e) => setS({ ...s, defaultDepositRatio: Number(e.target.value) })}
-                >
-                  <option value="0.2">20%</option>
-                  <option value="0.3">30%</option>
-                  <option value="0.4">40%</option>
-                  <option value="0.5">50%</option>
-                </select>
-              </div>
-              <div className="field">
-                <label>基准币种</label>
-                <select
-                  value={s.baseCurrency}
-                  onChange={(e) => setS({ ...s, baseCurrency: e.target.value })}
-                >
-                  {CURRENCIES.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
+          <div className="field-row-3">
+            <div className="field">
+              <label>PI 有效期（天）</label>
+              <input type="number" min={1} max={365} value={s.piValidDays} onChange={(e) => day('piValidDays', e.target.value)} />
+            </div>
+            <div className="field">
+              <label>默认定金比例</label>
+              <select
+                value={String(s.defaultDepositRatio)}
+                onChange={(e) => setS({ ...s, defaultDepositRatio: Number(e.target.value) })}
+              >
+                <option value="0.2">20%</option>
+                <option value="0.3">30%</option>
+                <option value="0.4">40%</option>
+                <option value="0.5">50%</option>
+              </select>
+            </div>
+            <div className="field">
+              <label>基准币种</label>
+              <select
+                value={s.baseCurrency}
+                disabled={baseLocked}
+                onChange={(e) => setS({ ...s, baseCurrency: e.target.value })}
+              >
+                {CURRENCIES.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+              <div className="hint">
+                {baseLocked
+                  ? `已经有单据按 ${s.baseCurrency} 记账了，基准币锁定——换了它，历史待收、毛利、报表会集体错位且改不回来`
+                  : '报表和待收都折成这一种币；开单以后就锁死，改不了'}
               </div>
             </div>
+          </div>
 
-            <div className="field-row-3">
-              <div className="field">
-                <label>催确认阈值（天）</label>
-                <input
-                  type="number"
-                  value={s.remindConfirmDays}
-                  onChange={(e) => setS({ ...s, remindConfirmDays: Number(e.target.value) })}
-                />
-                <div className="hint">PI 发出超过该天数未确认则提醒</div>
-              </div>
-              <div className="field">
-                <label>催款阈值（天）</label>
-                <input
-                  type="number"
-                  value={s.remindPaymentDays}
-                  onChange={(e) => setS({ ...s, remindPaymentDays: Number(e.target.value) })}
-                />
-                <div className="hint">客户确认后超过该天数未收款则提醒</div>
-              </div>
-              <div className="field">
-                <label>催尾款阈值（天）</label>
-                <input
-                  type="number"
-                  value={s.remindBalanceDays}
-                  onChange={(e) => setS({ ...s, remindBalanceDays: Number(e.target.value) })}
-                />
-                <div className="hint">已收定金但未收齐，超过该天数提醒催尾款</div>
-              </div>
+          <div className="field-row-3">
+            <div className="field">
+              <label>催确认阈值（天）</label>
+              <input
+                type="number"
+                min={0}
+                max={365}
+                value={s.remindConfirmDays}
+                onChange={(e) => day('remindConfirmDays', e.target.value)}
+              />
+              <div className="hint">PI 发出超过该天数未确认则提醒</div>
             </div>
+            <div className="field">
+              <label>催款阈值（天）</label>
+              <input
+                type="number"
+                min={0}
+                max={365}
+                value={s.remindPaymentDays}
+                onChange={(e) => day('remindPaymentDays', e.target.value)}
+              />
+              <div className="hint">客户确认后超过该天数未收款则提醒</div>
+            </div>
+            <div className="field">
+              <label>催尾款阈值（天）</label>
+              <input
+                type="number"
+                min={0}
+                max={365}
+                value={s.remindBalanceDays}
+                onChange={(e) => day('remindBalanceDays', e.target.value)}
+              />
+              <div className="hint">已收定金但未收齐，超过该天数提醒催尾款</div>
+            </div>
+          </div>
 
-            <div className="field-row-3">
-              <div className="field">
-                <label>出货提醒提前（天）</label>
-                <input
-                  type="number"
-                  value={s.remindShipDays}
-                  onChange={(e) => setS({ ...s, remindShipDays: Number(e.target.value) })}
-                />
-                <div className="hint">距预计出货日该天数时提醒备货</div>
-              </div>
-              <div className="field">
-                <label>毛重系数</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={s.grossWeightFactor}
-                  onChange={(e) => setS({ ...s, grossWeightFactor: Number(e.target.value) })}
-                />
-                <div className="hint">装箱单未填毛重时按此系数估算</div>
+          <div className="field-row-3">
+            <div className="field">
+              <label>出货提醒提前（天）</label>
+              <input
+                type="number"
+                min={0}
+                max={90}
+                value={s.remindShipDays}
+                onChange={(e) => day('remindShipDays', e.target.value)}
+              />
+              <div className="hint">距预计出货日该天数时提醒备货</div>
+            </div>
+            <div className="field">
+              <label>毛重系数</label>
+              <input
+                type="number"
+                step="0.01"
+                min={1}
+                max={3}
+                value={s.grossWeightFactor}
+                onChange={(e) => setS({ ...s, grossWeightFactor: Number(e.target.value) })}
+              />
+              <div className="hint">
+                装箱单没填毛重时按此系数估算。改动只影响今后新填的箱子，已经出运的单据上标的还是当年的结论
               </div>
             </div>
+          </div>
         </Card>
 
         <Card title="数据备份">
-            <div className="hint" style={{ marginBottom: 8 }}>
-              主数据库：<span className="mono">{dataDir ? `${dataDir}\\ikanbot.db` : '…'}</span>
+          <div className="hint" style={{ marginBottom: 6 }}>
+            主数据库：<span className="mono">{paths?.db ?? '…'}</span>
+          </div>
+          <div className="hint" style={{ marginBottom: 6 }}>
+            图片目录：<span className="mono">{paths?.images ?? '…'}</span>
+          </div>
+          <div className="hint" style={{ marginBottom: 6 }}>
+            单据存档：<span className="mono">{paths?.docs ?? '…'}</span>
+          </div>
+          <div className="hint" style={{ marginBottom: 12 }}>
+            备份目录：<span className="mono">{paths?.backups ?? '…'}</span>
+          </div>
+          <div className="hint" style={{ marginBottom: 8 }}>
+            程序每天启动时自动备份一次，保留最近 30 份。备份把数据库、商品图片、单据存档 PDF 一起打包，缺一样都不算备齐。
+          </div>
+          <div className="hint" style={{ marginBottom: 12 }}>
+            最近一次成功备份：<strong>{sinceWords(s.lastBackupAt)}</strong>
+          </div>
+          {s.lastBackupError ? (
+            <div className="alert warn" style={{ marginBottom: 12 }}>
+              上一次备份没成功：{s.lastBackupError}
             </div>
-            <div className="hint" style={{ marginBottom: 8 }}>
-              图片目录：<span className="mono">{dataDir ? `${dataDir}\\images` : '…'}</span>
-            </div>
-            <div className="hint" style={{ marginBottom: 12 }}>
-              备份目录：<span className="mono">{backupsDir || '…'}</span>
-            </div>
-            <div className="hint">
-              程序每天启动时会自动备份一次，保留最近 30 份。
-            </div>
-            <div className="row">
-              <Button variant="primary"
-                
-                onClick={async () => {
-                  const f = await window.api.backup.create()
-                  if (f) {
-                    setBackupPath(f)
-                    toast('备份已创建')
-                  }
-                }}
-              >
-                立即备份
-              </Button>
-              <Button  onClick={async () => {
+          ) : null}
+          <div className="row" style={{ flexWrap: 'wrap', gap: 8 }}>
+            <Button variant="primary" disabled={busy} onClick={runBackup}>
+              {busy ? '备份中，别关窗口…' : '立即备份'}
+            </Button>
+            <Button
+              onClick={async () => {
                 const d = await window.api.backup.reveal()
-                if (d) setBackupPath(d)
-              }}>
-                打开备份目录
-              </Button>
+                if (d) setLastBackupFile(d)
+              }}
+            >
+              打开备份目录
+            </Button>
+            <Button disabled={restoring} onClick={chooseRestoreFile}>
+              从备份恢复…
+            </Button>
+          </div>
+          {lastBackupFile ? <div className="hint mono" style={{ marginTop: 8 }}>{lastBackupFile}</div> : null}
+
+          {restoreInfo ? (
+            <div className="alert info" style={{ marginTop: 12 }}>
+              <div style={{ marginBottom: 6 }}>
+                <strong>准备用这一份恢复</strong>
+              </div>
+              <div className="hint mono" style={{ marginBottom: 6, wordBreak: 'break-all' }}>
+                {restorePath}
+              </div>
+              <div className="hint" style={{ marginBottom: 8 }}>
+                备份于 {restoreInfo.takenAt ? new Date(restoreInfo.takenAt).toLocaleString() : '时间未知'} · 订单{' '}
+                {restoreInfo.orderCount ?? '—'} 张 · 收款 {restoreInfo.paymentCount ?? '—'} 笔 · {restoreInfo.entryCount}{' '}
+                个文件 · {(restoreInfo.fileSize / MB).toFixed(1)} MB
+              </div>
+              <div className="row" style={{ gap: 8 }}>
+                <Button variant="danger" disabled={restoring} onClick={doRestore}>
+                  {restoring ? '恢复中，程序马上重启…' : '替换成这一份'}
+                </Button>
+                <Button
+                  disabled={restoring}
+                  onClick={() => {
+                    setRestoreInfo(null)
+                    setRestorePath('')
+                  }}
+                >
+                  取消
+                </Button>
+              </div>
+              <div className="hint" style={{ marginTop: 8 }}>
+                替换之前会先把现在的数据压一份留成 pre-restore 备份，选错了还能退回来。
+              </div>
             </div>
-            {backupPath ? <div className="hint mono">{backupPath}</div> : null}
+          ) : null}
         </Card>
 
         <Card title="软件更新">
-            <div className="field-row">
-              <div className="field">
-                <label>当前版本</label>
-                <div className="row" style={{ gap: 12, alignItems: 'center' }}>
-                  <span className="mono" style={{ fontSize: 16 }}>
-                    {update?.currentVersion ?? '—'}
-                  </span>
-                  <Button
-                    
-                    disabled={update?.status === 'checking' || update?.status === 'downloading'}
-                    onClick={async () => {
-                      const r = await window.api.updater.check()
-                      setUpdate(r)
-                      if (r.status === 'error' && r.message) toast(r.message, 'error')
-                    }}
-                  >
-                    检查更新
-                  </Button>
-                  {update?.status === 'available' ? (
-                    <Button variant="primary"
-                      
-                      onClick={async () => {
-                        const r = await window.api.updater.download()
-                        setUpdate(r)
-                      }}
-                    >
-                      下载 v{update.version}
-                    </Button>
-                  ) : null}
-                  {update?.status === 'downloaded' ? (
-                    <Button variant="primary"
-                      
-                      onClick={() => void window.api.updater.install()}
-                    >
-                      重启安装 v{update.version}
-                    </Button>
-                  ) : null}
-                </div>
-                <div className="hint">
-                  有新版时会显示下载按钮，下载完点"重启安装"，程序会自己关了自己装完再打开。
-                </div>
-              </div>
-            </div>
-
-            {/* 状态反馈 */}
-            {update?.status === 'checking' ? (
-              <div className="alert info">正在检查更新…</div>
-            ) : null}
-            {update?.status === 'not-available' ? (
-              <div className="alert info">
-                已经是最新版本（v{update.version ?? update.currentVersion}）。
-              </div>
-            ) : null}
-            {update?.status === 'available' ? (
-              <div className="alert warn">
-                发现新版本 <strong>v{update.version}</strong>
-                {update.releaseDate ? <span className="faint">（{String(update.releaseDate).slice(0, 10)}）</span> : null}
-                {update.releaseNotes ? (
-                  <div className="hint" style={{ marginTop: 6, whiteSpace: 'pre-wrap' }}>
-                    {update.releaseNotes}
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-            {update?.status === 'downloading' ? (
-              <div className="alert info">
-                <div style={{ marginBottom: 6 }}>
-                  正在下载 v{update.version ?? ''}…{' '}
-                  <strong>{update.percent ?? 0}%</strong>
-                  {update.transferred != null && update.total != null ? (
-                    <span className="faint">
-                      {' '}
-                      （{Math.round(update.transferred / 1024 / 1024)}MB /{' '}
-                      {Math.round(update.total / 1024 / 1024)}MB）
-                    </span>
-                  ) : null}
-                </div>
-                <div
-                  style={{
-                    height: 6,
-                    background: '#e2e6ee',
-                    borderRadius: 3,
-                    overflow: 'hidden'
+          <div className="field-row">
+            <div className="field">
+              <label>当前版本</label>
+              <div className="row" style={{ gap: 12, alignItems: 'center' }}>
+                <span className="mono" style={{ fontSize: 16 }}>
+                  {update?.currentVersion ?? '—'}
+                </span>
+                <Button
+                  disabled={update?.status === 'checking' || update?.status === 'downloading'}
+                  onClick={async () => {
+                    try {
+                      setUpdate(await window.api.updater.check())
+                    } catch (e) {
+                      toast((e as Error).message, 'error')
+                    }
                   }}
                 >
-                  <div
-                    style={{
-                      width: `${update.percent ?? 0}%`,
-                      height: '100%',
-                      background: 'var(--accent)',
-                      transition: 'width .2s'
+                  检查更新
+                </Button>
+                {update?.status === 'available' ? (
+                  <Button
+                    variant="primary"
+                    onClick={async () => {
+                      try {
+                        setUpdate(await window.api.updater.download())
+                      } catch (e) {
+                        toast((e as Error).message, 'error')
+                      }
                     }}
-                  />
-                </div>
+                  >
+                    下载 v{update.version}
+                  </Button>
+                ) : null}
+                {update?.status === 'downloaded' ? (
+                  <Button variant="primary" onClick={installUpdate}>
+                    重启安装 v{update.version}
+                  </Button>
+                ) : null}
               </div>
-            ) : null}
-            {update?.status === 'downloaded' ? (
-              <div className="alert info">
-                已下载完成，点上面"重启安装 v{update.version}"即可。
+              <div className="hint">
+                有新版时会显示下载按钮，下载完点「重启安装」，程序会先备份一次再自己关了自己装完。
               </div>
-            ) : null}
-            {update?.status === 'error' ? (
-              <div className="alert warn">{update.message ?? '出错了'}</div>
-            ) : null}
-
-            <div className="hint" style={{ marginTop: 10 }}>
-              更新来自 GitHub Releases，需要能访问 github.com。如果下载慢，
-              <Button size="sm"
-                
-                style={{ marginLeft: 6 }}
-                onClick={() =>
-                  void window.api.shell.openExternal('https://github.com/chenpeigen2/IKanBot/releases')
-                }
-              >
-                去 GitHub 手动下载
-              </Button>
             </div>
+          </div>
+
+          {/* 状态反馈 */}
+          {update?.status === 'checking' ? <div className="alert info">正在检查更新…</div> : null}
+          {update?.status === 'not-available' ? (
+            <div className="alert info">已经是最新版本（v{update.version ?? update.currentVersion}）。</div>
+          ) : null}
+          {update?.status === 'available' ? (
+            <div className="alert warn">
+              发现新版本 <strong>v{update.version}</strong>
+              {update.releaseDate ? (
+                <span className="faint">（{String(update.releaseDate).slice(0, 10)}）</span>
+              ) : null}
+              {update.releaseNotes ? (
+                <div className="hint" style={{ marginTop: 6, whiteSpace: 'pre-wrap' }}>
+                  {update.releaseNotes}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {update?.status === 'downloading' ? (
+            <div className="alert info">
+              <div style={{ marginBottom: 6 }}>
+                正在下载 v{update.version ?? ''}… <strong>{update.percent ?? 0}%</strong>
+                {update.transferred != null && update.total != null ? (
+                  <span className="faint">
+                    {' '}
+                    （{Math.round(update.transferred / MB)}MB / {Math.round(update.total / MB)}MB）
+                  </span>
+                ) : null}
+              </div>
+              <div style={{ height: 6, background: '#e2e6ee', borderRadius: 3, overflow: 'hidden' }}>
+                <div
+                  style={{
+                    width: `${update.percent ?? 0}%`,
+                    height: '100%',
+                    background: 'var(--accent)',
+                    transition: 'width .2s'
+                  }}
+                />
+              </div>
+            </div>
+          ) : null}
+          {update?.status === 'downloaded' ? (
+            <div className="alert info">已下载完成，点上面「重启安装 v{update.version}」即可。</div>
+          ) : null}
+          {update?.status === 'error' ? <div className="alert warn">{update.message ?? '出错了'}</div> : null}
+
+          <div className="hint" style={{ marginTop: 10 }}>
+            更新来自 GitHub Releases，需要能访问 github.com。如果下载慢，
+            <Button
+              size="sm"
+              style={{ marginLeft: 6 }}
+              onClick={() => void window.api.shell.openExternal('https://github.com/chenpeigen2/IKanBot/releases')}
+            >
+              去 GitHub 手动下载
+            </Button>
+          </div>
         </Card>
       </div>
     </>

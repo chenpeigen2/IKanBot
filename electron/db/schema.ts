@@ -462,5 +462,19 @@ ALTER TABLE packing_lists ADD COLUMN doc_date TEXT;
 -- 只能「消失」是不行的——作废的批次不参与汇总、不占箱号，但记录和存档一条不动。
 ALTER TABLE packing_lists ADD COLUMN voided_at TEXT;
 `
+  },
+  {
+    version: 15,
+    name: 'gross_measured_flag',
+    sql: `
+-- 毛重是不是实测过磅：把「这行毛重是量出来的、还是拿净重×系数猜的」钉在数据里。
+-- 以前靠「毛重恰好等于净重×系数」反推，改一次毛重系数，去年已出运单据上的 (est.)
+-- 标记就当场翻脸——同一张 PDF 前后两次打印结论不一样，报关行据此复核会吃闷亏。
+ALTER TABLE packing_list_lines ADD COLUMN gross_est INTEGER;
+`
   }
 ]
+
+/** 本程序认识的最高库结构版本：备份里 user_version 比它大，说明是升级版程序写的数据，直接拒开 */
+export const LATEST_DB_VERSION = MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0)
+

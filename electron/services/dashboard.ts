@@ -126,6 +126,7 @@ export function dashboard(): DashboardStats {
  *  5. 到期类：PI 有效期、报价单发出没回音与报价过期
  *  6. 打样类：打样费未收 + 样品压在手里迟迟没寄出
  *  7. 待修类：日期格式不对、汇率看着不像真的、开了船没提单号、批次没标状态、整单没有任何交期
+ *  8. 备份类：从没成功备份过、或者太久没备份（数据只躺在这台电脑上）
  *
  * 铁律：天数一律用本地日期算；脏日期不许印成「还有 NaN 天」，改成单独亮一条「日期格式待修」；
  *      金额一律取自 services/money.ts，这里不再自己写 SQL 算钱。
@@ -712,6 +713,61 @@ export function reminders(): Reminder[] {
       },
       'rate'
     )
+  }
+
+  /* 8. 备份类：软件一直能用，不代表数据一直安全 */
+  {
+    // 超过这个天数没备份就催：程序每天启动会自动备一次，正常用着的人永远不会看到这条
+    const BACKUP_STALE_DAYS = 7
+    const docCount = Number(
+      (
+        db.get(
+          `SELECT (SELECT COUNT(*) FROM orders) + (SELECT COUNT(*) FROM quotations) + (SELECT COUNT(*) FROM sample_orders) AS n`
+        ) as { n: number } | null
+      )?.n ?? 0
+    )
+    // 空库不催：刚装好还没有业务，天天喊备份只会让人学会无视它
+    if (docCount > 0) {
+      if (s.lastBackupError) {
+        add(
+          {
+            orderId: 0,
+            orderNo: '数据备份',
+            customerName: '备份',
+            kind: 'data',
+            message: `最近一次备份没成功：${s.lastBackupError}。请到「设置 → 数据备份」手动点一次「立即备份」，成功了这条提示才会消掉`,
+            days: 0
+          },
+          'backup-failed'
+        )
+      }
+      const since = daysFrom(s.lastBackupAt ?? '')
+      if (since === null) {
+        add(
+          {
+            orderId: 0,
+            orderNo: '数据备份',
+            customerName: '备份',
+            kind: 'data',
+            message: `已经有 ${docCount} 张单据，这台电脑上却还没有一份成功备份。电脑一坏就全没了——请到「设置 → 数据备份」点一次「立即备份」`,
+            days: 0
+          },
+          'backup-never'
+        )
+      } else if (since > BACKUP_STALE_DAYS) {
+        add(
+          {
+            orderId: 0,
+            orderNo: '数据备份',
+            customerName: '备份',
+            kind: 'data',
+            message: `距离上一次成功备份已经 ${since} 天（超过 ${BACKUP_STALE_DAYS} 天），中间的单据都还没有凭据。请到「设置 → 数据备份」再备一次`,
+            days: 0
+          },
+          'backup-stale'
+        )
+      }
+    }
   }
 
   // 逾期最前（越久越靠前）→ 按还剩几天升序 → 「待修」垫底：

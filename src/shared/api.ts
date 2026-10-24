@@ -149,6 +149,8 @@ export interface IKanApi {
   settings: {
     get(): Promise<any>
     save(s: any): Promise<any>
+    /** 基准币种是否已锁死（库里已有单据） */
+    baseLocked(): Promise<boolean>
   }
   images: {
     pick(): Promise<string[]>
@@ -161,6 +163,14 @@ export interface IKanApi {
   backup: {
     create(): Promise<string>
     reveal(): Promise<string>
+    /** 备份目录里现成的备份包（新→旧） */
+    list(): Promise<BackupFile[]>
+    /** 用系统文件选择框挑一个备份包；取消返回空串 */
+    pick(): Promise<string>
+    /** 恢复前先打开看一眼里面是什么（不落任何盘） */
+    inspect(path: string): Promise<BackupPreview>
+    /** 用选定的备份包覆盖当前数据，成功后程序会自动重启 */
+    restore(path: string): Promise<{ restarted: boolean }>
   }
   exporter: {
     csv(kind: ExportKind): Promise<string>
@@ -176,7 +186,14 @@ export interface IKanApi {
     /** 当前版本号 */
     version(): Promise<string>
     download(): Promise<UpdateStatus>
-    install(): Promise<boolean>
+    /** 当前状态（只认主进程那一份，界面刷新也不会丢进度） */
+    state(): Promise<UpdateStatus>
+    /**
+     * 装已下载好的更新。
+     * 装之前会先压一份备份，压不成就不装——返回 ok:false 和原因，
+     * 免得升级把数据结构改坏了却连个退回去的地方都没有。
+     */
+    install(): Promise<{ ok: boolean; message?: string }>
     on(cb: (info: UpdateStatus) => void): () => void
   }
   /** 用系统浏览器打开外链 */
@@ -188,7 +205,39 @@ export interface IKanApi {
     dataDir(): Promise<string>
     imagesDir(): Promise<string>
     backupsDir(): Promise<string>
+    /** 一次拿全：主进程用 join 拼好，界面只管显示，不许自己拼斜杠 */
+    paths(): Promise<DataPaths>
   }
+}
+
+/** 本机各数据目录的绝对路径 */
+export interface DataPaths {
+  data: string
+  db: string
+  images: string
+  docs: string
+  backups: string
+}
+
+/** 备份目录里的一个备份包 */
+export interface BackupFile {
+  path: string
+  name: string
+  /** 从文件名里的时间戳还原；手工放进来的文件可能没有 */
+  takenAt: string | null
+  size: number
+}
+
+/** 备份包内容摘要（恢复确认框用） */
+export interface BackupPreview {
+  path: string
+  takenAt: string | null
+  fileSize: number
+  entryCount: number
+  hasDb: boolean
+  /** 包里的订单数：恢复前必须看得见，不然等于闭眼按 */
+  orderCount: number | null
+  paymentCount: number | null
 }
 
 /** 自动更新状态 */

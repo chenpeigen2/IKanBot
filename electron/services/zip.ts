@@ -1,8 +1,8 @@
-import { deflateRawSync } from 'zlib'
+import { deflateRawSync, inflateRawSync } from 'zlib'
 import { existsSync, readdirSync, readFileSync, statSync } from 'fs'
 import { join, basename } from 'path'
 
-interface ZipEntry {
+export interface ZipEntry {
   name: string
   data: Buffer
 }
@@ -115,6 +115,122 @@ export function collectDir(dir: string, prefix: string): ZipEntry[] {
     }
   }
   return out
+}
+
+/* ------------------------------------------------------------------ *
+ * 读侧：从 zip 里把条目取回来
+ * ------------------------------------------------------------------ */
+
+const EOCD_SIG = 0x06054b50
+const CD_SIG = 0x02014b50
+const LOCAL_SIG = 0x04034b50
+/** EOCD 定长 22 字节，前面最多还能挂 64KB 注释，所以只往回找这么多 */
+const EOCD_MAX_BACK = 22 + 0xffff
+
+/**
+ * 逐个读出压缩包里的条目（解压一个、给一个，不留全量在内存里）。
+ *
+ * 校验强度按「这份备份能不能拿去恢复」的标准来：
+ * 目录结构越界、解压失败、大小不符、CRC 对不上——任何一种都是硬伤，
+ * 直接抛，绝不返回半截数据。备份最怕的不是没备成，而是以为备成了。
+ */
+function forEachZipEntry(buf: Buffer, onEntry: (name: string, data: Buffer) => void): void {
+  if (buf.length < 22) throw new Error('这个文件太小了，不像是一个完整的备份包')
+  let eocd = -1
+  const floor = Math.max(0, buf.length - EOCD_MAX_BACK)
+  for (let i = buf.length - 22; i >= floor; i--) {
+    if (buf.readUInt32LE(i) === EOCD_SIG) {
+      eocd = i
+      break
+    }
+  }
+  if (eocd < 0) {
+    throw new Error('备份包结尾的目录信息不见了：文件被截断或写坏了，这个包不能用')
+  }
+  const count = buf.readUInt16LE(eocd + 10)
+  const dirSize = buf.readUInt32LE(eocd + 12)
+  const dirOffset = buf.readUInt32LE(eocd + 16)
+  if (dirOffset + dirSize > eocd) throw new Error('备份包的目录信息越界了：文件已损坏，这个包不能用')
+
+  let p = dirOffset
+  for (let i = 0; i < count; i++) {
+    if (p + 46 > buf.length || buf.readUInt32LE(p) !== CD_SIG) {
+      throw new Error(`备份包里第 ${i + 1} 条目录记录读不出来：文件已损坏`)
+    }
+    const flags = buf.readUInt16LE(p + 8)
+    const method = buf.readUInt16LE(p + 10)
+    const crc = buf.readUInt32LE(p + 16)
+    const compSize = buf.readUInt32LE(p + 20)
+    const uncompSize = buf.readUInt32LE(p + 24)
+    const nameLen = buf.readUInt16LE(p + 28)
+    const extraLen = buf.readUInt16LE(p + 30)
+    const commentLen = buf.readUInt16LE(p + 32)
+    const localOff = buf.readUInt32LE(p + 42)
+    const name = buf.slice(p + 46, p + 46 + nameLen).toString('utf8')
+    p += 46 + nameLen + extraLen + commentLen
+
+    // 数据真正的位置要回到本地文件头去算（那里的文件名/附加区长度可能不一样）
+    if (localOff + 30 > buf.length || buf.readUInt32LE(localOff) !== LOCAL_SIG) {
+      throw new Error(`备份包里的「${name}」找不到对应的位置：文件已损坏`)
+    }
+    if ((flags & 0x0008) !== 0) {
+      throw new Error(`备份包里的「${name}」用了流式写法，本程序读不了`)
+    }
+    const localNameLen = buf.readUInt16LE(localOff + 26)
+    const localExtraLen = buf.readUInt16LE(localOff + 28)
+    const dataStart = localOff + 30 + localNameLen + localExtraLen
+    if (dataStart + compSize > buf.length) {
+      throw new Error(`备份包里的「${name}」内容不完整：写到一半就断了`)
+    }
+    const body = buf.slice(dataStart, dataStart + compSize)
+
+    let data: Buffer
+    if (method === 0) data = body
+    else if (method === 8) {
+      try {
+        data = inflateRawSync(body)
+      } catch {
+        throw new Error(`备份包里的「${name}」解不开：文件已损坏`)
+      }
+    } else {
+      throw new Error(`备份包里的「${name}」用了不认识的压缩方式（编号 ${method}）`)
+    }
+    if (data.length !== uncompSize) {
+      throw new Error(`备份包里的「${name}」大小不对：说好 ${uncompSize} 字节，实际 ${data.length}`)
+    }
+    if (crc32(data) !== crc) {
+      throw new Error(`备份包里的「${name}」校验码对不上：内容已经损坏，这个包不能用来恢复`)
+    }
+    onEntry(name, data)
+  }
+}
+
+export function readZip(buf: Buffer): ZipEntry[] {
+  const out: ZipEntry[] = []
+  forEachZipEntry(buf, (name, data) => out.push({ name, data }))
+  return out
+}
+
+/**
+ * 验货：把刚落盘的包逐条读回来，和解包前手上的那份逐字节比对。
+ * 名字对不上（少了一张图、少了一个 PDF）也算失败——备份的用途是「出事时能全须全尾回来」，
+ * 少一个文件就是少一个凭据。
+ */
+export function verifyZip(buf: Buffer, expected: ZipEntry[]): void {
+  const want = new Map(expected.map((e) => [e.name, e.data]))
+  const got = new Set<string>()
+  forEachZipEntry(buf, (name, data) => {
+    if (got.has(name)) throw new Error(`备份包里「${name}」出现了两次`)
+    got.add(name)
+    const origin = want.get(name)
+    if (!origin) throw new Error(`备份包里多出一个没打算装进去的文件：「${name}」`)
+    if (!origin.equals(data)) throw new Error(`备份包里的「${name}」和原始内容不一致`)
+    want.delete(name)
+  })
+  const missing = [...want.keys()]
+  if (missing.length > 0) {
+    throw new Error(`备份包里少了 ${missing.length} 个文件（例如「${missing[0]}」）——这个包不完整，不要用`)
+  }
 }
 
 export { basename }

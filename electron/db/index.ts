@@ -1,8 +1,8 @@
 import { Database } from 'node-sqlite3-wasm'
-import { existsSync, mkdirSync, statSync, rmdirSync } from 'fs'
+import { existsSync, mkdirSync, statSync, rmdirSync, renameSync } from 'fs'
 import { join } from 'path'
 import { app } from 'electron'
-import { MIGRATIONS } from './schema'
+import { LATEST_DB_VERSION, MIGRATIONS } from './schema'
 
 let db: Database | null = null
 
@@ -58,15 +58,26 @@ export function openDb(): Database {
  * node-sqlite3-wasm 用「建一个 <db>.lock 目录」当排他锁：正常 close() 会删，
  * 但进程被强杀（超时 / taskkill / 崩溃）时不会删——下次启动就抛
  * `SQLite3Error: database is locked`，程序直接打不开。
- * 所以打开前先自愈：锁目录存在且确实是目录就删掉。
- * 只删空目录，避免误删别人正持有的锁。
+ * 所以打开前先自愈。
+ *
+ * 只敢删空目录：锁目录里万一有内容，说明可能是别的进程（比如没退干净的另一份程序）
+ * 正拿着它，递归删掉等于把它的锁抽走——两边同时写同一个库才是真灾难。
+ * 所以非空时改名挪开、留个案底，让本次启动照常进行，也让人看得见发生过什么。
  */
 function clearStaleLock(file: string): void {
   try {
     const lockPath = `${file}.lock`
     if (!existsSync(lockPath)) return
     if (!statSync(lockPath).isDirectory()) return
-    rmdirSync(lockPath, { recursive: true })
+    try {
+      rmdirSync(lockPath)
+      return
+    } catch {
+      /* 非空（ENOTEMPTY）或正被别人持有：往下改名挪走 */
+    }
+    const moved = `${lockPath}.stale-${Date.now()}`
+    renameSync(lockPath, moved)
+    console.warn(`[db] 锁目录不为空，已挪到 ${moved}（可能是上一次异常退出留下的）`)
   } catch {
     // 删不掉就算了，下次还会再试
   }
@@ -75,6 +86,13 @@ function clearStaleLock(file: string): void {
 function migrate(database: Database): void {
   const row = database.get('PRAGMA user_version') as { user_version?: number } | null
   const current = Number(row?.user_version ?? 0)
+  if (current > LATEST_DB_VERSION) {
+    throw new Error(
+      `这份数据的新版结构是 v${current}，当前程序只认到 v${LATEST_DB_VERSION}。` +
+        `多半是恢复了升级版程序做出来的备份。` +
+        `请先升级程序再打开，直接在老版本里改会把新数据改坏。`
+    )
+  }
   for (const m of MIGRATIONS) {
     if (m.version <= current) continue
     database.exec('BEGIN')

@@ -10,7 +10,10 @@
  * 代价是更新包本身没有来源校验——因为它来自你自己的 GitHub Release。
  */
 import { autoUpdater } from 'electron-updater'
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow } from 'electron'
+// 壳只有一处：{ok,data}/{ok,error} 由 handle() 统一包，preload 的 call() 才解得开
+import { handle } from '../ipc/handle'
+import { createBackup } from './backup'
 
 export interface UpdateInfo {
   /** 当前状态：idle / checking / available / not-available / downloading / downloaded / error */
@@ -49,6 +52,18 @@ export function isUpdaterAvailable(): boolean {
 let mainWindow: BrowserWindow | null = null
 let downloadedUpdate = false
 
+/**
+ * 更新状态的唯一真源。
+ * 以前每个 IPC 各自 return 一份快照，进度靠事件推——两边一打架，
+ * 界面上就出现「下载完了按钮又灰回去」。现在只认这一份：事件写它，IPC 读它。
+ */
+let lastState: UpdateInfo = { status: 'idle', currentVersion: app.getVersion() }
+
+function setState(patch: Partial<UpdateInfo>): UpdateInfo {
+  lastState = { ...lastState, currentVersion: app.getVersion(), ...patch }
+  return lastState
+}
+
 /** 更新日志写到数据目录，排查"检查更新没反应"用 */
 function logUpdate(msg: string): void {
   try {
@@ -77,7 +92,10 @@ export function initUpdater(win: BrowserWindow): void {
   }
 
   autoUpdater.autoDownload = false
-  autoUpdater.autoInstallOnAppQuit = true
+  // 不自动装：更新包下好后停在硬盘上，等人点「重启安装」。
+  // 开着 autoInstallOnAppQuit 的话，用户某天随手关掉程序，回来发现版本换了、
+  // 数据格式跟着迁了新一版，而出问题的那笔单子正是在这次改动之前录的——查无可查。
+  autoUpdater.autoInstallOnAppQuit = false
   // 把更新日志写到文件，方便排查"检查更新没反应"这类问题
   autoUpdater.logger = {
     info: (m: string) => logUpdate(`[info] ${m}`),
@@ -87,15 +105,16 @@ export function initUpdater(win: BrowserWindow): void {
   }
 
   const send = (payload: Partial<UpdateInfo>) => {
+    const state = setState(payload)
+    logUpdate(`[state] ${state.status} ${state.version ?? ''} ${state.message ?? ''}`)
     if (!mainWindow || mainWindow.isDestroyed()) return
-    mainWindow.webContents.send('updater:event', {
-      currentVersion: app.getVersion(),
-      ...payload
-    })
+    mainWindow.webContents.send('updater:event', state)
   }
 
   autoUpdater.on('checking-for-update', () => {
-    send({ status: 'checking' })
+    // 重新检查就把上一轮的结论清空，不然界面上还挂着上次的「发现新版本 vNNN」
+    downloadedUpdate = false
+    send({ status: 'checking', version: '', releaseNotes: '', percent: 0, transferred: 0, total: 0, message: '' })
   })
 
   autoUpdater.on('update-available', (info) => {
@@ -153,7 +172,7 @@ function friendlyError(err: unknown): string {
 }
 
 export function registerUpdaterIpc(): void {
-  ipcMain.handle('updater:check', async (): Promise<UpdateInfo> => {
+  handle('updater:check', async (): Promise<UpdateInfo> => {
     const base: UpdateInfo = { status: 'idle', currentVersion: app.getVersion() }
     if (!isUpdaterAvailable()) {
       return {
@@ -171,40 +190,51 @@ export function registerUpdaterIpc(): void {
       }
     }
     try {
-      const result = await autoUpdater.checkForUpdates()
-      if (!result) {
-        return { ...base, status: 'not-available' }
-      }
-      return { ...base, status: 'checking' }
+      // 结果由 update-available / update-not-available 事件写进 lastState，
+      // 这里只负责等它跑完再把那一份交出去
+      await autoUpdater.checkForUpdates()
+      return lastState
     } catch (e) {
-      return { ...base, status: 'error', message: friendlyError(e) }
+      return setState({ status: 'error', message: friendlyError(e) })
     }
   })
 
-  ipcMain.handle('updater:download', async (): Promise<UpdateInfo> => {
+  handle('updater:download', async (): Promise<UpdateInfo> => {
     const base: UpdateInfo = { status: 'idle', currentVersion: app.getVersion() }
     if (!isUpdaterAvailable()) {
       return { ...base, status: 'error', message: '开发模式下不能下载更新。' }
     }
     try {
       await autoUpdater.downloadUpdate()
-      return { ...base, status: 'downloading' }
+      return lastState
     } catch (e) {
-      return { ...base, status: 'error', message: friendlyError(e) }
+      return setState({ status: 'error', message: friendlyError(e) })
     }
   })
 
-  ipcMain.handle('updater:install', (): boolean => {
-    if (!downloadedUpdate) return false
+  handle('updater:install', async (): Promise<{ ok: boolean; message?: string }> => {
+    if (!downloadedUpdate) {
+      return { ok: false, message: '还没有下载好新版本，请先点下载。' }
+    }
+    // 装新版 = 换程序 + 可能顺带迁移数据结构，是不可逆的。
+    // 先压一份能回得去的备份，压不出来就别装——装坏了连退路都没有。
+    try {
+      await createBackup('pre-update')
+    } catch (e) {
+      const msg = (e as Error).message
+      logUpdate(`[install] 更新前备份失败，拒绝安装: ${msg}`)
+      return {
+        ok: false,
+        message: `更新前的备份没成功，所以没有安装：${msg}。请先手动备份成功再更新。`
+      }
+    }
     // isSilent=false → 弹出安装界面；isForceRunAfter=true → 装完自动启动
     autoUpdater.quitAndInstall(false, true)
-    return true
+    return { ok: true }
   })
 
-  ipcMain.handle('updater:version', (): string => app.getVersion())
+  handle('updater:version', (): string => app.getVersion())
 
-  ipcMain.handle('updater:state', (): UpdateInfo => ({
-    status: 'idle',
-    currentVersion: app.getVersion()
-  }))
+  /** 界面挂载时先问一次：状态存在主进程这份 lastState 里，刷新页面也不会丢 */
+  handle('updater:state', (): UpdateInfo => lastState)
 }

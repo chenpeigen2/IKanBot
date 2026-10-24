@@ -121,7 +121,8 @@ const api: IKanApi = {
   app: {
     dataDir: () => call<string>('app:dataDir'),
     imagesDir: () => call<string>('app:imagesDir'),
-    backupsDir: () => call<string>('app:backupsDir')
+    backupsDir: () => call<string>('app:backupsDir'),
+    paths: () => call<any>('app:paths')
   },
   pl: {
     list: (orderId: number) => call<any[]>('pl:list', orderId),
@@ -150,7 +151,8 @@ const api: IKanApi = {
   },
   settings: {
     get: () => call<any>('settings:get'),
-    save: (s: any) => call<any>('settings:save', s)
+    save: (s: any) => call<any>('settings:save', s),
+    baseLocked: () => call<boolean>('settings:baseLocked')
   },
   images: {
     pick: () => call<string[]>('images:pick'),
@@ -161,7 +163,11 @@ const api: IKanApi = {
   },
   backup: {
     create: () => call<string>('backup:create'),
-    reveal: () => call<string>('backup:reveal')
+    reveal: () => call<string>('backup:reveal'),
+    list: () => call<any[]>('backup:list'),
+    pick: () => call<string>('backup:pick'),
+    inspect: (path: string) => call<any>('backup:inspect', path),
+    restore: (path: string) => call<{ restarted: boolean }>('backup:restore', path)
   },
   exporter: {
     csv: (kind: ExportKind) => call<string>('export:csv', kind)
@@ -179,8 +185,10 @@ const api: IKanApi = {
     version: () => call<string>('updater:version'),
     /** 下载更新 */
     download: () => call<any>('updater:download'),
-    /** 重启并安装已下载的更新 */
-    install: () => call<boolean>('updater:install'),
+    /** 当前状态（主进程那一份，页面刷新不丢进度） */
+    state: () => call<any>('updater:state'),
+    /** 重启并安装已下载的更新（装之前先自动备份，备份不成就不装） */
+    install: () => call<{ ok: boolean; message?: string }>('updater:install'),
     /** 订阅更新事件（进度/状态） */
     on: (cb: (info: any) => void) => {
       const listener = (_e: unknown, info: any) => cb(info)

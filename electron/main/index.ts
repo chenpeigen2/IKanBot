@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Tray, Menu, globalShortcut, shell, nativeImage } from 'electron'
+import { app, BrowserWindow, Tray, Menu, globalShortcut, shell, nativeImage, dialog } from 'electron'
 import { join } from 'path'
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs'
 import { openDb, closeDb } from '../db'
@@ -15,6 +15,23 @@ let mainWindow: BrowserWindow | null = null
  * 用于人工核对 UI 渲染效果。
  */
 const shotRoute = process.env['IKAN_SHOT']
+
+/**
+ * 同一份数据只许一个进程打开。
+ * 双击图标两下、或者恢复备份后自动重启那一瞬间撞上老进程，就会起来两个窗口，
+ * 各自开着同一个 sqlite 文件：一个在写、一个在读，轻则报错，重则把库写坏。
+ * 第二个进程直接退出，并把已经开着的那个叫到前台。
+ */
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      showMainWindow()
+    }
+  })
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -163,7 +180,16 @@ function createTray(): void {
 }
 
 app.whenReady().then(() => {
-  openDb()
+  try {
+    openDb()
+  } catch (e) {
+    // 打不开库就弹人话窗口：给一堆栈只会让人截图来问，数据到底还在不在看不出来
+    const msg = (e as Error).message
+    console.error('[db] 打开失败', e)
+    dialog.showErrorBox('打不开数据', msg)
+    app.exit(1)
+    return
+  }
   registerIpc()
   autoBackupOnStart()
   createWindow()

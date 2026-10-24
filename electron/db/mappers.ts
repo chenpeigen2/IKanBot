@@ -27,6 +27,8 @@ const num = (v: unknown): number => (v == null ? 0 : Number(v))
 const str = (v: unknown): string => (v == null ? '' : String(v))
 const optNum = (v: unknown): number | null => (v == null ? null : Number(v))
 const optStr = (v: unknown): string | null => (v == null ? null : String(v))
+/** 0/1 三态列：库里没这一列（升级前的老行）时返回 null，让读的人知道「当年没记」而不是「假的」 */
+const optBool = (v: unknown): boolean | null => (v == null ? null : Number(v) === 1)
 
 function parseArray(v: unknown): string[] {
   try {
@@ -258,6 +260,7 @@ export function mapPackingListLine(r: Row): PackingListLine {
     quantity: num(r.quantity),
     netWeight: optNum(r.net_weight),
     grossWeight: optNum(r.gross_weight),
+    grossEst: optBool(r.gross_est),
     boxLength: optNum(r.box_length),
     boxWidth: optNum(r.box_width),
     boxHeight: optNum(r.box_height)

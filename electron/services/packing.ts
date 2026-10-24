@@ -51,6 +51,18 @@ function assertStyleNo(styleNo: unknown): void {
   }
 }
 
+/**
+ * 这一行的毛重算「估」还是「实测」。
+ * 落库时就把结论钉死，而不是打印时拿「毛重恰好等于净重×系数」去反推——
+ * 反推的结果会随着毛重系数改动而翻面：去年已经出运、已经报关的箱单，
+ * 今天重印一次 (est.) 标记换了位置，报关行按着复核就成了麻烦。
+ * 毛重整个空着（连估算都做不出来）时返回 null：没得判，也不该判。
+ */
+function estFlag(gross: number | null, measured: boolean): number | null {
+  if (gross == null) return null
+  return measured ? 0 : 1
+}
+
 function now(): string {
   return new Date().toISOString()
 }
@@ -213,8 +225,8 @@ export function createPackingList(input: PackingListInput): PackingList[] {
       const gross = l.grossWeight ?? (net != null ? Number((net * factor).toFixed(2)) : null)
       db.run(
         `INSERT INTO packing_list_lines(packing_list_id, box_no, style_no, product_name, color, size, quantity,
-          net_weight, gross_weight, box_length, box_width, box_height)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+          net_weight, gross_weight, gross_est, box_length, box_width, box_height)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           plId,
           l.boxNo ?? '',
@@ -225,6 +237,7 @@ export function createPackingList(input: PackingListInput): PackingList[] {
           l.quantity,
           net,
           gross,
+          estFlag(gross, l.grossWeight != null),
           l.boxLength ?? null,
           l.boxWidth ?? null,
           l.boxHeight ?? null
@@ -507,11 +520,19 @@ export function updatePackingListLine(
   if (patch.netWeight !== undefined && patch.grossWeight === undefined) {
     gross = net != null ? Number((net * factor).toFixed(2)) : null
   }
+  // 毛重来源跟着写：手填 = 实测；只改净重（或清空毛重）= 估算；两者都没动就沿用原判定。
+  // 这个标记一旦落库就不再跟着毛重系数变——老单据上 (est.) 翻面比不标更糟。
+  const est =
+    patch.grossWeight !== undefined
+      ? estFlag(gross, patch.grossWeight != null)
+      : patch.netWeight !== undefined
+        ? estFlag(gross, false)
+        : (cur.gross_est as number | null)
   db.exec('BEGIN')
   try {
     db.run(
       `UPDATE packing_list_lines SET box_no=?, style_no=?, product_name=?, color=?, size=?, quantity=?,
-        net_weight=?, gross_weight=?, box_length=?, box_width=?, box_height=?
+        net_weight=?, gross_weight=?, gross_est=?, box_length=?, box_width=?, box_height=?
        WHERE id=? AND packing_list_id=?`,
       [
         patch.boxNo ?? (cur.box_no as string),
@@ -522,6 +543,7 @@ export function updatePackingListLine(
         patch.quantity ?? (cur.quantity as number),
         net,
         gross,
+        est,
         patch.boxLength !== undefined ? patch.boxLength : (cur.box_length as number | null),
         patch.boxWidth !== undefined ? patch.boxWidth : (cur.box_width as number | null),
         patch.boxHeight !== undefined ? patch.boxHeight : (cur.box_height as number | null),
@@ -585,8 +607,8 @@ export function addPackingListLine(
   try {
     db.run(
       `INSERT INTO packing_list_lines(packing_list_id, box_no, style_no, product_name, color, size, quantity,
-        net_weight, gross_weight, box_length, box_width, box_height)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+        net_weight, gross_weight, gross_est, box_length, box_width, box_height)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         plId,
         line.boxNo ?? '',
@@ -597,6 +619,7 @@ export function addPackingListLine(
         line.quantity,
         net,
         gross,
+        estFlag(gross, false),
         twin?.box_length == null ? null : Number(twin.box_length),
         twin?.box_width == null ? null : Number(twin.box_width),
         twin?.box_height == null ? null : Number(twin.box_height)

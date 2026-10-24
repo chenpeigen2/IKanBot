@@ -16,7 +16,15 @@ import {
   type ShipStatus,
   type PaymentMethod
 } from '../../../shared/types'
-import { renderPi, renderPl, renderCi, orderDocAmount, ciDocAmount, type ImageMap } from '../../../shared/documents'
+import {
+  renderPi,
+  renderPl,
+  renderCi,
+  orderDocAmount,
+  ciDocAmount,
+  isGrossEstimated,
+  type ImageMap
+} from '../../../shared/documents'
 import { imageUrl } from '../imageUrl'
 import { isLocalDate, localDate } from '../../../shared/date'
 import EditOrderModal from './EditOrderModal'
@@ -1977,7 +1985,7 @@ function batchWeights(pl: any, factor: number): { net: number; gross: number; cb
   for (const l of pl?.lines ?? []) {
     const n = Number(l.netWeight) || 0
     const raw = l.grossWeight == null ? null : Number(l.grossWeight)
-    const isEst = raw == null || (n > 0 && Math.abs(raw - n * factor) < 0.005)
+    const isEst = isGrossEstimated(l, factor)
     net += n
     gross += raw == null ? Number((n * factor).toFixed(2)) : raw
     if (isEst) estimated = true
@@ -2263,21 +2271,34 @@ function PackingTab({
                         />
                       </td>
                       <td className="num">
-                        <input
-                          type="number"
-                          step="0.01"
-                          className="col-num-sm"
-                          title="报关/订舱请填实测毛重；留空按净重×系数估算（纸上标 est.）"
-                          defaultValue={l.grossWeight ?? ''}
-                          placeholder="按净重估"
-                          onBlur={async (e) => {
-                            const input = e.target
-                            const v = input.value === '' ? null : Number(input.value)
-                            await saveLine(pl.id, l.id, { grossWeight: v }, () => {
-                              input.value = l.grossWeight == null ? '' : String(l.grossWeight)
-                            })
-                          }}
-                        />
+                        <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
+                          <input
+                            type="number"
+                            step="0.01"
+                            className="col-num-sm"
+                            title="报关/订舱请填实测毛重；留空按净重×系数估算（纸上标 est.）"
+                            defaultValue={l.grossWeight ?? ''}
+                            placeholder="按净重估"
+                            onBlur={async (e) => {
+                              const input = e.target
+                              const v = input.value === '' ? null : Number(input.value)
+                              // 只有真的改过才提交：毛重的「估 / 实测」身份在库里就定死了，
+                              // 点进去又原样退出来不能算「这箱我过磅了」，否则估算值会被洗成实测值
+                              const unchanged =
+                                (v == null && l.grossWeight == null) ||
+                                (v != null && l.grossWeight != null && Number(v) === Number(l.grossWeight))
+                              if (unchanged) return
+                              await saveLine(pl.id, l.id, { grossWeight: v }, () => {
+                                input.value = l.grossWeight == null ? '' : String(l.grossWeight)
+                              })
+                            }}
+                          />
+                          {isGrossEstimated(l, grossFactor) ? (
+                            <span className="faint" style={{ fontSize: 11 }} title="这箱毛重是净重×系数估的，没过磅">
+                              估
+                            </span>
+                          ) : null}
+                        </div>
                       </td>
                       <td>
                         <div className="row" style={{ gap: 3 }}>

@@ -2,9 +2,11 @@
  * 端到端业务逻辑测试：直接调用 service 层，验证核心流程。
  * 运行：npm run test:e2e
  */
-import { openDb, closeDb, getDb, docsDir } from '../electron/db'
+import { openDb, closeDb, getDb, dataDir, imagesDir, docsDir, backupsDir } from '../electron/db'
+import { LATEST_DB_VERSION } from '../electron/db/schema'
 import * as fs from 'fs'
-import { isAbsolute } from 'path'
+import { join, isAbsolute } from 'path'
+import { Database } from 'node-sqlite3-wasm'
 import * as products from '../electron/services/products'
 import * as customers from '../electron/services/customers'
 import * as orders from '../electron/services/orders'
@@ -14,10 +16,10 @@ import * as packing from '../electron/services/packing'
 import { shipmentSummary, factoryDeliveredQuantity } from '../electron/services/shipping'
 import * as dashboard from '../electron/services/dashboard'
 import * as money from '../electron/services/money'
-import { getSettings, saveSettings } from '../electron/services/settings'
-import { createBackup } from '../electron/services/backup'
+import { getSettings, saveSettings, markBackupOk, markBackupFail, baseCurrencyLocked } from '../electron/services/settings'
+import { createBackup, inspectBackup, listBackups, pruneBackups, restoreBackup } from '../electron/services/backup'
 import * as docs from '../electron/services/docs'
-import { collectDir } from '../electron/services/zip'
+import { collectDir, createZip, readZip, verifyZip } from '../electron/services/zip'
 import { renderPi, renderPl, renderQuotation, renderCi, renderSample, orderDocAmount, ciDocAmount } from '../src/shared/documents'
 import { localDate, localMonthOf } from '../src/shared/date'
 
@@ -3581,13 +3583,380 @@ check(
   ['received_qty', 'doc_date', 'voided_at'].every((c) => r8Cols.includes(c)),
   r8Cols.join(',')
 )
-eq('迁移版本停在 v14', Number((getDb().get('PRAGMA user_version') as { user_version?: number })?.user_version ?? 0), 14)
+eq('迁移一路跑到程序认得的最高版本（v15）', Number((getDb().get('PRAGMA user_version') as { user_version?: number })?.user_version ?? 0), LATEST_DB_VERSION)
 eq(
   '作废批次仍留在装箱单列表里（只多一个 voidedAt，纸面存档不丢）',
   packing.listPackingLists(r8a.id).filter((p) => p.voidedAt != null).length,
   1
 )
 
+
+/* ---------------- R9 设置 / 备份 / 更新 ---------------- */
+section('R9 设置把关：脏值进不来，备份凭据不会被保存冲掉')
+const r9err = (fn: () => unknown): string => {
+  try {
+    fn()
+    return ''
+  } catch (e) {
+    return (e as Error).message
+  }
+}
+const r9errA = async (fn: () => Promise<unknown>): Promise<string> => {
+  try {
+    await fn()
+    return ''
+  } catch (e) {
+    return (e as Error).message
+  }
+}
+/** 在「当前设置」基础上改几个字段（设置页就是这么发的） */
+const r9base = getSettings()
+const r9set = (patch: Record<string, any>): any => ({ ...r9base, ...patch })
+
+check(
+  'PI 有效期填小数拦下（0.5 天没人能催）',
+  r9err(() => saveSettings(r9set({ piValidDays: 7.5 }))).includes('整数')
+)
+check('PI 有效期留空拦下（以前留空会变成 NaN 天）', r9err(() => saveSettings(r9set({ piValidDays: '' }))).includes('PI 有效期'))
+check('催款阈值填负数拦下', r9err(() => saveSettings(r9set({ remindPaymentDays: -3 }))).includes('催款阈值'))
+check('出货提醒填 999 天拦下（等于永远不提醒）', r9err(() => saveSettings(r9set({ remindShipDays: 999 }))).includes('0～90'))
+check(
+  '毛重系数填 0.5 拦下：报错讲了为什么（毛重不会比净重轻）',
+  r9err(() => saveSettings(r9set({ grossWeightFactor: 0.5 }))).includes('毛重系数')
+)
+check('毛重系数填 9 也拦下', r9err(() => saveSettings(r9set({ grossWeightFactor: 9 }))).includes('毛重系数'))
+check(
+  '定金比例填 1.5 拦下（否则定金比货款还多，待收算出来是负的）',
+  r9err(() => saveSettings(r9set({ defaultDepositRatio: 1.5 }))).includes('定金比例')
+)
+check(
+  '同一币种加两个收款账户拦下，并说明后果（PI 不知道印哪个）',
+  r9err(
+    () =>
+      saveSettings(
+        r9set({ banks: [{ currency: 'USD', bankName: 'A' }, { currency: 'USD', bankName: 'B' }] })
+      )
+  ).includes('加了两遍')
+)
+check('币种没选也拦下', r9err(() => saveSettings(r9set({ banks: [{ currency: '', bankName: 'A' }] }))).includes('币种'))
+check(
+  '公司名过长拦下，并说明会印不下（单据抬头排版有红线）',
+  r9err(() => saveSettings(r9set({ company: { ...getSettings().company, name: 'X'.repeat(260) } }))).includes('排不下')
+)
+check(
+  '银行 SWIFT 填 100 个字符拦下',
+  r9err(() => saveSettings(r9set({ banks: [{ currency: 'USD', swift: 'S'.repeat(60) }] }))).includes('SWIFT')
+)
+
+// 已经有单据了，基准币就是历史账的地基
+check('界面提前置灰：基准币已锁死', baseCurrencyLocked() === true)
+const r9baseCur = getSettings().baseCurrency
+const r9lockErr = r9err(() => saveSettings(r9set({ baseCurrency: r9baseCur === 'USD' ? 'CNY' : 'USD' })))
+check('有单据时换基准币拦下', r9lockErr.includes('基准币不能换'), r9lockErr)
+check('拦下时说明了后果（历史账要重算、改不回来）', r9lockErr.includes('重算') && r9lockErr.includes('改不回来'))
+check('拦下时给了出路（结清旧账再重开一套）', r9lockErr.includes('导出台账'))
+eq('一连串报错的保存之后，库里的设置一个字段都没变', getSettings(), r9base)
+
+// 成功后：首尾空格自动去掉
+const r9trim = saveSettings(r9set({ company: { ...getSettings().company, name: '  钉珠卫衣工厂店  ' } }))
+eq('保存会把抬头首尾空格去掉（印出来才不会歪）', r9trim.company.name, '钉珠卫衣工厂店')
+saveSettings(r9base)
+eq('还原回原来的设置', getSettings(), r9base)
+
+// 备份凭据由服务写，界面传什么都不认
+markBackupOk('2026-10-01T08:00:00.000Z')
+markBackupFail('磁盘满了，备份写到一半停了')
+saveSettings(r9set({ lastBackupAt: '瞎填的', lastBackupError: null }))
+eq('界面保存不会抹掉「最近成功备份」时间', getSettings().lastBackupAt, '2026-10-01T08:00:00.000Z')
+eq('界面保存不会抹掉上一次的失败原因', getSettings().lastBackupError, '磁盘满了，备份写到一半停了')
+
+// 库里那份 JSON 被改坏时：按字段退回默认值，而不是把默认值一起冲掉
+getDb().run(
+  'INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+  [
+    'app_settings',
+    JSON.stringify({
+      company: { name: 123, address: null },
+      banks: [{ currency: 'USD' }, { currency: 'USD' }, { currency: 'BTC' }, { currency: 'EUR' }],
+      piValidDays: null,
+      remindShipDays: '七天',
+      grossWeightFactor: 0,
+      defaultDepositRatio: 'abc',
+      baseCurrency: 'BTC'
+    })
+  ]
+)
+const r9bad = getSettings()
+eq('坏掉的天数退回默认值而不是留空', r9bad.piValidDays, 15)
+eq('坏掉的文字退回空串（不打印 [object]）', r9bad.company.name, '')
+eq('重复币种只留一个，不认识的币种丢掉', r9bad.banks.map((b) => b.currency), ['USD', 'EUR'])
+eq('坏掉的系数退回默认', r9bad.grossWeightFactor, 1.1)
+eq('坏掉的基准币退回默认', r9bad.baseCurrency, 'CNY')
+saveSettings(r9base)
+// 备份时间戳不在这次对比里：坏 JSON 里本来就没有它，读回来只能是空，
+// 下一次成功备份会重新盖章（下面「成功备份会盖上时间」那条盯的就是这个）
+const r9UserFields = (s: any) => ({
+  company: s.company,
+  banks: s.banks,
+  piValidDays: s.piValidDays,
+  remindShipDays: s.remindShipDays,
+  defaultDepositRatio: s.defaultDepositRatio,
+  grossWeightFactor: s.grossWeightFactor,
+  baseCurrency: s.baseCurrency
+})
+eq('读到坏数据后一次正常保存就把这些字段全修回来', r9UserFields(getSettings()), r9UserFields(r9base))
+
+section('R9 备份：写坏的不算备成')
+const r9file = await createBackup('r9')
+check('备份落在备份目录里且文件真的存在', r9file.startsWith(backupsDir()) && fs.existsSync(r9file))
+check(
+  '文件名带时间戳和用途（能认出是哪天的自动备份）',
+  /^ikanbot-\d{14}-r9\.zip$/.test(r9file.split(/[\\/]/).pop() ?? ''),
+  r9file
+)
+eq('成功备份会盖上时间', getSettings().lastBackupAt !== null, true)
+eq('成功备份会清掉上次的失败原因', getSettings().lastBackupError, null)
+eq('临时文件没留在原地', fs.existsSync(`${r9file}.part`), false)
+const r9buf = fs.readFileSync(r9file)
+const r9entries = readZip(r9buf)
+check('包里带着数据库本体', r9entries.some((e) => e.name === 'ikanbot.db'))
+eq(
+  '图片目录里有几张，包里就几张（一张不丢）',
+  r9entries.filter((e) => e.name.startsWith('images/')).length,
+  collectDir(imagesDir(), 'images').length
+)
+const r9docFiles = collectDir(docsDir(), 'docs')
+check('这一轮确实有单据存档要备（下面这条不是空过）', r9docFiles.length > 0, `${r9docFiles.length}`)
+eq('单据存档 PDF 也全在包里', r9entries.filter((e) => e.name.startsWith('docs/')).length, r9docFiles.length)
+eq('落盘的包原样自检通过', r9err(() => verifyZip(r9buf, readZip(r9buf))), '')
+
+// 验货本身要抓得住三种事故
+const r9tiny = Buffer.from('hello world hello world')
+check(
+  '少一个文件算失败（备份的意义是全须全尾回来）',
+  r9err(() =>
+    verifyZip(createZip([{ name: 'a', data: r9tiny }]), [
+      { name: 'a', data: r9tiny },
+      { name: 'b', data: r9tiny }
+    ])
+  ).includes('少了 1 个文件')
+)
+check(
+  '多一个没打算装的文件也算失败',
+  r9err(() =>
+    verifyZip(createZip([{ name: 'a', data: r9tiny }, { name: 'z', data: r9tiny }]), [{ name: 'a', data: r9tiny }])
+  ).includes('多出一个')
+)
+check(
+  '内容被换过（字节一样不算，逐字节比）',
+  r9err(() =>
+    verifyZip(createZip([{ name: 'a', data: r9tiny }]), [
+      { name: 'a', data: Buffer.from('hello world hello worlD') }
+    ])
+  ).includes('不一致')
+)
+check('尾巴被截掉的包报「截断」', r9err(() => readZip(r9buf.subarray(0, r9buf.length - 30))).includes('截断'))
+const r9flipped = Buffer.from(r9buf)
+// 直接改数据库内容段的一个字节（跳过 30 字节本地头 + 文件名）
+r9flipped[81] ^= 0xff
+const r9flipErr = r9err(() => readZip(r9flipped))
+check(
+  '包体坏一个字节就报错，绝不静默返回半截数据',
+  /损坏|校验码|大小不对|解不开/.test(r9flipErr),
+  r9flipErr
+)
+
+const r9corruptPath = join(backupsDir(), 'ikanbot-20260101000000-corrupt.zip')
+fs.writeFileSync(r9corruptPath, r9flipped)
+const r9inspectErr = r9err(() => inspectBackup(r9corruptPath))
+check('损坏的包在「预览」这一步就报出来（不用等到恢复时才发现）', /损坏|校验码|大小不对|解不开/.test(r9inspectErr), r9inspectErr)
+eq('预览报错也是中文人话', r9inspectErr.includes('at sqlite') || r9inspectErr.includes('SQLITE'), false)
+
+const r9prev = inspectBackup(r9file)
+eq('预览数得出包里的条目数', r9prev.entryCount, r9entries.length)
+eq('预览认得出里面有数据库', r9prev.hasDb, true)
+eq(
+  '预览报的订单数 = 当前库里的订单数（包里的账是真的）',
+  r9prev.orderCount,
+  Number((getDb().get('SELECT COUNT(*) AS n FROM orders') as { n: number }).n)
+)
+eq('预览把文件名里的时间戳还原成可读时间', r9prev.takenAt !== null, true)
+eq(
+  '手工丢进备份目录的文件也认时间戳',
+  (listBackups().find((b) => b.name === 'ikanbot-20260101000000-corrupt.zip') ?? { takenAt: null }).takenAt,
+  '2026-01-01T00:00:00Z'
+)
+eq('备份列表新到旧：刚备的那份排第一', listBackups()[0].name, r9file.split(/[\\/]/).pop() ?? '')
+
+// 自动清理只砍最老的，最近的一律留着
+for (let i = 0; i < 35; i++) {
+  const f = join(backupsDir(), `ikanbot-20200101${String(i).padStart(6, '0')}-old.zip`)
+  fs.writeFileSync(f, 'x')
+  fs.utimesSync(f, new Date('2020-01-01T00:00:00Z'), new Date('2020-01-01T00:00:00Z'))
+}
+pruneBackups(30)
+eq('备份只留最近 30 份（不然磁盘迟早被写满）', listBackups().length, 30)
+check('被砍的一定是最老的（刚备的这份还在）', fs.existsSync(r9file))
+eq('今天手工丢进备份目录的包不会被当成老备份删掉', fs.existsSync(r9corruptPath), true)
+
+section('R9 恢复：先验货、再留退路，退路之前一步都不许动手')
+const r9dbBytes = r9entries.find((e) => e.name === 'ikanbot.db')!.data
+// 说明：成功恢复的最后一步会换库并重启程序，测试进程跑到那里就没了，
+// 所以这里只验「拦下来」的每一道门——它们全都必须在破坏性步骤之前。
+const r9outErr = await r9errA(() => restoreBackup(join(dataDir(), 'not-here.zip')))
+check('备份目录以外的路径直接拒（渲染进程随便传一个路径进来是读不到的）', r9outErr.includes('只能从备份目录里选'), r9outErr)
+check('非 .zip 拒', (await r9errA(() => restoreBackup(join(backupsDir(), 'notes.txt')))).includes('.zip'))
+check(
+  '列表里还有、盘上已经被删的文件拒',
+  (await r9errA(() => restoreBackup(join(backupsDir(), 'ikanbot-20300101000000-none.zip')))).includes('已经不在了')
+)
+const r9evilPath = join(backupsDir(), 'ikanbot-20260102000000-evil.zip')
+fs.writeFileSync(r9evilPath, createZip([{ name: '../evil.txt', data: Buffer.from('跳出去') }, { name: 'ikanbot.db', data: r9dbBytes }]))
+const r9evilErr = await r9errA(() => restoreBackup(r9evilPath))
+check('包里有不认识的文件就整份拒掉（不是跳过它继续恢复）', r9evilErr.includes('不认识的文件'), r9evilErr)
+check('被拒的包没有把文件写到数据目录外面', !fs.existsSync(join(dataDir(), 'evil.txt')))
+const r9nodbPath = join(backupsDir(), 'ikanbot-20260103000000-nodb.zip')
+fs.writeFileSync(r9nodbPath, createZip([{ name: 'images/a.png', data: Buffer.from('png') }]))
+check('没有数据库的包拒（不然恢复完是个空程序）', (await r9errA(() => restoreBackup(r9nodbPath))).includes('没有数据库文件'))
+// 新版程序备的包：数据格式比当前程序还新，降回去必丢字段
+const r9futureDb = join(dataDir(), 'future-check.db')
+if (fs.existsSync(r9futureDb)) fs.unlinkSync(r9futureDb)
+{
+  const fdb = new Database(r9futureDb)
+  fdb.run('CREATE TABLE orders(id INTEGER PRIMARY KEY)')
+  fdb.run('PRAGMA user_version = 999')
+  fdb.close()
+}
+const r9futurePath = join(backupsDir(), 'ikanbot-20260104000000-future.zip')
+fs.writeFileSync(r9futurePath, createZip([{ name: 'ikanbot.db', data: fs.readFileSync(r9futureDb) }]))
+fs.unlinkSync(r9futureDb)
+const r9futureErr = await r9errA(() => restoreBackup(r9futurePath))
+check('数据格式比当前程序新的包拒', r9futureErr.includes('更新的程序版本'), r9futureErr)
+check('报错说清了当前只认到 v几', r9futureErr.includes(`v${LATEST_DB_VERSION}`), r9futureErr)
+check('给了出路（先升级程序再恢复）', r9futureErr.includes('再恢复'), r9futureErr)
+eq(
+  '被拒的恢复一份退路备份都没做（说明拦在动手之前）',
+  listBackups()
+    .filter((b) => b.name.includes('pre-restore'))
+    .map((b) => b.name),
+  []
+)
+const r9live = Number((getDb().get('SELECT COUNT(*) AS n FROM orders') as { n: number }).n)
+check('拒绝之后当前库还开着、一条数据没动', r9live > 0 && fs.existsSync(join(dataDir(), 'ikanbot.db')))
+eq(
+  '自己刚备的包版本不会超前（同一版本恢复自己不会被误拦）',
+  Number((getDb().get('PRAGMA user_version') as { user_version?: number })?.user_version ?? 0) <= LATEST_DB_VERSION,
+  true
+)
+
+section('R9 工作台会盯住备份（数据只躺在这台电脑上）')
+const r9setStamp = (at: string | null, err: string | null): void => {
+  const cur = getSettings()
+  getDb().run('INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', [
+    'app_settings',
+    JSON.stringify({ ...cur, lastBackupAt: at, lastBackupError: err })
+  ])
+}
+const r9backupTips = () => dashboard.reminders().filter((r) => r.orderNo === '数据备份')
+r9setStamp(null, null)
+eq('有单据却从没备份成功过 → 亮一条', r9backupTips().length, 1)
+check('说的是「这台电脑上还没有一份成功备份」', (r9backupTips()[0]?.message ?? '').includes('还没有一份成功备份'))
+r9setStamp(new Date().toISOString(), null)
+eq('今天刚备过 → 不催', r9backupTips().length, 0)
+r9setStamp(new Date(Date.now() - 30 * 86400000).toISOString(), null)
+eq('拖了 30 天 → 催一次', r9backupTips().length, 1)
+check('催的时候说清隔了多少天', (r9backupTips()[0]?.message ?? '').includes('距离上一次成功备份'))
+r9setStamp(new Date().toISOString(), '磁盘满了，备份写到一半停了')
+eq('今天备过但这次失败 → 只催失败', r9backupTips().length, 1)
+check('把失败原因原样亮出来', (r9backupTips()[0]?.message ?? '').includes('磁盘满了'))
+r9setStamp(null, '磁盘满了，备份写到一半停了')
+eq('从没成功过 + 又失败 → 两条都要（不互相顶掉）', r9backupTips().length, 2)
+eq('两条各占一个 key（界面上会各显示一行）', new Set(r9backupTips().map((r) => r.key)).size, 2)
+check('都归在「待修」而不是催款类', r9backupTips().every((r) => r.kind === 'data'))
+// 指向同一个去处：设置 → 数据备份
+check('每条都告诉用户去哪儿点', r9backupTips().every((r) => r.message.includes('设置 → 数据备份')))
+
+section('R9 毛重来源：填过实测就钉死，改系数不翻旧账（v15）')
+const r9cols = (getDb().all('PRAGMA table_info(packing_list_lines)') as { name: string }[]).map((c) => c.name)
+check('装箱明细多了一列 gross_est（记这箱毛重是填的还是算的）', r9cols.includes('gross_est'), r9cols.join(','))
+const r9w = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7 })
+await orders.addOrderItem(r9w.id, {
+  styleNo: 'R9W',
+  productName: '过磅款',
+  color: 'Grey',
+  size: 'M',
+  quantity: 120,
+  unitPrice: 10,
+  unitCost: 5
+})
+const r9pls = packing.createPackingList({
+  orderId: r9w.id,
+  lines: [
+    // 第一箱只填了净重（毛重是算出来的）；第二箱填了过磅值 26kg
+    { boxNo: 'NO.1', styleNo: 'R9W', color: 'Grey', size: 'M', quantity: 50, netWeight: 20 },
+    { boxNo: 'NO.2', styleNo: 'R9W', color: 'Grey', size: 'M', quantity: 50, netWeight: 20, grossWeight: 26 }
+  ]
+})
+const r9plId = r9pls[0].id
+const r9l1 = r9pls[0].lines[0].id
+const r9l2 = r9pls[0].lines[1].id
+/** 每次都从库里重读这一箱，不看内存里的旧值 */
+const r9line = (lineId: number) => packing.listPackingLists(r9w.id)[0].lines.find((l) => l.id === lineId)!
+/** 纸面这一批上印了几个 (est.)（只数箱明细行里的，页脚那句说明不算） */
+const r9estCount = (): number => {
+  const html = renderPl({ order: orders.getOrder(r9w.id)!, settings: getSettings(), images: {} }, packing.listPackingLists(r9w.id)[0])
+  return (html.match(/\(est\.\)<\/span>/g) ?? []).length
+}
+eq('没填毛重的那箱落库标为「算出来的」', r9line(r9l1).grossEst, true)
+eq('填了实测毛重的那箱落库标为「实测」', r9line(r9l2).grossEst, false)
+eq('纸面只给算出来的那箱印 (est.)', r9estCount(), 1)
+
+const r9added = packing.addPackingListLine(r9w.id, r9plId, { styleNo: 'R9W', color: 'Grey', size: 'M', quantity: 10 })
+const r9l3 = r9added[0].lines.find((l) => l.quantity === 10)!.id
+eq('现场补的一箱没填毛重，也标估算', r9line(r9l3).grossEst, true)
+eq('补完这箱，纸面上两个 (est.)', r9estCount(), 2)
+
+// 关键：把系数调到 1.3，20 × 1.3 = 26 恰好等于那箱手填的过磅值
+saveSettings(r9set({ grossWeightFactor: 1.3 }))
+eq('改了毛重系数，老单据上的 (est.) 一个都没翻面', r9estCount(), 2)
+eq('手填的 26kg 仍按实测印（没被新系数认成推算值）', r9line(r9l2).grossEst, false)
+saveSettings(r9set({ grossWeightFactor: 1.1 }))
+eq('系数调回来，标记还是原来那几个（标记不跟系数走）', r9estCount(), 2)
+
+// 编辑时的来源判定：改件数不动 / 只改净重退回估算 / 手填毛重算实测
+packing.updatePackingListLine(r9w.id, r9plId, r9l2, { quantity: 25 })
+eq('只改件数：毛重按比例跟着走（50 箱 26kg → 25 箱 13kg）', r9line(r9l2).grossWeight, 13)
+eq('只改件数：来源判定不动（还是实测）', r9line(r9l2).grossEst, false)
+eq('只改件数：这一箱的 (est.) 不会冒出来', r9estCount(), 2)
+packing.updatePackingListLine(r9w.id, r9plId, r9l2, { netWeight: 30 })
+eq('只改净重：毛重按当前系数重算（30 × 1.1 = 33）', r9line(r9l2).grossWeight, 33)
+eq('只改净重：这一箱退回「算出来的」', r9line(r9l2).grossEst, true)
+eq('只改净重之后，纸面三个 (est.)', r9estCount(), 3)
+packing.updatePackingListLine(r9w.id, r9plId, r9l2, { grossWeight: 35.5 })
+eq('手填毛重即视为实测（哪怕 35.5 看着也像算出来的）', r9line(r9l2).grossEst, false)
+eq('手填之后这一箱的 (est.) 消失', r9estCount(), 2)
+packing.updatePackingListLine(r9w.id, r9plId, r9l2, { grossWeight: null })
+eq('清空毛重：来源标记一起清掉（不谎称实测）', r9line(r9l2).grossEst, null)
+eq('清空的这箱按「没填」处理，重新标上 (est.)', r9estCount(), 3)
+
+// 老数据（v15 之前建的）没有这个标记，只能按系数猜——这正是标记要解决的问题
+getDb().run('UPDATE packing_list_lines SET gross_est = NULL WHERE packing_list_id = ?', [r9plId])
+eq('老数据在系数 1.1 下三箱全被猜成推算值', r9estCount(), 3)
+saveSettings(r9set({ grossWeightFactor: 1.3 }))
+eq('同一批数据只把系数改成 1.3，两个箱的 (est.) 就掉了', r9estCount(), 1)
+saveSettings(r9set({ grossWeightFactor: 1.1 }))
+eq('改回 1.1 结论又变回去——没落库的来源标记就是这么反复', r9estCount(), 3)
+
+section('R9 IPC 壳：服务层不许自己开通道')
+// 渲染进程的 call() 只认 {ok,data}/{ok,error} 这个壳。谁绕过它直接 ipcMain.handle 返回裸值，
+// 界面拿到的就是 res.ok === undefined → 抛一条「消息为空的 Error」被静默丢掉：
+// 自动更新那几张按钮就是这么哑了很久的（点了没反应，也不报错）。
+const r9svcDir = join(process.cwd(), 'electron', 'services')
+const r9rawIpc = fs
+  .readdirSync(r9svcDir)
+  .filter((f) => f.endsWith('.ts'))
+  .filter((f) => /ipcMain\s*\.\s*handle\s*\(/.test(fs.readFileSync(join(r9svcDir, f), 'utf8')))
+eq('服务层里没有自己注册的通道（都走 ipc/handle 那一个壳）', r9rawIpc, [])
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
