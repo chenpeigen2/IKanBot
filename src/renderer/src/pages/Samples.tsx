@@ -437,7 +437,8 @@ function SampleModal({
   )
 
   useEffect(() => {
-    void window.api.customers.list().then(setCustomers)
+    // 编辑老打样单时，即使客户后来停用了也要能选回原来那个
+    void window.api.customers.list('', true).then(setCustomers)
     void window.api.products.list('').then(setProducts)
   }, [])
 

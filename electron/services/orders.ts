@@ -1,9 +1,10 @@
 import { getDb, nextNo } from '../db'
 import { mapOrder, mapOrderItem, mapPayment, mapPackingList, mapPackingListLine, mapEvent, mapSkuSummary, mapOrderPhoto, mapCustomer, mapSettlement } from '../db/mappers'
 import { getSettings } from './settings'
-import { computeOrderMoney, parseCharges } from './money'
+import { computeOrderMoney, costInOrderCurrency, parseCharges } from './money'
 import { applyShipStatus, isShipStatusDerived, shipmentSummary } from './shipping'
 import { localDate, addDays, isLocalDate } from '../../src/shared/date'
+import { billPartyOf, emptyParty, parseParty, patchParty, shipPartyOf, stringifyParty } from '../../src/shared/party'
 import { SETTLEMENT_KIND_LABEL, SHIP_STATUS_LABEL } from '../../src/shared/types'
 import type {
   Currency,
@@ -13,6 +14,7 @@ import type {
   OrderEvent,
   OrderPhoto,
   PackingList,
+  PartySnapshot,
   PaymentMethod,
   PaymentStatus,
   QuotationCharge,
@@ -58,6 +60,10 @@ export interface OrderInput {
   charges?: QuotationCharge[]
   /** 建单时的收款状态（报价单转订单时用：PI 已发 = sent） */
   paymentStatus?: PaymentStatus
+  /** 买方抬头覆盖（不传就用客户档案当时的值，存进单子里冻结） */
+  billTo?: Partial<PartySnapshot>
+  /** 收货抬头覆盖（这单要送别的仓就在这里改） */
+  shipTo?: Partial<PartySnapshot>
 }
 
 export interface OrderItemInput {
@@ -69,7 +75,10 @@ export interface OrderItemInput {
   size?: string
   quantity: number
   unitPrice: number
+  /** 行成本单价（订单币种） */
   unitCost?: number | null
+  /** 工厂成本（基准币）：由服务端按本单汇率折算，前端不要自己乘除 */
+  costBase?: number | null
 }
 
 export type OrderSort = 'created_desc' | 'created_asc' | 'amount_desc' | 'amount_asc' | 'ship_asc'
@@ -123,7 +132,7 @@ export function listOrders(filter: {
   const sql = `SELECT o.* FROM orders o JOIN customers c ON c.id = o.customer_id
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}`
   const rows = db.all(sql, params) as Record<string, unknown>[]
-  const list = rows.map((r) => hydrate(mapOrder(r)))
+  const list = rows.map((r) => hydrate(mapOrder(r), r))
   return sortOrders(list, filter.sort ?? 'created_desc')
 }
 
@@ -155,14 +164,18 @@ function sortOrders(list: OrderDetail[], sort: OrderSort): OrderDetail[] {
 export function getOrder(id: number): OrderDetail | null {
   const row = getDb().get('SELECT * FROM orders WHERE id = ?', [id]) as Record<string, unknown> | null
   if (!row) return null
-  return hydrate(mapOrder(row))
+  return hydrate(mapOrder(row), row)
 }
 
-function hydrate(order: Order): OrderDetail {
+function hydrate(order: Order, row?: Record<string, unknown>): OrderDetail {
   const db = getDb()
   const customerRow = db.get('SELECT * FROM customers WHERE id = ?', [order.customerId]) as
     | Record<string, unknown>
     | null
+  const liveCustomer = customerRow ? mapCustomer(customerRow) : null
+  // 抬头优先用单子上钉死的快照；升级前的老单子没有快照，回退客户档案（保持原行为）
+  const billTo = parseParty(row?.bill_to_json) ?? billPartyOf(liveCustomer)
+  const shipTo = parseParty(row?.ship_to_json) ?? shipPartyOf(liveCustomer)
   const items = (
     db.all('SELECT * FROM order_items WHERE order_id = ? ORDER BY style_no, color, size, id', [order.id]) as Record<
       string,
@@ -213,7 +226,9 @@ function hydrate(order: Order): OrderDetail {
 
   return {
     ...order,
-    customer: customerRow ? mapCustomer(customerRow) : null,
+    customer: liveCustomer,
+    billTo,
+    shipTo,
     items,
     payments,
     packingLists,
@@ -253,6 +268,20 @@ function piDupErr(no: string): Error {
   )
 }
 
+/** 建单时把客户档案当时的抬头钉在这张单上（改档案不再影响已发出的单据） */
+function partiesForOrder(
+  customerId: number,
+  patch: { billTo?: Partial<PartySnapshot>; shipTo?: Partial<PartySnapshot> } = {}
+): { bill: string; ship: string } {
+  const row = getDb().get('SELECT * FROM customers WHERE id = ?', [customerId]) as Record<string, unknown> | null
+  const c = row ? mapCustomer(row) : null
+  if (!c) throw new Error(`客户编号 ${customerId} 不存在，不能建单`)
+  return {
+    bill: stringifyParty(patchParty(billPartyOf(c), patch.billTo)),
+    ship: stringifyParty(patchParty(shipPartyOf(c), patch.shipTo))
+  }
+}
+
 export function createOrder(input: OrderInput): OrderDetail {
   const db = getDb()
   const settings = getSettings()
@@ -268,14 +297,15 @@ export function createOrder(input: OrderInput): OrderDetail {
   const status: PaymentStatus = input.paymentStatus ?? 'draft'
   // 费用行（运费/保险等）存 JSON
   const chargesJson = JSON.stringify((input.charges ?? []).filter((c) => c.label.trim()))
+  const parties = partiesForOrder(input.customerId, input)
 
   const res = db.run(
     `INSERT INTO orders(order_no, customer_id, pi_no, payment_status, ship_status, currency, exchange_rate,
       base_currency, incoterm, port_of_loading, port_of_destination, payment_method, deposit_ratio,
       valid_until, expected_ship_date, expected_arrival_date, customer_po, note,
       exchange_rate_date, factory, factory_due_date, cut_off_date, etd_date, vessel, seal_no, charges,
-      created_at, updated_at)
-     VALUES(?,?,?,?,'not_prepared',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      bill_to_json, ship_to_json, created_at, updated_at)
+     VALUES(?,?,?,?,'not_prepared',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       orderNo,
       input.customerId,
@@ -302,6 +332,8 @@ export function createOrder(input: OrderInput): OrderDetail {
       input.vessel ?? '',
       input.sealNo ?? '',
       chargesJson,
+      parties.bill,
+      parties.ship,
       ts,
       ts
     ]
@@ -363,12 +395,21 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
       ? String(before.charges ?? '[]')
       : JSON.stringify(input.charges.filter((c) => c.label.trim()))
 
+  // 抬头快照：换了客户就按新客户重新钉一次；没换客户则保住单子上原有的快照，
+  // 只把用户这次明确改动的字段写进去（改档案绝不会顺带动到已发出的单据）
+  const customerChanged = Number(before.customer_id) !== Number(input.customerId)
+  const fresh = partiesForOrder(input.customerId, {})
+  const baseBill = (customerChanged ? null : parseParty(before.bill_to_json)) ?? parseParty(fresh.bill) ?? emptyParty()
+  const baseShip = (customerChanged ? null : parseParty(before.ship_to_json)) ?? parseParty(fresh.ship) ?? emptyParty()
+  const billJson = stringifyParty(patchParty(baseBill, input.billTo))
+  const shipJson = stringifyParty(patchParty(baseShip, input.shipTo))
+
   db.run(
     `UPDATE orders SET customer_id=?, currency=?, exchange_rate=?, base_currency=?, incoterm=?,
       port_of_loading=?, port_of_destination=?, payment_method=?, deposit_ratio=?, valid_until=?,
       expected_ship_date=?, expected_arrival_date=?, customer_po=?, note=?, pi_no=?,
       exchange_rate_date=?, factory=?, factory_due_date=?, cut_off_date=?, etd_date=?, vessel=?, seal_no=?,
-      charges=?, updated_at=?
+      charges=?, bill_to_json=?, ship_to_json=?, updated_at=?
      WHERE id=?`,
     [
       input.customerId,
@@ -394,6 +435,8 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
       input.vessel ?? '',
       input.sealNo ?? '',
       chargesJson,
+      billJson,
+      shipJson,
       ts,
       id
     ]
@@ -402,6 +445,56 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
   // 收款金额变了，状态可能需要重算
   recomputePaymentStatus(id)
   return getOrder(id)!
+}
+
+/**
+ * 单独改这张单的抬头（客户这单要送别的仓 / 抬头写错了）。
+ * 只动快照，不动客户档案——档案改了不能把已经发出去的单据改掉。
+ */
+export function setOrderParties(
+  orderId: number,
+  patch: { billTo?: Partial<PartySnapshot>; shipTo?: Partial<PartySnapshot> }
+): OrderDetail {
+  const db = getDb()
+  const row = db.get('SELECT * FROM orders WHERE id = ?', [orderId]) as Record<string, unknown> | null
+  if (!row) throw new Error('订单不存在')
+  const customerRow = db.get('SELECT * FROM customers WHERE id = ?', [Number(row.customer_id)]) as
+    | Record<string, unknown>
+    | null
+  const live = customerRow ? mapCustomer(customerRow) : null
+  const baseBill = parseParty(row.bill_to_json) ?? billPartyOf(live) ?? emptyParty()
+  const baseShip = parseParty(row.ship_to_json) ?? shipPartyOf(live) ?? emptyParty()
+  const billJson = stringifyParty(patchParty(baseBill, patch.billTo))
+  const shipJson = stringifyParty(patchParty(baseShip, patch.shipTo))
+  db.run('UPDATE orders SET bill_to_json=?, ship_to_json=?, updated_at=? WHERE id=?', [
+    billJson,
+    shipJson,
+    now(),
+    orderId
+  ])
+  const changed: string[] = []
+  const labels: Record<keyof PartySnapshot, string> = {
+    company: '公司',
+    attn: '收件人',
+    contact: '联系人',
+    address: '地址',
+    zipCode: '邮编',
+    country: '国家',
+    email: '邮箱',
+    phone: '电话',
+    paymentPref: '付款条款'
+  }
+  const diff = (title: string, base: PartySnapshot, p?: Partial<PartySnapshot>) => {
+    if (!p) return
+    const parts = (Object.keys(p) as (keyof PartySnapshot)[])
+      .filter((k) => p[k] !== undefined && String(p[k]) !== String(base[k]))
+      .map((k) => `${labels[k]} ${base[k] || '空'} → ${String(p[k]) || '空'}`)
+    if (parts.length) changed.push(`${title}：${parts.join('；')}`)
+  }
+  diff('买方抬头', baseBill, patch.billTo)
+  diff('收货抬头', baseShip, patch.shipTo)
+  logEvent(orderId, 'party_update', null, null, changed.join('；') || '抬头没改动')
+  return getOrder(orderId)!
 }
 
 /** 生成一条人话版的「改了什么」记录 */
@@ -519,6 +612,21 @@ function describeChargeChange(oldCharges: QuotationCharge[], newCharges: Quotati
 
 /* ---------------- 订单行 ---------------- */
 
+/**
+ * 行成本一律按订单币种存。
+ * 前端传 costBase（工厂报的人民币价）时，这里按本单汇率折算——
+ * 以前把 ¥30 直接当 $30 写进 unit_cost，毛利差一整个汇率。
+ */
+function resolveItemCost(orderId: number, item: { unitCost?: number | null; costBase?: number | null }): number | null {
+  if (item.costBase !== undefined && item.costBase !== null) {
+    const row = getDb().get('SELECT exchange_rate FROM orders WHERE id = ?', [orderId]) as
+      | { exchange_rate?: number }
+      | null
+    return costInOrderCurrency(item.costBase, Number(row?.exchange_rate ?? 1))
+  }
+  return item.unitCost ?? null
+}
+
 export function addOrderItem(orderId: number, item: OrderItemInput): OrderDetail {
   const db = getDb()
   db.run(
@@ -534,7 +642,7 @@ export function addOrderItem(orderId: number, item: OrderItemInput): OrderDetail
       item.size ?? '',
       item.quantity,
       item.unitPrice,
-      item.unitCost ?? null
+      resolveItemCost(orderId, item)
     ]
   )
   db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
@@ -600,6 +708,13 @@ export function updateOrderItem(
   if (!skuChanged && patch.quantity !== undefined && Number(patch.quantity) < packed) {
     assertNotBelowPacked(orderId, curSku)
   }
+  // costBase：没传 = 不动；传了数字 = 按本单汇率折算；传 null = 主动清空（不能当成「没传」）
+  const nextCost =
+    patch.costBase !== undefined
+      ? resolveItemCost(orderId, { costBase: patch.costBase })
+      : patch.unitCost !== undefined
+        ? patch.unitCost
+        : (cur.unit_cost as number | null)
   db.run(
     `UPDATE order_items SET product_id=?, style_no=?, product_name=?, composition=?, color=?, size=?, quantity=?, unit_price=?, unit_cost=?
      WHERE id=? AND order_id=?`,
@@ -612,13 +727,20 @@ export function updateOrderItem(
       patch.size ?? (cur.size as string),
       patch.quantity ?? (cur.quantity as number),
       patch.unitPrice ?? (cur.unit_price as number),
-      patch.unitCost !== undefined ? patch.unitCost : (cur.unit_cost as number | null),
+      nextCost,
       itemId,
       orderId
     ]
   )
   db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
-  const changes = describeItemChange(cur, patch)
+  const baseChanges = describeItemChange(cur, patch)
+  const costNote =
+    patch.costBase === undefined
+      ? ''
+      : `${baseChanges ? '；' : ''}成本按工厂价 ${patch.costBase ?? '清空'} 折算（本单汇率下 ${
+          nextCost == null ? '—' : nextCost
+        }）`
+  const changes = baseChanges + costNote
   if (changes) logEvent(orderId, 'item_update', null, null, `修改明细 ${patch.styleNo ?? cur.style_no}：${changes}`)
   // 件数变了，订单的「装够没有 / 走了没有」跟着变
   applyShipStatus(orderId)
@@ -718,7 +840,7 @@ export function replaceOrderItems(orderId: number, items: OrderItemInput[]): Ord
           item.size ?? '',
           item.quantity,
           item.unitPrice,
-          item.unitCost ?? null
+          resolveItemCost(orderId, item)
         ]
       )
     }
@@ -1151,8 +1273,9 @@ export interface OrderTerms {
 }
 
 export function lastOrderTerms(customerId: number): OrderTerms | null {
+  // 只带「真做过」的单：客户取消过的那张的港口、定金不能变成下一单的默认值
   const row = getDb().get(
-    `SELECT * FROM orders WHERE customer_id = ? AND payment_status != 'draft'
+    `SELECT * FROM orders WHERE customer_id = ? AND payment_status NOT IN ('draft','expired','void')
      ORDER BY created_at DESC, id DESC LIMIT 1`,
     [customerId]
   ) as Record<string, unknown> | null

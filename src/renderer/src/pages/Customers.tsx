@@ -13,6 +13,10 @@ interface Draft {
   address: string
   zipCode: string
   attn: string
+  shipAttn: string
+  shipAddress: string
+  shipZipCode: string
+  shipCountry: string
   paymentPref: string
   defaultPaymentMethod: string
   defaultDepositRatio: string
@@ -31,6 +35,10 @@ const blank: Draft = {
   address: '',
   zipCode: '',
   attn: '',
+  shipAttn: '',
+  shipAddress: '',
+  shipZipCode: '',
+  shipCountry: '',
   paymentPref: '',
   defaultPaymentMethod: '',
   defaultDepositRatio: '',
@@ -40,22 +48,52 @@ const blank: Draft = {
   note: ''
 }
 
+/** 客户档案 → 弹窗草稿（数字转字符串，null 转空） */
+function toDraft(c: Customer): Draft {
+  return {
+    ...blank,
+    id: c.id,
+    company: c.company,
+    contact: c.contact,
+    email: c.email,
+    phone: c.phone,
+    country: c.country,
+    address: c.address,
+    zipCode: c.zipCode,
+    attn: c.attn,
+    shipAttn: c.shipAttn ?? '',
+    shipAddress: c.shipAddress ?? '',
+    shipZipCode: c.shipZipCode ?? '',
+    shipCountry: c.shipCountry ?? '',
+    paymentPref: c.paymentPref,
+    defaultPaymentMethod: c.defaultPaymentMethod,
+    defaultDepositRatio: c.defaultDepositRatio == null ? '' : String(c.defaultDepositRatio),
+    defaultIncoterm: c.defaultIncoterm,
+    defaultPortLoading: c.defaultPortLoading,
+    defaultPortDestination: c.defaultPortDestination,
+    note: c.note
+  }
+}
+
 export default function Customers() {
   const toast = useToast()
   const [list, setList] = useState<Customer[]>([])
   const [keyword, setKeyword] = useState('')
   const [draft, setDraft] = useState<Draft | null>(null)
-  const [detail, setDetail] = useState<{ c: Customer; stats: any; orders: any[]; base: string } | null>(null)
+  const [detail, setDetail] = useState<{ c: Customer; stats: any; orders: any[]; base: string; prices: any[] } | null>(
+    null
+  )
+  const [includeInactive, setIncludeInactive] = useState(false)
 
   const load = async (kw = keyword) => {
-    setList(await window.api.customers.list(kw))
+    setList(await window.api.customers.list(kw, includeInactive))
   }
 
   useEffect(() => {
-    void load('')
-  }, [])
+    void load()
+  }, [includeInactive])
 
-  const save = async () => {
+  const save = async (allowDuplicate = false) => {
     if (!draft) return
     if (!draft.company.trim()) {
       toast('请填写客户公司名', 'error')
@@ -64,13 +102,23 @@ export default function Customers() {
     try {
       await window.api.customers.save({
         ...draft,
+        allowDuplicate,
         defaultDepositRatio: draft.defaultDepositRatio === '' ? null : Number(draft.defaultDepositRatio)
       })
       toast(draft.id ? '已保存' : '已新增客户')
       setDraft(null)
       await load()
     } catch (e) {
-      toast((e as Error).message, 'error')
+      const msg = (e as Error).message
+      // 同名可能是真重复，也可能是同集团的两个采购主体：拦一下，让人确认，不替他决定
+      if (msg.includes('同名')) {
+        if (confirm(`${msg}\n\n确认确实是另一家，就是要再建一个？`)) {
+          await save(true)
+          return
+        }
+        return
+      }
+      toast(msg, 'error')
     }
   }
 
@@ -85,13 +133,24 @@ export default function Customers() {
     }
   }
 
+  const toggleActive = async (c: Customer) => {
+    try {
+      await window.api.customers.setActive(c.id, c.active ? 0 : 1)
+      toast(c.active ? '已停用：建单时不再出现在客户列表，历史单据照旧' : '已重新启用')
+      await load()
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
+  }
+
   const openDetail = async (c: Customer) => {
-    const [stats, orders, settings] = await Promise.all([
+    const [stats, orders, settings, prices] = await Promise.all([
       window.api.customers.stats(c.id),
       window.api.customers.orders(c.id),
-      window.api.settings.get()
+      window.api.settings.get(),
+      window.api.customers.stylePriceHistory({ customerId: c.id })
     ])
-    setDetail({ c, stats, orders, base: settings?.baseCurrency ?? 'CNY' })
+    setDetail({ c, stats, orders, base: settings?.baseCurrency ?? 'CNY', prices })
   }
 
   return (
@@ -117,6 +176,17 @@ export default function Customers() {
             搜索
           </Button>
           <div className="spacer" />
+          <div className="field" style={{ marginBottom: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              id="show-inactive-customers"
+              type="checkbox"
+              checked={includeInactive}
+              onChange={(e) => setIncludeInactive(e.target.checked)}
+            />
+            <label htmlFor="show-inactive-customers" style={{ marginBottom: 0 }}>
+              显示已停用
+            </label>
+          </div>
           <span className="faint">共 {list.length} 个客户</span>
         </div>
 
@@ -146,8 +216,16 @@ export default function Customers() {
                   </thead>
                   <tbody>
                     {list.map((c) => (
-                      <tr key={c.id} className="clickable" onClick={() => openDetail(c)}>
-                        <td style={{ fontWeight: 550 }}>{c.company}</td>
+                      <tr
+                        key={c.id}
+                        className="clickable"
+                        style={c.active ? undefined : { opacity: 0.5 }}
+                        onClick={() => openDetail(c)}
+                      >
+                        <td style={{ fontWeight: 550 }}>
+                          {c.company}
+                          {!c.active ? <span className="tag" style={{ marginLeft: 6 }}>已停用</span> : null}
+                        </td>
                         <td>{c.contact}</td>
                         <td className="muted">{c.country}</td>
                         <td className="muted">{c.email}</td>
@@ -158,14 +236,19 @@ export default function Customers() {
                             className="link"
                             onClick={(e) => {
                               e.stopPropagation()
-                              setDraft({
-                                ...c,
-                                defaultDepositRatio:
-                                  c.defaultDepositRatio == null ? '' : String(c.defaultDepositRatio)
-                              })
+                              setDraft(toDraft(c))
                             }}
                           >
                             编辑
+                          </button>
+                          <button
+                            className="link"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              toggleActive(c)
+                            }}
+                          >
+                            {c.active ? '停用' : '启用'}
                           </button>
                           <button
                             className="link danger"
@@ -197,7 +280,7 @@ export default function Customers() {
               <Button  onClick={() => setDraft(null)}>
                 取消
               </Button>
-              <Button variant="primary"  onClick={save}>
+              <Button variant="primary"  onClick={() => void save()}>
                 保存
               </Button>
             </>
@@ -255,6 +338,44 @@ export default function Customers() {
           <div className="field">
             <label>地址</label>
             <input value={draft.address} onChange={(e) => setDraft({ ...draft, address: e.target.value })} />
+            <div className="hint">这是账单 / 发票抬头，PI、CI 上印它。</div>
+          </div>
+
+          <h3 style={{ fontSize: 13, margin: '10px 0 4px' }}>收货抬头（和上面的地址不同时才填）</h3>
+          <div className="hint" style={{ marginBottom: 6 }}>
+            填了它，装箱单（PL）就印收货人这一套；不填则 PL 与 PI 一样印账单地址。货代和报关看的是收货人，别混。
+          </div>
+          <div className="field-row-3">
+            <div className="field">
+              <label>收货人 / 收件人</label>
+              <input
+                value={draft.shipAttn}
+                onChange={(e) => setDraft({ ...draft, shipAttn: e.target.value })}
+                placeholder="如 Warehouse / Mr. Lee"
+              />
+            </div>
+            <div className="field">
+              <label>收货邮编</label>
+              <input
+                value={draft.shipZipCode}
+                onChange={(e) => setDraft({ ...draft, shipZipCode: e.target.value })}
+              />
+            </div>
+            <div className="field">
+              <label>收货国家</label>
+              <input
+                value={draft.shipCountry}
+                onChange={(e) => setDraft({ ...draft, shipCountry: e.target.value })}
+              />
+            </div>
+          </div>
+          <div className="field">
+            <label>收货地址</label>
+            <input
+              value={draft.shipAddress}
+              onChange={(e) => setDraft({ ...draft, shipAddress: e.target.value })}
+              placeholder="如 1234 Industrial Rd, Long Beach"
+            />
           </div>
           <div className="field-row">
             <div className="field">
@@ -345,6 +466,9 @@ export default function Customers() {
             <div className="stat">
               <div className="stat-label">订单数</div>
               <div className="stat-value small">{detail.stats.orderCount}</div>
+              {detail.stats.excludedOrderCount > 0 ? (
+                <div className="stat-hint">另有 {detail.stats.excludedOrderCount} 张草稿/作废单不算成交</div>
+              ) : null}
             </div>
             <div className="stat">
               <div className="stat-label">累计成交额</div>
@@ -400,6 +524,15 @@ export default function Customers() {
               <span className="muted">收件人</span>
               <span>{detail.c.attn || '—'}</span>
             </div>
+            {detail.c.shipAddress ? (
+              <div style={{ gridColumn: '1 / -1' }}>
+                <span className="muted">收货抬头（PL）</span>
+                <span>
+                  {detail.c.shipAttn ? `${detail.c.shipAttn} · ` : ''}
+                  {detail.c.shipAddress} {detail.c.shipZipCode} {detail.c.shipCountry}
+                </span>
+              </div>
+            ) : null}
             <div>
               <span className="muted">付款条款</span>
               <span>{detail.c.paymentPref || '—'}</span>
@@ -427,6 +560,40 @@ export default function Customers() {
               <span>{detail.c.note || '—'}</span>
             </div>
           </div>
+
+          <h3 style={{ fontSize: 13, margin: '4px 0 8px' }}>历史成交价（报价前先看这家上次付了多少）</h3>
+          {detail.prices.length === 0 ? (
+            <Empty text="这个客户还没有成交过的款号" />
+          ) : (
+            <div className="table-wrap" style={{ marginBottom: 12 }}>
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>款号</th>
+                    <th>颜色</th>
+                    <th className="num">最近单价</th>
+                    <th>币种</th>
+                    <th>最近成交</th>
+                    <th className="num">成交次数</th>
+                    <th className="num">累计数量</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {detail.prices.map((r, i) => (
+                    <tr key={`${r.styleNo}|${r.color}|${i}`}>
+                      <td className="mono">{r.styleNo}</td>
+                      <td className="muted">{r.color || '—'}</td>
+                      <td className="num">{money(r.lastUnitPrice, r.lastCurrency)}</td>
+                      <td className="muted">{r.lastCurrency}</td>
+                      <td className="faint nowrap">{fmtDate(r.lastDate)}</td>
+                      <td className="num">{r.times}</td>
+                      <td className="num">{r.totalQuantity}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
 
           <h3 style={{ fontSize: 13, margin: '4px 0 8px' }}>订单历史</h3>
           {detail.orders.length === 0 ? (
@@ -459,7 +626,10 @@ export default function Customers() {
                       </td>
                       <td className="num">{money(o.grandTotal, o.currency)}</td>
                       <td className="num">{money(o.paid, o.currency)}</td>
-                      <td className="num">{money(o.remaining, o.currency)}</td>
+                      <td className="num">
+                        {money(o.remaining, o.currency)}
+                        {o.counted ? null : <span className="faint"> · 不催款</span>}
+                      </td>
                       <td className="faint nowrap">{fmtDate(o.createdAt)}</td>
                     </tr>
                   ))}

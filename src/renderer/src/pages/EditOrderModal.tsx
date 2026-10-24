@@ -84,7 +84,8 @@ export default function EditOrderModal({
   const chargesTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
 
   useEffect(() => {
-    void window.api.customers.list().then(setCustomers)
+    // 已停用的客户也要能选：改历史单时下拉里必须还有当时那个客户
+    void window.api.customers.list('', true).then(setCustomers)
     void window.api.orders.ports().then(setPorts)
   }, [])
 

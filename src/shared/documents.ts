@@ -4,11 +4,13 @@ import {
   type AppSettings,
   type OrderDetail,
   type PackingList,
+  type PartySnapshot,
   type QuotationCharge,
   type QuotationDetail,
   type SampleOrderDetail
 } from './types'
 import { localDate } from './date'
+import { emptyParty } from './party'
 
 /** 图片文件名的 data URL 映射 */
 export type ImageMap = Record<string, string>
@@ -58,6 +60,24 @@ function fmtMoney(v: number, currency: string): string {
 
 function fmtQty(v: number): string {
   return Number.isInteger(v) ? String(v) : v.toLocaleString('en-US', { maximumFractionDigits: 2 })
+}
+
+/**
+ * 抬头（买方 / 收货人 / 进口方）三到四行。
+ *
+ * 版式一个字没动，只是数据源从「客户档案当前值」换成「这张单子上冻结的快照」：
+ * 客户后来搬家、改名、换付款条件，已经发出去的 PI / PL / CI 不能跟着重写——
+ * 那是报关、退税、催款的凭据。老单子没快照时自动回退档案值，印出来和从前一样。
+ */
+function partyRows(p: PartySnapshot | null | undefined, withEmail: boolean): string {
+  const q = p ?? emptyParty()
+  return `<div class="kv"><span class="k">Company</span><span>${esc(q.company)}</span></div>
+      <div class="kv"><span class="k">Attn</span><span>${esc(q.attn || q.contact || '—')}</span></div>
+      <div class="kv"><span class="k">Address</span><span>${esc(q.address)}${
+        q.zipCode ? `, ${esc(q.zipCode)}` : ''
+      }${q.country ? `, ${esc(q.country)}` : ''}</span></div>${
+        withEmail && q.email ? `\n      <div class="kv"><span class="k">Email</span><span>${esc(q.email)}</span></div>` : ''
+      }`
 }
 
 /**
@@ -262,12 +282,7 @@ export function renderPi(ctx: DocContext): string {
     </div>
     <div class="box">
       <h4>BUYER / 买方</h4>
-      <div class="kv"><span class="k">Company</span><span>${esc(order.customer?.company)}</span></div>
-      <div class="kv"><span class="k">Attn</span><span>${esc(order.customer?.attn || order.customer?.contact || '—')}</span></div>
-      <div class="kv"><span class="k">Address</span><span>${esc(order.customer?.address)}${
-        order.customer?.zipCode ? `, ${esc(order.customer.zipCode)}` : ''
-      }${order.customer?.country ? `, ${esc(order.customer.country)}` : ''}</span></div>
-      ${order.customer?.email ? `<div class="kv"><span class="k">Email</span><span>${esc(order.customer.email)}</span></div>` : ''}
+      ${partyRows(order.billTo, true)}
     </div>
   </div>
 
@@ -310,7 +325,7 @@ export function renderPi(ctx: DocContext): string {
       ).toFixed(0)}%` : ''}
       <div style="margin-top:3px">Deposit: ${fmtMoney(deposit, order.currency)}</div>
       <div>Balance: ${fmtMoney(balance, order.currency)}</div>
-      ${order.customer?.paymentPref ? `<div style="margin-top:3px">Agreed Terms: ${esc(order.customer.paymentPref)}</div>` : ''}
+      ${order.billTo?.paymentPref ? `<div style="margin-top:3px">Agreed Terms: ${esc(order.billTo.paymentPref)}</div>` : ''}
     </div>
     <div class="term">
       <b>Trade Terms / 贸易条款</b>
@@ -443,11 +458,7 @@ export function renderPl(ctx: DocContext, pl: PackingList): string {
     </div>
     <div class="box">
       <h4>CONSIGNEE / 收货人</h4>
-      <div class="kv"><span class="k">Company</span><span>${esc(order.customer?.company)}</span></div>
-      <div class="kv"><span class="k">Attn</span><span>${esc(order.customer?.attn || order.customer?.contact || '—')}</span></div>
-      <div class="kv"><span class="k">Address</span><span>${esc(order.customer?.address)}${
-        order.customer?.zipCode ? `, ${esc(order.customer.zipCode)}` : ''
-      }${order.customer?.country ? `, ${esc(order.customer.country)}` : ''}</span></div>
+      ${partyRows(order.shipTo, false)}
     </div>
   </div>
 
@@ -593,12 +604,7 @@ export function renderQuotation(ctx: QuotationDocContext): string {
     </div>
     <div class="box">
       <h4>BUYER / 买方</h4>
-      <div class="kv"><span class="k">Company</span><span>${esc(q.customer?.company)}</span></div>
-      <div class="kv"><span class="k">Attn</span><span>${esc(q.customer?.attn || q.customer?.contact || '—')}</span></div>
-      <div class="kv"><span class="k">Address</span><span>${esc(q.customer?.address)}${
-        q.customer?.zipCode ? `, ${esc(q.customer.zipCode)}` : ''
-      }${q.customer?.country ? `, ${esc(q.customer.country)}` : ''}</span></div>
-      ${q.customer?.email ? `<div class="kv"><span class="k">Email</span><span>${esc(q.customer.email)}</span></div>` : ''}
+      ${partyRows(q.billTo, true)}
     </div>
   </div>
 
@@ -639,7 +645,9 @@ export function renderQuotation(ctx: QuotationDocContext): string {
         (1 - q.depositRatio) *
         100
       ).toFixed(0)}%` : ''}
-      ${q.customer?.paymentPref ? `<div style="margin-top:3px">Agreed Terms: ${esc(q.customer.paymentPref)}</div>` : ''}
+      ${q.billTo?.paymentPref || q.customer?.paymentPref
+        ? `<div style="margin-top:3px">Agreed Terms: ${esc(q.billTo?.paymentPref || q.customer?.paymentPref)}</div>`
+        : ''}
     </div>
     <div class="term">
       <b>Trade Terms / 贸易条款</b>
@@ -769,11 +777,7 @@ export function renderCi(ctx: DocContext, opts: CiOptions = {}): string {
     </div>
     <div class="box">
       <h4>IMPORTER / 进口方</h4>
-      <div class="kv"><span class="k">Company</span><span>${esc(order.customer?.company)}</span></div>
-      <div class="kv"><span class="k">Attn</span><span>${esc(order.customer?.attn || order.customer?.contact || '—')}</span></div>
-      <div class="kv"><span class="k">Address</span><span>${esc(order.customer?.address)}${
-        order.customer?.zipCode ? `, ${esc(order.customer.zipCode)}` : ''
-      }${order.customer?.country ? `, ${esc(order.customer.country)}` : ''}</span></div>
+      ${partyRows(order.billTo, false)}
     </div>
   </div>
 

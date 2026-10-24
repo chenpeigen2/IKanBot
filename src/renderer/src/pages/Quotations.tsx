@@ -838,7 +838,8 @@ function QuotationModal({
   useEffect(() => {
     void (async () => {
       const [cs, s, ps, pt, lr] = await Promise.all([
-        window.api.customers.list(),
+        // 编辑老报价时，即使客户后来停用了，下拉里也得还有他
+        window.api.customers.list('', true),
         window.api.settings.get(),
         window.api.products.list(''),
         window.api.orders.ports(),
@@ -859,6 +860,23 @@ function QuotationModal({
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  /** 这个客户的历史成交价（报价前看一眼上次卖了多少，别再凭感觉报） */
+  const [lastPrices, setLastPrices] = useState<any[]>([])
+
+  useEffect(() => {
+    if (!form.customerId) {
+      setLastPrices([])
+      return
+    }
+    let alive = true
+    void window.api.customers.stylePriceHistory({ customerId: form.customerId }).then((rows) => {
+      if (alive) setLastPrices(rows.slice(0, 8))
+    })
+    return () => {
+      alive = false
+    }
+  }, [form.customerId])
 
   /** 选客户后带出上一次的条款：先客户档案，再这个客户上一次的订单（跟新建订单同一套逻辑） */
   const onCustomerChange = async (id: number) => {
@@ -986,6 +1004,14 @@ function QuotationModal({
           </select>
           {selectedCustomer?.paymentPref ? (
             <div className="hint">客户档案条款：{selectedCustomer.paymentPref}</div>
+          ) : null}
+          {lastPrices.length ? (
+            <div className="hint">
+              这个客户最近成交价：
+              {lastPrices
+                .map((r) => `${r.styleNo}${r.color ? `/${r.color}` : ''} ${r.lastCurrency} ${r.lastUnitPrice}`)
+                .join(' · ')}
+            </div>
           ) : null}
         </div>
 
@@ -1330,6 +1356,8 @@ function QuotationModal({
         <ProductPickerModal
           products={products}
           currency={form.currency}
+          exchangeRate={Number(form.exchangeRate) || 1}
+          baseCurrency={(settings?.baseCurrency ?? 'CNY') as Currency}
           onClose={() => setShowPicker(false)}
           onPick={(rows) => {
             setLines((ls) => [...ls, ...rows])
@@ -1379,11 +1407,15 @@ function PickField({
 function ProductPickerModal({
   products,
   currency,
+  exchangeRate = 1,
+  baseCurrency = 'CNY',
   onClose,
   onPick
 }: {
   products: any[]
   currency: Currency
+  exchangeRate?: number
+  baseCurrency?: Currency
   onClose: () => void
   onPick: (rows: LineRow[]) => void
 }) {
@@ -1407,12 +1439,24 @@ function ProductPickerModal({
 
   const selectProduct = (p: any) => {
     setPicked(p)
-    setPrice(p.costPrice != null ? String(p.costPrice) : '')
+    // 工厂成本不是报价：不能自动填进「销售单价」，只作为参考显示在下面
+    setPrice('')
     const g: Record<string, string> = {}
     for (const c of p.colors) for (const s of p.sizes) g[`${c}|${s}`] = ''
     setGrid(g)
     setColorPrice({})
   }
+
+  /** 工厂价（基准币）折到本单币种，只给人看一眼参考 */
+  const costHint = (() => {
+    if (!picked) return ''
+    if (picked.costPrice == null) return '工厂成本：未设置'
+    const rate = Number(exchangeRate) > 0 ? Number(exchangeRate) : 1
+    const inOrder = baseCurrency === currency ? picked.costPrice : picked.costPrice / rate
+    return baseCurrency === currency
+      ? `工厂成本：${baseCurrency} ${picked.costPrice}`
+      : `工厂成本：${baseCurrency} ${picked.costPrice} ≈ ${currency} ${inOrder.toFixed(2)}（本单汇率）`
+  })()
 
   const rows = useMemo(() => {
     if (!picked) return []
@@ -1499,7 +1543,9 @@ function ProductPickerModal({
           <div className="field">
             <label>销售单价（{currency}）</label>
             <input type="number" step="0.01" value={price} onChange={(e) => setPrice(e.target.value)} />
-            <div className="hint">同一个款号不同颜色可以给不同价：在下面「按颜色设价」里填，会覆盖上面的单价。</div>
+            <div className="hint">
+              {costHint}。报价要报的是卖价，不是工厂成本，所以这里不会替你填。
+            </div>
           </div>
 
           {picked.colors.length ? (

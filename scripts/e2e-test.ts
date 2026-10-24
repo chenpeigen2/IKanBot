@@ -899,7 +899,13 @@ const manualQ = quotations.saveQuotation({
 })
 eq('手工加的款号也能认出商品库', manualQ.items.find((i) => i.styleNo === 'A001')?.productId ?? null, p1.id)
 const manualOrder = quotations.convertToOrder(manualQ.id)
-eq('手工加的行自动带出成本价', manualOrder.items.find((i) => i.styleNo === 'A001')?.unitCost, 5.5)
+// R5：商品成本记的是工厂价（基准币 CNY），订单明细的成本落在本单币种上。
+// 5.5 ÷ 7.15 = 0.769231（保留 6 位）——以前这里直接写 5.5，等于把 ¥5.5 当成 $5.5，毛利全错。
+eq('手工加的行按本单汇率带出成本价', manualOrder.items.find((i) => i.styleNo === 'A001')?.unitCost, 0.769231)
+check(
+  '折算成本乘回汇率就是工厂价',
+  Math.abs((manualOrder.items.find((i) => i.styleNo === 'A001')?.unitCost ?? 0) * 7.15 - 5.5) < 0.001
+)
 eq('商品库里没有的款号成本为空', manualOrder.items.find((i) => i.styleNo === 'X-999')?.unitCost, null)
 eq('有一行成本未录', manualOrder.missingCostItems, 1)
 check(
@@ -2654,6 +2660,237 @@ const plManual = renderPl(
 )
 check('PL 手工毛重按实测值印', plManual.includes('20.50'))
 check('PL 全部填了实测毛重后不再标 (est.)', !plManual.includes('(est.)'), plManual.includes('(est.)') ? '仍有 est.' : '')
+
+/* ---------------- R5 客户与商品：抬头快照 / 成本币种 / 停用不删 ---------------- */
+section('R5 单据抬头：钉在这一张单上的快照')
+const cSnap = customers.saveCustomer({
+  company: 'Snapshot Trading Co.',
+  contact: 'Mr. Snap',
+  email: 'snap@snapshot.com',
+  country: 'Netherlands',
+  address: 'Keizersgracht 100',
+  zipCode: '1016AA',
+  attn: 'Mr. Snap',
+  paymentPref: 'T/T 30% 定金',
+  shipAttn: 'WH-Breda',
+  shipAddress: 'Weteringweg 12, Breda',
+  shipZipCode: '4845',
+  shipCountry: 'Netherlands'
+})
+const snapOrder = orders.createOrder({ customerId: cSnap.id, currency: 'USD', exchangeRate: 7.5, baseCurrency: 'CNY' })
+check('建单时就把买方抬头钉在单上', snapOrder.billTo?.address === 'Keizersgracht 100')
+check('收货抬头单独钉一套', snapOrder.shipTo?.address === 'Weteringweg 12, Breda')
+const snapPl0 = packing.createPackingList({
+  orderId: snapOrder.id,
+  lines: [
+    {
+      boxNo: 'NO.1',
+      styleNo: 'A001',
+      productName: '纯棉圆领T恤',
+      color: 'Black',
+      size: 'M',
+      quantity: 10,
+      netWeight: 2
+    }
+  ]
+})
+const snapPiCtx = { order: orders.getOrder(snapOrder.id)!, settings: getSettings(), images: {} }
+const snapPiHtml = renderPi(snapPiCtx)
+check('PI 印买方地址', snapPiHtml.includes('Keizersgracht 100'))
+check('PI 印钉住的付款条款', snapPiHtml.includes('T/T 30% 定金'))
+const snapPlHtml = renderPl(snapPiCtx, snapPl0[0])
+check('PL 印收货仓而不是买方办公室', snapPlHtml.includes('Weteringweg 12, Breda'))
+check('PL 收货人取档案里的 shipAttn', snapPlHtml.includes('WH-Breda'))
+
+// 建完单才改档案：已经发出去的单据不能被人 retrospectively 改掉
+customers.saveCustomer({ ...cSnap, address: '换了三次门牌', paymentPref: 'D/P 见票 60 天' })
+const snapPiAfter = renderPi({ order: orders.getOrder(snapOrder.id)!, settings: getSettings(), images: {} })
+check('改了档案，已开的 PI 仍印当初的地址', snapPiAfter.includes('Keizersgracht 100'))
+check('已开的 PI 不会跟着新条款走', !snapPiAfter.includes('D/P 见票'))
+eq('订单详情里档案当前值确实变了', orders.getOrder(snapOrder.id)!.customer?.address, '换了三次门牌')
+
+// 这一单要送别的仓：只改这张单的抬头，不改档案
+const afterParty = orders.setOrderParties(snapOrder.id, {
+  billTo: { address: '客户临时指定的鹿特丹仓' },
+  shipTo: { zipCode: '4845AB' }
+})
+check('抬头可以单点改，改完就印新地址', afterParty.billTo?.address === '客户临时指定的鹿特丹仓')
+check('没提到的字段保持快照原值', afterParty.billTo?.company === 'Snapshot Trading Co.')
+check('收货抬头只补邮编', afterParty.shipTo?.zipCode === '4845AB')
+const partyEvent = orders.listEvents(snapOrder.id).find((e) => e.kind === 'party_update')
+check('改抬头留痕并写清改了哪项', (partyEvent?.note ?? '').includes('地址'), partyEvent?.note ?? '')
+check('改抬头不碰客户档案', customers.getCustomer(cSnap.id)?.address === '换了三次门牌')
+
+section('R5 报价单抬头快照，转单原样带过去')
+const qSnap = quotations.saveQuotation({
+  customerId: cSnap.id,
+  currency: 'USD',
+  exchangeRate: 7.5,
+  exchangeRateDate: '2026-09-01',
+  items: [
+    { styleNo: 'A001', productName: '纯棉圆领T恤', color: 'Black', size: 'M', quantity: 100, unitPrice: 8 }
+  ]
+})
+check('报价单也存抬头快照', (qSnap.billTo?.company ?? '') === 'Snapshot Trading Co.')
+const qSnapHtml = renderQuotation({ quotation: qSnap, settings: getSettings(), images: {} })
+check('报价单印报价时钉住的地址', qSnapHtml.includes('换了三次门牌'))
+check('报价单不受别的订单抬头改动影响', !qSnapHtml.includes('客户临时指定的鹿特丹仓'))
+const qSnap2 = quotations.saveQuotation({
+  ...qSnap,
+  items: qSnap.items.map((i) => ({
+    styleNo: i.styleNo,
+    productName: i.productName,
+    color: i.color,
+    size: i.size,
+    quantity: i.quantity,
+    unitPrice: i.unitPrice
+  })),
+  billTo: { attn: '这一单单独的收件人' }
+})
+check('报价单抬头单独覆盖某个字段', qSnap2.billTo?.attn === '这一单单独的收件人')
+check('覆盖一个字段不能把别的抹掉', (qSnap2.billTo?.company ?? '') === 'Snapshot Trading Co.')
+// 转单之前档案又改了一次：转出来的订单必须沿用报价单当初钉住的抬头
+customers.saveCustomer({ ...cSnap, address: '第四次改的地址' })
+const snapConverted = quotations.convertToOrder(qSnap2.id)
+check('转单沿用报价单钉住的地址', (snapConverted.billTo?.address ?? '') === '换了三次门牌')
+check('转单不拿档案最新地址', (snapConverted.billTo?.address ?? '') !== '第四次改的地址')
+check('转单带上单独覆盖的收件人', (snapConverted.billTo?.attn ?? '') === '这一单单独的收件人')
+
+section('R5 成本价是工厂价：按本单汇率折算，绝不混币')
+const costOrder = orders.createOrder({ customerId: cSnap.id, currency: 'USD', exchangeRate: 8, baseCurrency: 'CNY' })
+const withCost = orders.addOrderItem(costOrder.id, {
+  productId: p1.id,
+  styleNo: 'A001',
+  productName: '纯棉圆领T恤',
+  color: 'White',
+  size: 'L',
+  quantity: 10,
+  unitPrice: 12,
+  costBase: 32
+})
+eq('工厂价 32 元 ÷ 汇率 8 = 本单成本 4 美元', withCost.items.find((i) => i.color === 'White')?.unitCost, 4)
+const repatched = orders.updateOrderItem(costOrder.id, withCost.items[0].id, { costBase: 40 })
+eq('就地补录工厂价也按本单汇率折算', repatched.items[0].unitCost, 5)
+const clearedCost = orders.updateOrderItem(costOrder.id, withCost.items[0].id, { costBase: null })
+eq('工厂价填了又清空 = 成本变未录，不是留旧值', clearedCost.items[0].unitCost, null)
+const qCost = quotations.saveQuotation({
+  customerId: cSnap.id,
+  currency: 'USD',
+  exchangeRate: 8,
+  exchangeRateDate: '2026-09-01',
+  items: [{ styleNo: 'A001', productName: '纯棉圆领T恤', color: 'Black', size: 'S', quantity: 50, unitPrice: 9 }]
+})
+const convertedCost = quotations.convertToOrder(qCost.id)
+eq('报价转单时商品成本也折算成订单币种', convertedCost.items[0].unitCost, 0.6875)
+check(
+  '折算后的成本乘回汇率就是工厂价（¥5.5 不会被当成 $5.5）',
+  Math.abs((convertedCost.items[0].unitCost ?? 0) * 8 - 5.5) < 0.001
+)
+
+section('R5 历史成交价：报价前先看这客户上次什么价')
+const priceRows = customers.stylePriceHistory({ customerId: c1.id })
+check('能列出这个客户的历史成交价', priceRows.length > 0)
+check('历史成交价都带币种', priceRows.every((r) => !!r.lastCurrency))
+check('按客户过滤就不会混进别人', customers.stylePriceHistory({ customerId: c2.id }).every((r) => r.customerCompany === c2.company))
+const a001Rows = customers.stylePriceHistory({ styleNo: 'a001' })
+check('按款号过滤忽略大小写', a001Rows.length > 0 && a001Rows.every((r) => r.styleNo.toUpperCase() === 'A001'))
+check('同款同色合并成一条并累计次数', a001Rows.reduce((s, r) => s + r.times, 0) >= a001Rows.length)
+// 草稿 / 作废单还没成交，不能污染「上次成交价」
+const draftPriceOrder = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.2 })
+orders.addOrderItem(draftPriceOrder.id, { styleNo: 'ZZ999', productName: '没成交的草稿款', quantity: 1, unitPrice: 99.99 })
+check(
+  '草稿单的报价不进历史成交价',
+  !customers.stylePriceHistory({ styleNo: 'ZZ999' }).some((r) => r.lastUnitPrice === 99.99)
+)
+
+section('R5 同名客户：提醒但不硬拦')
+let dupErr = ''
+try {
+  customers.saveCustomer({ company: 'Acme Fashion GmbH' })
+} catch (e) {
+  dupErr = (e as Error).message
+}
+check('同名客户先拦一道并说清后果', dupErr.includes('同名'), dupErr)
+const dupOk = customers.saveCustomer({
+  company: 'acme fashion gmbh ',
+  contact: '第二个采购办',
+  allowDuplicate: true
+})
+check('确认是两家不同的公司就能存', dupOk.id > 0)
+eq('同名对照查得到几条', customers.sameNameCustomers('Acme Fashion GmbH').length, 2)
+
+section('R5 停用而不是删除：单据要能原样重印')
+let styleErr = ''
+try {
+  products.saveProduct({ styleNo: 'a001', name: '撞号的款', sizes: [], colors: [] })
+} catch (e) {
+  styleErr = (e as Error).message
+}
+check('款号大小写撞号被拦（一个号只能有一条档案）', styleErr.includes('已经存在'), styleErr)
+const refDel = products.deleteProduct(p1.id)
+check('被历史单据引用的款不真删，只做停用', refDel.deactivated)
+check('停用的话术讲清为什么不能删', refDel.message.includes('重印'), refDel.message)
+check('停用后建单下拉不再带出', !products.listProducts().some((p) => p.id === p1.id))
+eq('但按款号仍找得回来，历史单据照印', products.findProductByStyleNo('A001')?.id, p1.id)
+check('引用计数说得出挂在几个订单行上', products.productReferenceCount(p1.id).orders > 0)
+const backOn = products.setProductActive(p1.id, 1)
+check('需要时能再启用', backOn.active === 1)
+check('再启用后回到建单下拉', products.listProducts().some((p) => p.id === p1.id))
+
+const cStop = customers.saveCustomer({ company: 'Bymark AB', contact: 'Sofia', country: 'Sweden' })
+customers.setCustomerActive(cStop.id, 0)
+check('停用的客户不在建单下拉里', !customers.listCustomers('Bymark').some((c) => c.id === cStop.id))
+check('勾选「显示已停用」还能看到', customers.listCustomers('Bymark', true).some((c) => c.id === cStop.id))
+eq('停用不影响按编号取档案', customers.getCustomer(cStop.id)?.company, 'Bymark AB')
+customers.setCustomerActive(cStop.id, 1)
+
+section('R5 商品 CSV 导入：Excel 另存为 CSV 就能进库')
+const csvText = [
+  products.CSV_TEMPLATE_HEADER,
+  'B101,"羊毛混纺外套, 男款",80% Wool,S M L,黑/白/灰,¥ 88,雅戈尔,YY-88,20,60×40×50,0.7,外套,House,A/W26,挂牌要烫金',
+  'b101,库里已有的款,100% Polyester,,,,,,,,,',
+  ',这一行没有款号,100% Cotton,,,,,,,,'
+].join('\n')
+const imp1 = products.importProductsCsv(csvText, 'skip')
+eq('导入新增 1 款', imp1.created, 1)
+eq('撞号的和没款号的一共跳过 2 行', imp1.skipped, 2)
+const b101 = products.findProductByStyleNo('B101')!
+eq('引号里的逗号不算分列', b101.name, '羊毛混纺外套, 男款')
+eq('成本价里的 ¥ 会被抹掉', b101.costPrice, 88)
+eq('尺码按空格拆开', b101.sizes, ['S', 'M', 'L'])
+eq('颜色按斜杠拆开', b101.colors, ['黑', '白', '灰'])
+eq('箱规 60×40×50 拆成三个数', [b101.boxLength, b101.boxWidth, b101.boxHeight], [60, 40, 50])
+eq('工厂进了档案', b101.factory, '雅戈尔')
+eq('工厂货号进了档案', b101.factoryNo, 'YY-88')
+check('没款号的行逐行说明原因', imp1.errors.some((e) => e.includes('没有款号')), JSON.stringify(imp1.errors))
+const c900 = products.saveProduct({
+  styleNo: 'C900',
+  name: '旧名字',
+  composition: '100% Cotton',
+  costPrice: 10,
+  sizes: [],
+  colors: []
+})
+const impSkip = products.importProductsCsv(
+  [products.CSV_TEMPLATE_HEADER, 'C900,覆盖模式才会改,,,,,,,,,,'].join('\n'),
+  'skip'
+)
+eq('默认「跳过已有」不动老档案', products.getProduct(c900.id)?.name, '旧名字')
+eq('跳过模式不计更新', impSkip.updated, 0)
+const impOver = products.importProductsCsv(
+  [products.CSV_TEMPLATE_HEADER, 'C900,覆盖后的新名字,80% Wool,,,¥ 12,,,,,,,,,'].join('\n'),
+  'overwrite'
+)
+eq('覆盖模式更新 1 条', impOver.updated, 1)
+eq('覆盖后档案真的变了', products.getProduct(c900.id)?.name, '覆盖后的新名字')
+eq('覆盖时成本也按 ¥ 解析', products.getProduct(c900.id)?.costPrice, 12)
+let csvErr = ''
+try {
+  products.importProductsCsv('编号,品名\nX1,abc\n', 'skip')
+} catch (e) {
+  csvErr = (e as Error).message
+}
+check('表头没有「款号」时用人话报错，不静默导入 0 条', csvErr.includes('款号'), csvErr)
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

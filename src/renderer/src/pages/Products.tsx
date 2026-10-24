@@ -12,6 +12,8 @@ interface Draft {
   brand: string
   season: string
   costPrice: string
+  factory: string
+  factoryNo: string
   unitNetWeight: string
   boxPieces: string
   boxLength: string
@@ -31,6 +33,8 @@ function emptyDraft(): Draft {
     brand: '',
     season: '',
     costPrice: '',
+    factory: '',
+    factoryNo: '',
     unitNetWeight: '',
     boxPieces: '',
     boxLength: '',
@@ -50,15 +54,24 @@ export default function Products() {
   const [images, setImages] = useState<ProductImage[]>([])
   const [sizeInput, setSizeInput] = useState('')
   const [colorInput, setColorInput] = useState('')
+  // R5：成本是工厂价，得记下来自哪家工厂；停用不等于删除（历史单据还要重印）
+  const [includeInactive, setIncludeInactive] = useState(false)
+  const [baseCurrency, setBaseCurrency] = useState('CNY')
+  const [showImport, setShowImport] = useState(false)
 
   const load = async (kw = keyword) => {
-    const rows = await window.api.products.list(kw)
+    const rows = await window.api.products.list(kw, includeInactive)
     setList(rows)
   }
 
   useEffect(() => {
-    void load('')
+    void window.api.settings.get().then((s) => setBaseCurrency(s.baseCurrency || 'CNY'))
   }, [])
+
+  // 首次进入和「显示已停用」切换都走这里
+  useEffect(() => {
+    void load()
+  }, [includeInactive])
 
   const openEdit = async (p: Product) => {
     setDraft({
@@ -70,6 +83,8 @@ export default function Products() {
       brand: p.brand,
       season: p.season,
       costPrice: p.costPrice == null ? '' : String(p.costPrice),
+      factory: p.factory ?? '',
+      factoryNo: p.factoryNo ?? '',
       unitNetWeight: p.unitNetWeight == null ? '' : String(p.unitNetWeight),
       boxPieces: p.boxPieces == null ? '' : String(p.boxPieces),
       boxLength: p.boxLength == null ? '' : String(p.boxLength),
@@ -103,6 +118,8 @@ export default function Products() {
         brand: draft.brand,
         season: draft.season,
         costPrice: draft.costPrice.trim() === '' ? null : Number(draft.costPrice),
+        factory: draft.factory,
+        factoryNo: draft.factoryNo,
         unitNetWeight: draft.unitNetWeight.trim() === '' ? null : Number(draft.unitNetWeight),
         boxPieces: draft.boxPieces.trim() === '' ? null : Number(draft.boxPieces),
         boxLength: draft.boxLength.trim() === '' ? null : Number(draft.boxLength),
@@ -121,10 +138,20 @@ export default function Products() {
   }
 
   const remove = async (p: Product) => {
-    if (!confirm(`确认删除商品「${p.styleNo}」？历史订单中的行不受影响。`)) return
+    if (!confirm(`确认删除商品「${p.styleNo}」？被订单用过的款不会真删，只会被停用。`)) return
     try {
-      await window.api.products.remove(p.id)
-      toast('已删除')
+      const res = await window.api.products.remove(p.id)
+      toast(res.message || (res.deactivated ? '已停用' : '已删除'))
+      await load()
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
+  }
+
+  const toggleActive = async (p: Product) => {
+    try {
+      await window.api.products.setActive(p.id, p.active ? 0 : 1)
+      toast(p.active ? '已停用：不再出现在选款列表，历史单据照旧' : '已重新启用')
       await load()
     } catch (e) {
       toast((e as Error).message, 'error')
@@ -168,6 +195,9 @@ export default function Products() {
       <div className="topbar">
         <h1>商品库</h1>
         <div className="spacer" />
+        <Button  onClick={() => setShowImport(true)}>
+          批量导入
+        </Button>
         <Button variant="primary"  onClick={openNew}>
           + 新增商品
         </Button>
@@ -177,7 +207,7 @@ export default function Products() {
         <div className="toolbar">
           <input
             className="search"
-            placeholder="搜索款号 / 品名 / 成分"
+            placeholder="搜索款号 / 品名 / 成分 / 工厂"
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && load()}
@@ -186,6 +216,17 @@ export default function Products() {
             搜索
           </Button>
           <div className="spacer" />
+          <div className="field" style={{ marginBottom: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              id="show-inactive"
+              type="checkbox"
+              checked={includeInactive}
+              onChange={(e) => setIncludeInactive(e.target.checked)}
+            />
+            <label htmlFor="show-inactive" style={{ marginBottom: 0 }}>
+              显示已停用
+            </label>
+          </div>
           <span className="faint">共 {list.length} 个款号</span>
         </div>
 
@@ -203,6 +244,7 @@ export default function Products() {
                       <th>成分</th>
                       <th>尺码</th>
                       <th>颜色</th>
+                      <th>工厂</th>
                       <th className="num">成本价</th>
                       <th>备注</th>
                       <th></th>
@@ -210,13 +252,24 @@ export default function Products() {
                   </thead>
                   <tbody>
                     {list.map((p) => (
-                      <tr key={p.id} className="clickable" onClick={() => openEdit(p)}>
-                        <td className="mono nowrap">{p.styleNo}</td>
+                      <tr
+                        key={p.id}
+                        className="clickable"
+                        style={p.active ? undefined : { opacity: 0.5 }}
+                        onClick={() => openEdit(p)}
+                      >
+                        <td className="mono nowrap">
+                          {p.styleNo}
+                          {!p.active ? <span className="tag" style={{ marginLeft: 6 }}>已停用</span> : null}
+                        </td>
                         <td>{p.name}</td>
                         <td className="muted">{p.composition}</td>
                         <td className="muted nowrap">{p.sizes.join(' / ') || '—'}</td>
                         <td className="muted">{p.colors.join(', ') || '—'}</td>
-                        <td className="num">{p.costPrice == null ? '—' : money(p.costPrice)}</td>
+                        <td className="muted">{p.factory || '—'}</td>
+                        <td className="num" title={`工厂价（${baseCurrency}），下单时按订单汇率折算`}>
+                          {p.costPrice == null ? '—' : money(p.costPrice)}
+                        </td>
                         {/* R4-P6：备注为空时显示辅助灰的「—」，
                             否则整列全空会让人以为“备注没显示出来”。 */}
                         <td className="faint cell-clip" title={p.note || undefined}>
@@ -231,6 +284,15 @@ export default function Products() {
                             }}
                           >
                             复制
+                          </button>
+                          <button
+                            className="link"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              toggleActive(p)
+                            }}
+                          >
+                            {p.active ? '停用' : '启用'}
                           </button>
                           <button
                             className="link danger"
@@ -344,7 +406,7 @@ export default function Products() {
 
           <div className="field-row-3">
             <div className="field">
-              <label>成本价（工厂价，可空）</label>
+              <label>工厂成本价（{baseCurrency}，可空）</label>
               <input
                 type="number"
                 step="0.01"
@@ -352,7 +414,27 @@ export default function Products() {
                 onChange={(e) => setDraft({ ...draft, costPrice: e.target.value })}
                 placeholder="不填则不核算毛利"
               />
+              <div className="hint">记工厂开给你的价（基准币）；下单时系统按订单汇率折成本单币种，不用自己换算。</div>
             </div>
+            <div className="field">
+              <label>工厂</label>
+              <input
+                value={draft.factory}
+                onChange={(e) => setDraft({ ...draft, factory: e.target.value })}
+                placeholder="哪家做的，如 汕头华鑫"
+              />
+            </div>
+            <div className="field">
+              <label>工厂货号</label>
+              <input
+                value={draft.factoryNo}
+                onChange={(e) => setDraft({ ...draft, factoryNo: e.target.value })}
+                placeholder="工厂那边的号，返单时用"
+              />
+            </div>
+          </div>
+
+          <div className="field-row">
             <div className="field">
               <label>类目</label>
               <input
@@ -506,6 +588,138 @@ export default function Products() {
           </div>
         </Modal>
       ) : null}
+
+      {showImport ? (
+        <ImportModal
+          onClose={() => setShowImport(false)}
+          onDone={async () => {
+            setShowImport(false)
+            await load()
+          }}
+        />
+      ) : null}
     </>
+  )
+}
+
+/** CSV 批量导入：贴文本或选文件都认，表头中英文都行 */
+function ImportModal({ onClose, onDone }: { onClose: () => void; onDone: () => Promise<void> }) {
+  const toast = useToast()
+  const [text, setText] = useState('')
+  const [mode, setMode] = useState<'skip' | 'overwrite'>('skip')
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<{ created: number; updated: number; skipped: number; errors: string[] } | null>(
+    null
+  )
+
+  const downloadTemplate = async () => {
+    const header = await window.api.products.csvTemplate()
+    const blob = new Blob([`${header}\n`], { type: 'text/csv;charset=utf-8' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = '商品库导入模板.csv'
+    a.click()
+    URL.revokeObjectURL(a.href)
+  }
+
+  const pickFile = () =>
+    new Promise<void>((resolve) => {
+      const input = document.createElement('input')
+      input.type = 'file'
+      input.accept = '.csv,text/csv,text/plain'
+      input.onchange = () => {
+        const f = input.files?.[0]
+        if (!f) return resolve()
+        const reader = new FileReader()
+        reader.onload = () => {
+          setText(String(reader.result ?? ''))
+          resolve()
+        }
+        reader.onerror = () => resolve()
+        reader.readAsText(f, 'utf-8')
+      }
+      input.click()
+    })
+
+  const run = async () => {
+    if (!text.trim()) {
+      toast('先贴入 CSV 内容或选择一个文件', 'error')
+      return
+    }
+    setBusy(true)
+    try {
+      const res = await window.api.products.importCsv(text, mode)
+      setResult(res)
+      toast(`新增 ${res.created} 款，更新 ${res.updated} 款`)
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal
+      title="批量导入商品"
+      onClose={onClose}
+      size="wide"
+      footer={
+        <>
+          <Button onClick={downloadTemplate}>下载模板</Button>
+          <Button onClick={() => void pickFile()}>选择 CSV 文件</Button>
+          <Button variant="primary" onClick={run} disabled={busy}>
+            开始导入
+          </Button>
+        </>
+      }
+    >
+      <div className="hint">
+        表头认中文也认英文（款号、品名、成分、尺码、颜色、成本价、工厂、工厂货号、每箱件数、箱规、单件净重、类目、品牌、季节、备注）。
+        尺码/颜色用「、」或「,」分开。款号已经存在的默认跳过，选「覆盖」才会改档案。
+      </div>
+      <div className="field" style={{ marginTop: 10 }}>
+        <label>CSV 内容</label>
+        <textarea rows={8} value={text} onChange={(e) => setText(e.target.value)} placeholder="款号,品名,成分,成本价&#10;A001,纯棉圆领T恤,100% Cotton,30" />
+      </div>
+      <div className="field">
+        <label>款号已存在时</label>
+        <div className="row" style={{ gap: 16 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input type="radio" name="csv-mode" checked={mode === 'skip'} onChange={() => setMode('skip')} />
+            跳过（只补新的）
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              type="radio"
+              name="csv-mode"
+              checked={mode === 'overwrite'}
+              onChange={() => setMode('overwrite')}
+            />
+            覆盖（按 CSV 改档案）
+          </label>
+        </div>
+      </div>
+      {result ? (
+        <div className="card">
+          <div className="card-body tight">
+            <div>
+              新增 <b>{result.created}</b> · 更新 <b>{result.updated}</b> · 跳过 <b>{result.skipped}</b>
+              {result.errors.length ? ` · 有问题 ${result.errors.length} 行` : ''}
+            </div>
+            {result.errors.length ? (
+              <ul className="hint" style={{ marginTop: 6, paddingLeft: 18 }}>
+                {result.errors.slice(0, 20).map((er, i) => (
+                  <li key={i}>{er}</li>
+                ))}
+                {result.errors.length > 20 ? <li>……其余 {result.errors.length - 20} 行略</li> : null}
+              </ul>
+            ) : null}
+            <div style={{ marginTop: 8 }}>
+              <Button onClick={() => void onDone()}>完成</Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </Modal>
   )
 }

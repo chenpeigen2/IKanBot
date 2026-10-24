@@ -15,27 +15,37 @@ const api: IKanApi = {
       call<any[]>('products:list', keyword, includeInactive),
     get: (id: number) => call<any>('products:get', id),
     save: (input: any) => call<any>('products:save', input),
-    remove: (id: number) => call<void>('products:delete', id),
+    remove: (id: number) => call<any>('products:delete', id),
     copy: (id: number, newStyleNo: string) => call<any>('products:copy', id, newStyleNo),
     images: (productId: number) => call<any[]>('products:images', productId),
     addImage: (productId: number, fileName: string, isPrimary?: boolean) =>
       call<any>('products:addImage', productId, fileName, isPrimary),
     delImage: (id: number) => call<void>('products:delImage', id),
-    setPrimary: (productId: number, imageId: number) => call<void>('products:setPrimary', productId, imageId)
+    setPrimary: (productId: number, imageId: number) => call<void>('products:setPrimary', productId, imageId),
+    setActive: (id: number, active: 0 | 1) => call<any>('products:setActive', id, active),
+    referenceCount: (id: number) => call<any>('products:referenceCount', id),
+    csvTemplate: () => call<string>('products:csvTemplate'),
+    importCsv: (text: string, mode?: 'skip' | 'overwrite') => call<any>('products:importCsv', text, mode)
   },
   customers: {
-    list: (keyword?: string) => call<any[]>('customers:list', keyword),
+    list: (keyword?: string, includeInactive?: boolean) =>
+      call<any[]>('customers:list', keyword, includeInactive),
     get: (id: number) => call<any>('customers:get', id),
     save: (input: any) => call<any>('customers:save', input),
     remove: (id: number) => call<void>('customers:delete', id),
+    setActive: (id: number, active: 0 | 1) => call<any>('customers:setActive', id, active),
+    sameName: (company: string, selfId?: number) => call<any[]>('customers:sameName', company, selfId),
     stats: (id: number) => call<any>('customers:stats', id),
-    orders: (id: number) => call<any[]>('customers:orders', id)
+    orders: (id: number) => call<any[]>('customers:orders', id),
+    stylePriceHistory: (filter?: { customerId?: number; styleNo?: string }) =>
+      call<any[]>('customers:stylePriceHistory', filter)
   },
   orders: {
     list: (filter: any) => call<any[]>('orders:list', filter),
     get: (id: number) => call<any>('orders:get', id),
     create: (input: any) => call<any>('orders:create', input),
     update: (id: number, input: any) => call<any>('orders:update', id, input),
+    setParties: (id: number, patch: { billTo?: any; shipTo?: any }) => call<any>('orders:setParties', id, patch),
     updateCharges: (id: number, charges: any[]) => call<any>('orders:updateCharges', id, charges),
     remove: (id: number) => call<void>('orders:delete', id),
     /** 作废订单（客户取消 / 建错单）：记录全留，不进货值/待收/毛利 */

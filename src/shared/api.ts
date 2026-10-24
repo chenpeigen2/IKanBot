@@ -7,26 +7,38 @@ export interface IKanApi {
     list(keyword?: string, includeInactive?: boolean): Promise<any[]>
     get(id: number): Promise<any>
     save(input: any): Promise<any>
-    remove(id: number): Promise<void>
+    /** 删除或被引用的款：被引用过只停用，不删数据 */
+    remove(id: number): Promise<{ deactivated: boolean; message: string }>
     copy(id: number, newStyleNo: string): Promise<any>
     images(productId: number): Promise<any[]>
     addImage(productId: number, fileName: string, isPrimary?: boolean): Promise<any>
     delImage(id: number): Promise<void>
     setPrimary(productId: number, imageId: number): Promise<void>
+    setActive(id: number, active: 0 | 1): Promise<any>
+    referenceCount(id: number): Promise<{ orders: number; quotations: number; samples: number }>
+    csvTemplate(): Promise<string>
+    importCsv(text: string, mode?: 'skip' | 'overwrite'): Promise<any>
   }
   customers: {
-    list(keyword?: string): Promise<any[]>
+    list(keyword?: string, includeInactive?: boolean): Promise<any[]>
     get(id: number): Promise<any>
     save(input: any): Promise<any>
     remove(id: number): Promise<void>
+    setActive(id: number, active: 0 | 1): Promise<any>
+    /** 同名客户（重名提醒，不是硬拦） */
+    sameName(company: string, selfId?: number): Promise<any[]>
     stats(id: number): Promise<any>
     orders(id: number): Promise<any[]>
+    /** 款号×颜色的历史成交价：报价前先看客户上次付了多少 */
+    stylePriceHistory(filter?: { customerId?: number; styleNo?: string }): Promise<any[]>
   }
   orders: {
     list(filter: any): Promise<any[]>
     get(id: number): Promise<any>
     create(input: any): Promise<any>
     update(id: number, input: any): Promise<any>
+    /** 单独改单据抬头快照（重印时纠正地址，不动其他字段） */
+    setParties(id: number, patch: { billTo?: any; shipTo?: any }): Promise<any>
     /** 只改费用行（运费/保险），其他字段不动 */
     updateCharges(id: number, charges: any[]): Promise<any>
     remove(id: number): Promise<void>

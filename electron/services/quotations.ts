@@ -8,12 +8,14 @@ import { getDb, nextNo } from '../db'
 import { mapQuotation, mapQuotationItem, mapCustomer } from '../db/mappers'
 import { getSettings } from './settings'
 import { createOrder, getOrder, logEvent } from './orders'
-import { computeOrderMoney } from './money'
+import { computeOrderMoney, costInOrderCurrency } from './money'
+import { billPartyOf, emptyParty, parseParty, patchParty, stringifyParty } from '../../src/shared/party'
 import { localDate, addDays } from '../../src/shared/date'
 import type {
   Currency,
   Incoterm,
   OrderDetail,
+  PartySnapshot,
   PaymentMethod,
   Quotation,
   QuotationCharge,
@@ -57,6 +59,8 @@ export interface QuotationInput {
   status?: QuotationStatus
   result?: QuotationResult
   charges?: QuotationCharge[]
+  /** 单据抬头快照：不传就取客户档案当时的值 */
+  billTo?: Partial<PartySnapshot>
   items: QuotationItemInput[]
 }
 
@@ -78,7 +82,7 @@ function findProductIdByStyleNo(styleNo: string): number | null {
   return findProductByStyleNo(styleNo)?.id ?? null
 }
 
-function hydrate(q: Quotation): QuotationDetail {
+function hydrate(q: Quotation, row?: Record<string, unknown>): QuotationDetail {
   const db = getDb()
   const customerRow = db.get('SELECT * FROM customers WHERE id = ?', [q.customerId]) as Record<string, unknown> | null
   const items = (
@@ -91,9 +95,13 @@ function hydrate(q: Quotation): QuotationDetail {
     payments: [],
     depositRatio: q.depositRatio
   })
+  const liveCustomer = mapCustomerLocal(customerRow)
+  // 抬头：有快照用快照，老报价单（升级前存的）沿用客户档案当前值
+  const billTo = parseParty(row?.bill_to_json) ?? (liveCustomer ? billPartyOf(liveCustomer) : null)
   return {
     ...q,
-    customer: mapCustomerLocal(customerRow),
+    customer: liveCustomer,
+    billTo,
     items,
     totalAmount: m.goodsValue,
     totalQuantity: m.totalQuantity,
@@ -120,6 +128,8 @@ export interface QuotationSnapshot {
   customerPo: string
   note: string
   charges: QuotationCharge[]
+  /** 抬头快照：转单时连抬头一起带走，事后改客户档案不影响已出的纸 */
+  billTo?: PartySnapshot
   items: QuotationItemInput[]
 }
 
@@ -167,6 +177,7 @@ function freezeQuotationVersion(qId: number, revision: number): void {
     customerPo: String(row.customer_po ?? ''),
     note: String(row.note ?? ''),
     charges,
+    billTo: billPartyForFreeze(row),
     items
   }
   const goodsTotal = items.reduce((s, i) => s + i.quantity * i.unitPrice, 0)
@@ -253,13 +264,39 @@ export function listQuotations(filter: {
      ORDER BY q.created_at DESC, q.id DESC`,
     params
   ) as Record<string, unknown>[]
-  return rows.map((r) => hydrate(mapQuotation(r)))
+  return rows.map((r) => hydrate(mapQuotation(r), r))
 }
 
 export function getQuotation(id: number): QuotationDetail | null {
   const row = getDb().get('SELECT * FROM quotations WHERE id = ?', [id]) as Record<string, unknown> | null
   if (!row) return null
-  return hydrate(mapQuotation(row))
+  return hydrate(mapQuotation(row), row)
+}
+
+/** 存档用的抬头：优先用单上冻结的快照，老单退回客户档案当前值 */
+function billPartyForFreeze(qRow: Record<string, unknown>): PartySnapshot {
+  const fromDoc = parseParty(qRow.bill_to_json)
+  if (fromDoc) return fromDoc
+  const cRow = getDb().get('SELECT * FROM customers WHERE id = ?', [Number(qRow.customer_id)]) as
+    | Record<string, unknown>
+    | null
+  const c = cRow ? mapCustomer(cRow) : null
+  return c ? billPartyOf(c) : emptyParty()
+}
+
+/**
+ * 报价单抬头快照：新建时取客户档案当时的值；
+ * 编辑时默认沿用原快照（改档案不许重写已经发出去的报价），
+ * 只有业务员在本单上手工改过才更新。
+ */
+function billForQuotation(customerId: number, input: QuotationInput, before?: Record<string, unknown> | null): string {
+  const row = getDb().get('SELECT * FROM customers WHERE id = ?', [customerId]) as Record<string, unknown> | null
+  const c = row ? mapCustomer(row) : null
+  if (!c) throw new Error(`客户编号 ${customerId} 不存在，不能建报价单`)
+  // 换了客户就重新取新客户的档案抬头；没换则沿用它已经冻结的那份
+  const keepExisting = before && Number(before.customer_id) === customerId
+  const base = (keepExisting ? parseParty(before?.bill_to_json) : null) ?? billPartyOf(c)
+  return stringifyParty(patchParty(base, input.billTo))
 }
 
 export function saveQuotation(input: QuotationInput): QuotationDetail {
@@ -332,10 +369,12 @@ export function saveQuotation(input: QuotationInput): QuotationDetail {
     // 改之前先把当前版冻结：客户手里那张纸必须能原样找回来
     freezeQuotationVersion(qId, Number(before.revision ?? 1))
 
+    const billJson = billForQuotation(input.customerId, input, before)
+
     db.run(
       `UPDATE quotations SET customer_id=?, currency=?, exchange_rate=?, exchange_rate_date=?, base_currency=?, incoterm=?,
         port_of_loading=?, port_of_destination=?, payment_method=?, deposit_ratio=?, valid_until=?,
-        customer_po=?, note=?, charges=?, status=?, result=?, revision=?, updated_at=? WHERE id=?`,
+        customer_po=?, note=?, charges=?, status=?, result=?, revision=?, bill_to_json=?, updated_at=? WHERE id=?`,
       [
         input.customerId,
         input.currency ?? 'USD',
@@ -354,6 +393,7 @@ export function saveQuotation(input: QuotationInput): QuotationDetail {
         status,
         result,
         revision,
+        billJson,
         ts,
         qId
       ]
@@ -362,11 +402,12 @@ export function saveQuotation(input: QuotationInput): QuotationDetail {
   } else {
     if (!rateDate) rateDate = localDate()
     const qNo = nextNo('Q')
+    const billJson = billForQuotation(input.customerId, input, null)
     const res = db.run(
       `INSERT INTO quotations(q_no, customer_id, status, result, currency, exchange_rate, exchange_rate_date, base_currency, incoterm,
         port_of_loading, port_of_destination, payment_method, deposit_ratio, valid_until, customer_po, note,
-        charges, converted_order_id, revision, created_at, updated_at)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,1,?,?)`,
+        charges, bill_to_json, converted_order_id, revision, created_at, updated_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,1,?,?)`,
       [
         qNo,
         input.customerId,
@@ -385,6 +426,7 @@ export function saveQuotation(input: QuotationInput): QuotationDetail {
         input.customerPo ?? '',
         input.note ?? '',
         charges,
+        billJson,
         ts,
         ts
       ]
@@ -623,6 +665,8 @@ export function convertToOrder(
       validUntil: snap.validUntil,
       customerPo: snap.customerPo,
       charges: snap.charges,
+      // 抬头按报价那一版带走（老存档没有就沿用客户档案）
+      billTo: snap.billTo,
       note: [`由报价单 ${snap.qNo} 第 ${targetRevision} 版转成`, snap.note].filter(Boolean).join('；'),
       // 转订单的落点状态：PI 已发 = 待确认（sent），否则草稿
       paymentStatus: opts.paymentStatus ?? 'sent'
@@ -631,22 +675,25 @@ export function convertToOrder(
     for (const it of snap.items) {
       // 成本价：先按商品 id 找，找不到就按款号在商品库里找（手工加的行也能带上成本）
       let productId = it.productId ?? null
-      let cost: number | null = null
+      let costBase: number | null = null
       if (productId) {
         const p = db.get('SELECT id, cost_price FROM products WHERE id = ?', [productId]) as
           | { id?: number; cost_price?: number | null }
           | null
         // 商品被删过：ID 悬空就置空，别让订单明细指着一个不存在的款
         if (!p) productId = null
-        else cost = p.cost_price ?? null
+        else costBase = p.cost_price ?? null
       }
-      if (cost == null) {
+      if (costBase == null) {
         const byStyle = findProductByStyleNo(it.styleNo)
         if (byStyle) {
           productId = byStyle.id
-          cost = byStyle.cost_price
+          costBase = byStyle.cost_price
         }
       }
+      // 商品成本是工厂价（基准币），订单明细的成本要落在本单币种上，
+      // 直接抄进 unit_cost 会把 ¥30 当成 $30，毛利全错
+      const cost = costInOrderCurrency(costBase, snap.exchangeRate)
       db.run(
         `INSERT INTO order_items(order_id, product_id, style_no, product_name, composition, color, size, quantity, unit_price, unit_cost)
          VALUES(?,?,?,?,?,?,?,?,?,?)`,

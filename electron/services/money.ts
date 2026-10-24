@@ -49,6 +49,22 @@ export interface MoneyItem {
   unitCost: number | null
 }
 
+/**
+ * 工厂成本（基准币，工厂报的是人民币）折成订单币种。
+ *
+ * 汇率口径是「1 外币 = exchangeRate 基准币」，所以除不是乘。
+ * 这一步必须由服务端做：以前前端把 ¥30 直接当 $30 写进 unit_cost，
+ * 30 元成本在 USD 单里按 30 美元算，毛利整整差出一个汇率。
+ */
+export function costInOrderCurrency(costBase: number | null | undefined, exchangeRate: number): number | null {
+  if (costBase == null) return null
+  const base = Number(costBase)
+  const rate = Number(exchangeRate)
+  if (!Number.isFinite(base) || !Number.isFinite(rate) || rate <= 0) return null
+  // 留 6 位小数：单价折算不能拿 2 位四舍五入去乘几百件
+  return Math.round((base / rate) * 1e6) / 1e6
+}
+
 /** 核销台账里参与金额计算的一条 */
 export interface SettlementInput {
   kind: string

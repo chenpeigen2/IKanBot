@@ -11,6 +11,7 @@ import { mapCustomer } from '../db/mappers'
 import { localDate } from '../../src/shared/date'
 import { getSettings } from './settings'
 import { logEvent, createOrder, getOrder } from './orders'
+import { costInOrderCurrency } from './money'
 import type { OrderDetail } from '../../src/shared/types'
 import type {
   Customer,
@@ -423,15 +424,17 @@ export function convertSampleToOrder(
 
     for (const it of s.items) {
       let productId = it.productId
-      let cost: number | null = null
+      let costBase: number | null = null
       if (productId) {
         const p = db.get('SELECT id, cost_price FROM products WHERE id = ?', [productId]) as
           | { cost_price?: number | null }
           | null
         // 商品被删过：ID 悬空就置空，别让订单明细指着一个不存在的款
         if (!p) productId = null
-        else cost = p.cost_price ?? null
+        else costBase = p.cost_price ?? null
       }
+      // 商品成本是工厂价（基准币）：直接抄进 unit_cost 会把 ¥30 记成 $30，毛利全错
+      const cost = costInOrderCurrency(costBase, rate)
       db.run(
         `INSERT INTO order_items(order_id, product_id, style_no, product_name, composition, color, size, quantity, unit_price, unit_cost)
          VALUES(?,?,?,?,?,?,?,?,?,?)`,

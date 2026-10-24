@@ -413,5 +413,28 @@ ALTER TABLE sample_order_items ADD COLUMN goods_unit_price REAL;
 CREATE UNIQUE INDEX ux_doc_versions_doc_kind_version
   ON doc_versions(doc_no, kind, version);
 `
+  },
+  {
+    version: 12,
+    name: 'party_snapshot_and_archive_hygiene',
+    sql: `
+-- 抬头快照：客户搬地址、被收购改名，都不能把已经发出去的 PI / PL / CI 改掉。
+-- 建单（和报价转单）时把买方 / 收货方钉在这张单上；老数据字段为空，读取时回退客户档案。
+ALTER TABLE orders ADD COLUMN bill_to_json TEXT NOT NULL DEFAULT '';
+ALTER TABLE orders ADD COLUMN ship_to_json TEXT NOT NULL DEFAULT '';
+ALTER TABLE quotations ADD COLUMN bill_to_json TEXT NOT NULL DEFAULT '';
+
+-- 客户：收货地址单独一套（德国客户账单在汉堡、货送不来梅仓是常态）；
+-- 建错但不想留档案的客户用「停用」，不再出现在建单下拉里，历史记录一条不动。
+ALTER TABLE customers ADD COLUMN ship_attn TEXT NOT NULL DEFAULT '';
+ALTER TABLE customers ADD COLUMN ship_address TEXT NOT NULL DEFAULT '';
+ALTER TABLE customers ADD COLUMN ship_zip_code TEXT NOT NULL DEFAULT '';
+ALTER TABLE customers ADD COLUMN ship_country TEXT NOT NULL DEFAULT '';
+ALTER TABLE customers ADD COLUMN active INTEGER NOT NULL DEFAULT 1;
+
+-- 商品：工厂与工厂货号记在款号上（跟单时不用翻 1688 聊天记录）
+ALTER TABLE products ADD COLUMN factory TEXT NOT NULL DEFAULT '';
+ALTER TABLE products ADD COLUMN factory_no TEXT NOT NULL DEFAULT '';
+`
   }
 ]

@@ -100,20 +100,36 @@ export function registerIpc(): void {
   handle('products:setPrimary', (productId: number, imageId: number) =>
     products.setPrimaryImage(productId, imageId)
   )
+  handle('products:setActive', (id: number, active: 0 | 1) => products.setProductActive(id, active))
+  handle('products:referenceCount', (id: number) => products.productReferenceCount(id))
+  handle('products:csvTemplate', () => products.CSV_TEMPLATE_HEADER)
+  handle('products:importCsv', (text: string, mode?: 'skip' | 'overwrite') =>
+    products.importProductsCsv(text, mode ?? 'skip')
+  )
 
   /* ---- 客户 ---- */
-  handle('customers:list', (keyword?: string) => customers.listCustomers(keyword))
+  handle('customers:list', (keyword?: string, includeInactive?: boolean) =>
+    customers.listCustomers(keyword, includeInactive)
+  )
   handle('customers:get', (id: number) => customers.getCustomer(id))
   handle('customers:save', (input: customers.CustomerInput) => customers.saveCustomer(input))
   handle('customers:delete', (id: number) => customers.deleteCustomer(id))
+  handle('customers:setActive', (id: number, active: 0 | 1) => customers.setCustomerActive(id, active))
+  handle('customers:sameName', (company: string, selfId?: number) => customers.sameNameCustomers(company, selfId))
   handle('customers:stats', (id: number) => customers.customerStats(id))
   handle('customers:orders', (id: number) => customers.customerOrderBriefs(id))
+  handle('customers:stylePriceHistory', (filter?: { customerId?: number; styleNo?: string }) =>
+    customers.stylePriceHistory(filter ?? {})
+  )
 
   /* ---- 订单 ---- */
   handle('orders:list', (filter: Parameters<typeof orders.listOrders>[0]) => orders.listOrders(filter))
   handle('orders:get', (id: number) => orders.getOrder(id))
   handle('orders:create', (input: orders.OrderInput) => orders.createOrder(input))
   handle('orders:update', (id: number, input: orders.OrderInput) => orders.updateOrder(id, input))
+  handle('orders:setParties', (id: number, patch: Parameters<typeof orders.setOrderParties>[1]) =>
+    orders.setOrderParties(id, patch)
+  )
   handle('orders:updateCharges', (id: number, charges: any[]) =>
     orders.updateOrderCharges(id, charges ?? [])
   )

@@ -19,6 +19,7 @@ import { renderPi, renderPl, renderCi, orderDocAmount, ciDocAmount, type ImageMa
 import { imageUrl } from '../imageUrl'
 import { isLocalDate, localDate } from '../../../shared/date'
 import EditOrderModal from './EditOrderModal'
+import PartyModal from './PartyModal'
 
 type PreviewState = {
   kind: 'pi' | 'pl' | 'ci'
@@ -49,6 +50,7 @@ export default function OrderDetail() {
   const [tab, setTab] = useState<'items' | 'payment' | 'packing' | 'timeline' | 'photos'>('items')
   const [preview, setPreview] = useState<PreviewState>(null)
   const [showEdit, setShowEdit] = useState(false)
+  const [showParty, setShowParty] = useState(false)
   const [showCi, setShowCi] = useState(false)
   const [editCharges, setEditCharges] = useState(false)
   // R1-④：状态只有一种形态（tag）。点「改状态」才临时变成下拉框，改完回到 tag
@@ -376,6 +378,9 @@ export default function OrderDetail() {
             <div className="card-head">
               <h3>客户与条款</h3>
               <div className="spacer" />
+              <Button size="sm" onClick={() => setShowParty(true)}>
+                抬头
+              </Button>
               <Button size="sm"  onClick={() => setShowEdit(true)}>
                 编辑
               </Button>
@@ -383,19 +388,27 @@ export default function OrderDetail() {
             <div className="card-body">
               <div className="kv-grid">
                 <div>
-                  <span className="k">客户</span>
-                  <span className="v">{order.customer?.company}</span>
+                  <span className="k">买方抬头</span>
+                  <span className="v">{order.billTo?.company || '—'}</span>
                 </div>
                 <div>
                   <span className="k">联系人</span>
-                  <span className="v">{order.customer?.attn || order.customer?.contact || '—'}</span>
+                  <span className="v">{order.billTo?.attn || order.billTo?.contact || '—'}</span>
                 </div>
-                <div>
+                <div style={{ gridColumn: '1 / -1' }}>
                   <span className="k">地址</span>
                   <span className="v">
-                    {order.customer?.address} {order.customer?.zipCode} {order.customer?.country}
+                    {order.billTo?.address} {order.billTo?.zipCode} {order.billTo?.country}
                   </span>
                 </div>
+                {order.shipTo && order.shipTo.address !== order.billTo?.address ? (
+                  <div style={{ gridColumn: '1 / -1' }}>
+                    <span className="k">收货抬头（PL）</span>
+                    <span className="v">
+                      {order.shipTo.company} · {order.shipTo.address} {order.shipTo.zipCode} {order.shipTo.country}
+                    </span>
+                  </div>
+                ) : null}
                 <div>
                   <span className="k">客户 PO</span>
                   <span className="v">{order.customerPo || '—'}</span>
@@ -428,10 +441,10 @@ export default function OrderDetail() {
                       : ''}
                   </span>
                 </div>
-                {order.customer?.paymentPref ? (
+                {order.billTo?.paymentPref ? (
                   <div>
                     <span className="k">客户付款条款</span>
-                    <span className="v">{order.customer.paymentPref}</span>
+                    <span className="v">{order.billTo.paymentPref}</span>
                   </div>
                 ) : null}
                 <div>
@@ -494,6 +507,14 @@ export default function OrderDetail() {
                   </div>
                 ) : null}
               </div>
+              {order.customer && order.billTo && (order.customer.address || '') !== (order.billTo.address || '')
+                ? (
+                  <div className="hint mt-2">
+                    客户档案的地址已改成「{order.customer.address || '空'}」，这张单仍按建单时钉住的抬头打印——
+                    已发出的 PI / PL / CI 不会因为改档案而被重写。要跟着改请点「抬头」。
+                  </div>
+                )
+                : null}
               {editCharges ? (
                 <div className="mt-2">
                   <ChargesEditor
@@ -640,6 +661,17 @@ export default function OrderDetail() {
           onClose={() => setShowEdit(false)}
           onSaved={async () => {
             setShowEdit(false)
+            await load()
+          }}
+        />
+      ) : null}
+
+      {showParty ? (
+        <PartyModal
+          order={order}
+          onClose={() => setShowParty(false)}
+          onSaved={async () => {
+            setShowParty(false)
             await load()
           }}
         />
@@ -991,8 +1023,8 @@ function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<voi
                 <th>尺码</th>
                 <th className="num">数量</th>
                 <th className="num">单价</th>
-                <th className="num" title="没录就填这里">
-                  成本
+                <th className="num" title="本单币种的成本价，不是工厂报的人民币价；没录就填这里">
+                  成本（{order.currency}）
                 </th>
                 <th className="num">金额</th>
                 <th className="num">毛利</th>
@@ -1165,7 +1197,8 @@ function AddItemsModal({
 
   const selectProduct = async (p: any) => {
     setPicked(p)
-    setPrice(p.costPrice != null ? String(p.costPrice) : '')
+    // 成本价是工厂价，不是卖价：绝不能自动填进「销售单价」
+    setPrice('')
     const g: Record<string, string> = {}
     for (const c of p.colors) for (const s of p.sizes) g[`${c}|${s}`] = ''
     setGrid(g)
@@ -1192,7 +1225,8 @@ function AddItemsModal({
         size: r.size,
         quantity: Number(grid[r.key]),
         unitPrice: colorPrice[r.color] ? Number(colorPrice[r.color]) : Number(price) || 0,
-        unitCost: picked.costPrice
+        // 交工厂价（基准币），由服务端按本单汇率折算——前端不自己除，免得又算出两套数
+        costBase: picked.costPrice
       }))
     if (items.length === 0) {
       toast('请至少填写一个 SKU 的数量', 'error')
@@ -1284,8 +1318,16 @@ function AddItemsModal({
               <span>{picked.composition || '—'}</span>
             </div>
             <div>
-              <span className="muted">成本价</span>
-              <span>{picked.costPrice == null ? '未设置' : picked.costPrice}</span>
+              <span className="muted">工厂成本价</span>
+              <span>
+                {picked.costPrice == null
+                  ? '未设置'
+                  : `${order.baseCurrency || 'CNY'} ${picked.costPrice}${
+                      Number(order.exchangeRate) > 0 && order.baseCurrency !== order.currency
+                        ? ` ≈ ${order.currency} ${(picked.costPrice / Number(order.exchangeRate)).toFixed(2)}（本单汇率）`
+                        : ''
+                    }`}
+              </span>
             </div>
           </div>
 

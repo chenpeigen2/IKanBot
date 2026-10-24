@@ -67,6 +67,8 @@ export function mapProduct(r: Row): Product {
     boxLength: optNum(r.box_length),
     boxWidth: optNum(r.box_width),
     boxHeight: optNum(r.box_height),
+    factory: str(r.factory),
+    factoryNo: str(r.factory_no),
     note: str(r.note),
     active: num(r.active),
     createdAt: str(r.created_at),
@@ -96,6 +98,11 @@ export function mapCustomer(r: Row): Customer {
     zipCode: str(r.zip_code),
     attn: str(r.attn),
     paymentPref: str(r.payment_pref),
+    shipAttn: str(r.ship_attn),
+    shipAddress: str(r.ship_address),
+    shipZipCode: str(r.ship_zip_code),
+    shipCountry: str(r.ship_country),
+    active: num(r.active),
     defaultPaymentMethod: str(r.default_payment_method) as PaymentMethod | '',
     defaultDepositRatio: optNum(r.default_deposit_ratio),
     defaultIncoterm: str(r.default_incoterm) as Incoterm | '',
@@ -294,6 +301,7 @@ export function mapEvent(r: Row): OrderEvent {
 export function mapCustomerStats(r: Row): CustomerStats {
   return {
     orderCount: num(r.order_count),
+    excludedOrderCount: num(r.excluded_order_count),
     totalAmount: num(r.total_amount),
     totalProfit: r.total_profit == null ? null : num(r.total_profit),
     outstanding: num(r.outstanding),

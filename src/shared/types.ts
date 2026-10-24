@@ -115,7 +115,7 @@ export interface Product {
   category: string
   brand: string
   season: string
-  /** 成本价（工厂价），空表示不核算利润 */
+  /** 成本价（工厂价，按基准币 CNY 记），空表示不核算利润 */
   costPrice: number | null
   /** 自有尺码表，如 ["S","M","L"] */
   sizes: string[]
@@ -129,6 +129,10 @@ export interface Product {
   boxLength: number | null
   boxWidth: number | null
   boxHeight: number | null
+  /** 做这个款的工厂 */
+  factory: string
+  /** 工厂自己的货号（1688 / 打样单上的号） */
+  factoryNo: string
   note: string
   active: number
   createdAt: string
@@ -144,6 +148,24 @@ export interface ProductImage {
   sortOrder: number
 }
 
+/**
+ * 单据抬头快照。
+ * 客户档案会改（搬家、改名、换付款条件），但已经发出去的 PI / PL / CI 不能跟着改——
+ * 那是凭据。所以建单时把抬头钉死在单子上，重印永远印当时那一版。
+ */
+export interface PartySnapshot {
+  company: string
+  attn: string
+  contact: string
+  address: string
+  zipCode: string
+  country: string
+  email: string
+  phone: string
+  /** 档案里的付款条款（印在 PI 的 Agreed Terms） */
+  paymentPref: string
+}
+
 /** 客户 */
 export interface Customer {
   id: number
@@ -156,6 +178,13 @@ export interface Customer {
   zipCode: string
   attn: string
   paymentPref: string
+  /** 收货地址（货代实际送的地方），空则沿用账单地址 */
+  shipAttn: string
+  shipAddress: string
+  shipZipCode: string
+  shipCountry: string
+  /** 0 = 停用：建单下拉里不再出现，历史单据一条不动 */
+  active: number
   /** 默认付款方式（建单时带出） */
   defaultPaymentMethod: PaymentMethod | ''
   /** 默认定金比例 */
@@ -174,6 +203,8 @@ export interface Customer {
 /** 客户聚合统计 */
 export interface CustomerStats {
   orderCount: number
+  /** 成交额口径之外还有几单（草稿 / 已失效 / 已作废），客户页要写明，别让人以为漏单 */
+  excludedOrderCount: number
   /** 累计成交额（基准币）= Σ含费用合计 */
   totalAmount: number
   /** 累计毛利（基准币）；有成本没录全时为 null（不可信） */
@@ -294,6 +325,30 @@ export interface OrderDetail extends Order {
   sourceQuotationNo: string
   /** 出货汇总（批次件数与推导状态） */
   shipSummary: ShipSummary
+  /**
+   * 买方抬头快照（PI / CI 印这个）。
+   * 建单时钉死；改客户档案不影响这张单。老数据没快照时回退客户档案当前值。
+   */
+  billTo: PartySnapshot
+  /** 收货抬头快照（PL 印这个；客户没填收货地址时等于买方抬头） */
+  shipTo: PartySnapshot
+}
+
+/** 历史成交价：客户问「上次那款多少钱」时立刻答得上 */
+export interface StylePriceRow {
+  styleNo: string
+  color: string
+  /** 最近一次成交价（原币） */
+  lastUnitPrice: number
+  lastCurrency: string
+  /** 最近一次成交日期（ISO） */
+  lastDate: string
+  /** 成交过几次（按订单数） */
+  times: number
+  /** 累计件数 */
+  totalQuantity: number
+  /** 对方是谁（客户方向为空；商品方向带公司名） */
+  customerCompany: string
 }
 
 export type SettlementKind = 'shortage' | 'bad_debt' | 'recovery'
@@ -398,6 +453,8 @@ export interface Quotation {
 /** 报价单 + 展开 */
 export interface QuotationDetail extends Quotation {
   customer: Customer | null
+  /** 报价单发出时的买方抬头快照；老数据没有快照时回退客户档案 */
+  billTo: PartySnapshot | null
   items: QuotationItem[]
   totalAmount: number
   totalQuantity: number
