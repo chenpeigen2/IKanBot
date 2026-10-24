@@ -150,3 +150,71 @@ jobs:
       - name: 汇总
         run: |
           ls -lh release/*.dmg release/*.zip
+
+  build-linux:
+    # 同样排在后面，沿用 Windows 已创建好的 Release
+    needs: build-macos
+    runs-on: ubuntu-latest
+    name: Linux x64
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 端到端测试
+        run: npm run test:e2e
+
+      - name: 校验图标资源
+        run: |
+          test -f build/icon_1024.png || { echo '缺少 build/icon_1024.png'; exit 1; }
+          test -f electron/resources/tray-16.png || { echo '缺少托盘图标'; exit 1; }
+
+      - name: 构建
+        run: npm run build
+
+      - name: 安装 rpm 打包工具
+        # rpmbuild 不在 ubuntu-latest 的默认镜像里，deb 和 AppImage 用不到
+        run: sudo apt-get update && sudo apt-get install -y rpm
+
+      - name: 打包（上传到 Release）
+        if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.publish == true)
+        run: npx electron-builder --linux --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ELECTRON_BUILDER_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 打包（仅本地产物）
+        if: ${{ !(startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.publish == true)) }}
+        run: npx electron-builder --linux
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 归档产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: IKanBot-linux-x64
+          path: |
+            release/*.AppImage
+            release/*.deb
+            release/*.rpm
+            release/*.blockmap
+            release/latest-linux.yml
+            release/*.yml
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 汇总
+        run: |
+          ls -lh release/*.AppImage release/*.deb release/*.rpm

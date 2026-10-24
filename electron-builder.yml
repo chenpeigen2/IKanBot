@@ -50,6 +50,19 @@
     "identity": null,
     "notarize": false
   },
+  "linux": {
+    "target": [
+      { "target": "AppImage", "arch": ["x64"] },
+      { "target": "deb", "arch": ["x64"] },
+      { "target": "rpm", "arch": ["x64"] }
+    ],
+    "category": "Office",
+    "icon": "build/icon_1024.png",
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "synopsis": "外贸商品与单据管理",
+    "description": "面向服装类外贸的本地桌面工具：商品录入、订单、PI/PL 单据、收款与出货跟踪。",
+    "maintainer": "IKanBot <chenpeigen2@users.noreply.github.com>"
+  },
   "afterPack": "scripts/after-pack.cjs",
   "nsis": {
     "oneClick": false,
