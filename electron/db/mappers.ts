@@ -17,7 +17,6 @@ import type {
   Quotation,
   QuotationCharge,
   QuotationItem,
-  Reminder,
   Settlement,
   SkuSummary
 } from '../../src/shared/types'
@@ -312,17 +311,6 @@ export function mapCustomerStats(r: Row): CustomerStats {
   }
 }
 
-export function mapReminder(r: Row): Reminder {
-  return {
-    orderId: num(r.order_id),
-    orderNo: str(r.order_no),
-    customerName: str(r.customer_name),
-    kind: str(r.kind) as Reminder['kind'],
-    message: str(r.message),
-    days: num(r.days)
-  }
-}
-
 export function mapSkuSummary(r: Row): SkuSummary {
   const quantity = num(r.quantity)
   const packedQuantity = num(r.packed_quantity)
@@ -348,6 +336,12 @@ export function mapDashboard(r: Row): DashboardStats {
     monthProfitReliable: true,
     monthReceived: num(r.month_received),
     monthNewOrders: num(r.month_new_orders),
+    // 待收拆分与坏账是内存里算出来的，由 services/dashboard.ts 覆盖这几个 0
+    pendingUnconfirmed: 0,
+    pendingDeposit: 0,
+    pendingBalance: 0,
+    pendingSample: 0,
+    outstandingBadDebt: 0,
     currency: str(r.currency) as DashboardStats['currency']
   }
 }

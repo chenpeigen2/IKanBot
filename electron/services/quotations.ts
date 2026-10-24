@@ -315,6 +315,7 @@ export function saveQuotation(input: QuotationInput): QuotationDetail {
   let status: QuotationStatus = input.status ?? 'draft'
   let result: QuotationResult = input.result ?? 'pending'
   let changeNote = ''
+  let oldStatus: string | null = null
 
   if (qId) {
     const before = db.get('SELECT * FROM quotations WHERE id = ?', [qId]) as Record<string, unknown> | null
@@ -352,6 +353,7 @@ export function saveQuotation(input: QuotationInput): QuotationDetail {
     // 汇率没变就沿用原来的日期；变了就记今天（谁改的谁负责）
     if (!rateDate) rateDate = oldRate === rate ? oldDate ?? localDate() : localDate()
     // 状态/结果没传就保持原样（编辑一张已转订单的报价单不能把状态打回草稿）
+    oldStatus = String(before.status ?? '')
     status = input.status ?? (before.status as QuotationStatus)
     result = input.result ?? (before.result as QuotationResult)
     revision = Number(before.revision ?? 1) + 1
@@ -370,11 +372,13 @@ export function saveQuotation(input: QuotationInput): QuotationDetail {
     freezeQuotationVersion(qId, Number(before.revision ?? 1))
 
     const billJson = billForQuotation(input.customerId, input, before)
+    // 发出时间：只在「这次真的发出去了」时刷新，改价重发重新计时
+    const sentAt = status === 'sent' && oldStatus !== 'sent' ? ts : (before.sent_at as string | null) ?? null
 
     db.run(
       `UPDATE quotations SET customer_id=?, currency=?, exchange_rate=?, exchange_rate_date=?, base_currency=?, incoterm=?,
         port_of_loading=?, port_of_destination=?, payment_method=?, deposit_ratio=?, valid_until=?,
-        customer_po=?, note=?, charges=?, status=?, result=?, revision=?, bill_to_json=?, updated_at=? WHERE id=?`,
+        customer_po=?, note=?, charges=?, status=?, result=?, revision=?, bill_to_json=?, sent_at=?, updated_at=? WHERE id=?`,
       [
         input.customerId,
         input.currency ?? 'USD',
@@ -394,6 +398,7 @@ export function saveQuotation(input: QuotationInput): QuotationDetail {
         result,
         revision,
         billJson,
+        sentAt,
         ts,
         qId
       ]
@@ -406,8 +411,8 @@ export function saveQuotation(input: QuotationInput): QuotationDetail {
     const res = db.run(
       `INSERT INTO quotations(q_no, customer_id, status, result, currency, exchange_rate, exchange_rate_date, base_currency, incoterm,
         port_of_loading, port_of_destination, payment_method, deposit_ratio, valid_until, customer_po, note,
-        charges, bill_to_json, converted_order_id, revision, created_at, updated_at)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,1,?,?)`,
+        charges, bill_to_json, converted_order_id, revision, sent_at, created_at, updated_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,1,?,?,?)`,
       [
         qNo,
         input.customerId,
@@ -427,6 +432,7 @@ export function saveQuotation(input: QuotationInput): QuotationDetail {
         input.note ?? '',
         charges,
         billJson,
+        status === 'sent' ? ts : null,
         ts,
         ts
       ]
@@ -455,6 +461,10 @@ export function saveQuotation(input: QuotationInput): QuotationDetail {
   }
   freezeQuotationVersion(qId, revision)
   logQuotationEvent(qId, input.id ? 'update' : 'create', changeNote || (input.id ? '修改报价单' : '新建报价单'))
+  // 状态单独记一条：谁把这张报价发出去的、什么时候，历史里都要查得到
+  if (input.id && status !== oldStatus) {
+    logQuotationEvent(qId, 'status', `状态 ${oldStatus || '无'} → ${status}`)
+  }
   return getQuotation(qId)!
 }
 

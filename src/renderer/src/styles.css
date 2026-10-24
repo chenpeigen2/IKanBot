@@ -1405,6 +1405,16 @@ table.data th.num {
 .reminder-dot.sample {
   background: var(--warning);
 }
+.reminder-dot.expiry {
+  background: var(--warning);
+}
+.reminder-dot.quote {
+  background: var(--accent);
+}
+/* R6「待修」：数据本身有问题（日期/汇率/提单号）。不上警示色，别跟催款抢眼球 */
+.reminder-dot.data {
+  background: var(--text-dim);
+}
 
 /* R2-P1：光靠 7px 圆点的颜色认不出"该干什么"，加一个 2 字文字标签 */
 .reminder-tag {
@@ -1436,6 +1446,15 @@ table.data th.num {
   color: var(--accent-hover);
 }
 
+.reminder-tag.expiry {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+.reminder-tag.quote {
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+}
+
 .reminder-main {
   flex: 1;
   min-width: 0;
@@ -1452,6 +1471,24 @@ table.data th.num {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* R6：一张单同时有几条事由（催确认 + 交期 + 待修），默认只摊开最要紧的一条，
+   剩下的收在同一单下面——不静音、不删，点一下就全出来 */
+.reminder-more {
+  padding: var(--space-1) var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--accent-hover);
+  border-bottom: 1px solid var(--divider);
+  cursor: pointer;
+}
+.reminder-more:hover {
+  text-decoration: underline;
+  background: var(--surface-2);
+}
+.reminder-item.nested {
+  margin-left: var(--space-6);
+  background: var(--surface-2);
 }
 
 /* ---------- 单据预览（打印区之外的应用外壳） ----------

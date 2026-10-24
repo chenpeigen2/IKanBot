@@ -436,5 +436,14 @@ ALTER TABLE customers ADD COLUMN active INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE products ADD COLUMN factory TEXT NOT NULL DEFAULT '';
 ALTER TABLE products ADD COLUMN factory_no TEXT NOT NULL DEFAULT '';
 `
+  },
+  {
+    version: 13,
+    name: 'quotation_sent_at',
+    sql: `
+-- 报价真正发出去的那天。工作台的「报价发出 N 天客户没回」必须按它算：
+-- 拿 updated_at 会导致改个备注就把等待天数清零，拖了三个月的报价永远催不出来。
+ALTER TABLE quotations ADD COLUMN sent_at TEXT;
+`
   }
 ]

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Modal, useToast, money, num, Empty, fmtDate, fmtDateTime, today, ActionMenu, QuotationStatusTag, Button } from '../ui'
 import {
   CURRENCIES,
@@ -40,7 +40,9 @@ export default function Quotations() {
   const navigate = useNavigate()
   const toast = useToast()
   const [list, setList] = useState<any[]>([])
-  const [keyword, setKeyword] = useState('')
+  // 工作台点「报价」提醒带 ?kw=Q-0001 跳进来：先把这一张筛出来
+  const [searchParams] = useSearchParams()
+  const [keyword, setKeyword] = useState(searchParams.get('kw') ?? '')
   const [tab, setTab] = useState('')
   const [editing, setEditing] = useState<any | null>(null)
   const [detail, setDetail] = useState<any | null>(null)

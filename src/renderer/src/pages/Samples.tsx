@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Modal, useToast, money, num, Empty, fmtDate, today, ActionMenu, SampleStatusTag, Button, SampleFeeTag } from '../ui'
 import {
   SAMPLE_STATUS_LABEL,
@@ -33,7 +33,9 @@ export default function Samples() {
   const toast = useToast()
   const navigate = useNavigate()
   const [list, setList] = useState<any[]>([])
-  const [keyword, setKeyword] = useState('')
+  // 工作台点「打样」提醒带 ?kw=SMP-0001 跳进来：直接把那一单筛出来，别让人再搜一遍
+  const [searchParams] = useSearchParams()
+  const [keyword, setKeyword] = useState(searchParams.get('kw') ?? '')
   const [status, setStatus] = useState('')
   const [editing, setEditing] = useState<any | null>(null)
   const [preview, setPreview] = useState<{ html: string; no: string } | null>(null)

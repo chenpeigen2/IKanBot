@@ -945,7 +945,7 @@ const balOrder2 = orders.createOrder({
 })
 await orders.addOrderItem(balOrder2.id, { styleNo: 'A001', productName: 'x', quantity: 100, unitPrice: 10 })
 await orders.addPayment(balOrder2.id, { paidAt: '2026-03-01', amount: 1000, method: 'T/T', bankRef: 'BAL002' })
-const remBal2 = dashboard.reminders().find((r) => r.orderId === balOrder2.id)
+const remBal2 = dashboard.reminders().find((r) => r.kind === 'balance' && r.orderId === balOrder2.id)
 check('尾款提醒按含费用算（付了货值也会提醒还欠运费）', !!remBal2, JSON.stringify(remBal2))
 check('尾款提醒里写的是含费用的待收（1300 - 1000 = 300）', (remBal2?.message ?? '').includes('待收 300.00'), remBal2?.message)
 saveSettings(balSettings2)
@@ -1202,10 +1202,18 @@ const smpOld = samples.saveSample({
 })
 const remSample = dashboard.reminders()
 check('超阈值未收的打样费出现在待办提醒里', remSample.some((r) => r.kind === 'sample'), JSON.stringify(remSample.map((r) => r.kind)))
-const smpRem = remSample.find((r) => r.kind === 'sample')!
+// R6：打样类有两种事由（催费 / 样品压在手里没寄出），催收必须认准「打样费」那一条
+const smpRem = remSample.find((r) => r.kind === 'sample' && r.sampleId === smpOld.id && r.message.includes('打样费'))!
 eq('催收提醒里带打样单号', smpRem.orderNo, smpOld.sampleNo)
 eq('催收提醒关联打样单 id', smpRem.sampleId, smpOld.id)
 check('催收提醒金额含样品费+快递费', smpRem.message.includes((15 + 60).toFixed(2)), smpRem.message)
+check(
+  'R6：样品迟迟没寄出单独亮一条（客户等的是样，不是发票）',
+  remSample.some(
+    (r) => r.kind === 'sample' && r.sampleId === smpOld.id && r.message.includes('还没寄出样品')
+  ),
+  JSON.stringify(remSample.filter((r) => r.sampleId === smpOld.id).map((r) => r.message))
+)
 
 /* ---------------- 第 10 轮：N-2 转单问 PI / N-3 样品单号查重 ---------------- */
 section('N-2 打样转单可指定 PI 状态；N-3 样品单号查重')
@@ -2891,6 +2899,205 @@ try {
   csvErr = (e as Error).message
 }
 check('表头没有「款号」时用人话报错，不静默导入 0 条', csvErr.includes('款号'), csvErr)
+
+/* ---------------- R6 工作台提醒 ---------------- */
+section('R6 催款时钟：改备注不会把拖了几星期的单子清零')
+const sR6 = getSettings()
+saveSettings({ ...sR6, remindConfirmDays: 7, remindPaymentDays: 10, remindBalanceDays: 15, remindShipDays: 3 })
+const dAgo = (n: number): string => localDate(new Date(Date.now() - n * 86400000))
+const dAgoIso = (n: number): string => new Date(Date.now() - n * 86400000).toISOString()
+const cR6 = customers.saveCustomer({ company: 'R6 Clock GmbH', country: 'DE' })
+const oR6 = orders.createOrder({
+  customerId: cR6.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentMethod: 'tt_deposit',
+  depositRatio: 30,
+  validUntil: dAgo(2)
+})
+await orders.addOrderItem(oR6.id, { styleNo: 'A001', productName: 'T恤', quantity: 10, unitPrice: 10 })
+orders.setPaymentStatus(oR6.id, 'sent')
+// 把「进入待确认」这条事件往前拨 20 天，模拟 PI 真的发出去三周了
+getDb().run(
+  `UPDATE order_events SET at = ? WHERE order_id = ? AND kind = 'payment_status' AND to_status = 'sent'`,
+  [dAgoIso(20), oR6.id]
+)
+const remR6a = dashboard.reminders()
+const confirmR6 = remR6a.find((r) => r.kind === 'confirm' && r.orderId === oR6.id)
+check('PI 发出 20 天没确认 → 催确认按状态时钟算天数', !!confirmR6 && confirmR6.days >= 19, JSON.stringify(confirmR6))
+check(
+  'PI 有效期已过 → 单独亮一条到期提醒',
+  dashboard.reminders().some((r) => r.kind === 'expiry' && r.orderId === oR6.id && r.message.includes('PI 有效期')),
+  JSON.stringify(dashboard.reminders().filter((r) => r.orderId === oR6.id).map((r) => r.kind))
+)
+orders.updateOrder(oR6.id, { customerId: cR6.id, note: '顺手补了个备注' })
+const confirmR6b = dashboard.reminders().find((r) => r.kind === 'confirm' && r.orderId === oR6.id)
+eq('改个备注不会把等待天数刷新成 0（不看 updated_at）', confirmR6b?.days, confirmR6?.days)
+
+section('R6 脏日期：宁可亮「待修」，不许印「还有 NaN 天」')
+const oDirty = orders.createOrder({ customerId: cR6.id, currency: 'USD', exchangeRate: 7.2 })
+orders.updateOrder(oDirty.id, { customerId: cR6.id, expectedShipDate: '2026/13/45', cutOffDate: '2026/10/05' })
+const remDirty = dashboard.reminders()
+check(
+  '没有任何一条提醒印出 NaN',
+  !remDirty.some((r) => r.message.includes('NaN') || r.message.includes('undefined')),
+  JSON.stringify(remDirty.filter((r) => /NaN|undefined/.test(r.message)).map((r) => r.message))
+)
+check(
+  '写歪的预计出货日变成一条「待修」',
+  remDirty.some(
+    (r) => r.kind === 'data' && r.orderId === oDirty.id && r.message.includes('预计出货日') && r.message.includes('不是合法日期')
+  ),
+  JSON.stringify(remDirty.filter((r) => r.orderId === oDirty.id).map((r) => r.message))
+)
+check(
+  '分隔符写歪的截关日也算脏数据（本地日期只认 2026-10-05）',
+  remDirty.some((r) => r.kind === 'data' && r.orderId === oDirty.id && r.message.includes('截关日')),
+  ''
+)
+
+section('R6 货已出运却一分未收：赊销 / L/C 不再哑火')
+const oShipped = orders.createOrder({
+  customerId: cR6.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentMethod: 'oa',
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(oShipped.id, { styleNo: 'A001', productName: 'T恤', quantity: 10, unitPrice: 10 })
+const plR6 = packing.createPackingList({ orderId: oShipped.id, lines: [{ styleNo: 'A001', quantity: 10 }] })
+packing.updatePackingListInfo(oShipped.id, plR6[0].id, {
+  shipStatus: 'shipped',
+  atdDate: dAgo(30),
+  etaDate: dAgo(16),
+  blNo: 'MEDU-9988776'
+})
+const remShipped = dashboard.reminders()
+const unpaidRem = remShipped.find(
+  (r) => r.kind === 'balance' && r.orderId === oShipped.id && r.message.includes('一分未收')
+)
+check('出运 30 天、没收到过一分钱 → 照样催款', !!unpaidRem, JSON.stringify(remShipped.filter((r) => r.orderId === oShipped.id)))
+check('催款话术带上付款方式，一眼知道是赊销还是信用证', (unpaidRem?.message ?? '').includes('赊销'), unpaidRem?.message)
+check(
+  '预计到港已过、钱还没收齐 → 单独催一次（按批次 ETA）',
+  remShipped.some((r) => r.kind === 'balance' && r.plId === plR6[0].id && r.message.includes('到港')),
+  JSON.stringify(remShipped.filter((r) => r.plId === plR6[0].id).map((r) => r.message))
+)
+check(
+  '每条提醒自带唯一 key（界面折叠不会误伤同单另一条）',
+  new Set(remShipped.map((r) => r.key)).size === remShipped.length,
+  `${remShipped.length} 条 / ${new Set(remShipped.map((r) => r.key)).size} 个 key`
+)
+const overdueN = remShipped.filter((r) => r.days < 0).length
+check('逾期的排在最前面，越久越靠前', remShipped.slice(0, overdueN).every((r) => r.days < 0), JSON.stringify(remShipped.slice(0, 3).map((r) => r.days)))
+const remOrdered = dashboard.reminders()
+const firstData = remOrdered.findIndex((r) => r.kind === 'data')
+const lastUpcoming = remOrdered.reduce((acc, r, idx) => (r.kind !== 'data' && r.days > 0 ? idx : acc), -1)
+check(
+  '「待修」垫底：数据待修不会压住真正的交期提醒',
+  firstData === -1 || lastUpcoming < firstData,
+  JSON.stringify(remOrdered.map((r) => `${r.kind}:${r.days}`))
+)
+
+section('R6 待修清单：数据歪了要有人去补，别让提醒静默失效')
+packing.updatePackingListInfo(oShipped.id, plR6[0].id, { blNo: '' })
+check(
+  '标了「已出运」却没有提单号 → 待修',
+  dashboard
+    .reminders()
+    .some((r) => r.kind === 'data' && r.plId === plR6[0].id && r.message.includes('提单号')),
+  ''
+)
+const oLegacy = orders.createOrder({ customerId: cR6.id, currency: 'USD', exchangeRate: 7.2 })
+await orders.addOrderItem(oLegacy.id, { styleNo: 'A001', productName: 'T恤', quantity: 4, unitPrice: 10 })
+const plLegacy = packing.createPackingList({ orderId: oLegacy.id, lines: [{ styleNo: 'A001', quantity: 4 }] })
+getDb().run('UPDATE packing_lists SET ship_status = NULL WHERE id = ?', [plLegacy[0].id])
+check(
+  '老批次没标出运状态 → 待修（整单进度推不出来）',
+  dashboard
+    .reminders()
+    .some((r) => r.kind === 'data' && r.orderId === oLegacy.id && r.message.includes('没标出运状态')),
+  ''
+)
+const oRate1 = orders.createOrder({ customerId: cR6.id, currency: 'USD', paymentStatus: 'sent' })
+check(
+  '外币单汇率还是 1:1 → 待修（不阻断建单，但要亮出来）',
+  dashboard
+    .reminders()
+    .some((r) => r.kind === 'data' && r.orderId === oRate1.id && r.message.includes('按 1:')),
+  ''
+)
+
+section('R6 报价跟进：发出去没回音、到期没人转单')
+const qR6 = quotations.saveQuotation({
+  customerId: cR6.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  status: 'sent',
+  validUntil: dAgo(2),
+  items: [{ styleNo: 'A001', productName: 'T恤', quantity: 10, unitPrice: 9 }]
+})
+check('报价标成「已发出」时落下 sent_at', (getDb().get('SELECT sent_at FROM quotations WHERE id = ?', [qR6.id]) as { sent_at?: string }).sent_at != null)
+getDb().run('UPDATE quotations SET sent_at = ? WHERE id = ?', [dAgoIso(20), qR6.id])
+const remQuote = dashboard.reminders()
+check(
+  '报价发出 20 天没回音 → 催跟进',
+  remQuote.some((r) => r.kind === 'quote' && r.orderNo === qR6.qNo && r.message.includes('没回音') && r.days >= 19),
+  JSON.stringify(remQuote.filter((r) => r.kind === 'quote').map((r) => r.message))
+)
+check(
+  '报价有效期已过还没转单 → 催重新盘汇率',
+  remQuote.some((r) => r.kind === 'quote' && r.orderNo === qR6.qNo && r.message.includes('到期')),
+  ''
+)
+// 编辑报价只动 updated_at，等待天数必须还按 sent_at 算
+quotations.saveQuotation({ ...qR6, note: '改了一下备注' })
+const remQuote2 = dashboard.reminders()
+check(
+  '改报价备注不会把「发出 20 天没回音」清零',
+  remQuote2.some((r) => r.kind === 'quote' && r.orderNo === qR6.qNo && r.message.includes('发出 20 天')),
+  JSON.stringify(remQuote2.filter((r) => r.orderNo === qR6.qNo).map((r) => r.message))
+)
+quotations.saveQuotation({ ...qR6, status: 'confirmed' })
+check(
+  '报价状态变化单独进历史：谁把报价发出去、什么时候改口，都要查得到',
+  quotations.listQuotationEvents(qR6.id).some((e) => e.kind === 'status' && e.note.includes('sent')),
+  JSON.stringify(quotations.listQuotationEvents(qR6.id).map((e) => e.note))
+)
+
+section('R6 待收款拆分与「本月完成」口径')
+const stR6 = dashboard.dashboard()
+check(
+  '四桶相加 = 待收款总额（拆分只是展示，不动口径）',
+  Math.abs(stR6.pendingUnconfirmed + stR6.pendingDeposit + stR6.pendingBalance + stR6.pendingSample - stR6.pendingAmount) < 0.01,
+  `${stR6.pendingUnconfirmed + stR6.pendingDeposit + stR6.pendingBalance + stR6.pendingSample} vs ${stR6.pendingAmount}`
+)
+const doneBefore = dashboard.dashboard().completedThisMonth
+const oSigned = orders.createOrder({ customerId: cR6.id, currency: 'USD', exchangeRate: 7.2 })
+getDb().run("UPDATE orders SET ship_status = 'delivered' WHERE id = ?", [oSigned.id])
+eq(
+  '只有 updated_at 动过的单不再被算成「本月完成」（要批次签收或状态事件）',
+  dashboard.dashboard().completedThisMonth,
+  doneBefore
+)
+orders.setShipStatus(oSigned.id, 'delivered')
+eq('正常标签收后计入本月完成', dashboard.dashboard().completedThisMonth, doneBefore + 1)
+// 作废单：任何提醒都不该再挂它
+const oVoid = orders.createOrder({
+  customerId: cR6.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  expectedShipDate: dAgo(1)
+})
+orders.setPaymentStatus(oVoid.id, 'sent')
+check('作废前确实有提醒', dashboard.reminders().some((r) => r.orderId === oVoid.id))
+orders.voidOrder(oVoid.id, '客户取消')
+check(
+  '作废单从待办里彻底消失（催确认/交期/待修都不再喊）',
+  !dashboard.reminders().some((r) => r.orderId === oVoid.id),
+  JSON.stringify(dashboard.reminders().filter((r) => r.orderId === oVoid.id).map((r) => r.kind))
+)
+saveSettings(sR6)
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

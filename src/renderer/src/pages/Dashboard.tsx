@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { money, moneyOrDash, num, fmtDate, PaymentTag, ShipTag, Button } from '../ui'
 import type { DashboardStats, Reminder } from '../../../shared/types'
 
@@ -8,14 +8,28 @@ const REMINDER_KIND_LABEL: Record<string, string> = {
   payment: '收款',
   ship: '出货',
   balance: '尾款',
-  sample: '打样'
+  sample: '打样',
+  expiry: '到期',
+  quote: '报价',
+  data: '待修'
 }
+
+/** 提醒点到哪儿去：打样/报价回各自的列表页并带上单号，其余进订单详情 */
+function reminderTarget(r: Reminder): string | null {
+  if (r.kind === 'sample') return `/samples?kw=${encodeURIComponent(r.orderNo)}`
+  if (r.kind === 'quote') return `/quotations?kw=${encodeURIComponent(r.orderNo)}`
+  return r.orderId > 0 ? `/orders/${r.orderId}` : null
+}
+
+const REFRESH_MS = 60000
 
 export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => void }) {
   const [stats, setStats] = useState<DashboardStats | null>(null)
   const [reminders, setReminders] = useState<Reminder[]>([])
   const [recent, setRecent] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
+  /** 展开过的「同一单多条事由」（key 是单号，收起状态不落库，刷新后回到默认） */
+  const [openGroups, setOpenGroups] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     let alive = true
@@ -35,12 +49,68 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
       }
     }
     load()
+    // 工作台是「早上打开看一眼」的页面：交期与天数每天都在动，挂着不刷新就成了昨日新闻
+    const timer = setInterval(load, REFRESH_MS)
+    const onFocus = () => void load()
+    window.addEventListener('focus', onFocus)
     return () => {
       alive = false
+      clearInterval(timer)
+      window.removeEventListener('focus', onFocus)
     }
   }, [])
 
+  // 同一张单的几条事由挨着放：默认只摊开最要紧的一条，其余点「还有 N 条」再看
+  const groups = useMemo(() => {
+    const out: { orderNo: string; items: Reminder[] }[] = []
+    const index = new Map<string, number>()
+    for (const r of reminders) {
+      const at = index.get(r.orderNo)
+      if (at === undefined) {
+        index.set(r.orderNo, out.length)
+        out.push({ orderNo: r.orderNo, items: [r] })
+      } else {
+        out[at].items.push(r)
+      }
+    }
+    return out
+  }, [reminders])
+
+  const overdueCount = reminders.filter((r) => r.days < 0).length
+  const dataCount = reminders.filter((r) => r.kind === 'data').length
+
   const cur = stats?.currency ?? 'CNY'
+
+  const toggleGroup = (orderNo: string) =>
+    setOpenGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(orderNo)) next.delete(orderNo)
+      else next.add(orderNo)
+      return next
+    })
+
+  const row = (r: Reminder, nested: boolean) => {
+    const target = reminderTarget(r)
+    return (
+      <div
+        key={r.key}
+        className={`reminder-item${nested ? ' nested' : ''}`}
+        onClick={() => target && onNavigate(target)}
+      >
+        <span className={`reminder-dot ${r.kind}`} />
+        {/* R2-P1：圆点只靠颜色认不出来（红/黄分不清），加一个 2 字文字标签 */}
+        <span className={`reminder-tag ${r.kind}`}>{REMINDER_KIND_LABEL[r.kind] ?? '待办'}</span>
+        <div className="reminder-main">
+          <div className="reminder-title">{nested ? r.customerName : `${r.customerName} · ${r.orderNo}`}</div>
+          <div className="reminder-sub">{r.message}</div>
+        </div>
+        {/* 「待修」没有期限概念，别给它挂个假的「0 天」 */}
+        {r.kind === 'data' ? null : (
+          <span className="faint nowrap">{r.days < 0 ? `逾期 ${-r.days} 天` : `${r.days} 天`}</span>
+        )}
+      </div>
+    )
+  }
 
   return (
     <>
@@ -68,8 +138,12 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
           <div className="stat amber">
             <div className="stat-label">待收款金额</div>
             <div className="stat-value">{money(stats?.pendingAmount, cur)}</div>
-            {/* N37：口径含打样费，说明必须跟着数走（money.ts 唯一入口） */}
-            <div className="stat-hint">含未收定金、尾款与打样费</div>
+            {/* N37：口径含打样费，说明必须跟着数走（money.ts 唯一入口）
+                R6：拆成四桶给一眼看清楚该催谁——合计仍等于上面这个数 */}
+            <div className="stat-hint">
+              未确认 {money(stats?.pendingUnconfirmed, cur)} · 定金 {money(stats?.pendingDeposit, cur)} · 尾款{' '}
+              {money(stats?.pendingBalance, cur)} · 打样 {money(stats?.pendingSample, cur)}
+            </div>
           </div>
           <div className="stat">
             <div className="stat-label">待出货订单</div>
@@ -91,7 +165,9 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
             <div className="card-head">
               <h2>待办提醒</h2>
               <div className="spacer" />
-              {reminders.length > 0 ? <span className="tag red">{reminders.length} 项</span> : null}
+              {overdueCount > 0 ? <span className="tag red">逾期 {overdueCount} 项</span> : null}
+              {dataCount > 0 ? <span className="tag grey">待修 {dataCount}</span> : null}
+              {reminders.length > 0 ? <span className="tag">{reminders.length} 项</span> : null}
             </div>
             <div className="card-body tight">
               {loading ? (
@@ -99,29 +175,22 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
               ) : reminders.length === 0 ? (
                 <div className="empty">没有待办事项，一切顺利</div>
               ) : (
-                reminders.map((r, i) => (
-                  <div
-                    key={`${r.kind}-${r.orderId}-${r.plId ?? r.sampleId ?? 0}-${i}`}
-                    className="reminder-item"
-                    onClick={() =>
-                      // 打样提醒（N23）跳打样单页；其余跳订单详情
-                      onNavigate(r.kind === 'sample' ? '/samples' : `/orders/${r.orderId}`)
-                    }
-                  >
-                    <span className={`reminder-dot ${r.kind}`} />
-                    {/* R2-P1：圆点只靠颜色认不出来（红/黄分不清），加一个 2 字文字标签 */}
-                    <span className={`reminder-tag ${r.kind}`}>{REMINDER_KIND_LABEL[r.kind] ?? '待办'}</span>
-                    <div className="reminder-main">
-                      <div className="reminder-title">
-                        {r.customerName} · {r.orderNo}
-                      </div>
-                      <div className="reminder-sub">{r.message}</div>
+                groups.map((g) => {
+                  const open = openGroups.has(g.orderNo)
+                  return (
+                    <div key={g.orderNo}>
+                      {row(g.items[0], false)}
+                      {g.items.length > 1 ? (
+                        <div className="reminder-more" onClick={() => toggleGroup(g.orderNo)}>
+                          {open
+                            ? `收起 ${g.orderNo} 的其余待办`
+                            : `${g.orderNo} 还有 ${g.items.length - 1} 条待办（点开看）`}
+                        </div>
+                      ) : null}
+                      {open ? g.items.slice(1).map((r) => row(r, true)) : null}
                     </div>
-                    <span className="faint nowrap">
-                      {r.kind === 'ship' && r.days < 0 ? `逾期 ${-r.days} 天` : `${r.days} 天`}
-                    </span>
-                  </div>
-                ))
+                  )
+                })
               )}
             </div>
           </div>
@@ -154,6 +223,11 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
                 <div>
                   <span className="muted">本月完成（已签收）</span>
                   <span>{stats?.completedThisMonth ?? 0} 单</span>
+                </div>
+                {/* R2：核销掉的坏账不是收进了口袋，是从应收里挪走的窟窿，工作台必须一直摆着 */}
+                <div>
+                  <span className="muted">坏账未追回</span>
+                  <span>{money(stats?.outstandingBadDebt, cur)}</span>
                 </div>
               </div>
             </div>

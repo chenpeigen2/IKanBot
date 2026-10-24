@@ -600,18 +600,31 @@ export interface DashboardStats {
   monthProfitReliable: boolean
   monthReceived: number
   monthNewOrders: number
+  /** 待收款拆分：客户还没确认（草稿 / PI 已发）的单（基准币） */
+  pendingUnconfirmed: number
+  /** 待收款拆分：客户已确认但定金没到账（基准币） */
+  pendingDeposit: number
+  /** 待收款拆分：收过钱但没收齐的尾款（基准币） */
+  pendingBalance: number
+  /** 待收款拆分：未收的打样费 + 快递费（基准币）；前四项相加 = pendingAmount */
+  pendingSample: number
+  /** 已核销但还没追回来的坏账（基准币） */
+  outstandingBadDebt: number
   currency: Currency
 }
 
 /** 待办提醒 */
 export interface Reminder {
-  /** 订单提醒才有 orderId；打样提醒用 sampleId */
+  /** 订单提醒才有 orderId；打样/报价提醒用 sampleId 或留 0 */
   orderId: number
   orderNo: string
   customerName: string
-  kind: 'confirm' | 'payment' | 'ship' | 'balance' | 'sample'
+  kind: 'confirm' | 'payment' | 'ship' | 'balance' | 'sample' | 'expiry' | 'quote' | 'data'
   message: string
+  /** 距到期还有几天（负数 = 已逾期）；「待修」类没有期限，固定 0 */
   days: number
+  /** 稳定的折叠键：同一单同一事由刷新后仍是同一条，收起一条不会误伤另一条 */
+  key: string
   /** 打样提醒的打样单 id（非打样提醒为 0） */
   sampleId?: number
   /** 出货提醒的批次 id / 装箱单号（同单多批各提醒各的） */
