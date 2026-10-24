@@ -94,6 +94,13 @@ export function registerIpc(): void {
   handle('orders:deletePayment', (orderId: number, paymentId: number, reason?: string) =>
     orders.deletePayment(orderId, paymentId, reason ?? '')
   )
+  handle('orders:listSettlements', (orderId: number) => orders.listSettlements(orderId))
+  handle('orders:addSettlement', (orderId: number, input: orders.SettlementInput) =>
+    orders.addSettlement(orderId, input)
+  )
+  handle('orders:reverseSettlement', (orderId: number, settlementId: number, reason?: string) =>
+    orders.reverseSettlement(orderId, settlementId, reason ?? '')
+  )
   handle('orders:setShipStatus', (orderId: number, status: any, note?: string) =>
     orders.setShipStatus(orderId, status, note)
   )

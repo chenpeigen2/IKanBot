@@ -18,6 +18,7 @@ import type {
   QuotationCharge,
   QuotationItem,
   Reminder,
+  Settlement,
   SkuSummary
 } from '../../src/shared/types'
 
@@ -222,6 +223,21 @@ export function mapPayment(r: Row): Payment {
   }
 }
 
+export function mapSettlement(r: Row): Settlement {
+  return {
+    id: num(r.id),
+    orderId: num(r.order_id),
+    kind: str(r.kind) as Settlement['kind'],
+    amount: num(r.amount),
+    reason: str(r.reason),
+    evidence: str(r.evidence),
+    reversesId: optNum(r.reverses_id),
+    paymentId: optNum(r.payment_id),
+    at: str(r.at),
+    createdAt: str(r.created_at)
+  }
+}
+
 export function mapPackingListLine(r: Row): PackingListLine {
   return {
     id: num(r.id),
@@ -281,6 +297,7 @@ export function mapCustomerStats(r: Row): CustomerStats {
     outstanding: num(r.outstanding),
     outstandingOrders: num(r.outstanding_orders),
     outstandingSamples: num(r.outstanding_samples),
+    badDebt: num(r.bad_debt),
     missingCostOrders: num(r.missing_cost_orders)
   }
 }

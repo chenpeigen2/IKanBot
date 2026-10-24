@@ -2289,6 +2289,210 @@ check(
   `orders=${r1Stats.outstandingOrders} samples=${r1Stats.outstandingSamples} total=${r1Stats.outstanding}`
 )
 
+/* ============================================================
+ * 第 6 轮：短款核销 / 坏账 / 追回（R2）
+ * ============================================================ */
+section('核销与坏账：短款让利、坏账、追回、撤销与全站口径')
+
+const cR2 = customers.saveCustomer({
+  company: 'R2 Credit Co',
+  contact: 'Credit Desk',
+  country: 'United States',
+  email: 'credit@r2.example'
+})
+
+const wo = orders.createOrder({
+  customerId: cR2.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  depositRatio: 0.3,
+  charges: [{ label: '运费 Freight', amount: 100 }]
+})
+orders.setPaymentStatus(wo.id, 'confirmed')
+await orders.addOrderItem(wo.id, {
+  styleNo: 'R2-A',
+  productName: 'R2 核销测试',
+  quantity: 100,
+  unitPrice: 10,
+  unitCost: 6
+})
+let woNow = orders.addPayment(wo.id, { paidAt: localDate(), amount: 700, method: 'T/T', bankRef: 'R2PAY' })
+eq('核销前待收 = 1100 − 700', woNow.remaining, 400)
+eq('核销前状态 = 已收定金', woNow.paymentStatus, 'paid')
+
+let r2Err = ''
+try {
+  orders.addSettlement(wo.id, { kind: 'shortage', amount: 10, reason: '  ' })
+} catch (e) {
+  r2Err = (e as Error).message
+}
+check('核销必须写原因', r2Err.includes('原因'), r2Err)
+r2Err = ''
+try {
+  orders.addSettlement(wo.id, { kind: 'shortage', amount: 0, reason: '银行扣费' })
+} catch (e) {
+  r2Err = (e as Error).message
+}
+check('核销金额 0 会被拦住', r2Err.includes('大于 0'), r2Err)
+r2Err = ''
+try {
+  orders.addSettlement(wo.id, { kind: 'shortage', amount: 999, reason: '银行扣费' })
+} catch (e) {
+  r2Err = (e as Error).message
+}
+check('核销不能超过当前待收', r2Err.includes('超过'), r2Err)
+
+const r2Draft = orders.createOrder({ customerId: cR2.id, currency: 'USD', exchangeRate: 7 })
+await orders.addOrderItem(r2Draft.id, {
+  styleNo: 'R2-DRAFT',
+  productName: '草稿核销测试',
+  quantity: 1,
+  unitPrice: 100
+})
+r2Err = ''
+try {
+  orders.addSettlement(r2Draft.id, { kind: 'bad_debt', reason: '客户失联' })
+} catch (e) {
+  r2Err = (e as Error).message
+}
+check('草稿单不能核销 / 标坏账', r2Err.includes('草稿'), r2Err)
+
+woNow = orders.addSettlement(wo.id, {
+  kind: 'shortage',
+  amount: 40,
+  at: localDate(),
+  reason: '银行扣费',
+  evidence: '水单 R2-001'
+})
+eq('短款核销后待收 = 400 − 40', woNow.remaining, 360)
+eq('短款核销金额单独可见', woNow.writeOffShortage, 40)
+eq('短款核销不动已收', woNow.paidAmount, 700)
+eq('短款是让利，进毛利：1000 − 600 − 40', woNow.totalProfit, 360)
+eq('短款只核销一部分时状态仍是已收定金', woNow.paymentStatus, 'paid')
+eq('核销台账有一条短款', orders.listSettlements(wo.id).filter((s) => s.kind === 'shortage').length, 1)
+
+const recvBefore = dashboard.dashboard().monthReceived
+woNow = orders.addSettlement(wo.id, {
+  kind: 'bad_debt',
+  amount: 360,
+  at: localDate(),
+  reason: '客户破产',
+  evidence: '破产公告 2026-10'
+})
+eq('坏账核销后待收归零', woNow.remaining, 0)
+eq('坏账核销金额单独可见', woNow.writeOffBadDebt, 360)
+eq('坏账未追回余额 = 360', woNow.badDebtOutstanding, 360)
+eq('坏账不动已收', woNow.paidAmount, 700)
+eq('坏账结清后收款状态自动到已结清', woNow.paymentStatus, 'settled')
+eq('坏账不改进货毛利：仍是 360', woNow.totalProfit, 360)
+eq('坏账不进本月回款', dashboard.dashboard().monthReceived, recvBefore)
+
+const woBrief = customers.customerOrderBriefs(cR2.id).find((o) => o.id === wo.id)!
+eq('客户页订单待到收 = 0（坏账已核销）', woBrief.remaining, 0)
+eq('客户页坏账未追回可见', customers.customerStats(cR2.id).badDebt, 360 * 7)
+const woMoney = money.listOrderMoney().find((r) => r.orderId === wo.id)!
+eq('汇总口径待收 = 0', woMoney.receivable, 0)
+eq('汇总口径坏账 = 360', woMoney.badDebtOutstanding, 360)
+eq('坏账单不再出现在催尾款提醒里', dashboard.reminders().some((r) => r.orderId === wo.id && r.kind === 'balance'), false)
+
+const csvRowsR2 = dashboard.exportCsv('orders').split('\r\n')
+const headR2 = csvRowsR2[0].replace(/^\uFEFF/, '').split(',')
+const rowR2 = csvRowsR2.find((r) => r.split(',')[headR2.indexOf('订单号')] === wo.orderNo)!
+eq('CSV 短款核销列', Number(rowR2.split(',')[headR2.indexOf('短款核销(原币)')]), 40)
+eq('CSV 坏账核销列', Number(rowR2.split(',')[headR2.indexOf('坏账核销(原币)')]), 360)
+eq('CSV 坏账未追回列', Number(rowR2.split(',')[headR2.indexOf('坏账未追回(原币)')]), 360)
+
+const recvBeforeRecovery = dashboard.dashboard().monthReceived
+woNow = orders.addSettlement(wo.id, {
+  kind: 'recovery',
+  amount: 200,
+  at: localDate(),
+  paidAt: localDate(),
+  bankRef: 'R2REC',
+  reason: '客户分期补付第一笔'
+})
+eq('追回后坏账余额 = 160', woNow.badDebtOutstanding, 160)
+eq('追回款进已收', woNow.paidAmount, 900)
+eq('追回后待收仍是 0', woNow.remaining, 0)
+eq('追回后状态仍是已结清', woNow.paymentStatus, 'settled')
+check(
+  '追回款计入本月回款',
+  Math.abs(dashboard.dashboard().monthReceived - (recvBeforeRecovery + 200 * 7)) < 0.01,
+  `before=${recvBeforeRecovery} after=${dashboard.dashboard().monthReceived}`
+)
+eq('追回款对应一条真实收款记录', woNow.payments.filter((p) => p.bankRef === 'R2REC').length, 1)
+r2Err = ''
+try {
+  orders.addSettlement(wo.id, { kind: 'recovery', amount: 999, reason: '再追一笔' })
+} catch (e) {
+  r2Err = (e as Error).message
+}
+check('追回不能超过坏账余额', r2Err.includes('超过'), r2Err)
+const recoveryRow = orders.listSettlements(wo.id).find((s) => s.kind === 'recovery')!
+r2Err = ''
+try {
+  orders.reverseSettlement(wo.id, recoveryRow.id, '退汇')
+} catch (e) {
+  r2Err = (e as Error).message
+}
+check('实际到账的追回款不能撤销', r2Err.includes('不能撤销'), r2Err)
+
+const rev = orders.createOrder({ customerId: cR2.id, currency: 'USD', exchangeRate: 7 })
+orders.setPaymentStatus(rev.id, 'confirmed')
+await orders.addOrderItem(rev.id, {
+  styleNo: 'R2-REV',
+  productName: '撤销核销测试',
+  quantity: 10,
+  unitPrice: 10,
+  unitCost: 5
+})
+orders.addPayment(rev.id, { paidAt: localDate(), amount: 20 })
+let revNow = orders.addSettlement(rev.id, { kind: 'bad_debt', amount: 80, reason: '客户失联' })
+eq('撤销前待收归零', revNow.remaining, 0)
+const bdRow = orders.listSettlements(rev.id).find((s) => s.kind === 'bad_debt')!
+revNow = orders.reverseSettlement(rev.id, bdRow.id, '客户又把钱补来了')
+eq('撤销坏账后待收恢复 = 100 − 20', revNow.remaining, 80)
+eq('撤销后坏账余额归零', revNow.badDebtOutstanding, 0)
+eq('撤销后状态退回部分收款', revNow.paymentStatus, 'partial')
+const revRows = orders.listSettlements(rev.id)
+eq('撤销是追加一条负数，不删原记录', revRows.length, 2)
+eq('撤销记录金额为负', revRows.find((s) => s.reversesId === bdRow.id)!.amount, -80)
+r2Err = ''
+try {
+  orders.reverseSettlement(rev.id, bdRow.id, '再撤一次')
+} catch (e) {
+  r2Err = (e as Error).message
+}
+check('同一笔核销不能撤销两次', r2Err.includes('撤销过'), r2Err)
+r2Err = ''
+try {
+  orders.deleteOrder(rev.id)
+} catch (e) {
+  r2Err = (e as Error).message
+}
+check('有核销记录的订单不能物理删除', r2Err.includes('核销'), r2Err)
+
+const curOnly = orders.createOrder({ customerId: cR2.id, currency: 'USD', exchangeRate: 7 })
+orders.setPaymentStatus(curOnly.id, 'confirmed')
+await orders.addOrderItem(curOnly.id, {
+  styleNo: 'R2-CUR',
+  productName: '只有核销没有收款',
+  quantity: 10,
+  unitPrice: 10
+})
+orders.addSettlement(curOnly.id, { kind: 'shortage', amount: 10, reason: '客户抹零' })
+r2Err = ''
+try {
+  await orders.updateOrder(curOnly.id, {
+    customerId: cR2.id,
+    currency: 'EUR',
+    exchangeRate: 8
+  })
+} catch (e) {
+  r2Err = (e as Error).message
+}
+check('只有核销记录也不能改币种', r2Err.includes('核销'), r2Err)
+
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
 console.log(`通过 ${passed} 项，失败 ${failed} 项`)

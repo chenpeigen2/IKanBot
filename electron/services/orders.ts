@@ -1,10 +1,10 @@
 import { getDb, nextNo } from '../db'
-import { mapOrder, mapOrderItem, mapPayment, mapPackingList, mapPackingListLine, mapEvent, mapSkuSummary, mapOrderPhoto, mapCustomer } from '../db/mappers'
+import { mapOrder, mapOrderItem, mapPayment, mapPackingList, mapPackingListLine, mapEvent, mapSkuSummary, mapOrderPhoto, mapCustomer, mapSettlement } from '../db/mappers'
 import { getSettings } from './settings'
 import { computeOrderMoney, parseCharges } from './money'
 import { applyShipStatus, isShipStatusDerived, shipmentSummary } from './shipping'
 import { localDate, addDays, isLocalDate } from '../../src/shared/date'
-import { SHIP_STATUS_LABEL } from '../../src/shared/types'
+import { SETTLEMENT_KIND_LABEL, SHIP_STATUS_LABEL } from '../../src/shared/types'
 import type {
   Currency,
   Incoterm,
@@ -16,6 +16,8 @@ import type {
   PaymentMethod,
   PaymentStatus,
   QuotationCharge,
+  Settlement,
+  SettlementKind,
   ShipStatus,
   SkuSummary
 } from '../../src/shared/types'
@@ -170,6 +172,12 @@ function hydrate(order: Order): OrderDetail {
   const payments = (
     db.all('SELECT * FROM payments WHERE order_id = ? ORDER BY paid_at, id', [order.id]) as Record<string, unknown>[]
   ).map(mapPayment)
+  const settlements = (
+    db.all('SELECT * FROM order_settlements WHERE order_id = ? ORDER BY at, id', [order.id]) as Record<
+      string,
+      unknown
+    >[]
+  ).map(mapSettlement)
   const plRows = db.all('SELECT * FROM packing_lists WHERE order_id = ? ORDER BY id', [order.id]) as Record<
     string,
     unknown
@@ -190,6 +198,7 @@ function hydrate(order: Order): OrderDetail {
     items: items.map((i) => ({ quantity: i.quantity, unitPrice: i.unitPrice, unitCost: i.unitCost })),
     charges: order.charges,
     payments: payments.map((p) => ({ amount: p.amount })),
+    settlements: settlements.map((s) => ({ kind: s.kind, amount: s.amount })),
     depositRatio: order.depositRatio
   })
 
@@ -210,6 +219,11 @@ function hydrate(order: Order): OrderDetail {
     remaining: m.receivable,
     remainingRaw: m.remaining,
     depositAmount: m.depositAmount,
+    writeOffShortage: m.shortageAmount,
+    writeOffBadDebt: m.badDebtAmount,
+    badDebtOutstanding: m.badDebtOutstanding,
+    writtenOff: m.writtenOff,
+    settlements,
     shipSummary: shipmentSummary(order.id)
   }
 }
@@ -309,9 +323,17 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
     const payCount = Number(
       (db.get('SELECT COUNT(*) AS n FROM payments WHERE order_id = ?', [id]) as { n?: number } | null)?.n ?? 0
     )
-    if (payCount > 0) {
+    const settleCount = Number(
+      (
+        db.get('SELECT COUNT(*) AS n FROM order_settlements WHERE order_id = ?', [id]) as
+          | { n?: number }
+          | null
+      )?.n ?? 0
+    )
+    if (payCount > 0 || settleCount > 0) {
+      const what = payCount > 0 ? `${payCount} 笔收款` : `${settleCount} 笔核销`
       throw new Error(
-        `这张单已经登记了 ${payCount} 笔收款，不能改币种——收款是按 ${oldCurrency} 记的，改了会和银行流水对不上。确实要换币种，请作废这张单后按正确币种重开。`
+        `这张单已经登记了 ${what}，不能改币种——历史金额都是按 ${oldCurrency} 记的，改了会和银行流水、核销记录对不上。确实要换币种，请作废这张单后按正确币种重开。`
       )
     }
     // 没改汇率就换币种，等于把 USD 的 7.1 套在 EUR 上，报表和毛利全错
@@ -438,16 +460,18 @@ export function deleteOrder(id: number): void {
   const row = db.get(
     `SELECT o.order_no,
             (SELECT COUNT(*) FROM payments p WHERE p.order_id = o.id) AS pay_cnt,
+            (SELECT COUNT(*) FROM order_settlements s WHERE s.order_id = o.id) AS settle_cnt,
             (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id) AS item_cnt
      FROM orders o WHERE o.id = ?`,
     [id]
-  ) as { order_no?: string; pay_cnt?: number; item_cnt?: number } | null
+  ) as { order_no?: string; pay_cnt?: number; settle_cnt?: number; item_cnt?: number } | null
   if (!row) throw new Error('订单不存在')
   const payCnt = Number(row.pay_cnt ?? 0)
+  const settleCnt = Number(row.settle_cnt ?? 0)
   const itemCnt = Number(row.item_cnt ?? 0)
-  if (payCnt > 0 || itemCnt > 0) {
+  if (payCnt > 0 || settleCnt > 0 || itemCnt > 0) {
     throw new Error(
-      `订单 ${row.order_no} 已经有 ${itemCnt} 行明细、${payCnt} 笔收款，不能直接删（删了收款凭据和操作历史会一起没有）。请用「作废」：记录全留，只是不再计入销售额和待收款。`
+      `订单 ${row.order_no} 已经有 ${itemCnt} 行明细、${payCnt} 笔收款、${settleCnt} 笔核销，不能直接删（删了收款与核销凭据、操作历史会一起没有）。请用「作废」：记录全留，只是不再计入销售额和待收款。`
     )
   }
   db.run('DELETE FROM orders WHERE id = ?', [id])
@@ -800,6 +824,198 @@ export function deletePayment(orderId: number, paymentId: number, reason = ''): 
   return getOrder(orderId)!
 }
 
+/* ---------------- 核销 / 坏账 ---------------- */
+
+export interface SettlementInput {
+  kind: SettlementKind
+  /** 金额；不填 = 当前待收全额 */
+  amount?: number
+  /** 业务发生日，默认今天 */
+  at?: string
+  reason: string
+  evidence?: string
+  /** 追回款：这笔钱实际到账的日期与流水号 */
+  paidAt?: string
+  bankRef?: string
+  method?: string
+}
+
+export function listSettlements(orderId: number): Settlement[] {
+  return (
+    getDb().all('SELECT * FROM order_settlements WHERE order_id = ? ORDER BY at, id', [orderId]) as Record<
+      string,
+      unknown
+    >[]
+  ).map(mapSettlement)
+}
+
+function settlementSums(orderId: number): { shortage: number; badDebt: number; recovered: number } {
+  const rows = getDb().all(
+    `SELECT kind, COALESCE(SUM(amount), 0) AS total
+     FROM order_settlements WHERE order_id = ? GROUP BY kind`,
+    [orderId]
+  ) as { kind?: string; total?: number }[]
+  let shortage = 0
+  let badDebt = 0
+  let recovered = 0
+  for (const r of rows) {
+    const total = Number(r.total ?? 0)
+    if (r.kind === 'shortage') shortage = total
+    else if (r.kind === 'bad_debt') badDebt = total
+    else if (r.kind === 'recovery') recovered = total
+  }
+  return { shortage, badDebt, recovered }
+}
+
+/**
+ * 登记一笔核销：
+ *  - shortage 短款让利：从待收里扣，也进毛利；
+ *  - bad_debt 坏账：从待收里扣，报表单列，不改进货毛利；
+ *  - recovery 坏账追回：钱真的到账，先落一条收款，再冲减坏账余额。
+ * 都只追加；要改就撤销后重登，历史里每一步都在。
+ */
+export function addSettlement(orderId: number, input: SettlementInput): OrderDetail {
+  const db = getDb()
+  const order = getOrder(orderId)
+  if (!order) throw new Error('订单不存在')
+  if (['draft', 'expired', 'void'].includes(order.paymentStatus)) {
+    throw new Error('草稿、已失效、已作废的订单不能做核销或坏账。先把订单状态改成正式单，再处理欠款。')
+  }
+  const kind = input.kind
+  if (kind !== 'shortage' && kind !== 'bad_debt' && kind !== 'recovery') {
+    throw new Error('核销类型不对，只能是短款核销、坏账或坏账追回。')
+  }
+  const reason = String(input.reason ?? '').trim()
+  if (!reason) throw new Error('核销 / 坏账要写原因（例如“银行扣费”“客户破产”），操作历史要留痕。')
+  const at = String(input.at ?? '').trim() || localDate()
+  if (!isLocalDate(at)) throw new Error('核销日期要填完整（例如 2026-10-24）。')
+  const evidence = String(input.evidence ?? '').trim()
+
+  const sums = settlementSums(orderId)
+  const badDebtOutstanding = Math.max(0, sums.badDebt - sums.recovered)
+  const currency = order.currency
+
+  if (kind === 'recovery') {
+    if (badDebtOutstanding <= 0.001) {
+      throw new Error('这张单没有尚未追回的坏账，不能登记追回款；钱到账请走「记录收款」。')
+    }
+    const amount = Number(input.amount)
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error('追回金额必须是大于 0 的数。')
+    if (amount > badDebtOutstanding + 0.001) {
+      throw new Error(
+        `追回金额 ${amount.toFixed(2)} 超过了尚未追回的坏账 ${badDebtOutstanding.toFixed(2)}；超出的部分请按普通收款登记。`
+      )
+    }
+    const paidAt = String(input.paidAt ?? '').trim() || at
+    if (!isLocalDate(paidAt)) throw new Error('追回款的到账日期要填完整（例如 2026-10-24）。')
+    db.exec('BEGIN')
+    try {
+      db.run(
+        `INSERT INTO payments(order_id, paid_at, amount, method, bank_ref, note, created_at) VALUES(?,?,?,?,?,?,?)`,
+        [orderId, paidAt, amount, input.method ?? 'T/T', input.bankRef ?? '', `坏账追回：${reason}`, now()]
+      )
+      const payId = Number(
+        (db.get('SELECT last_insert_rowid() AS id') as { id?: number } | null)?.id ?? 0
+      )
+      db.run(
+        `INSERT INTO order_settlements(order_id, kind, amount, reason, evidence, reverses_id, payment_id, at, created_at)
+         VALUES(?,?,?,?,?,?,?,?,?)`,
+        [orderId, kind, amount, reason, evidence, null, payId, at, now()]
+      )
+      logEvent(
+        orderId,
+        'settlement',
+        null,
+        null,
+        `坏账追回 ${currency} ${amount.toFixed(2)}（${paidAt}${input.bankRef ? `，流水号 ${input.bankRef}` : ''}）原因：${reason}`
+      )
+      recomputePaymentStatus(orderId)
+      db.exec('COMMIT')
+    } catch (e) {
+      db.exec('ROLLBACK')
+      throw e
+    }
+    return getOrder(orderId)!
+  }
+
+  const outstanding = order.remaining
+  if (outstanding <= 0.001) {
+    throw new Error('这张单已经没有待收了，不能核销。多收的钱请核对收款记录，不要用核销来平账。')
+  }
+  // 只有完全不填才按当前待收全额；填 0 或负数必须拦住，不能悄悄变成全额核销
+  const amount = input.amount == null ? outstanding : Number(input.amount)
+  if (!Number.isFinite(amount) || amount <= 0) throw new Error('核销金额必须是大于 0 的数。')
+  if (amount > outstanding + 0.001) {
+    throw new Error(
+      `核销金额 ${amount.toFixed(2)} 超过了当前待收 ${outstanding.toFixed(2)}；核销不能把单子做成多收。`
+    )
+  }
+  const label = kind === 'shortage' ? '短款核销' : '坏账'
+  db.exec('BEGIN')
+  try {
+    db.run(
+      `INSERT INTO order_settlements(order_id, kind, amount, reason, evidence, reverses_id, payment_id, at, created_at)
+       VALUES(?,?,?,?,?,?,?,?,?)`,
+      [orderId, kind, amount, reason, evidence, null, null, at, now()]
+    )
+    logEvent(
+      orderId,
+      'settlement',
+      null,
+      null,
+      `${label} ${currency} ${amount.toFixed(2)}（${at}）原因：${reason}${evidence ? `；证据：${evidence}` : ''}`
+    )
+    recomputePaymentStatus(orderId)
+    db.exec('COMMIT')
+  } catch (e) {
+    db.exec('ROLLBACK')
+    throw e
+  }
+  return getOrder(orderId)!
+}
+
+/** 撤销一笔核销：记一条负数并指向原记录，原记录不动 */
+export function reverseSettlement(orderId: number, settlementId: number, reason = ''): OrderDetail {
+  const db = getDb()
+  const row = db.get('SELECT * FROM order_settlements WHERE id = ? AND order_id = ?', [
+    settlementId,
+    orderId
+  ]) as Record<string, unknown> | null
+  if (!row) throw new Error('这条核销记录已经不存在了，刷新页面后再试。')
+  const kind = String(row.kind) as SettlementKind
+  const amount = Number(row.amount ?? 0)
+  if (kind === 'recovery') {
+    throw new Error('追回款是实际到账的钱，不能撤销核销；如果要退汇，请单独登记一笔反向收款并写明原因。')
+  }
+  if (amount <= 0) throw new Error('这条是撤销记录，不能再撤销一次。')
+  const reversed = db.get('SELECT id FROM order_settlements WHERE reverses_id = ?', [settlementId])
+  if (reversed) throw new Error('这笔核销已经撤销过了，刷新页面就能看到。')
+  const why = String(reason ?? '').trim()
+  if (!why) throw new Error('撤销核销要写原因，操作历史要留痕。')
+  const label = SETTLEMENT_KIND_LABEL[kind] ?? kind
+  db.exec('BEGIN')
+  try {
+    db.run(
+      `INSERT INTO order_settlements(order_id, kind, amount, reason, evidence, reverses_id, payment_id, at, created_at)
+       VALUES(?,?,?,?,?,?,?,?,?)`,
+      [orderId, kind, -amount, why, '', settlementId, null, localDate(), now()]
+    )
+    logEvent(
+      orderId,
+      'settlement_reverse',
+      null,
+      null,
+      `撤销${label} ${amount.toFixed(2)} 原因：${why}`
+    )
+    recomputePaymentStatus(orderId)
+    db.exec('COMMIT')
+  } catch (e) {
+    db.exec('ROLLBACK')
+    throw e
+  }
+  return getOrder(orderId)!
+}
+
 /**
  * 收款状态自动流转（双向）：
  *  - 收款 >= 总额 → 已结清
@@ -834,11 +1050,15 @@ export function recomputePaymentStatus(orderId: number): PaymentStatus {
       db.get('SELECT COALESCE(SUM(amount), 0) AS p FROM payments WHERE order_id = ?', [orderId]) as { p: number }
     ).p
   )
+  // 核销过的钱不用再收：短款 + 坏账算「结清」，撤销记负数自然退回；
+  // 追回款已经进了 paid，只能冲减坏账本身，不能重复抵扣
+  const sums = settlementSums(orderId)
+  const writtenOff = sums.shortage + sums.badDebt - Math.min(sums.recovered, Math.max(0, sums.badDebt))
   const deposit = total * Number(order.deposit_ratio)
 
   // 注意：这里算出来的是「下一个状态」，跟当前状态无关，所以能往上走也能往下退
   let next: PaymentStatus = status
-  if (total > 0 && paid >= total - 0.001) next = 'settled'
+  if (total > 0 && paid + writtenOff >= total - 0.001) next = 'settled'
   else if (deposit > 0 && paid >= deposit - 0.001) next = 'paid'
   else if (paid > 0) next = 'partial'
   else next = 'confirmed'

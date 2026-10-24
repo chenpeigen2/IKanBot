@@ -184,6 +184,8 @@ export interface CustomerStats {
   outstandingOrders: number
   /** 未收金额里的打样费部分（基准币），客户页用来拆开显示 */
   outstandingSamples: number
+  /** 尚未追回的坏账（基准币），不进待收，但客户页要能看见 */
+  badDebt: number
   /** 成本没录全的订单数：这些单的毛利是假的，不能当成真毛利看 */
   missingCostOrders: number
 }
@@ -269,13 +271,50 @@ export interface OrderDetail extends Order {
   missingCostItems: number
   totalQuantity: number
   paidAmount: number
-  /** 待收（含费用合计 − 已收，不会出现负数；多收的部分不显示为待收） */
+  /** 待收（含费用合计 − 已收 − 核销，不会出现负数；多收的部分不显示为待收） */
   remaining: number
   /** 待收原始值（可能为负，表示多收了） */
   remainingRaw: number
   depositAmount: number
+  /** 短款核销合计（原币，让利，已从待收与毛利里扣） */
+  writeOffShortage: number
+  /** 坏账核销合计（原币，信用损失，只从待收扣，不改进货毛利） */
+  writeOffBadDebt: number
+  /** 坏账尚未追回的余额（原币） */
+  badDebtOutstanding: number
+  /** 核销合计 = 短款 + 坏账（原币） */
+  writtenOff: number
+  /** 核销 / 坏账 / 追回台账（只追加，撤销也留一条负数） */
+  settlements: Settlement[]
   /** 出货汇总（批次件数与推导状态） */
   shipSummary: ShipSummary
+}
+
+export type SettlementKind = 'shortage' | 'bad_debt' | 'recovery'
+
+/** 订单核销台账：只追加，撤销也记一条负数，凭据不丢 */
+export interface Settlement {
+  id: number
+  orderId: number
+  kind: SettlementKind
+  /** 正数 = 核销/追回；负数 = 撤销 */
+  amount: number
+  reason: string
+  /** 文字证据说明（邮件、律师函、破产公告等），附件在后续版本补 */
+  evidence: string
+  /** 被撤销的原记录 id */
+  reversesId: number | null
+  /** 追回款对应的收款记录 id（钱实际到账才有） */
+  paymentId: number | null
+  /** 业务发生日 YYYY-MM-DD */
+  at: string
+  createdAt: string
+}
+
+export const SETTLEMENT_KIND_LABEL: Record<SettlementKind, string> = {
+  shortage: '短款核销',
+  bad_debt: '坏账',
+  recovery: '坏账追回'
 }
 
 /** 订单照片（验货照 / 柜照等） */

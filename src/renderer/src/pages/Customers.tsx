@@ -369,6 +369,11 @@ export default function Customers() {
                   {money(detail.stats.outstandingSamples, detail.base)}
                 </div>
               ) : null}
+              {detail.stats.badDebt > 0 ? (
+                <div className="stat-hint">
+                  另有坏账未追回 {money(detail.stats.badDebt, detail.base)}
+                </div>
+              ) : null}
             </div>
           </div>
 

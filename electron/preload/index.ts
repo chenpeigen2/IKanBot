@@ -49,6 +49,10 @@ const api: IKanApi = {
     addPayment: (orderId: number, p: any) => call<any>('orders:addPayment', orderId, p),
     deletePayment: (orderId: number, paymentId: number, reason: string) =>
       call<any>('orders:deletePayment', orderId, paymentId, reason),
+    listSettlements: (orderId: number) => call<any[]>('orders:listSettlements', orderId),
+    addSettlement: (orderId: number, input: any) => call<any>('orders:addSettlement', orderId, input),
+    reverseSettlement: (orderId: number, settlementId: number, reason: string) =>
+      call<any>('orders:reverseSettlement', orderId, settlementId, reason),
     setShipStatus: (orderId: number, status: string, note?: string) =>
       call<any>('orders:setShipStatus', orderId, status, note),
     setPaymentStatus: (orderId: number, status: string, note?: string) =>

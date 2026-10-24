@@ -11,8 +11,12 @@
  *
  * 三个权威数字：
  *   含费用合计 grandTotal = 货值 + 费用行（PI / CI / 报价单 / PL 都用它）
- *   待收     receivable  = 含费用合计 − 已收（多收的部分不算待收，最小 0）
- *   毛利     profit      = 货值 + 负费用 − 成本（成本有缺失 → null = 不可信）
+ *   待收     receivable  = 含费用合计 − 已收 − 核销（多收的部分不算待收，最小 0）
+ *   毛利     profit      = 货值 + 负费用 − 成本 − 短款核销（成本有缺失 → null = 不可信）
+ *
+ * 核销与坏账（R2）：
+ *   短款核销是让利，进毛利；坏账是信用损失，只从待收扣，不改进货毛利。
+ *   两者都不进 payments（没有银行流水），月回款/收款台账仍只认真金白银。
  *
  * 毛利为什么要把负费用算进去（N-4）：
  *   正向费用（运费/保险）是代收代付的过手钱，客户多付我们也多付，不进毛利；
@@ -45,11 +49,38 @@ export interface MoneyItem {
   unitCost: number | null
 }
 
+/** 核销台账里参与金额计算的一条 */
+export interface SettlementInput {
+  kind: string
+  amount: number
+}
+
+/** 核销口径汇总（原币） */
+export interface SettlementTotals {
+  /** 短款让利合计（正数） */
+  shortage: number
+  /** 坏账核销合计（正数，已扣撤销） */
+  badDebt: number
+  /** 已追回金额（正数） */
+  recovered: number
+  /** 坏账尚未追回余额 = max(0, 坏账 − 追回) */
+  badDebtOutstanding: number
+  /** 核销合计（毛额）= 短款 + 坏账，界面上分开显示 */
+  writtenOff: number
+  /**
+   * 从待收里扣掉的净核销 = 短款 + 坏账 − 已追回。
+   * 追回款已经作为现金进了「已收」，不能再按坏账毛额扣一次，否则会显示成多收。
+   */
+  netWrittenOff: number
+}
+
 /** 计算口径的输入 */
 export interface MoneyInput {
   items: MoneyItem[]
   charges: { amount: number }[]
   payments: { amount: number }[]
+  /** 核销 / 坏账 / 追回台账；撤销记录是负数，直接相加 */
+  settlements?: SettlementInput[]
   /** 定金比例，0.3 = 30% */
   depositRatio: number
 }
@@ -82,6 +113,39 @@ export interface OrderMoney {
   profitRaw: number
   /** 总件数 */
   totalQuantity: number
+  /** 短款核销合计（让利，已从待收和毛利里扣） */
+  shortageAmount: number
+  /** 坏账核销合计（信用损失，只从待收扣） */
+  badDebtAmount: number
+  /** 坏账尚未追回余额 */
+  badDebtOutstanding: number
+  /** 核销合计 = 短款 + 坏账（毛额） */
+  writtenOff: number
+  /** 净核销 = 短款 + 坏账 − 已追回（用于算待收） */
+  netWrittenOff: number
+}
+
+/** 核销台账汇总：撤销是负数，求和即可；追回只冲减坏账余额，不重开待收 */
+export function summarizeSettlements(rows: SettlementInput[]): SettlementTotals {
+  let shortage = 0
+  let badDebt = 0
+  let recovered = 0
+  for (const r of rows ?? []) {
+    const amount = Number(r.amount) || 0
+    if (r.kind === 'shortage') shortage += amount
+    else if (r.kind === 'bad_debt') badDebt += amount
+    else if (r.kind === 'recovery') recovered += amount
+  }
+  // 追回只能冲减坏账本身；坏账撤销后，追回款就只是普通到账现金，不再抵扣核销
+  const recoveredApplied = Math.min(recovered, Math.max(0, badDebt))
+  return {
+    shortage,
+    badDebt,
+    recovered,
+    badDebtOutstanding: Math.max(0, badDebt - recovered),
+    writtenOff: shortage + badDebt,
+    netWrittenOff: shortage + badDebt - recoveredApplied
+  }
 }
 
 /**
@@ -94,7 +158,8 @@ export function computeOrderMoney(input: MoneyInput): OrderMoney {
   const chargesTotal = (input.charges ?? []).reduce((s, c) => s + (Number(c.amount) || 0), 0)
   const grandTotal = goodsValue + chargesTotal
   const paidAmount = (input.payments ?? []).reduce((s, p) => s + (Number(p.amount) || 0), 0)
-  const remaining = grandTotal - paidAmount
+  const st = summarizeSettlements(input.settlements ?? [])
+  const remaining = grandTotal - paidAmount - st.netWrittenOff
   const missingCostItems = items.filter((i) => i.unitCost == null).length
   const totalCost = items.reduce((s, i) => s + Number(i.quantity || 0) * (i.unitCost ?? 0), 0)
   // 负向费用（抵扣/折让）从毛利里扣；正向费用（运费等过手钱）维持原口径不进毛利
@@ -102,7 +167,8 @@ export function computeOrderMoney(input: MoneyInput): OrderMoney {
     (s, c) => (Number(c.amount) < 0 ? s + Number(c.amount) : s),
     0
   )
-  const profitRaw = goodsValue + negativeCharges - totalCost
+  // 短款是让利，真金白银少收，进毛利；坏账是信用损失，报表单列，不改进货毛利
+  const profitRaw = goodsValue + negativeCharges - totalCost - st.shortage
   return {
     goodsValue,
     chargesTotal,
@@ -117,7 +183,12 @@ export function computeOrderMoney(input: MoneyInput): OrderMoney {
     // 成本有缺失 → 毛利不可信（null），不许拿 0 成本算出一个漂亮的数
     profit: missingCostItems > 0 ? null : profitRaw,
     profitRaw,
-    totalQuantity: items.reduce((s, i) => s + Number(i.quantity || 0), 0)
+    totalQuantity: items.reduce((s, i) => s + Number(i.quantity || 0), 0),
+    shortageAmount: st.shortage,
+    badDebtAmount: st.badDebt,
+    badDebtOutstanding: st.badDebtOutstanding,
+    writtenOff: st.writtenOff,
+    netWrittenOff: st.netWrittenOff
   }
 }
 
@@ -150,6 +221,8 @@ export interface OrderMoneyRow extends OrderMoney {
   goodsValueBase: number
   costBase: number
   profitBase: number
+  /** 尚未追回的坏账（基准币） */
+  badDebtBase: number
 }
 
 /** 汇总时的筛选条件 */
@@ -231,6 +304,18 @@ export function listOrderMoney(filter: MoneyListFilter = {}): OrderMoneyRow[] {
     `SELECT order_id, amount FROM payments WHERE order_id IN (${ph})`,
     ids
   ) as Record<string, unknown>[]
+  const settleRows = db.all(
+    `SELECT order_id, kind, amount FROM order_settlements WHERE order_id IN (${ph})`,
+    ids
+  ) as Record<string, unknown>[]
+
+  const settBy = new Map<number, SettlementInput[]>()
+  for (const r of settleRows) {
+    const id = Number(r.order_id)
+    const arr = settBy.get(id) ?? []
+    arr.push({ kind: String(r.kind ?? ''), amount: Number(r.amount ?? 0) })
+    settBy.set(id, arr)
+  }
 
   const itemsBy = new Map<number, MoneyItem[]>()
   for (const r of itemRows) {
@@ -258,6 +343,7 @@ export function listOrderMoney(filter: MoneyListFilter = {}): OrderMoneyRow[] {
       items: itemsBy.get(id) ?? [],
       charges: parseCharges(r.charges),
       payments: (paysBy.get(id) ?? []).map((amount) => ({ amount })),
+      settlements: settBy.get(id) ?? [],
       depositRatio: Number(r.deposit_ratio ?? 0)
     })
     const createdAt = String(r.created_at ?? '')
@@ -285,7 +371,8 @@ export function listOrderMoney(filter: MoneyListFilter = {}): OrderMoneyRow[] {
       receivableBase: m.receivable * rate,
       goodsValueBase: m.goodsValue * rate,
       costBase: m.totalCost * rate,
-      profitBase: (m.profit ?? m.profitRaw) * rate
+      profitBase: (m.profit ?? m.profitRaw) * rate,
+      badDebtBase: m.badDebtOutstanding * rate
     }
   })
 }

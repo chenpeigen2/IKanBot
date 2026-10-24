@@ -356,5 +356,27 @@ ALTER TABLE packing_lists ADD COLUMN seal_no TEXT NOT NULL DEFAULT '';
 ALTER TABLE packing_lists ADD COLUMN bl_no TEXT NOT NULL DEFAULT '';
 ALTER TABLE packing_lists ADD COLUMN delivered_at TEXT;
 `
+  },
+  {
+    version: 9,
+    name: 'order_settlements',
+    sql: `
+-- 核销台账：短款让利 / 坏账 / 追回，只追加不修改。
+-- 撤销 = 再记一条负数并指向原记录，金额与原因都留在流水里。
+-- 钱到账只认 payments；核销没有流水号，不能混进收款台账。
+CREATE TABLE order_settlements (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id    INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  kind        TEXT NOT NULL,
+  amount      REAL NOT NULL,
+  reason      TEXT NOT NULL DEFAULT '',
+  evidence    TEXT NOT NULL DEFAULT '',
+  reverses_id INTEGER,
+  payment_id  INTEGER,
+  at          TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX idx_order_settlements_order ON order_settlements(order_id);
+`
   }
 ]

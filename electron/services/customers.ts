@@ -147,6 +147,8 @@ export function customerStats(customerId: number): CustomerStats {
   const outstandingOrders = rows.reduce((s, r) => s + r.receivableBase, 0)
   const outstandingSamples = sampleReceivable(customerId)
   const outstanding = outstandingOrders + outstandingSamples
+  // 坏账不进待收，但客户页要能看见这家客户赖过多少钱
+  const badDebt = rows.reduce((s, r) => s + r.badDebtBase, 0)
   const missingCostOrders = rows.filter((r) => r.missingCostItems > 0).length
   const totalProfitRaw = rows.reduce((s, r) => s + r.profitRaw * r.exchangeRate, 0)
   return mapCustomerStats({
@@ -157,6 +159,7 @@ export function customerStats(customerId: number): CustomerStats {
     outstanding,
     outstanding_orders: outstandingOrders,
     outstanding_samples: outstandingSamples,
+    bad_debt: badDebt,
     missing_cost_orders: missingCostOrders
   })
 }

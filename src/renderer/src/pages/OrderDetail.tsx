@@ -10,6 +10,7 @@ import {
   SHIP_STATUS_LABEL,
   PAYMENT_STATUS_ORDER,
   SHIP_STATUS_ORDER,
+  SETTLEMENT_KIND_LABEL,
   type PaymentStatus,
   type ShipStatus,
   type PaymentMethod
@@ -1327,6 +1328,19 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
   const [deleteTarget, setDeleteTarget] = useState<any | null>(null)
   const [deleteReason, setDeleteReason] = useState('')
   const [deleting, setDeleting] = useState(false)
+  const [settleKind, setSettleKind] = useState<'shortage' | 'bad_debt' | 'recovery' | null>(null)
+  const [settleForm, setSettleForm] = useState({
+    amount: '',
+    at: localDate(),
+    reason: '',
+    evidence: '',
+    paidAt: localDate(),
+    bankRef: ''
+  })
+  const [settleSaving, setSettleSaving] = useState(false)
+  const [reverseTarget, setReverseTarget] = useState<any | null>(null)
+  const [reverseReason, setReverseReason] = useState('')
+  const [reversing, setReversing] = useState(false)
 
   const add = async () => {
     const amt = Number(form.amount)
@@ -1352,6 +1366,69 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
     }
   }
 
+  const openSettle = (kind: 'shortage' | 'bad_debt' | 'recovery', amount = '') => {
+    setSettleForm({
+      amount,
+      at: localDate(),
+      reason: '',
+      evidence: '',
+      paidAt: localDate(),
+      bankRef: ''
+    })
+    setSettleKind(kind)
+  }
+
+  const saveSettle = async () => {
+    if (!settleKind || settleSaving) return
+    if (!settleForm.reason.trim()) {
+      toast('请写清楚原因，核销和坏账都会进操作历史', 'error')
+      return
+    }
+    if (settleKind === 'recovery' && !isLocalDate(settleForm.paidAt)) {
+      toast('追回款要填到账日期', 'error')
+      return
+    }
+    setSettleSaving(true)
+    try {
+      await window.api.orders.addSettlement(order.id, {
+        kind: settleKind,
+        amount: settleForm.amount === '' ? undefined : Number(settleForm.amount),
+        at: settleForm.at,
+        reason: settleForm.reason.trim(),
+        evidence: settleForm.evidence.trim(),
+        paidAt: settleKind === 'recovery' ? settleForm.paidAt : undefined,
+        bankRef: settleForm.bankRef.trim()
+      })
+      toast(settleKind === 'recovery' ? '已登记追回款' : settleKind === 'bad_debt' ? '已标坏账' : '已核销短款')
+      setSettleKind(null)
+      await onChange()
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    } finally {
+      setSettleSaving(false)
+    }
+  }
+
+  const reverse = async () => {
+    if (!reverseTarget || reversing) return
+    if (!reverseReason.trim()) {
+      toast('撤销要写原因，操作历史要留痕', 'error')
+      return
+    }
+    setReversing(true)
+    try {
+      await window.api.orders.reverseSettlement(order.id, reverseTarget.id, reverseReason.trim())
+      toast('已撤销，原记录和撤销记录都留在台账里')
+      setReverseTarget(null)
+      setReverseReason('')
+      await onChange()
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    } finally {
+      setReversing(false)
+    }
+  }
+
   const remove = async () => {
     if (!deleteTarget || deleting) return
     const why = deleteReason.trim()
@@ -1372,6 +1449,14 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
       setDeleting(false)
     }
   }
+
+  const settleLocked = ['draft', 'expired', 'void'].includes(order.paymentStatus)
+  const settlements: any[] = order.settlements ?? []
+  const reversedIds = new Set(
+    settlements.filter((s) => s.reversesId != null).map((s) => Number(s.reversesId))
+  )
+  const settleTitle =
+    settleKind === 'recovery' ? '登记坏账追回' : settleKind === 'bad_debt' ? '标坏账' : '登记短款核销'
 
   return (
     <>
@@ -1395,6 +1480,24 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
             <span className="muted">已收</span>
             <span>{money(order.paidAmount, order.currency)}</span>
           </div>
+          {order.writeOffShortage ? (
+            <div>
+              <span className="muted">短款核销</span>
+              <span>−{money(order.writeOffShortage, order.currency)}</span>
+            </div>
+          ) : null}
+          {order.writeOffBadDebt ? (
+            <div>
+              <span className="muted">坏账核销</span>
+              <span>−{money(order.writeOffBadDebt, order.currency)}</span>
+            </div>
+          ) : null}
+          {order.badDebtOutstanding ? (
+            <div>
+              <span className="muted">坏账未追回</span>
+              <span>{money(order.badDebtOutstanding, order.currency)}</span>
+            </div>
+          ) : null}
           <div className="total">
             <span>待收</span>
             <span>{money(order.remaining, order.currency)}</span>
@@ -1402,6 +1505,11 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
         </div>
         {order.chargesTotal ? (
           <div className="hint mb">定金和待收都按「含费用合计」算，运费保险也算在应收里。</div>
+        ) : null}
+        {order.writtenOff ? (
+          <div className="hint mb">
+            待收已经扣掉核销金额。短款是让利，会进毛利；坏账只从待收里拿掉，月回款仍只认银行到账。
+          </div>
         ) : null}
 
         <div className="field-row-3">
@@ -1489,6 +1597,237 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
           </tbody>
         </table>
       </div>
+
+      <div className="card-body">
+        <div className="field-row" style={{ alignItems: 'center' }}>
+          <div>
+            <strong>核销与坏账</strong>
+            <div className="hint">
+              客户少付、银行扣费、抹零 → 短款核销；确实收不回来 → 坏账。都只追加，撤销也留一条记录。
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <Button
+              size="sm"
+              onClick={() => openSettle('shortage', String(order.remaining || ''))}
+              disabled={settleLocked || order.remaining <= 0}
+            >
+              登记短款
+            </Button>
+            <Button
+              size="sm"
+              variant="danger"
+              onClick={() => openSettle('bad_debt', String(order.remaining || ''))}
+              disabled={settleLocked || order.remaining <= 0}
+            >
+              标坏账
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => openSettle('recovery')}
+              disabled={settleLocked || order.badDebtOutstanding <= 0}
+            >
+              坏账追回
+            </Button>
+          </div>
+        </div>
+        {settleLocked ? (
+          <div className="hint mb">草稿、已失效、已作废的订单不能核销；先把订单状态改成正式单。</div>
+        ) : null}
+
+        <div className="table-wrap" style={{ marginTop: 12 }}>
+          <table className="data">
+            <thead>
+              <tr>
+                <th>日期</th>
+                <th>类型</th>
+                <th className="num">金额</th>
+                <th>原因</th>
+                <th>证据说明</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {settlements.length === 0 ? (
+                <tr>
+                  <td colSpan={6}>
+                    <Empty text="还没有核销记录。少收的钱不要靠改写单据来平账。" />
+                  </td>
+                </tr>
+              ) : (
+                settlements.map((s) => {
+                  const isReversal = s.amount < 0
+                  return (
+                    <tr key={s.id}>
+                      <td className="nowrap">{fmtDate(s.at)}</td>
+                      <td>
+                        {SETTLEMENT_KIND_LABEL[s.kind as keyof typeof SETTLEMENT_KIND_LABEL] ?? s.kind}
+                        {isReversal ? ' · 撤销' : ''}
+                      </td>
+                      <td className="num">{money(s.amount, order.currency)}</td>
+                      <td>{s.reason}</td>
+                      <td className="faint">{s.evidence || '—'}</td>
+                      <td className="right">
+                        {s.amount > 0 && s.kind !== 'recovery' && !reversedIds.has(s.id) ? (
+                          <Button
+                            variant="danger"
+                            size="sm"
+                            onClick={() => {
+                              setReverseReason('')
+                              setReverseTarget(s)
+                            }}
+                          >
+                            撤销
+                          </Button>
+                        ) : null}
+                      </td>
+                    </tr>
+                  )
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {settleKind ? (
+        <Modal
+          title={settleTitle}
+          onClose={() => setSettleKind(null)}
+          footer={
+            <>
+              <Button onClick={() => setSettleKind(null)} disabled={settleSaving}>
+                取消
+              </Button>
+              <Button
+                variant={settleKind === 'bad_debt' ? 'danger' : 'primary'}
+                onClick={saveSettle}
+                disabled={settleSaving}
+              >
+                {settleSaving ? '保存中…' : '确认'}
+              </Button>
+            </>
+          }
+        >
+          {settleKind === 'shortage' ? (
+            <p>
+              客户少付的那部分从待收里扣掉，也会进毛利（这是让利，不是坏账）。不要为了结清单去改 PI 金额。
+            </p>
+          ) : settleKind === 'bad_debt' ? (
+            <p>
+              坏账从待收里拿掉，订单和收款记录一条不删。报表里单列信用损失，不会悄悄从销售额里扣。
+            </p>
+          ) : (
+            <p>
+              追回的钱会先落一笔收款（进本月回款），再冲减坏账余额；待收不会重新冒出来。
+            </p>
+          )}
+          {settleKind === 'recovery' ? (
+            <div className="field-row">
+              <div className="field">
+                <label>到账日期 *</label>
+                <input
+                  type="date"
+                  value={settleForm.paidAt}
+                  onChange={(e) => setSettleForm({ ...settleForm, paidAt: e.target.value })}
+                />
+              </div>
+              <div className="field">
+                <label>追回金额（{order.currency}）</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={settleForm.amount}
+                  onChange={(e) => setSettleForm({ ...settleForm, amount: e.target.value })}
+                  placeholder={`未追回 ${order.badDebtOutstanding.toFixed(2)}`}
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="field-row">
+              <div className="field">
+                <label>核销日期 *</label>
+                <input
+                  type="date"
+                  value={settleForm.at}
+                  onChange={(e) => setSettleForm({ ...settleForm, at: e.target.value })}
+                />
+              </div>
+              <div className="field">
+                <label>金额（{order.currency}）</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={settleForm.amount}
+                  onChange={(e) => setSettleForm({ ...settleForm, amount: e.target.value })}
+                  placeholder={`当前待收 ${order.remaining.toFixed(2)}`}
+                />
+              </div>
+            </div>
+          )}
+          <div className="field">
+            <label>原因 *</label>
+            <input
+              value={settleForm.reason}
+              onChange={(e) => setSettleForm({ ...settleForm, reason: e.target.value })}
+              placeholder={
+                settleKind === 'shortage'
+                  ? '例如：银行扣费 / 客户抹零 / 汇差 / 我方让价'
+                  : settleKind === 'bad_debt'
+                    ? '例如：客户破产 / 失联 / 拒付'
+                    : '例如：客户分期补付第一笔'
+              }
+            />
+          </div>
+          {settleKind === 'recovery' ? (
+            <div className="field">
+              <label>银行流水号</label>
+              <input
+                value={settleForm.bankRef}
+                onChange={(e) => setSettleForm({ ...settleForm, bankRef: e.target.value })}
+                placeholder="对账凭据"
+              />
+            </div>
+          ) : null}
+          <div className="field">
+            <label>证据说明</label>
+            <input
+              value={settleForm.evidence}
+              onChange={(e) => setSettleForm({ ...settleForm, evidence: e.target.value })}
+              placeholder="邮件日期、律师函编号、破产公告等（附件在后续版本补）"
+            />
+          </div>
+        </Modal>
+      ) : null}
+
+      {reverseTarget ? (
+        <Modal
+          title={`撤销${SETTLEMENT_KIND_LABEL[reverseTarget.kind as keyof typeof SETTLEMENT_KIND_LABEL] ?? ''} ${money(reverseTarget.amount, order.currency)}`}
+          onClose={() => setReverseTarget(null)}
+          footer={
+            <>
+              <Button onClick={() => setReverseTarget(null)} disabled={reversing}>
+                取消
+              </Button>
+              <Button variant="danger" onClick={reverse} disabled={reversing}>
+                {reversing ? '撤销中…' : '确认撤销'}
+              </Button>
+            </>
+          }
+        >
+          <p>
+            撤销不会删原记录，而是在台账里追加一条负数。待收和收款状态会自动重算，原因会写进操作历史。
+          </p>
+          <div className="field">
+            <label>撤销原因 *</label>
+            <input
+              value={reverseReason}
+              onChange={(e) => setReverseReason(e.target.value)}
+              placeholder="例如：客户又把钱补来了 / 核销金额录错"
+            />
+          </div>
+        </Modal>
+      ) : null}
 
       {deleteTarget ? (
         <Modal

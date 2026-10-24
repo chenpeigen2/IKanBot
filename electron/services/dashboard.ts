@@ -278,31 +278,26 @@ export function reminders(): Reminder[] {
     }
   }
 
-  // 催尾款：已经收过定金但还没收齐，超过阈值就提醒
-  const balRows = db.all(
-    `SELECT o.id, o.order_no, o.updated_at, o.created_at, c.company AS customer_name, o.charges,
-            COALESCE((SELECT SUM(oi.quantity * oi.unit_price) FROM order_items oi WHERE oi.order_id = o.id), 0) AS total,
-            COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.order_id = o.id), 0) AS paid,
-            (SELECT MAX(p.paid_at) FROM payments p WHERE p.order_id = o.id) AS last_paid
-     FROM orders o JOIN customers c ON c.id = o.customer_id
-     WHERE o.payment_status IN ('partial','paid')`
-  ) as Record<string, unknown>[]
-  for (const r of balRows) {
-    // 应收总额 = 货值 + 费用（运费/保险也算客户欠的钱）
-    const chargesTotal = parseCharges(r.charges).reduce((s, c) => s + c.amount, 0)
-    const total = Number(r.total) + chargesTotal
-    const paid = Number(r.paid)
-    if (total <= 0 || paid <= 0 || paid >= total - 0.001) continue
-    const since = String(r.last_paid || r.updated_at || r.created_at)
+  // 催尾款：已经收过定金但还没收齐，超过阈值就提醒。
+  // 金额口径必须走 money.ts：短款核销/坏账之后的待收在这里也要消失，
+  // 否则钱已经平了，工作台还在天天催。
+  const lastPaid = new Map<number, string>()
+  for (const p of db.all(
+    `SELECT order_id, MAX(paid_at) AS last_paid FROM payments GROUP BY order_id`
+  ) as Record<string, unknown>[]) {
+    lastPaid.set(Number(p.order_id), String(p.last_paid ?? ''))
+  }
+  for (const r of listOrderMoney({ onlyStatuses: ['partial', 'paid'] })) {
+    if (r.paidAmount <= 0 || r.receivable <= 0.001) continue
+    const since = lastPaid.get(r.orderId) || r.createdAt
     const days = daysSince(since)
     if (days < s.remindBalanceDays) continue
-    const remain = total - paid
     out.push({
-      orderId: Number(r.id),
-      orderNo: String(r.order_no),
-      customerName: String(r.customer_name),
+      orderId: r.orderId,
+      orderNo: r.orderNo,
+      customerName: r.customerName,
       kind: 'balance',
-      message: `已收 ${paid.toFixed(2)} / 待收 ${remain.toFixed(2)}，尾款 ${days} 天未到账`,
+      message: `已收 ${r.paidAmount.toFixed(2)} / 待收 ${r.receivable.toFixed(2)}，尾款 ${days} 天未到账`,
       days
     })
   }
@@ -339,19 +334,6 @@ export function reminders(): Reminder[] {
 
   out.sort((a, b) => a.kind.localeCompare(b.kind) || b.days - a.days)
   return out
-}
-
-/** 解析费用行 JSON（运费/保险等） */
-function parseCharges(v: unknown): { label: string; amount: number }[] {
-  try {
-    const parsed = JSON.parse(String(v ?? '[]'))
-    if (!Array.isArray(parsed)) return []
-    return parsed
-      .map((c: any) => ({ label: String(c?.label ?? ''), amount: Number(c?.amount ?? 0) }))
-      .filter((c: { label: string; amount: number }) => c.label)
-  } catch {
-    return []
-  }
 }
 
 function daysSince(iso: string): number {  if (!iso) return 0
@@ -476,6 +458,9 @@ export function exportCsv(kind: 'orders' | 'payments' | 'items'): string {
       '含费用合计(原币)',
       '已收金额(原币)',
       '待收金额(原币)',
+      '短款核销(原币)',
+      '坏账核销(原币)',
+      '坏账未追回(原币)',
       `含费用合计(${base})`,
       `已收金额(${base})`,
       `待收金额(${base})`
@@ -503,6 +488,9 @@ export function exportCsv(kind: 'orders' | 'payments' | 'items'): string {
         r.grandTotal.toFixed(2),
         r.paidAmount.toFixed(2),
         r.receivable.toFixed(2),
+        r.shortageAmount.toFixed(2),
+        r.badDebtAmount.toFixed(2),
+        r.badDebtOutstanding.toFixed(2),
         (r.grandTotal * rate).toFixed(2),
         (r.paidAmount * rate).toFixed(2),
         (r.receivable * rate).toFixed(2)
