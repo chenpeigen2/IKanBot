@@ -121,8 +121,9 @@ function hydrate(s: SampleOrder): SampleOrderDetail {
   const companyCost = Number(s.factoryCost ?? 0) + Number(s.expressFee ?? 0)
   const feeRecovered =
     s.feeStatus === 'paid' || s.feeStatus === 'offset' ? sampleFee : 0
-  // 待收（N23）：未收才计；汇率必须有，否则工作台会少算 → 标记 rateMissing 提示补
-  const owed = s.feeStatus === 'unpaid' ? sampleFee + s.expressFee : 0
+  // 待收（N23）：未收才计；取消的单不收钱；汇率必须有，否则工作台会少算 → 标记 rateMissing 提示补
+  const cancelled = s.status === 'cancelled'
+  const owed = s.feeStatus === 'unpaid' && !cancelled ? sampleFee + s.expressFee : 0
   const rateMissing = owed > 0 && Number(s.exchangeRate ?? 0) <= 0
   return {
     ...s,
@@ -207,6 +208,35 @@ export function saveSample(input: SampleInput): SampleOrderDetail {
   if (id) {
     const before = db.get('SELECT * FROM sample_orders WHERE id = ?', [id]) as Record<string, unknown> | null
     if (!before) throw new Error('打样单不存在')
+    // 已转订单的打样单：钱的部分（样品费合计 / 快递费 / 汇率）是那单的依据，
+    // 事后一改订单就对不上。颜色、尺码、品名这些描述性的字眼照旧能改。
+    if (before.converted_order_id) {
+      const o = db.get('SELECT order_no FROM orders WHERE id = ?', [Number(before.converted_order_id)]) as
+        | { order_no?: string }
+        | null
+      const oldFee = (
+        db.all('SELECT quantity, unit_price FROM sample_order_items WHERE sample_order_id = ?', [id]) as Record<
+          string,
+          unknown
+        >[]
+      ).reduce((sum, r) => sum + Number(r.quantity) * Number(r.unit_price), 0)
+      const moneyChanged =
+        Math.abs(oldFee - sampleFee) > 0.001 ||
+        Math.abs(expressFee - Number(before.express_fee ?? 0)) > 0.001 ||
+        Math.abs(exchangeRate - Number(before.exchange_rate ?? 0)) > 0.001 ||
+        (input.currency !== undefined && input.currency !== String(before.currency)) ||
+        (input.exchangeRateDate !== undefined &&
+          input.exchangeRateDate !== String(before.exchange_rate_date ?? ''))
+      if (moneyChanged) {
+        throw new Error(
+          `这张打样单已经转成订单 ${o?.order_no ?? ''}，样品费、快递费、汇率都是那单的依据，不能再改。要改请直接改订单。`
+        )
+      }
+      // 已经抵扣到订单的样品费，不能再改回「未收」——否则同一笔钱收两次
+      if (String(before.fee_status) === 'offset' && feeStatus !== 'offset') {
+        throw new Error('这张打样单的样品费已经抵扣到订单，不能改回未收（否则同一笔钱会收两次）')
+      }
+    }
     // 改号时查重（不改号就不管）
     const finalNo = requestedNo || String(before.sample_no)
     if (finalNo !== String(before.sample_no) && noTaken(finalNo, id)) throw noDupErr(finalNo)
@@ -329,6 +359,7 @@ export function convertSampleToOrder(
 ): OrderDetail {
   const s = getSample(id)
   if (!s) throw new Error('打样单不存在')
+  if (s.status === 'cancelled') throw new Error('这张打样单已取消，不能再转订单（要转请先把状态改回来）')
   if (s.convertedOrderId) {
     const exist = getOrder(s.convertedOrderId)
     if (exist) return exist
@@ -336,9 +367,14 @@ export function convertSampleToOrder(
   const settings = getSettings()
   const currency = (s.currency || 'USD') as 'USD'
   const rate = Number(s.exchangeRate || 0)
-  const rateDate = s.exchangeRateDate || s.sampleDate || localDate()
   if (rate <= 0) {
     throw new Error('这张打样单没有汇率，请先编辑打样单填上汇率再转订单')
+  }
+  // 锁汇日期必须是真记下来的那一天：打样日期不是订单的锁汇日，拿它或今天顶替
+  // 都会在账上留下一个查不出处的汇率
+  const rateDate = s.exchangeRateDate
+  if (!rateDate) {
+    throw new Error('这张打样单没记汇率锁定日期。请先编辑打样单，把汇率锁定日期补上再转订单')
   }
 
   const customerDefaults = db_customerDefaults(s.customerId)
@@ -349,59 +385,70 @@ export function convertSampleToOrder(
       ? [{ label: '样品费抵扣 Sample Fee (offset)', amount: -s.sampleFee }]
       : []
 
-  const order = createOrder({
-    customerId: s.customerId,
-    currency,
-    exchangeRate: rate,
-    exchangeRateDate: rateDate,
-    baseCurrency: settings.baseCurrency as 'CNY',
-    incoterm: customerDefaults.incoterm as any,
-    portOfLoading: customerDefaults.portLoading,
-    portOfDestination: customerDefaults.portDestination,
-    paymentMethod: (customerDefaults.paymentMethod || 'tt_deposit') as any,
-    depositRatio: customerDefaults.depositRatio ?? 0.3,
-    note: s.note ? `由打样单 ${s.sampleNo} 转成；${s.note}` : `由打样单 ${s.sampleNo} 转成`,
-    charges: charges as any,
-    paymentStatus: opts.paymentStatus ?? 'draft'
-  })
-
   const db = getDb()
-  for (const it of s.items) {
-    let productId = it.productId
-    let cost: number | null = null
-    if (productId) {
-      const p = db.get('SELECT id, cost_price FROM products WHERE id = ?', [productId]) as
-        | { cost_price?: number | null }
-        | null
-      cost = p?.cost_price ?? null
+  // 转单要一次做完：订单头 + 明细 + 打样单标记。中途失败就整单回滚，
+  // 不留下「有订单头没明细」或「打样单标了已转、订单却是空的」半截数据
+  db.exec('BEGIN')
+  try {
+    const order = createOrder({
+      customerId: s.customerId,
+      currency,
+      exchangeRate: rate,
+      exchangeRateDate: rateDate,
+      baseCurrency: settings.baseCurrency as 'CNY',
+      incoterm: customerDefaults.incoterm as any,
+      portOfLoading: customerDefaults.portLoading,
+      portOfDestination: customerDefaults.portDestination,
+      paymentMethod: (customerDefaults.paymentMethod || 'tt_deposit') as any,
+      depositRatio: customerDefaults.depositRatio ?? 0.3,
+      note: s.note ? `由打样单 ${s.sampleNo} 转成；${s.note}` : `由打样单 ${s.sampleNo} 转成`,
+      charges: charges as any,
+      paymentStatus: opts.paymentStatus ?? 'draft'
+    })
+
+    for (const it of s.items) {
+      let productId = it.productId
+      let cost: number | null = null
+      if (productId) {
+        const p = db.get('SELECT id, cost_price FROM products WHERE id = ?', [productId]) as
+          | { cost_price?: number | null }
+          | null
+        // 商品被删过：ID 悬空就置空，别让订单明细指着一个不存在的款
+        if (!p) productId = null
+        else cost = p.cost_price ?? null
+      }
+      db.run(
+        `INSERT INTO order_items(order_id, product_id, style_no, product_name, composition, color, size, quantity, unit_price, unit_cost)
+         VALUES(?,?,?,?,?,?,?,?,?,?)`,
+        [order.id, productId, it.styleNo, it.productName, it.composition, it.color, it.size, it.quantity, it.unitPrice, cost]
+      )
     }
-    db.run(
-      `INSERT INTO order_items(order_id, product_id, style_no, product_name, composition, color, size, quantity, unit_price, unit_cost)
-       VALUES(?,?,?,?,?,?,?,?,?,?)`,
-      [order.id, productId, it.styleNo, it.productName, it.composition, it.color, it.size, it.quantity, it.unitPrice, cost]
+    db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), order.id])
+    // 打样单标记：转过的不能再转；样品费标记为「下单抵扣」（否则以后收不回来还被忘了）
+    db.run('UPDATE sample_orders SET converted_order_id = ?, updated_at = ? WHERE id = ?', [order.id, now(), id])
+    if (opts.offsetSampleFee && s.sampleFee > 0) {
+      db.run('UPDATE sample_orders SET fee_status = ?, fee_note = ?, updated_at = ? WHERE id = ?', [
+        'offset',
+        `已抵扣到订单 ${order.orderNo}`,
+        now(),
+        id
+      ])
+    }
+    logEvent(
+      order.id,
+      'sample_convert',
+      null,
+      null,
+      `由打样单 ${s.sampleNo} 转成订单，${
+        opts.offsetSampleFee ? `样品费 ${s.sampleFee.toFixed(2)} 抵扣` : '样品费未抵扣'
+      }`
     )
+    db.exec('COMMIT')
+    return getOrder(order.id)!
+  } catch (e) {
+    db.exec('ROLLBACK')
+    throw e
   }
-  db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), order.id])
-  // 打样单标记：转过的不能再转；样品费标记为「下单抵扣」（否则以后收不回来还被忘了）
-  db.run('UPDATE sample_orders SET converted_order_id = ?, updated_at = ? WHERE id = ?', [order.id, now(), id])
-  if (opts.offsetSampleFee && s.sampleFee > 0) {
-    db.run('UPDATE sample_orders SET fee_status = ?, fee_note = ?, updated_at = ? WHERE id = ?', [
-      'offset',
-      `已抵扣到订单 ${order.orderNo}`,
-      now(),
-      id
-    ])
-  }
-  logEvent(
-    order.id,
-    'sample_convert',
-    null,
-    null,
-    `由打样单 ${s.sampleNo} 转成订单，${
-      opts.offsetSampleFee ? `样品费 ${s.sampleFee.toFixed(2)} 抵扣` : '样品费未抵扣'
-    }`
-  )
-  return getOrder(order.id)!
 }
 
 /** 客户档案里的默认条款（打样转订单时用） */

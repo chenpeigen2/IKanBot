@@ -339,5 +339,22 @@ ALTER TABLE sample_orders ADD COLUMN exchange_rate REAL NOT NULL DEFAULT 0;
 ALTER TABLE sample_orders ADD COLUMN exchange_rate_date TEXT;
 ALTER TABLE sample_orders ADD COLUMN converted_order_id INTEGER;
 `
+  },
+  {
+    version: 8,
+    name: 'packing_list_shipment_batches',
+    sql: `
+-- 分批出运：每张装箱单 = 一个出货批次，状态与船期挂在批次上。
+-- ship_status 允许 NULL：迁移前的老批次保持 NULL，不参与推导，订单继续沿用手工状态，
+-- 绝不会因为升级把已经签收的老单算回「已包装」。
+ALTER TABLE packing_lists ADD COLUMN ship_status TEXT;
+ALTER TABLE packing_lists ADD COLUMN vessel TEXT NOT NULL DEFAULT '';
+ALTER TABLE packing_lists ADD COLUMN etd_date TEXT;
+ALTER TABLE packing_lists ADD COLUMN atd_date TEXT;
+ALTER TABLE packing_lists ADD COLUMN eta_date TEXT;
+ALTER TABLE packing_lists ADD COLUMN seal_no TEXT NOT NULL DEFAULT '';
+ALTER TABLE packing_lists ADD COLUMN bl_no TEXT NOT NULL DEFAULT '';
+ALTER TABLE packing_lists ADD COLUMN delivered_at TEXT;
+`
   }
 ]

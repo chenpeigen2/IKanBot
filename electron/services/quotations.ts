@@ -167,6 +167,16 @@ export function saveQuotation(input: QuotationInput): QuotationDetail {
   if (qId) {
     const before = db.get('SELECT * FROM quotations WHERE id = ?', [qId]) as Record<string, unknown> | null
     if (!before) throw new Error('报价单不存在')
+    // 已转订单的报价单是那单的原始报价凭据：价格、明细、费用事后一改，
+    // 订单和报价单就对不上了，客户拿两份纸来问谁也说不清
+    if (before.converted_order_id) {
+      const o = db.get('SELECT order_no FROM orders WHERE id = ?', [Number(before.converted_order_id)]) as
+        | { order_no?: string }
+        | null
+      throw new Error(
+        `报价单 ${before.q_no} 已经转成订单 ${o?.order_no ?? ''}，是那单的原始报价凭据，不能再改。要改价格请直接改订单。`
+      )
+    }
     const oldItems = (
       db.all('SELECT style_no, color, size, quantity, unit_price FROM quotation_items WHERE quotation_id = ? ORDER BY id', [
         qId
@@ -421,75 +431,86 @@ export function convertToOrder(id: number, opts: { paymentStatus?: 'draft' | 'se
   }
 
   // 费用行（运费/保险等）直接变成订单的正式费用行，不再塞进备注
-  const order = createOrder({
-    customerId: q.customerId,
-    currency: q.currency,
-    exchangeRate: q.exchangeRate,
-    exchangeRateDate: q.exchangeRateDate,
-    baseCurrency: q.baseCurrency,
-    incoterm: q.incoterm,
-    portOfLoading: q.portOfLoading,
-    portOfDestination: q.portOfDestination,
-    paymentMethod: q.paymentMethod,
-    depositRatio: q.depositRatio,
-    validUntil: q.validUntil,
-    customerPo: q.customerPo,
-    charges: q.charges,
-    note: q.note,
-    // 转订单的落点状态：PI 已发 = 待确认（sent），否则草稿
-    paymentStatus: opts.paymentStatus ?? 'sent'
-  })
-
   const db = getDb()
-  for (const it of q.items) {
-    // 成本价：先按商品 id 找，找不到就按款号在商品库里找（手工加的行也能带上成本）
-    let productId = it.productId
-    let cost: number | null = null
-    if (productId) {
-      const p = db.get('SELECT id, cost_price FROM products WHERE id = ?', [productId]) as
-        | { id?: number; cost_price?: number | null }
-        | null
-      cost = p?.cost_price ?? null
-    }
-    if (cost == null) {
-      const byStyle = findProductByStyleNo(it.styleNo)
-      if (byStyle) {
-        productId = byStyle.id
-        cost = byStyle.cost_price
-      }
-    }
-    db.run(
-      `INSERT INTO order_items(order_id, product_id, style_no, product_name, composition, color, size, quantity, unit_price, unit_cost)
-       VALUES(?,?,?,?,?,?,?,?,?,?)`,
-      [
-        order.id,
-        productId,
-        it.styleNo,
-        it.productName,
-        it.composition,
-        it.color,
-        it.size,
-        it.quantity,
-        it.unitPrice,
-        cost
-      ]
-    )
-  }
-  db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), order.id])
-  logEvent(
-    order.id,
-    'quotation_convert',
-    null,
-    null,
-    `由报价单 ${q.qNo} 转成订单，商品明细原样带入（汇率 ${q.exchangeRate}，汇率日期 ${q.exchangeRateDate}）`
-  )
+  // 订单头 + 明细 + 报价单标记要一次做完：中途失败整单回滚，
+  // 不留下「报价单标了已转、订单却是空的」半截数据
+  db.exec('BEGIN')
+  try {
+    const order = createOrder({
+      customerId: q.customerId,
+      currency: q.currency,
+      exchangeRate: q.exchangeRate,
+      exchangeRateDate: q.exchangeRateDate,
+      baseCurrency: q.baseCurrency,
+      incoterm: q.incoterm,
+      portOfLoading: q.portOfLoading,
+      portOfDestination: q.portOfDestination,
+      paymentMethod: q.paymentMethod,
+      depositRatio: q.depositRatio,
+      validUntil: q.validUntil,
+      customerPo: q.customerPo,
+      charges: q.charges,
+      note: q.note,
+      // 转订单的落点状态：PI 已发 = 待确认（sent），否则草稿
+      paymentStatus: opts.paymentStatus ?? 'sent'
+    })
 
-  db.run('UPDATE quotations SET status=?, result=?, converted_order_id=?, updated_at=? WHERE id=?', [
-    'converted',
-    'won',
-    order.id,
-    now(),
-    id
-  ])
-  return getOrder(order.id)!
+    for (const it of q.items) {
+      // 成本价：先按商品 id 找，找不到就按款号在商品库里找（手工加的行也能带上成本）
+      let productId = it.productId
+      let cost: number | null = null
+      if (productId) {
+        const p = db.get('SELECT id, cost_price FROM products WHERE id = ?', [productId]) as
+          | { id?: number; cost_price?: number | null }
+          | null
+        // 商品被删过：ID 悬空就置空，别让订单明细指着一个不存在的款
+        if (!p) productId = null
+        else cost = p.cost_price ?? null
+      }
+      if (cost == null) {
+        const byStyle = findProductByStyleNo(it.styleNo)
+        if (byStyle) {
+          productId = byStyle.id
+          cost = byStyle.cost_price
+        }
+      }
+      db.run(
+        `INSERT INTO order_items(order_id, product_id, style_no, product_name, composition, color, size, quantity, unit_price, unit_cost)
+         VALUES(?,?,?,?,?,?,?,?,?,?)`,
+        [
+          order.id,
+          productId,
+          it.styleNo,
+          it.productName,
+          it.composition,
+          it.color,
+          it.size,
+          it.quantity,
+          it.unitPrice,
+          cost
+        ]
+      )
+    }
+    db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), order.id])
+    logEvent(
+      order.id,
+      'quotation_convert',
+      null,
+      null,
+      `由报价单 ${q.qNo} 转成订单，商品明细原样带入（汇率 ${q.exchangeRate}，汇率日期 ${q.exchangeRateDate}）`
+    )
+
+    db.run('UPDATE quotations SET status=?, result=?, converted_order_id=?, updated_at=? WHERE id=?', [
+      'converted',
+      'won',
+      order.id,
+      now(),
+      id
+    ])
+    db.exec('COMMIT')
+    return getOrder(order.id)!
+  } catch (e) {
+    db.exec('ROLLBACK')
+    throw e
+  }
 }

@@ -10,12 +10,13 @@ import * as orders from '../electron/services/orders'
 import * as quotations from '../electron/services/quotations'
 import * as samples from '../electron/services/samples'
 import * as packing from '../electron/services/packing'
+import { shipmentSummary } from '../electron/services/shipping'
 import * as dashboard from '../electron/services/dashboard'
 import * as money from '../electron/services/money'
 import { getSettings, saveSettings } from '../electron/services/settings'
 import { createBackup } from '../electron/services/backup'
 import { renderPi, renderPl, renderQuotation, renderCi, renderSample, orderDocAmount, ciDocAmount } from '../src/shared/documents'
-import { localDate } from '../src/shared/date'
+import { localDate, localMonthOf } from '../src/shared/date'
 
 let passed = 0
 let failed = 0
@@ -212,7 +213,11 @@ const oShip = orders.createOrder({
 })
 const rem = dashboard.reminders()
 check('出货提醒命中（预计出货日临近）', rem.some((r) => r.kind === 'ship' && r.orderId === oShip.id))
-check('已包装订单不再提醒', !rem.some((r) => r.kind === 'ship' && r.orderId === order.id))
+check(
+  '有批次但没填 ETD、交期临近 → 提醒不被装箱单吞掉',
+  rem.some((r) => r.kind === 'ship' && r.orderId === order.id && r.message.includes('批次还没填 ETD')),
+  JSON.stringify(rem.filter((r) => r.orderId === order.id))
+)
 
 // 催确认：PI 发出超过 7 天
 const sConf = getSettings()
@@ -248,6 +253,7 @@ check('订单 CSV 含待收列', csv.includes('待收金额(原币)') && csv.inc
 check('订单 CSV 含货值/费用列', csv.includes('货值(原币)') && csv.includes('费用合计(原币)'))
 const csvPay = dashboard.exportCsv('payments')
 check('收款 CSV 含基准币列', csvPay.includes('金额(CNY)'))
+check('收款 CSV 含订单状态列（作废单的钱还在，但得看得见它已作废）', csvPay.includes('订单状态'))
 
 /* ---------------- 设置 ---------------- */
 section('设置')
@@ -1091,7 +1097,7 @@ eq(
   offMoneyRow.profitBase,
   offDetail.totalProfit * offMoneyRow.exchangeRate
 )
-const offMonth = String(offDetail.createdAt).slice(0, 7)
+const offMonth = localMonthOf(String(offDetail.createdAt))
 const offMonthRow = dashboard.monthlyReport().find((r) => r.month === offMonth)!
 const offMonthOrders = money.listOrderMoney({ month: offMonth })
 const offMonthMissing = offMonthOrders.filter((r) => r.missingCostItems > 0).length
@@ -1285,7 +1291,10 @@ getDb().run(
   [soSkipOrder.id, stalePl]
 )
 const plsBeforeNos = packing.listPackingLists(soSkipOrder.id).map((p) => p.plNo)
-const plsAfter = packing.createPackingList({ orderId: soSkipOrder.id, lines: [] })
+const plsAfter = packing.createPackingList({
+  orderId: soSkipOrder.id,
+  lines: [{ boxNo: 'NO.1', styleNo: 'SKIP-1', quantity: 1 }]
+})
 const createdPl = plsAfter.find((p) => !plsBeforeNos.includes(p.plNo))
 check(
   'PL 号：自动号跳过手工占用的号',
@@ -1458,11 +1467,13 @@ eq('客户页未收金额口径正确（含费用、减已收、含打样未收�
 // ⑧ r3 补强：报表页不能自己一套口径 —— 逐月销售额必须 = Σ(订单页该月各单 grandTotal×汇率)，独立两边算
 const repAll = dashboard.monthlyReport()
 const ordersAll = orders.listOrders({})
+// 现金流口径要把作废单的钱也算进来（默认列表不含作废单）
+const ordersForCash = [...ordersAll, ...orders.listOrders({ paymentStatus: 'void' })]
 const moneyRowsAll = money.listOrderMoney()
 const EXCL_MONEY = ['draft', 'expired', 'void']
 for (const rr of repAll) {
   const salesSum = ordersAll
-    .filter((o) => !EXCL_MONEY.includes(o.paymentStatus) && o.createdAt.slice(0, 7) === rr.month)
+    .filter((o) => !EXCL_MONEY.includes(o.paymentStatus) && localMonthOf(o.createdAt) === rr.month)
     .reduce((s, o) => s + o.grandTotal * o.exchangeRate, 0)
   check(
     `报表 ${rr.month} 销售额 = Σ(订单页该月各单 grandTotal×汇率)`,
@@ -1472,10 +1483,10 @@ for (const rr of repAll) {
   // r3-审②：报表「成本没录全的单数」必须 = Σ(missingCostItems>0 的单)，不能报表自己报一个数
   const missSum = moneyRowsAll.filter((r) => r.month === rr.month && r.missingCostItems > 0).length
   eq(`报表 ${rr.month} 标出的成本没录全单数 = Σ(missingCostItems>0 的单)`, rr.missingCostOrders, missSum)
-  // r3-审①：报表逐月收款 = Σ(该月每笔收款×汇率)（工作台「本月收款」与报表同一套聚合口径）
+  // r3-审①：报表逐月收款 = Σ(该月每笔收款×汇率)（现金流口径：只排除草稿单，作废单的钱真到账了也算）
   let recSum = 0
-  for (const o of ordersAll) {
-    if (['draft', 'void'].includes(o.paymentStatus)) continue
+  for (const o of ordersForCash) {
+    if (o.paymentStatus === 'draft') continue
     for (const p of orders.getOrder(o.id)?.payments ?? []) {
       if (p.paidAt.slice(0, 7) === rr.month) recSum += p.amount * o.exchangeRate
     }
@@ -1493,8 +1504,8 @@ const custMoneySum =
 eq('客户页未收 = Σ(该客户各单待收×汇率) + 该客户打样未收', customers.customerStats(c1.id).outstanding, custMoneySum)
 // ⑨ r3 补强：报表累计收款 = Σ(每单每笔收款×汇率)，同一笔钱两条路算出来必须相等
 let recSumAll = 0
-for (const o of ordersAll) {
-  if (['draft', 'void'].includes(o.paymentStatus)) continue
+for (const o of ordersForCash) {
+  if (o.paymentStatus === 'draft') continue
   for (const p of orders.getOrder(o.id)?.payments ?? []) recSumAll += p.amount * o.exchangeRate
 }
 const recReportAll = repAll.reduce((s, r) => s + r.received, 0)
@@ -1597,7 +1608,10 @@ check(
 const r30pl = packing.createPackingList({
   orderId: r30.id,
   containerNo: 'MSKU0001',
-  lines: [{ boxNo: 'NO.1', styleNo: 'A001', color: 'Black', size: 'M', quantity: 100, netWeight: 10 }]
+  lines: [
+    { boxNo: 'NO.1', styleNo: 'A001', color: 'Black', size: 'M', quantity: 60, netWeight: 10 },
+    { boxNo: 'NO.2', styleNo: 'A001', color: 'Black', size: 'M', quantity: 40 }
+  ]
 })
 const r30plLine = r30pl[0].lines[0]
 packing.updatePackingListLine(r30.id, r30pl[0].id, r30plLine.id, { netWeight: 12 })
@@ -1679,6 +1693,479 @@ eq('作废后待收款不变', dashboard.dashboard().pendingAmount, pendingBefor
 const r28empty = orders.createOrder({ customerId: c1.id, currency: 'USD' })
 orders.deleteOrder(r28empty.id)
 check('空单可以真删', orders.getOrder(r28empty.id) === null)
+
+/* ---------------- 业务闭环守则（r14）：口径、汇率、转单锁定 ---------------- */
+section('口径守则：作废单的钱算现金流、不算销售')
+
+const cashFlowOrder = orders.createOrder({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  depositRatio: 0.3,
+  paymentStatus: 'sent'
+})
+await orders.addOrderItem(cashFlowOrder.id, {
+  styleNo: 'R14-CASH',
+  productName: '现金流口径测试款',
+  color: 'Black',
+  size: 'M',
+  quantity: 10,
+  unitPrice: 10,
+  unitCost: 4
+})
+await orders.addPayment(cashFlowOrder.id, {
+  paidAt: localDate(),
+  amount: 30,
+  method: 'T/T',
+  bankRef: 'R14-CASH-001'
+})
+const cashBeforeReport = dashboard.monthlyReport().reduce((s, r) => s + r.received, 0)
+const salesBeforeReport = dashboard.monthlyReport().reduce((s, r) => s + r.sales, 0)
+const monthReceivedBeforeVoid = dashboard.dashboard().monthReceived
+const pendingBeforeCashVoid = dashboard.dashboard().pendingAmount
+orders.voidOrder(cashFlowOrder.id, 'r14 口径测试')
+const cashAfterReport = dashboard.monthlyReport().reduce((s, r) => s + r.received, 0)
+const salesAfterReport = dashboard.monthlyReport().reduce((s, r) => s + r.sales, 0)
+check(
+  '作废单真收到的钱仍留在现金流里（报表收款一分不少）',
+  Math.abs(cashAfterReport - cashBeforeReport) < 0.01,
+  `${cashBeforeReport} → ${cashAfterReport}`
+)
+eq(
+  '作废后工作台「本月收款」不变（钱已经到账，作废不退款）',
+  dashboard.dashboard().monthReceived,
+  monthReceivedBeforeVoid
+)
+check(
+  '作废单不再计入销售额（该单货值 100 × 7 从销售里减掉）',
+  Math.abs(salesBeforeReport - salesAfterReport - 100 * 7) < 0.01,
+  `${salesBeforeReport} → ${salesAfterReport}`
+)
+check(
+  '作废后待收里少了这单未收的 70 × 7',
+  Math.abs(pendingBeforeCashVoid - dashboard.dashboard().pendingAmount - 70 * 7) < 0.01,
+  `${pendingBeforeCashVoid} → ${dashboard.dashboard().pendingAmount}`
+)
+const csvPayAfterVoid = dashboard.exportCsv('payments')
+const cashRow = csvPayAfterVoid.split('\r\n').find((l) => l.includes(cashFlowOrder.orderNo))
+check('收款 CSV 里作废单这行还在，且订单状态列写着 void', !!cashRow && cashRow.includes('void'), cashRow ?? '没找到该行')
+
+section('数据守卫：汇率不能清空、已转的单不能改钱')
+let rateZeroErr = ''
+try {
+  orders.updateOrder(cashFlowOrder.id, {
+    customerId: c1.id,
+    currency: 'USD',
+    exchangeRate: 0,
+    baseCurrency: 'CNY'
+  })
+} catch (e) {
+  rateZeroErr = (e as Error).message
+}
+check('编辑订单把汇率清成 0 会被拦住', rateZeroErr.includes('汇率'), rateZeroErr)
+eq('被拦住后订单汇率没被改成 1', orders.getOrder(cashFlowOrder.id)?.exchangeRate, 7)
+
+// 已转订单的报价单：明细/价格不许事后改
+let qLockedErr = ''
+try {
+  quotations.saveQuotation({
+    id: q1.id,
+    customerId: c1.id,
+    currency: 'USD',
+    exchangeRate: 7.15,
+    exchangeRateDate: '2026-09-01',
+    items: [{ styleNo: 'A001', quantity: 9999, unitPrice: 1 }]
+  })
+} catch (e) {
+  qLockedErr = (e as Error).message
+}
+check('已转订单的报价单不能再改（价格凭据锁住）', qLockedErr.includes('已经转成订单'), qLockedErr)
+
+// 已转订单的打样单：钱的部分锁住，描述性的字眼还能改
+const smpLocked = samples.getSample(smpConv.id)!
+let smpMoneyErr = ''
+try {
+  samples.saveSample({
+    id: smpLocked.id,
+    customerId: smpLocked.customerId,
+    expressFee: 999,
+    currency: smpLocked.currency,
+    exchangeRate: smpLocked.exchangeRate,
+    exchangeRateDate: smpLocked.exchangeRateDate,
+    items: smpLocked.items.map((i) => ({ styleNo: i.styleNo, color: i.color, size: i.size, quantity: i.quantity, unitPrice: i.unitPrice }))
+  })
+} catch (e) {
+  smpMoneyErr = (e as Error).message
+}
+check('已转订单的打样单不能再改快递费', smpMoneyErr.includes('已经转成订单'), smpMoneyErr)
+const smpDescOk = samples.saveSample({
+  id: smpLocked.id,
+  customerId: smpLocked.customerId,
+  courier: '顺丰',
+  trackingNo: 'SF-R14',
+  expressFee: smpLocked.expressFee,
+  currency: smpLocked.currency,
+  exchangeRate: smpLocked.exchangeRate,
+  exchangeRateDate: smpLocked.exchangeRateDate,
+  items: smpLocked.items.map((i) => ({ styleNo: i.styleNo, color: 'Navy', size: i.size, quantity: i.quantity, unitPrice: i.unitPrice }))
+})
+eq('已转订单的打样单还能改快递单号', smpDescOk.trackingNo, 'SF-R14')
+eq('已转订单的打样单还能改颜色', smpDescOk.items[0].color, 'Navy')
+
+section('取消的打样单：不再计应收、不再催款、不能转单')
+const smpCancel = samples.saveSample({
+  customerId: c2.id,
+  sampleDate: '2026-08-01',
+  expressFee: 80,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: '2026-08-01',
+  items: [{ styleNo: 'R14-CANCEL', quantity: 1, unitPrice: 50 }]
+})
+const receivableBeforeCancel = money.sampleReceivable()
+const smpCancelled = samples.saveSample({
+  id: smpCancel.id,
+  customerId: c2.id,
+  status: 'cancelled',
+  sampleDate: '2026-08-01',
+  expressFee: 80,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: '2026-08-01',
+  items: [{ styleNo: 'R14-CANCEL', quantity: 1, unitPrice: 50 }]
+})
+eq('取消后打样单状态是已取消', smpCancelled.status, 'cancelled')
+eq('取消的打样单待收为 0', smpCancelled.receivableBase, 0)
+check(
+  '取消的打样费从全公司待收里扣掉了',
+  Math.abs(receivableBeforeCancel - money.sampleReceivable() - (50 + 80) * 7) < 0.01,
+  `${receivableBeforeCancel} → ${money.sampleReceivable()}`
+)
+check(
+  '取消的打样单不再出现在催款提醒里',
+  !dashboard.reminders().some((r) => r.kind === 'sample' && r.sampleId === smpCancel.id)
+)
+let smpCancelConvertErr = ''
+try {
+  samples.convertSampleToOrder(smpCancel.id)
+} catch (e) {
+  smpCancelConvertErr = (e as Error).message
+}
+check('取消的打样单不能转订单', smpCancelConvertErr.includes('已取消'), smpCancelConvertErr)
+
+section('PL 分批出货：已装扣减、超装拦下、箱内件数可改')
+const batchOrder = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7 })
+await orders.addOrderItem(batchOrder.id, {
+  styleNo: 'BATCH-1',
+  productName: '分批款',
+  color: 'Black',
+  size: 'M',
+  quantity: 100,
+  unitPrice: 5,
+  unitCost: 2
+})
+const b0 = orders.summarizeSkus(batchOrder.id)[0]
+eq('还没装箱时已装数量 = 0', b0.packedQuantity, 0)
+eq('还没装箱时未装箱数量 = 订单数量', b0.remainingQuantity, 100)
+
+const bPl1 = packing.createPackingList({
+  orderId: batchOrder.id,
+  containerNo: 'C1',
+  lines: [{ boxNo: 'NO.1', styleNo: 'BATCH-1', color: 'Black', size: 'M', quantity: 40 }]
+})
+const b1 = orders.summarizeSkus(batchOrder.id)[0]
+eq('装 40 件后已装数量 = 40', b1.packedQuantity, 40)
+eq('未装箱数量自动扣到 60', b1.remainingQuantity, 60)
+
+let overQtyErr = ''
+try {
+  packing.createPackingList({
+    orderId: batchOrder.id,
+    lines: [{ boxNo: 'NO.1', styleNo: 'BATCH-1', color: 'Black', size: 'M', quantity: 70 }]
+  })
+} catch (e) {
+  overQtyErr = (e as Error).message
+}
+check('第二批要装 70 件（只剩 60）会被拦下，并说清超了几件', overQtyErr.includes('超了 10 件'), overQtyErr)
+
+packing.createPackingList({
+  orderId: batchOrder.id,
+  lines: [{ boxNo: 'NO.1', styleNo: 'BATCH-1', color: 'Black', size: 'M', quantity: 60 }]
+})
+eq('第二批装剩下的 60 件放行', packing.listPackingLists(batchOrder.id).length, 2)
+eq('全部装完：未装箱数量归 0', orders.summarizeSkus(batchOrder.id)[0].remainingQuantity, 0)
+
+const bLine = bPl1[0].lines[0]
+packing.updatePackingListLine(batchOrder.id, bPl1[0].id, bLine.id, { netWeight: 20 })
+const bEdited = packing.updatePackingListLine(batchOrder.id, bPl1[0].id, bLine.id, { quantity: 30 })
+eq('PL 明细件数可以改（40 → 30）', bEdited[0].lines[0].quantity, 30)
+eq('件数改小后净重按比例跟着改（20kg → 15kg）', bEdited[0].lines[0].netWeight, 15)
+let lineOverErr = ''
+try {
+  packing.updatePackingListLine(batchOrder.id, bPl1[0].id, bLine.id, { quantity: 50 })
+} catch (e) {
+  lineOverErr = (e as Error).message
+}
+check('改大后累计超过订单数量也会被拦下', lineOverErr.includes('超了'), lineOverErr)
+
+/* ---------------- 批次出货：整单状态由批次汇总 ---------------- */
+section('批次出货：整单状态由批次汇总，升级不回退')
+const shipOrder = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7 })
+orders.updateOrder(shipOrder.id, {
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  piNo: shipOrder.piNo,
+  vessel: 'ORDER VESSEL V.9',
+  etdDate: '2026-12-15',
+  sealNo: 'ORDER-SEAL'
+})
+await orders.addOrderItem(shipOrder.id, {
+  styleNo: 'SHIP-1',
+  productName: '分批出运款',
+  color: 'Navy',
+  size: 'L',
+  quantity: 100,
+  unitPrice: 6,
+  unitCost: 3
+})
+
+const shipManual = orders.setShipStatus(shipOrder.id, 'shipped')
+eq('没有批次时，整单状态还能手工改', shipManual.shipStatus, 'shipped')
+eq('没有批次时不做推导', shipmentSummary(shipOrder.id).derivedStatus, null)
+
+const shipPls1 = packing.createPackingList({
+  orderId: shipOrder.id,
+  containerNo: 'CONT-A',
+  lines: [{ boxNo: 'NO.1', styleNo: 'SHIP-1', color: 'Navy', size: 'L', quantity: 40 }]
+})
+const shipPlA = shipPls1[0]
+const sumA = shipmentSummary(shipOrder.id)
+eq('建了首批后整单状态由批次接管', sumA.derivedStatus, 'preparing')
+eq('首批只装了 40 件', sumA.packedQuantity, 40)
+eq('首批还没出运', sumA.shippedQuantity, 0)
+eq('还有 1 个批次没出运', sumA.unshippedBatches, 1)
+eq('订单上缓存的出货状态回写成备货中', orders.getOrder(shipOrder.id)!.shipStatus, 'preparing')
+
+packing.updatePackingListInfo(shipOrder.id, shipPlA.id, {
+  vessel: 'EVER GIVEN V.001',
+  etdDate: '2026-11-01',
+  atdDate: '2026-11-02',
+  etaDate: '2026-12-01',
+  sealNo: 'SEAL-1',
+  blNo: 'BL-1',
+  shipStatus: 'shipped'
+})
+const sumB = shipmentSummary(shipOrder.id)
+eq('首批出运、货没装够 → 部分出运', sumB.derivedStatus, 'partial_shipped')
+eq('已出运件数 = 首批 40 件', sumB.shippedQuantity, 40)
+eq('订单缓存也变成部分出运', orders.getOrder(shipOrder.id)!.shipStatus, 'partial_shipped')
+const plA = packing.listPackingLists(shipOrder.id)[0]
+eq('批次船名航次存住了', plA.vessel, 'EVER GIVEN V.001')
+eq('批次 ETD/ATD/ETA 存住了', [plA.etdDate, plA.atdDate, plA.etaDate], ['2026-11-01', '2026-11-02', '2026-12-01'])
+eq('批次封条号/提单号存住了', [plA.sealNo, plA.blNo], ['SEAL-1', 'BL-1'])
+
+let manualAfterBatchErr = ''
+try {
+  orders.setShipStatus(shipOrder.id, 'delivered')
+} catch (e) {
+  manualAfterBatchErr = (e as Error).message
+}
+check(
+  '有批次接管后不能再手工改整单状态，并指路到装箱单',
+  manualAfterBatchErr.includes('批次') && manualAfterBatchErr.includes('装箱单'),
+  manualAfterBatchErr
+)
+let derivedPickErr = ''
+try {
+  packing.updatePackingListInfo(shipOrder.id, shipPlA.id, { shipStatus: 'partial_shipped' as any })
+} catch (e) {
+  derivedPickErr = (e as Error).message
+}
+check('「部分出运」是汇总出来的，批次上不能手选', derivedPickErr.includes('不能手工选'), derivedPickErr)
+
+const shipPls2 = packing.createPackingList({
+  orderId: shipOrder.id,
+  containerNo: 'CONT-B',
+  lines: [{ boxNo: 'NO.1', styleNo: 'SHIP-1', color: 'Navy', size: 'L', quantity: 60 }]
+})
+const shipPlB = shipPls2[1]
+const sumC = shipmentSummary(shipOrder.id)
+eq('两批加起来装够 100 件', sumC.packedQuantity, 100)
+eq('尾批还没出运，仍是部分出运', sumC.derivedStatus, 'partial_shipped')
+eq('还有 1 个批次没出运', sumC.unshippedBatches, 1)
+
+packing.updatePackingListInfo(shipOrder.id, shipPlB.id, { shipStatus: 'shipped' })
+eq('全部装够且全部出运 → 已出运', shipmentSummary(shipOrder.id).derivedStatus, 'shipped')
+
+packing.updatePackingListInfo(shipOrder.id, shipPlA.id, { shipStatus: 'cleared' })
+packing.updatePackingListInfo(shipOrder.id, shipPlB.id, { shipStatus: 'cleared' })
+eq('两批都清关 → 已清关', shipmentSummary(shipOrder.id).derivedStatus, 'cleared')
+
+packing.updatePackingListInfo(shipOrder.id, shipPlA.id, { shipStatus: 'delivered' })
+packing.updatePackingListInfo(shipOrder.id, shipPlB.id, { shipStatus: 'delivered' })
+const sumDelivered = shipmentSummary(shipOrder.id)
+eq('两批都签收 → 已签收', sumDelivered.derivedStatus, 'delivered')
+eq('已签收后订单缓存同步', orders.getOrder(shipOrder.id)!.shipStatus, 'delivered')
+eq(
+  '签收日期按本地日期落档',
+  packing.listPackingLists(shipOrder.id).map((p) => p.deliveredAt),
+  [localDate(), localDate()]
+)
+
+packing.updatePackingListInfo(shipOrder.id, shipPlA.id, { shipStatus: 'packed' })
+eq('退回一批 → 又变回部分出运（已走的那批仍算已出）', shipmentSummary(shipOrder.id).derivedStatus, 'partial_shipped')
+let depDelErr = ''
+try {
+  packing.deletePackingList(shipOrder.id, shipPlB.id)
+} catch (e) {
+  depDelErr = (e as Error).message
+}
+check('已签收的批次不能直接删，提示先退回', depDelErr.includes('不能删除') && depDelErr.includes('已签收'), depDelErr)
+packing.updatePackingListInfo(shipOrder.id, shipPlB.id, { shipStatus: 'packed' })
+const afterDelete = packing.deletePackingList(shipOrder.id, shipPlB.id)
+eq('退回已包装后可以删批次', afterDelete.length, 1)
+eq('删掉尾批后整单回到备货中', shipmentSummary(shipOrder.id).derivedStatus, 'preparing')
+
+// 已出运批次的箱明细是凭据：加/改/删都要先退回「已包装」
+packing.updatePackingListInfo(shipOrder.id, shipPlA.id, { shipStatus: 'shipped' })
+let lockEditErr = ''
+try {
+  packing.updatePackingListLine(shipOrder.id, shipPlA.id, shipPlA.lines[0].id, { quantity: 20 })
+} catch (e) {
+  lockEditErr = (e as Error).message
+}
+check('已出运批次的箱明细不能改', lockEditErr.includes('明细不能改'), lockEditErr)
+let lockAddErr = ''
+try {
+  packing.addPackingListLine(shipOrder.id, shipPlA.id, { styleNo: 'SHIP-1', color: 'Navy', size: 'L', quantity: 1 })
+} catch (e) {
+  lockAddErr = (e as Error).message
+}
+check('已出运批次的箱明细不能加', lockAddErr.includes('明细不能改'), lockAddErr)
+let lockDelErr = ''
+try {
+  packing.deletePackingListLine(shipOrder.id, shipPlA.id, shipPlA.lines[0].id)
+} catch (e) {
+  lockDelErr = (e as Error).message
+}
+check('已出运批次的箱明细不能删', lockDelErr.includes('明细不能改'), lockDelErr)
+packing.updatePackingListInfo(shipOrder.id, shipPlA.id, { shipStatus: 'packed' })
+
+// 订单这头也不能减到已装箱数以下，否则会出现「已出 40 / 订单 20 件」
+const shipItem = orders.getOrder(shipOrder.id)!.items[0]
+let shrinkErr = ''
+try {
+  orders.updateOrderItem(shipOrder.id, shipItem.id, { quantity: 20 })
+} catch (e) {
+  shrinkErr = (e as Error).message
+}
+check('订单数量不能减到已装箱数以下', shrinkErr.includes('订单数量不能改到 40 件以下'), shrinkErr)
+let swapSkuErr = ''
+try {
+  orders.updateOrderItem(shipOrder.id, shipItem.id, { color: 'Red' })
+} catch (e) {
+  swapSkuErr = (e as Error).message
+}
+check('已装箱的款不能直接换颜色/尺码', swapSkuErr.includes('不能直接换'), swapSkuErr)
+let removePackedErr = ''
+try {
+  orders.removeOrderItem(shipOrder.id, shipItem.id)
+} catch (e) {
+  removePackedErr = (e as Error).message
+}
+check('已装箱的订单行不能直接删', removePackedErr.includes('不能直接删'), removePackedErr)
+
+// 装箱单不能凭空多出订单里没有的款
+let ghostSkuErr = ''
+try {
+  packing.createPackingList({
+    orderId: shipOrder.id,
+    lines: [{ boxNo: 'NO.1', styleNo: 'NOPE-1', color: 'Navy', size: 'L', quantity: 1 }]
+  })
+} catch (e) {
+  ghostSkuErr = (e as Error).message
+}
+check('装箱单不能装订单里没有的款', ghostSkuErr.includes('订单里没有 NOPE-1'), ghostSkuErr)
+
+// 升级前的老批次：ship_status 为 NULL，不参与推导，订单保持手工状态
+const legacyOrder = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7 })
+await orders.addOrderItem(legacyOrder.id, {
+  styleNo: 'LEGACY-1',
+  productName: '升级前老单',
+  color: 'Black',
+  size: 'M',
+  quantity: 50,
+  unitPrice: 3,
+  unitCost: 1
+})
+const legacyRes = getDb().run(
+  `INSERT INTO packing_lists(order_id, pl_no, container_no, note, created_at, ship_status)
+   VALUES(?,?,?,?,?,NULL)`,
+  [legacyOrder.id, 'PL-LEGACY-1', '', '', new Date().toISOString()]
+)
+getDb().run(
+  `INSERT INTO packing_list_lines(packing_list_id, box_no, style_no, product_name, color, size, quantity)
+   VALUES(?,?,?,?,?,?,?)`,
+  [Number(legacyRes.lastInsertRowid), 'NO.1', 'LEGACY-1', '升级前老单', 'Black', 'M', 50]
+)
+eq('老批次（状态为空）不接管整单状态', shipmentSummary(legacyOrder.id).derivedStatus, null)
+const legacyManual = orders.setShipStatus(legacyOrder.id, 'delivered')
+eq('老单还能按手工状态走', legacyManual.shipStatus, 'delivered')
+const legacyPl = packing.listPackingLists(legacyOrder.id)[0]
+packing.updatePackingListInfo(legacyOrder.id, legacyPl.id, { containerNo: 'C-OLD', vessel: 'OLD V.1' })
+eq('只补老批次柜号/船期，不动整单手工状态', orders.getOrder(legacyOrder.id)!.shipStatus, 'delivered')
+eq('老批次状态仍为空（没有选就不接管）', packing.listPackingLists(legacyOrder.id)[0].shipStatus, null)
+let lastLineErr = ''
+try {
+  packing.deletePackingListLine(legacyOrder.id, legacyPl.id, legacyPl.lines[0].id)
+} catch (e) {
+  lastLineErr = (e as Error).message
+}
+check('装箱单不能被删成一箱都没有', lastLineErr.includes('留不住'), lastLineErr)
+
+// 一张单混有老批次 + 新批次：仍然不推导，等老批次补上状态再接管
+const mixedOrder = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7 })
+await orders.addOrderItem(mixedOrder.id, {
+  styleNo: 'MIX-1',
+  productName: '混合批次款',
+  color: 'Black',
+  size: 'M',
+  quantity: 100,
+  unitPrice: 4,
+  unitCost: 2
+})
+const mixedLegacyRes = getDb().run(
+  `INSERT INTO packing_lists(order_id, pl_no, container_no, note, created_at, ship_status)
+   VALUES(?,?,?,?,?,NULL)`,
+  [mixedOrder.id, 'PL-MIX-LEGACY', '', '', new Date().toISOString()]
+)
+getDb().run(
+  `INSERT INTO packing_list_lines(packing_list_id, box_no, style_no, product_name, color, size, quantity)
+   VALUES(?,?,?,?,?,?,?)`,
+  [Number(mixedLegacyRes.lastInsertRowid), 'NO.1', 'MIX-1', '混合批次款', 'Black', 'M', 40]
+)
+orders.setShipStatus(mixedOrder.id, 'delivered')
+packing.createPackingList({
+  orderId: mixedOrder.id,
+  lines: [{ boxNo: 'NO.1', styleNo: 'MIX-1', color: 'Black', size: 'M', quantity: 30 }]
+})
+eq('混有老批次时不推导', shipmentSummary(mixedOrder.id).derivedStatus, null)
+eq('加新批次不会把手工「已签收」拉回来', orders.getOrder(mixedOrder.id)!.shipStatus, 'delivered')
+const mixedLegacyPl = packing.listPackingLists(mixedOrder.id)[0]
+packing.updatePackingListInfo(mixedOrder.id, mixedLegacyPl.id, { shipStatus: 'packed' })
+eq('老批次补上状态后，整单才由批次汇总', shipmentSummary(mixedOrder.id).derivedStatus, 'preparing')
+
+const shipOrderFull = orders.getOrder(shipOrder.id)!
+const plPaperBatch = renderPl({ order: shipOrderFull, settings: getSettings(), images: {} }, packing.listPackingLists(shipOrder.id)[0])
+check('PL 纸面用批次的船名航次', plPaperBatch.includes('EVER GIVEN V.001'), plPaperBatch)
+check('PL 纸面用批次的 ETD', plPaperBatch.includes('2026-11-01'))
+check('PL 纸面用批次的封条号', plPaperBatch.includes('SEAL-1'))
+check('PL 纸面没有串成订单级船期', !plPaperBatch.includes('ORDER VESSEL V.9'))
+const ciPaperOrder = renderCi({ order: shipOrderFull, settings: getSettings(), images: {} })
+check('CI 仍用订单级船名航次', ciPaperOrder.includes('ORDER VESSEL V.9'))
+check('CI 仍用订单级 ETD', ciPaperOrder.includes('2026-12-15'))
+check('CI 不串批次的船期', !ciPaperOrder.includes('EVER GIVEN V.001'))
 
 /* ---------------- N35：订单列表能按款号搜 ---------------- */
 section('订单列表能按款号搜')

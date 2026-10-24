@@ -21,6 +21,7 @@ export type ShipStatus =
   | 'shipped' // 已出运
   | 'cleared' // 已清关
   | 'delivered' // 已签收
+  | 'partial_shipped' // 部分出运（只由批次汇总得出，不能手选）
 
 export const PAYMENT_STATUS_LABEL: Record<PaymentStatus, string> = {
   draft: '草稿',
@@ -39,7 +40,8 @@ export const SHIP_STATUS_LABEL: Record<ShipStatus, string> = {
   packed: '已包装',
   shipped: '已出运',
   cleared: '已清关',
-  delivered: '已签收'
+  delivered: '已签收',
+  partial_shipped: '部分出运'
 }
 
 export const PAYMENT_STATUS_ORDER: PaymentStatus[] = [
@@ -53,6 +55,7 @@ export const PAYMENT_STATUS_ORDER: PaymentStatus[] = [
   'void'
 ]
 
+/** 手工能选的状态（部分出运是批次汇总出来的，不出现在下拉里） */
 export const SHIP_STATUS_ORDER: ShipStatus[] = [
   'not_prepared',
   'preparing',
@@ -267,6 +270,8 @@ export interface OrderDetail extends Order {
   /** 待收原始值（可能为负，表示多收了） */
   remainingRaw: number
   depositAmount: number
+  /** 出货汇总（批次件数与推导状态） */
+  shipSummary: ShipSummary
 }
 
 /** 订单照片（验货照 / 柜照等） */
@@ -358,9 +363,34 @@ export interface PackingList {
   plNo: string
   /** 批次/柜号 */
   containerNo: string
+  /** null = 迁移前的老批次：不参与订单状态推导，沿用订单级手工状态 */
+  shipStatus: ShipStatus | null
+  vessel: string
+  /** 计划开船日 */
+  etdDate: string | null
+  /** 实际开船日 */
+  atdDate: string | null
+  /** 预计到港日 */
+  etaDate: string | null
+  sealNo: string
+  /** 提单号（只登记，不上纸） */
+  blNo: string
+  /** 全部批次签收的日期（本月完成按它归集，不跟 updated_at 走） */
+  deliveredAt: string | null
   note: string
   createdAt: string
   lines: PackingListLine[]
+}
+
+/** 一张订单的出货汇总：状态由批次 + 件数推导 */
+export interface ShipSummary {
+  orderedQuantity: number
+  packedQuantity: number
+  shippedQuantity: number
+  batchCount: number
+  unshippedBatches: number
+  /** null = 当前没有可推导的批次，订单仍用手工状态 */
+  derivedStatus: ShipStatus | null
 }
 
 /** 装箱单明细行（一箱一行） */
@@ -466,6 +496,9 @@ export interface Reminder {
   days: number
   /** 打样提醒的打样单 id（非打样提醒为 0） */
   sampleId?: number
+  /** 出货提醒的批次 id / 装箱单号（同单多批各提醒各的） */
+  plId?: number
+  plNo?: string
 }
 
 /** 单据种类 */
@@ -577,6 +610,10 @@ export interface SkuSummary {
   color: string
   size: string
   quantity: number
+  /** 已经装进装箱单的数量（分批出货时，后面几批只装剩下的） */
+  packedQuantity: number
+  /** 还没装箱的数量 = quantity − packedQuantity */
+  remainingQuantity: number
 }
 
 /** 报表 */

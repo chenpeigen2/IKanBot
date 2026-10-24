@@ -108,6 +108,8 @@ const api: IKanApi = {
     list: (orderId: number) => call<any[]>('pl:list', orderId),
     create: (input: any) => call<any[]>('pl:create', input),
     remove: (orderId: number, plId: number) => call<any[]>('pl:delete', orderId, plId),
+    updateInfo: (orderId: number, plId: number, patch: any) =>
+      call<any[]>('pl:updateInfo', orderId, plId, patch),
     updateLine: (orderId: number, plId: number, lineId: number, patch: any) =>
       call<any[]>('pl:updateLine', orderId, plId, lineId, patch),
     addLine: (orderId: number, plId: number, line: any) => call<any[]>('pl:addLine', orderId, plId, line),

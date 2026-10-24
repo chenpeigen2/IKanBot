@@ -246,6 +246,14 @@ export function mapPackingList(r: Row, lines: PackingListLine[]): PackingList {
     orderId: num(r.order_id),
     plNo: str(r.pl_no),
     containerNo: str(r.container_no),
+    shipStatus: (optStr(r.ship_status) as PackingList['shipStatus']) ?? null,
+    vessel: str(r.vessel),
+    etdDate: optStr(r.etd_date),
+    atdDate: optStr(r.atd_date),
+    etaDate: optStr(r.eta_date),
+    sealNo: str(r.seal_no),
+    blNo: str(r.bl_no),
+    deliveredAt: optStr(r.delivered_at),
     note: str(r.note),
     createdAt: str(r.created_at),
     lines
@@ -287,12 +295,16 @@ export function mapReminder(r: Row): Reminder {
 }
 
 export function mapSkuSummary(r: Row): SkuSummary {
+  const quantity = num(r.quantity)
+  const packedQuantity = num(r.packed_quantity)
   return {
     styleNo: str(r.style_no),
     productName: str(r.product_name),
     color: str(r.color),
     size: str(r.size),
-    quantity: num(r.quantity)
+    quantity,
+    packedQuantity,
+    remainingQuantity: Math.max(0, quantity - packedQuantity)
   }
 }
 

@@ -8,6 +8,7 @@ import {
   type Incoterm,
   type PaymentMethod
 } from '../../../shared/types'
+import { localDate } from '../../../shared/date'
 
 interface EditForm {
   customerId: number
@@ -88,12 +89,25 @@ export default function EditOrderModal({
   }, [])
 
   const save = async () => {
+    const rate = Number(form.exchangeRate)
+    if (!(rate > 0)) {
+      toast('汇率必须填大于 0 的数。清空不能保存——整单金额会按错汇率折算', 'error')
+      return
+    }
+    // 已经收过钱的单，换汇率等于把已收的钱重新折算，对账单会对不上 → 先问一声
+    const paidCount = (order.payments ?? []).length
+    if (rate !== Number(order.exchangeRate) && paidCount > 0) {
+      const ok = confirm(
+        `这张单已经记过 ${paidCount} 笔收款。换汇率，已收的钱折成本位币也会跟着变，跟银行流水对账时对不上。\n\n确认按新汇率保存吗？`
+      )
+      if (!ok) return
+    }
     try {
       await window.api.orders.update(order.id, {
         customerId: form.customerId,
         piNo: form.piNo.trim(),
         currency: form.currency,
-        exchangeRate: Number(form.exchangeRate) || 1,
+        exchangeRate: rate,
         exchangeRateDate: form.exchangeRateDate || null,
         baseCurrency: settings?.baseCurrency ?? 'CNY',
         incoterm: form.incoterm,
@@ -124,7 +138,7 @@ export default function EditOrderModal({
   const extendValidity = (days: number) => {
     const base = form.validUntil ? new Date(form.validUntil + 'T00:00:00') : new Date()
     base.setDate(base.getDate() + days)
-    setForm({ ...form, validUntil: base.toISOString().slice(0, 10) })
+    setForm({ ...form, validUntil: localDate(base) })
   }
 
   return (
@@ -375,6 +389,9 @@ export default function EditOrderModal({
             placeholder="如 CN1234567"
           />
         </div>
+      </div>
+      <div className="hint" style={{ marginTop: -4 }}>
+        这里是整单默认船期：PI / CI 用这里的值。分批出运时，装箱单批次可以单独填自己的船期，填了优先用批次的。
       </div>
 
       <h3 style={{ fontSize: 13, margin: '12px 0 4px' }}>费用（运费 / 保险费 / 其他）</h3>

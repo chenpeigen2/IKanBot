@@ -13,6 +13,23 @@ export function localDate(d: Date = new Date()): string {
   return `${y}-${m}-${day}`
 }
 
+/**
+ * 数据库里存的时间戳（UTC ISO 串）→ 本地日期。
+ * 直接 slice(0,10) 拿到的是 UTC 日期，UTC+8 的凌晨 0~8 点会串到前一天，
+ * 月底就会把整单记到上个月。已经是 YYYY-MM-DD 的本地日期原样返回。
+ */
+export function localDateOf(v: string | null | undefined): string {
+  if (!v) return ''
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v
+  const d = new Date(v)
+  return Number.isNaN(d.getTime()) ? '' : localDate(d)
+}
+
+/** 本地月份 YYYY-MM（报表按月归集用） */
+export function localMonthOf(v: string | null | undefined): string {
+  return localDateOf(v).slice(0, 7)
+}
+
 /** 在某个日期上加减天数，返回 YYYY-MM-DD */
 export function addDays(dateStr: string, days: number): string {
   const base = dateStr ? new Date(dateStr + 'T00:00:00') : new Date()

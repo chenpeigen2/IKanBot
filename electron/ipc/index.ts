@@ -131,6 +131,9 @@ export function registerIpc(): void {
   handle('pl:list', (orderId: number) => packing.listPackingLists(orderId))
   handle('pl:create', (input: packing.PackingListInput) => packing.createPackingList(input))
   handle('pl:delete', (orderId: number, plId: number) => packing.deletePackingList(orderId, plId))
+  handle('pl:updateInfo', (orderId: number, plId: number, patch: any) =>
+    packing.updatePackingListInfo(orderId, plId, patch)
+  )
   handle('pl:updateLine', (orderId: number, plId: number, lineId: number, patch: any) =>
     packing.updatePackingListLine(orderId, plId, lineId, patch)
   )

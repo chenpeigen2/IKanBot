@@ -21,6 +21,7 @@
  *   而报表销售额记 0 —— 同一单两个毛利，差 50 USD，纯属漂亮的假数字。
  */
 import { getDb } from '../db'
+import { localMonthOf } from '../../src/shared/date'
 import type { QuotationCharge } from '../../src/shared/types'
 
 /** 解析费用行 JSON（运费/保险等） */
@@ -168,6 +169,21 @@ export interface MoneyListFilter {
 export const EXCLUDED_STATUSES = ['draft', 'expired', 'void']
 
 /**
+ * 现金流口径：只排除草稿单（还没成为正式订单）。
+ * 已作废 / 已失效的订单如果真收到了钱，钱就在账上，必须留在收款流水里；
+ * 只是不再计入销售额和待收。两个口径各自用一个常量，不许各写各的。
+ */
+export const CASHFLOW_EXCLUDED_STATUSES = ['draft']
+
+/** 生成 "列 NOT IN (?,?,?)" 片段，配合上面两个状态集合用 */
+export function notInStatuses(column: string, statuses: string[]): { sql: string; params: string[] } {
+  return {
+    sql: `${column} NOT IN (${statuses.map(() => '?').join(',')})`,
+    params: [...statuses]
+  }
+}
+
+/**
  * 汇总口径：把所有订单的货值 / 费用 / 已收 / 待收一次算出来，
  * 订单列表、订单详情、客户页、工作台、报表、CSV 导出全部用这一份数据。
  */
@@ -189,7 +205,8 @@ export function listOrderMoney(filter: MoneyListFilter = {}): OrderMoneyRow[] {
     params.push(filter.customerId)
   }
   if (filter.month) {
-    where.push("strftime('%Y-%m', o.created_at) = ?")
+    // created_at 是 UTC ISO 串，按月筛选必须换成本地月份，否则月底的单会串月
+    where.push("strftime('%Y-%m', o.created_at, 'localtime') = ?")
     params.push(filter.month)
   }
 
@@ -255,7 +272,7 @@ export function listOrderMoney(filter: MoneyListFilter = {}): OrderMoneyRow[] {
       currency: String(r.currency ?? 'USD'),
       exchangeRate: rate,
       createdAt,
-      month: createdAt.slice(0, 7),
+      month: localMonthOf(createdAt),
       paymentStatus: String(r.payment_status ?? ''),
       shipStatus: String(r.ship_status ?? ''),
       incoterm: String(r.incoterm ?? ''),
@@ -292,7 +309,8 @@ export function totalReceivable(filter: MoneyListFilter = {}): number {
  */
 export function sampleReceivable(customerId?: number): number {
   const db = getDb()
-  const where = ["s.fee_status = 'unpaid'"]
+  // 取消的打样单不再向客户收钱：样品都没做/没寄，催款是错的
+  const where = ["s.fee_status = 'unpaid'", "s.status != 'cancelled'"]
   const params: (string | number)[] = []
   if (customerId != null) {
     where.push('s.customer_id = ?')

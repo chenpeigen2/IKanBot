@@ -420,9 +420,9 @@ export function renderPl(ctx: DocContext, pl: PackingList): string {
         <b>Order No.:</b> ${esc(order.orderNo)}<br>
         <b>PI No.:</b> ${esc(order.piNo)}
         ${pl.containerNo ? `<br><b>Container:</b> ${esc(pl.containerNo)}` : ''}
-        ${order.sealNo ? `<br><b>Seal No.:</b> ${esc(order.sealNo)}` : ''}
-        ${order.vessel ? `<br><b>Vessel/Voyage:</b> ${esc(order.vessel)}` : ''}
-        ${order.etdDate ? `<br><b>ETD:</b> ${esc(order.etdDate)}` : ''}
+        ${pl.sealNo || order.sealNo ? `<br><b>Seal No.:</b> ${esc(pl.sealNo || order.sealNo)}` : ''}
+        ${pl.vessel || order.vessel ? `<br><b>Vessel/Voyage:</b> ${esc(pl.vessel || order.vessel)}` : ''}
+        ${pl.etdDate || order.etdDate ? `<br><b>ETD:</b> ${esc(pl.etdDate || order.etdDate)}` : ''}
       </div>
     </div>
   </div>

@@ -185,13 +185,18 @@ export default function Quotations() {
                           )}
                           <ActionMenu
                             items={[
-                              {
-                                text: '编辑报价单',
-                                onClick: () => {
-                                  setDetail(null)
-                                  setEditing(q)
-                                }
-                              },
+                              // 已转订单的报价单是原始凭据，不再提供编辑入口（后端也会拦）
+                              ...(q.convertedOrderId
+                                ? []
+                                : [
+                                    {
+                                      text: '编辑报价单',
+                                      onClick: () => {
+                                        setDetail(null)
+                                        setEditing(q)
+                                      }
+                                    }
+                                  ]),
                               { text: '删除', danger: true, onClick: () => void remove(q) }
                             ]}
                           />
@@ -383,9 +388,11 @@ function QuotationDetailModal({
             <Button  onClick={onClose}>
               关闭
             </Button>
-            <Button  onClick={() => onEdit(quotation)}>
-              编辑
-            </Button>
+            {!quotation.convertedOrderId && (
+              <Button  onClick={() => onEdit(quotation)}>
+                编辑
+              </Button>
+            )}
             {quotation.convertedOrderId ? (
               <Button variant="primary"  onClick={() => navigate(`/orders/${quotation.convertedOrderId}`)}>
                 看已转的订单

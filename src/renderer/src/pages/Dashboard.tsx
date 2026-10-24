@@ -99,9 +99,9 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
               ) : reminders.length === 0 ? (
                 <div className="empty">没有待办事项，一切顺利</div>
               ) : (
-                reminders.map((r) => (
+                reminders.map((r, i) => (
                   <div
-                    key={`${r.kind}-${r.orderId}-${r.sampleId ?? 0}`}
+                    key={`${r.kind}-${r.orderId}-${r.plId ?? r.sampleId ?? 0}-${i}`}
                     className="reminder-item"
                     onClick={() =>
                       // 打样提醒（N23）跳打样单页；其余跳订单详情
@@ -117,7 +117,9 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
                       </div>
                       <div className="reminder-sub">{r.message}</div>
                     </div>
-                    <span className="faint nowrap">{r.kind === 'ship' ? fmtDate(null) : `${r.days} 天`}</span>
+                    <span className="faint nowrap">
+                      {r.kind === 'ship' && r.days < 0 ? `逾期 ${-r.days} 天` : `${r.days} 天`}
+                    </span>
                   </div>
                 ))
               )}

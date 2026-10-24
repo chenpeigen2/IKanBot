@@ -16,6 +16,7 @@ import {
 } from '../../../shared/types'
 import { renderPi, renderPl, renderCi, orderDocAmount, ciDocAmount, type ImageMap } from '../../../shared/documents'
 import { imageUrl } from '../imageUrl'
+import { localDate } from '../../../shared/date'
 import EditOrderModal from './EditOrderModal'
 
 type PreviewState = {
@@ -118,6 +119,20 @@ export default function OrderDetail() {
   const openPl = async (plId: number) => {
     const pl = order.packingLists.find((p: any) => p.id === plId)
     if (!pl) return
+    // 纸面缺项不拦死，但要让人知道这一版会空着什么（不改版式，不补字段）
+    const missing: string[] = []
+    if (!pl.containerNo) missing.push('柜号')
+    // 纸面会回退到订单级船期，订单上有就不算空着
+    if (!(pl.vessel || order.vessel)) missing.push('船名航次')
+    if (!(pl.etdDate || order.etdDate)) missing.push('ETD')
+    if (!(pl.sealNo || order.sealNo)) missing.push('封条号')
+    if (pl.lines.some((l: any) => l.netWeight == null)) missing.push('净重')
+    if (
+      missing.length > 0 &&
+      !confirm(`批次 ${pl.plNo} 还有没填的：${missing.join('、')}。纸面上会空着，仍要预览吗？`)
+    ) {
+      return
+    }
     const images = await buildImages()
     const rev = await window.api.docs.nextVersion(pl.plNo, 'pl')
     const render = (pending: boolean) => renderPl({ order, settings, images, rev, pending }, pl)
@@ -459,7 +474,7 @@ export default function OrderDetail() {
             <div className="card-head">
               <h3>状态推进</h3>
               <div className="spacer" />
-              <span className="faint">收款状态可手动改，出货状态独立推进</span>
+              <span className="faint">收款状态可手动改；出货状态有批次时由批次汇总</span>
             </div>
             <div className="card-body">
               {/* R1-④：状态只有一种形态（tag）。不点「改状态」就不出现下拉框，
@@ -497,7 +512,23 @@ export default function OrderDetail() {
               </div>
               <div className="field">
                 <label>出货状态</label>
-                {editShip ? (
+                {order.shipSummary?.derivedStatus ? (
+                  <>
+                    <div className="row">
+                      <ShipTag status={order.shipStatus} />
+                      <span className="faint">
+                        已出 {num(order.shipSummary.shippedQuantity)} / {num(order.shipSummary.orderedQuantity)} 件 ·{' '}
+                        {order.shipSummary.batchCount} 个批次
+                        {order.shipSummary.unshippedBatches > 0
+                          ? `，还有 ${order.shipSummary.unshippedBatches} 批没出运`
+                          : ''}
+                      </span>
+                    </div>
+                    <div className="hint">
+                      整单状态由装箱单批次汇总，不能在这里手改。到下面「装箱单」里改对应批次的出运状态。
+                    </div>
+                  </>
+                ) : editShip ? (
                   <select
                     value={order.shipStatus}
                     autoFocus
@@ -519,6 +550,13 @@ export default function OrderDetail() {
                     <Button variant="ghost" size="sm"  onClick={() => setEditShip(true)}>
                       改状态
                     </Button>
+                  </div>
+                )}
+                {!order.shipSummary?.derivedStatus && (
+                  <div className="hint">
+                    {order.shipSummary?.batchCount > 0
+                      ? '装箱单是升级前的老批次，出运状态还没标，整单仍按手工状态推进。到「装箱单」里补上状态后，会自动改由批次汇总。'
+                      : '还没有装箱单批次，这张单仍按手工状态推进。'}
                   </div>
                 )}
               </div>
@@ -871,6 +909,27 @@ function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<voi
     await onChange()
   }
 
+  // 已装箱/已出运的明细改不动：报错要说给人听，输入框也要跟着回退到真实值
+  const saveItem = async (itemId: number, patch: Record<string, unknown>, okMsg?: string) => {
+    try {
+      await window.api.orders.updateItem(order.id, itemId, patch)
+      if (okMsg) toast(okMsg)
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
+    await refresh()
+  }
+
+  const removeItem = async (itemId: number) => {
+    try {
+      await window.api.orders.removeItem(order.id, itemId)
+      toast('已删除，操作历史里已留痕')
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
+    await refresh()
+  }
+
   return (
     <>
       <div className="toolbar sec-top">
@@ -914,8 +973,7 @@ function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<voi
                       onBlur={async (e) => {
                         const v = e.target.value
                         if (v === it.color) return
-                        await window.api.orders.updateItem(order.id, it.id, { color: v })
-                        await refresh()
+                        await saveItem(it.id, { color: v })
                       }}
                     />
                     <datalist id={`colors-${it.id}`}>
@@ -932,8 +990,7 @@ function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<voi
                       onBlur={async (e) => {
                         const v = e.target.value
                         if (v === it.size) return
-                        await window.api.orders.updateItem(order.id, it.id, { size: v })
-                        await refresh()
+                        await saveItem(it.id, { size: v })
                       }}
                     />
                     <datalist id={`sizes-${it.id}`}>
@@ -950,8 +1007,7 @@ function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<voi
                       onBlur={async (e) => {
                         const v = Number(e.target.value)
                         if (v === it.quantity) return
-                        await window.api.orders.updateItem(order.id, it.id, { quantity: v })
-                        await refresh()
+                        await saveItem(it.id, { quantity: v })
                       }}
                     />
                   </td>
@@ -964,8 +1020,7 @@ function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<voi
                       onBlur={async (e) => {
                         const v = Number(e.target.value)
                         if (v === it.unitPrice) return
-                        await window.api.orders.updateItem(order.id, it.id, { unitPrice: v })
-                        await refresh()
+                        await saveItem(it.id, { unitPrice: v })
                       }}
                     />
                   </td>
@@ -981,9 +1036,7 @@ function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<voi
                         const raw = e.target.value.trim()
                         const v = raw === '' ? null : Number(raw)
                         if (v === it.unitCost) return
-                        await window.api.orders.updateItem(order.id, it.id, { unitCost: v })
-                        toast(v == null ? '已清空这行的成本（毛利变成不可信）' : '成本已录入')
-                        await refresh()
+                        await saveItem(it.id, { unitCost: v }, v == null ? '已清空这行的成本（毛利变成不可信）' : '成本已录入')
                       }}
                     />
                   </td>
@@ -1002,9 +1055,7 @@ function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<voi
                           )
                         )
                           return
-                        await window.api.orders.removeItem(order.id, it.id)
-                        toast('已删除，操作历史里已留痕')
-                        await refresh()
+                        await removeItem(it.id)
                       }}
                     >
                       删除
@@ -1266,7 +1317,7 @@ function AddItemsModal({
 function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<void> }) {
   const toast = useToast()
   const [form, setForm] = useState({
-    paidAt: new Date().toISOString().slice(0, 10),
+    paidAt: localDate(),
     amount: '',
     method: 'T/T',
     bankRef: '',
@@ -1413,7 +1464,30 @@ function PackingTab({
   onChange: () => Promise<void>
   onPreview: (plId: number) => void
 }) {
+  const toast = useToast()
   const [showCreate, setShowCreate] = useState(false)
+  const [editPl, setEditPl] = useState<any | null>(null)
+
+  // 已出运批次的箱明细是锁住的：报错要弹出来，输入框跟着回退到库里的值
+  const saveLine = async (plId: number, lineId: number, patch: Record<string, unknown>, revert?: () => void) => {
+    try {
+      await window.api.pl.updateLine(order.id, plId, lineId, patch)
+      await onChange()
+    } catch (e) {
+      toast((e as Error).message, 'error')
+      revert?.()
+      await onChange()
+    }
+  }
+
+  const removeLine = async (plId: number, lineId: number) => {
+    try {
+      await window.api.pl.deleteLine(order.id, plId, lineId)
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
+    await onChange()
+  }
 
   return (
     <>
@@ -1431,9 +1505,13 @@ function PackingTab({
           <div key={pl.id} style={{ borderBottom: '1px solid #eef1f6' }}>
             <div className="toolbar sec-top">
               <strong className="mono">{pl.plNo}</strong>
+              {pl.shipStatus ? <ShipTag status={pl.shipStatus} /> : <span className="faint">升级前的老批次</span>}
               {pl.containerNo ? <span className="tag blue">柜号 {pl.containerNo}</span> : null}
               <span className="faint">{pl.lines.length} 箱</span>
               <div className="spacer" />
+              <Button size="sm"  onClick={() => setEditPl(pl)}>
+                编辑批次
+              </Button>
               <Button size="sm"  onClick={() => onPreview(pl.id)}>
                 预览
               </Button>
@@ -1441,12 +1519,29 @@ function PackingTab({
                 
                 onClick={async () => {
                   if (!confirm(`删除装箱单 ${pl.plNo}？`)) return
-                  await window.api.pl.remove(order.id, pl.id)
-                  await onChange()
+                  try {
+                    await window.api.pl.remove(order.id, pl.id)
+                    await onChange()
+                  } catch (e) {
+                    toast((e as Error).message, 'error')
+                  }
                 }}
               >
                 删除
               </Button>
+            </div>
+            <div className="faint" style={{ fontSize: 12, padding: '0 0 6px' }}>
+              {[
+                pl.vessel && `船名航次 ${pl.vessel}`,
+                pl.etdDate && `ETD ${pl.etdDate}`,
+                pl.atdDate && `实际开船 ${pl.atdDate}`,
+                pl.etaDate && `ETA ${pl.etaDate}`,
+                pl.sealNo && `封条 ${pl.sealNo}`,
+                pl.blNo && `提单 ${pl.blNo}`,
+                pl.note
+              ]
+                .filter(Boolean)
+                .join(' · ') || '船期未填，点「编辑批次」补录'}
             </div>
             <div className="table-wrap">
               <table className="data">
@@ -1472,8 +1567,10 @@ function PackingTab({
                           className="col-num-sm"
                           defaultValue={l.boxNo}
                           onBlur={async (e) => {
-                            await window.api.pl.updateLine(order.id, pl.id, l.id, { boxNo: e.target.value })
-                            await onChange()
+                            const input = e.target
+                            await saveLine(pl.id, l.id, { boxNo: input.value }, () => {
+                              input.value = String(l.boxNo ?? '')
+                            })
                           }}
                         />
                       </td>
@@ -1481,7 +1578,27 @@ function PackingTab({
                       <td>{l.productName}</td>
                       <td>{l.color}</td>
                       <td>{l.size}</td>
-                      <td className="num">{num(l.quantity)}</td>
+                      <td className="num">
+                        <input
+                          type="number"
+                          className="col-num-sm"
+                          defaultValue={l.quantity}
+                          onBlur={async (e) => {
+                            const input = e.target
+                            const v = Number(input.value)
+                            if (!(v > 0)) {
+                              toast('箱内件数必须大于 0', 'error')
+                              input.value = String(l.quantity)
+                              return
+                            }
+                            if (v === l.quantity) return
+                            // 超装会被后端拦下：把输入框还原成库里的数，别让人以为已经改成功
+                            await saveLine(pl.id, l.id, { quantity: v }, () => {
+                              input.value = String(l.quantity)
+                            })
+                          }}
+                        />
+                      </td>
                       <td className="num">
                         <input
                           type="number"
@@ -1489,9 +1606,11 @@ function PackingTab({
                           className="col-num-sm"
                           defaultValue={l.netWeight ?? ''}
                           onBlur={async (e) => {
-                            const v = e.target.value === '' ? null : Number(e.target.value)
-                            await window.api.pl.updateLine(order.id, pl.id, l.id, { netWeight: v })
-                            await onChange()
+                            const input = e.target
+                            const v = input.value === '' ? null : Number(input.value)
+                            await saveLine(pl.id, l.id, { netWeight: v }, () => {
+                              input.value = l.netWeight == null ? '' : String(l.netWeight)
+                            })
                           }}
                         />
                       </td>
@@ -1505,9 +1624,11 @@ function PackingTab({
                               className="cell-input-sm"
                               defaultValue={l[k] ?? ''}
                               onBlur={async (e) => {
-                                const v = e.target.value === '' ? null : Number(e.target.value)
-                                await window.api.pl.updateLine(order.id, pl.id, l.id, { [k]: v })
-                                await onChange()
+                                const input = e.target
+                                const v = input.value === '' ? null : Number(input.value)
+                                await saveLine(pl.id, l.id, { [k]: v }, () => {
+                                  input.value = l[k] == null ? '' : String(l[k])
+                                })
                               }}
                             />
                           ))}
@@ -1517,8 +1638,7 @@ function PackingTab({
                         <Button variant="danger" size="sm"
                           
                           onClick={async () => {
-                            await window.api.pl.deleteLine(order.id, pl.id, l.id)
-                            await onChange()
+                            await removeLine(pl.id, l.id)
                           }}
                         >
                           删除
@@ -1543,8 +1663,154 @@ function PackingTab({
           }}
         />
       ) : null}
+
+      {editPl ? (
+        <EditBatchModal
+          order={order}
+          pl={editPl}
+          onClose={() => setEditPl(null)}
+          onDone={async () => {
+            setEditPl(null)
+            await onChange()
+          }}
+        />
+      ) : null}
     </>
   )
+}
+
+/** 批次信息：柜号、船期、封条、提单号与出运状态 */
+function EditBatchModal({
+  order,
+  pl,
+  onClose,
+  onDone
+}: {
+  order: any
+  pl: any
+  onClose: () => void
+  onDone: () => Promise<void>
+}) {
+  const toast = useToast()
+  // 升级前的老批次状态是空的：默认保持空，只补柜号/船期不会把整单状态从手工切到批次汇总
+  const isLegacy = pl.shipStatus == null
+  const [form, setForm] = useState({
+    containerNo: String(pl.containerNo ?? ''),
+    vessel: String(pl.vessel ?? ''),
+    etdDate: String(pl.etdDate ?? ''),
+    atdDate: String(pl.atdDate ?? ''),
+    etaDate: String(pl.etaDate ?? ''),
+    sealNo: String(pl.sealNo ?? ''),
+    blNo: String(pl.blNo ?? ''),
+    note: String(pl.note ?? ''),
+    shipStatus: (pl.shipStatus ?? '') as ShipStatus | ''
+  })
+
+  const save = async () => {
+    try {
+      await window.api.pl.updateInfo(order.id, pl.id, {
+        containerNo: form.containerNo,
+        vessel: form.vessel,
+        etdDate: form.etdDate || null,
+        atdDate: form.atdDate || null,
+        etaDate: form.etaDate || null,
+        sealNo: form.sealNo,
+        blNo: form.blNo,
+        note: form.note,
+        shipStatus: form.shipStatus || undefined
+      })
+      toast('批次信息已保存')
+      await onDone()
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
+  }
+
+  return (
+    <Modal
+      title={`批次 ${pl.plNo}`}
+      onClose={onClose}
+      size="wide"
+      footer={
+        <>
+          <Button onClick={onClose}>取消</Button>
+          <Button variant="primary" onClick={save}>
+            保存批次
+          </Button>
+        </>
+      }
+    >
+      <div className="field-row-3">
+        <div className="field">
+          <label>柜号 / 批次</label>
+          <input
+            value={form.containerNo}
+            onChange={(e) => setForm({ ...form, containerNo: e.target.value })}
+            placeholder="订到柜再补也来得及"
+          />
+        </div>
+        <div className="field">
+          <label>船名航次</label>
+          <input value={form.vessel} onChange={(e) => setForm({ ...form, vessel: e.target.value })} />
+        </div>
+        <div className="field">
+          <label>出运状态</label>
+          <select
+            value={form.shipStatus}
+            onChange={(e) => setForm({ ...form, shipStatus: e.target.value as ShipStatus | '' })}
+          >
+            {isLegacy && <option value="">未设置（订单继续手工状态）</option>}
+            {SHIP_STATUS_ORDER.map((s) => (
+              <option key={s} value={s}>
+                {SHIP_STATUS_LABEL[s]}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+      {isLegacy && (
+        <div className="hint">
+          这是升级前的批次，出运状态还没设置。只补柜号/船期不会动整单状态；选一个状态后，整单出货状态才改由批次汇总。
+        </div>
+      )}
+      <div className="field-row-3">
+        <div className="field">
+          <label>ETD（计划开船）</label>
+          <input type="date" value={form.etdDate} onChange={(e) => setForm({ ...form, etdDate: e.target.value })} />
+        </div>
+        <div className="field">
+          <label>实际开船日</label>
+          <input type="date" value={form.atdDate} onChange={(e) => setForm({ ...form, atdDate: e.target.value })} />
+        </div>
+        <div className="field">
+          <label>ETA（预计到港）</label>
+          <input type="date" value={form.etaDate} onChange={(e) => setForm({ ...form, etaDate: e.target.value })} />
+        </div>
+      </div>
+      <div className="field-row-3">
+        <div className="field">
+          <label>封条号</label>
+          <input value={form.sealNo} onChange={(e) => setForm({ ...form, sealNo: e.target.value })} />
+        </div>
+        <div className="field">
+          <label>提单号</label>
+          <input value={form.blNo} onChange={(e) => setForm({ ...form, blNo: e.target.value })} />
+        </div>
+        <div className="field">
+          <label>备注</label>
+          <input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} />
+        </div>
+      </div>
+      <div className="hint">
+        出运状态会汇总到订单（分批发时显示「部分出运」）。改成「已包装」后这个批次才能删除——出运过的批次必须留档。
+      </div>
+    </Modal>
+  )
+}
+
+/** 装箱 SKU 的唯一键：款号×颜色×尺码（品名不参与归组） */
+function skuKey(s: { styleNo?: string; color?: string; size?: string }): string {
+  return [s.styleNo ?? '', s.color ?? '', s.size ?? ''].join('|')
 }
 
 function CreatePlModal({
@@ -1566,9 +1832,16 @@ function CreatePlModal({
   const [boxSize, setBoxSize] = useState({ l: '', w: '', h: '' })
   // 按款号的箱规：款号 → { pieces, unitNet, l, w, h }
   const [styleCfg, setStyleCfg] = useState<Record<string, any>>({})
+  // 本次出货数量：默认 = 订单数量 − 已经装箱的数量（分批出货只装剩下的）
+  const [shipQty, setShipQty] = useState<Record<string, string>>({})
+  // 数量改过之后旧预览就作废了，空状态要提示「重新生成」而不是「还没设置每箱件数」
+  const [previewStale, setPreviewStale] = useState(false)
 
   useEffect(() => {
-    void window.api.orders.summarizeSkus(order.id).then(setSkus)
+    void window.api.orders.summarizeSkus(order.id).then((rows: any[]) => {
+      setSkus(rows)
+      setShipQty(Object.fromEntries(rows.map((s) => [skuKey(s), String(s.remainingQuantity)])))
+    })
   }, [order.id])
 
   /** 按商品库里的单件净重/每箱件数/箱规套用 */
@@ -1598,32 +1871,46 @@ function CreatePlModal({
     const out: any[] = []
     let boxNo = 1
     for (const s of skus) {
+      const qty = Math.floor(Number(shipQty[skuKey(s)] ?? s.remainingQuantity))
+      if (!(qty > 0)) continue
+      if (qty > s.remainingQuantity) {
+        toast(
+          `款号 ${s.styleNo} ${s.color}/${s.size} 只剩 ${s.remainingQuantity} 件没装箱，本次不能装 ${qty} 件`,
+          'error'
+        )
+        return
+      }
       const cfg = cfgFor(s.styleNo)
       const n = Math.max(1, Math.floor(Number(cfg.pieces) || g))
       const unit = Number(cfg.unitNet ?? unitNet)
       const l = Number(cfg.l || boxSize.l) || null
       const w = Number(cfg.w || boxSize.w) || null
       const h = Number(cfg.h || boxSize.h) || null
-      let remain = s.quantity
+      let remain = qty
       while (remain > 0) {
-        const qty = Math.min(n, remain)
+        const q = Math.min(n, remain)
         out.push({
           boxNo: `NO.${boxNo}`,
           styleNo: s.styleNo,
           productName: s.productName,
           color: s.color,
           size: s.size,
-          quantity: qty,
-          netWeight: unit > 0 ? Number((unit * qty).toFixed(2)) : null,
+          quantity: q,
+          netWeight: unit > 0 ? Number((unit * q).toFixed(2)) : null,
           boxLength: l,
           boxWidth: w,
           boxHeight: h
         })
-        remain -= qty
+        remain -= q
         boxNo += 1
       }
     }
+    if (out.length === 0) {
+      toast('每款的「本次出货」都是 0，没有可装箱的件数', 'error')
+      return
+    }
     setBoxes(out)
+    setPreviewStale(false)
   }
 
   const submit = async () => {
@@ -1659,6 +1946,11 @@ function CreatePlModal({
         </>
       }
     >
+      {order.packingLists?.some((p: any) => p.shipStatus == null) && (
+        <div className="hint mb">
+          这张单还有升级前的老批次没标出运状态。新建批次后整单仍按手工状态推进；建议先到「装箱单」里给老批次补上状态，整单才会改由批次汇总。
+        </div>
+      )}
       <div className="field-row-3">
         <div className="field">
           <label>柜号 / 批次</label>
@@ -1767,6 +2059,9 @@ function CreatePlModal({
       </div>
 
       <h3 style={{ fontSize: 13, margin: '10px 0 6px' }}>SKU 汇总</h3>
+      <div className="hint" style={{ marginBottom: 6 }}>
+        分批发货的话，这里默认填的是「还没装过箱」的数量；已经装过的会自动扣掉。
+      </div>
       <div className="table-wrap" style={{ maxHeight: 180, overflowY: 'auto' }}>
         <table className="data">
           <thead>
@@ -1775,19 +2070,42 @@ function CreatePlModal({
               <th>品名</th>
               <th>颜色</th>
               <th>尺码</th>
-              <th className="num">数量</th>
+              <th className="num">订单数量</th>
+              <th className="num">已装箱</th>
+              <th className="num">本次出货</th>
             </tr>
           </thead>
           <tbody>
-            {skus.map((s, i) => (
-              <tr key={i}>
-                <td className="mono">{s.styleNo}</td>
-                <td>{s.productName}</td>
-                <td>{s.color}</td>
-                <td>{s.size}</td>
-                <td className="num">{num(s.quantity)}</td>
-              </tr>
-            ))}
+            {skus.map((s, i) => {
+              const key = skuKey(s)
+              return (
+                <tr key={i}>
+                  <td className="mono">{s.styleNo}</td>
+                  <td>{s.productName}</td>
+                  <td>{s.color}</td>
+                  <td>{s.size}</td>
+                  <td className="num">{num(s.quantity)}</td>
+                  <td className="num faint">{num(s.packedQuantity)}</td>
+                  <td className="num">
+                    <input
+                      type="number"
+                      min={0}
+                      max={s.remainingQuantity}
+                      className="col-num-sm"
+                      disabled={s.remainingQuantity === 0}
+                      title={s.remainingQuantity === 0 ? '这一款已经全部装过箱了' : undefined}
+                      value={shipQty[key] ?? ''}
+                      onChange={(e) => {
+                        setShipQty({ ...shipQty, [key]: e.target.value })
+                        // 数量一改，旧预览就作废了，必须重新生成
+                        setBoxes([])
+                        setPreviewStale(true)
+                      }}
+                    />
+                  </td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       </div>
@@ -1796,7 +2114,9 @@ function CreatePlModal({
         箱明细预览（{boxes.length} 箱）
       </h3>
       {boxes.length === 0 ? (
-        <div className="hint">设置每箱件数后点「重新生成箱明细」</div>
+        <div className="hint">
+          {previewStale ? '本次出货已改，点「重新生成箱明细」看新的箱数。' : '设置每箱件数后点「重新生成箱明细」'}
+        </div>
       ) : (
         <div className="table-wrap" style={{ maxHeight: 220, overflowY: 'auto' }}>
           <table className="data">

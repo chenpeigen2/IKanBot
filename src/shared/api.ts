@@ -100,6 +100,7 @@ export interface IKanApi {
     list(orderId: number): Promise<any[]>
     create(input: any): Promise<any[]>
     remove(orderId: number, plId: number): Promise<any[]>
+    updateInfo(orderId: number, plId: number, patch: any): Promise<any[]>
     updateLine(orderId: number, plId: number, lineId: number, patch: any): Promise<any[]>
     addLine(orderId: number, plId: number, line: any): Promise<any[]>
     deleteLine(orderId: number, plId: number, lineId: number): Promise<any[]>

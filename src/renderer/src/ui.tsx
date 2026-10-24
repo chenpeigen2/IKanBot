@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, createContext, useContext, useRef, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
+import { localDateOf } from '../../shared/date'
 
 /* ---------------- 轻量 UI 组件 ---------------- */
 
@@ -391,7 +392,8 @@ export function today(): string {
 
 export function fmtDate(iso: string | null | undefined): string {
   if (!iso) return ''
-  return String(iso).slice(0, 10)
+  // 时间戳按本地日期显示（slice 出来的是 UTC 日期，凌晨会差一天）
+  return localDateOf(String(iso))
 }
 
 export function fmtDateTime(iso: string | null | undefined): string {

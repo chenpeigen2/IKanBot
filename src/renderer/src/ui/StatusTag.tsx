@@ -62,6 +62,7 @@ const SHIP: Record<ShipStatus, { label: string; tone: StatusTone }> = {
   preparing: { label: '备货中', tone: 'warning' },
   packed: { label: '已包装', tone: 'info' },
   shipped: { label: '已出运', tone: 'info' },
+  partial_shipped: { label: '部分出运', tone: 'info' },
   cleared: { label: '已清关', tone: 'success' },
   delivered: { label: '已签收', tone: 'success' }
 }

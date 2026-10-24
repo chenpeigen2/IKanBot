@@ -2,7 +2,9 @@ import { getDb, nextNo } from '../db'
 import { mapOrder, mapOrderItem, mapPayment, mapPackingList, mapPackingListLine, mapEvent, mapSkuSummary, mapOrderPhoto, mapCustomer } from '../db/mappers'
 import { getSettings } from './settings'
 import { computeOrderMoney, parseCharges } from './money'
+import { applyShipStatus, isShipStatusDerived, shipmentSummary } from './shipping'
 import { localDate, addDays } from '../../src/shared/date'
+import { SHIP_STATUS_LABEL } from '../../src/shared/types'
 import type {
   Currency,
   Incoterm,
@@ -207,7 +209,8 @@ function hydrate(order: Order): OrderDetail {
     paidAmount: m.paidAmount,
     remaining: m.receivable,
     remainingRaw: m.remaining,
-    depositAmount: m.depositAmount
+    depositAmount: m.depositAmount,
+    shipSummary: shipmentSummary(order.id)
   }
 }
 
@@ -294,7 +297,10 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
   if (newPiNo && newPiNo !== String(before.pi_no ?? '') && piNoTaken(newPiNo, id))
     throw piDupErr(newPiNo)
 
-  const newRate = input.exchangeRate ?? 1
+  // 汇率是锁定的凭据：清空或填 0 不许悄悄落成 1——
+  // 1 会让整单金额按错汇率折算，四张单据、报表、待收全跟着错
+  const newRate = Number(input.exchangeRate ?? before.exchange_rate)
+  if (!(newRate > 0)) throw new Error('汇率必须大于 0，清空汇率不能保存')
   const oldRate = Number(before.exchange_rate)
   // 汇率变了就重新记锁定日期（未手动指定时）
   let rateDate = (before.exchange_rate_date as string | null) ?? null
@@ -316,7 +322,7 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
     [
       input.customerId,
       input.currency ?? 'USD',
-      input.exchangeRate ?? 1,
+      newRate,
       input.baseCurrency ?? getSettings().baseCurrency,
       input.incoterm ?? 'FOB',
       input.portOfLoading ?? '',
@@ -480,9 +486,35 @@ export function addOrderItem(orderId: number, item: OrderItemInput): OrderDetail
   )
   db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
   logEvent(orderId, 'item_add', null, null, `添加 SKU ${item.styleNo} ${item.color}/${item.size} × ${item.quantity}`)
+  // 件数变了，订单的「装够没有 / 走了没有」跟着变
+  applyShipStatus(orderId)
   // 金额变了，应收总额 / 定金 / 待收都变了，收款状态要重算（可以往上也可以往下）
   recomputePaymentStatus(orderId)
   return getOrder(orderId)!
+}
+
+/** 这一款（款号×颜色×尺码）在所有装箱单里已经装了多少件 */
+function packedQty(orderId: number, sku: { styleNo: string; color: string; size: string }): number {
+  return Number(
+    (
+      getDb().get(
+        `SELECT COALESCE(SUM(l.quantity), 0) AS qty
+         FROM packing_list_lines l JOIN packing_lists pl ON pl.id = l.packing_list_id
+         WHERE pl.order_id = ? AND l.style_no = ? AND l.color = ? AND l.size = ?`,
+        [orderId, sku.styleNo, sku.color, sku.size]
+      ) as { qty?: number } | null
+    )?.qty ?? 0
+  )
+}
+
+/** 订单减量不能减到已装箱数以下：箱子里实物已经在了，订单数字必须兜得住 */
+function assertNotBelowPacked(orderId: number, sku: { styleNo: string; color: string; size: string }): void {
+  const packed = packedQty(orderId, sku)
+  if (packed > 0) {
+    throw new Error(
+      `款号 ${sku.styleNo} ${sku.color}/${sku.size} 已经装了 ${packed} 件箱，订单数量不能改到 ${packed} 件以下；请先到「装箱单」里改小或删掉对应箱明细（已出运的批次要先把状态改回「已包装」）。`
+    )
+  }
 }
 
 export function updateOrderItem(
@@ -495,6 +527,26 @@ export function updateOrderItem(
     | Record<string, unknown>
     | null
   if (!cur) throw new Error('订单行不存在')
+  const curSku = {
+    styleNo: String(cur.style_no ?? ''),
+    color: String(cur.color ?? ''),
+    size: String(cur.size ?? '')
+  }
+  const nextSku = {
+    styleNo: patch.styleNo ?? curSku.styleNo,
+    color: patch.color ?? curSku.color,
+    size: patch.size ?? curSku.size
+  }
+  const skuChanged = nextSku.styleNo !== curSku.styleNo || nextSku.color !== curSku.color || nextSku.size !== curSku.size
+  const packed = packedQty(orderId, curSku)
+  if (skuChanged && packed > 0) {
+    throw new Error(
+      `款号 ${curSku.styleNo} ${curSku.color}/${curSku.size} 已经装了 ${packed} 件箱，不能直接换款号/颜色/尺码；请先到「装箱单」里处理这一款的箱明细（已出运的批次要先把状态改回「已包装」）。`
+    )
+  }
+  if (!skuChanged && patch.quantity !== undefined && Number(patch.quantity) < packed) {
+    assertNotBelowPacked(orderId, curSku)
+  }
   db.run(
     `UPDATE order_items SET product_id=?, style_no=?, product_name=?, composition=?, color=?, size=?, quantity=?, unit_price=?, unit_cost=?
      WHERE id=? AND order_id=?`,
@@ -515,6 +567,8 @@ export function updateOrderItem(
   db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
   const changes = describeItemChange(cur, patch)
   if (changes) logEvent(orderId, 'item_update', null, null, `修改明细 ${patch.styleNo ?? cur.style_no}：${changes}`)
+  // 件数变了，订单的「装够没有 / 走了没有」跟着变
+  applyShipStatus(orderId)
   // 金额变了，收款状态要重算（加单加到收不够要从「已收款」退回「部分收款」）
   recomputePaymentStatus(orderId)
   return getOrder(orderId)!
@@ -548,6 +602,16 @@ export function removeOrderItem(orderId: number, itemId: number): OrderDetail {
     | Record<string, unknown>
     | null
   if (!cur) throw new Error('订单行不存在')
+  const packed = packedQty(orderId, {
+    styleNo: String(cur.style_no ?? ''),
+    color: String(cur.color ?? ''),
+    size: String(cur.size ?? '')
+  })
+  if (packed > 0) {
+    throw new Error(
+      `款号 ${String(cur.style_no)} ${String(cur.color)}/${String(cur.size)} 已经装了 ${packed} 件箱，不能直接删这一行；请先到「装箱单」里删掉对应箱明细（已出运的批次要先把状态改回「已包装」）。`
+    )
+  }
   db.run('DELETE FROM order_items WHERE id = ? AND order_id = ?', [itemId, orderId])
   db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
   logEvent(
@@ -559,6 +623,8 @@ export function removeOrderItem(orderId: number, itemId: number): OrderDetail {
       cur.unit_price ?? 0
     ).toFixed(2)}）`
   )
+  // 件数变了，订单的「装够没有 / 走了没有」跟着变
+  applyShipStatus(orderId)
   // 金额变了，收款状态要重算
   recomputePaymentStatus(orderId)
   return getOrder(orderId)!
@@ -567,6 +633,21 @@ export function removeOrderItem(orderId: number, itemId: number): OrderDetail {
 /** 批量替换订单行（从商品库选款生成 SKU 矩阵时用） */
 export function replaceOrderItems(orderId: number, items: OrderItemInput[]): OrderDetail {
   const db = getDb()
+  const packed = Number(
+    (
+      db.get(
+        `SELECT COALESCE(SUM(l.quantity), 0) AS qty
+         FROM packing_list_lines l JOIN packing_lists pl ON pl.id = l.packing_list_id
+         WHERE pl.order_id = ?`,
+        [orderId]
+      ) as { qty?: number } | null
+    )?.qty ?? 0
+  )
+  if (packed > 0) {
+    throw new Error(
+      `这张单已经装了 ${packed} 件箱，不能整体替换明细；请逐行调整，或先到「装箱单」里处理箱明细（已出运的批次要先把状态改回「已包装」）。`
+    )
+  }
   db.exec('BEGIN')
   try {
     db.run('DELETE FROM order_items WHERE order_id = ?', [orderId])
@@ -589,6 +670,7 @@ export function replaceOrderItems(orderId: number, items: OrderItemInput[]): Ord
       )
     }
     db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
+    applyShipStatus(orderId)
     db.exec('COMMIT')
   } catch (e) {
     db.exec('ROLLBACK')
@@ -600,13 +682,25 @@ export function replaceOrderItems(orderId: number, items: OrderItemInput[]): Ord
   return getOrder(orderId)!
 }
 
-/** 按 SKU 汇总（用于 PL 装箱单自动生成） */
+/**
+ * 按 SKU 汇总（用于 PL 装箱单自动生成）。
+ * 同时算出「已经装箱的数量」：分批出货时，新的一箱只装还没装的部分。
+ * SKU 按 款号×颜色×尺码 认（品名取其中一行，不参与归组）。
+ */
 export function summarizeSkus(orderId: number): SkuSummary[] {
   const rows = getDb().all(
-    `SELECT style_no, product_name, color, size, SUM(quantity) AS quantity
-     FROM order_items WHERE order_id = ? AND quantity > 0
-     GROUP BY style_no, product_name, color, size
-     ORDER BY style_no, color, size`,
+    `SELECT oi.style_no, MAX(oi.product_name) AS product_name, oi.color, oi.size,
+            SUM(oi.quantity) AS quantity,
+            COALESCE((
+              SELECT SUM(pll.quantity) FROM packing_list_lines pll
+              JOIN packing_lists pl ON pl.id = pll.packing_list_id
+              WHERE pl.order_id = oi.order_id AND pll.style_no = oi.style_no
+                AND pll.color = oi.color AND pll.size = oi.size
+            ), 0) AS packed_quantity
+     FROM order_items oi
+     WHERE oi.order_id = ? AND oi.quantity > 0
+     GROUP BY oi.style_no, oi.color, oi.size
+     ORDER BY oi.style_no, oi.color, oi.size`,
     [orderId]
   ) as Record<string, unknown>[]
   return rows.map(mapSkuSummary)
@@ -702,6 +796,12 @@ export function setShipStatus(orderId: number, next: ShipStatus, note = ''): Ord
     | { ship_status: string }
     | null
   if (!cur) throw new Error('订单不存在')
+  // 有批次之后，整单状态只能由批次汇总，手改会跟批次打架（比如尾批还在厂里却标已签收）
+  if (isShipStatusDerived(orderId)) {
+    throw new Error(
+      `这张单的出货状态由装箱单批次汇总（当前：${SHIP_STATUS_LABEL[cur.ship_status as ShipStatus] ?? cur.ship_status}）。请到「装箱单」里改对应批次的出运状态，整单状态会自动跟着变。`
+    )
+  }
   db.run('UPDATE orders SET ship_status = ?, updated_at = ? WHERE id = ?', [next, now(), orderId])
   logEvent(orderId, 'ship_status', cur.ship_status, next, note)
   return getOrder(orderId)!
