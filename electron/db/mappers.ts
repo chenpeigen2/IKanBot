@@ -353,6 +353,9 @@ export function mapMonthlyReport(r: Row): MonthlyReportRow {
     sales: num(r.sales),
     cost: num(r.cost),
     profit: r.profit == null ? null : num(r.profit),
+    discount: num(r.discount),
+    shortage: num(r.shortage),
+    badDebt: num(r.bad_debt),
     received: num(r.received),
     missingCostOrders: num(r.missing_cost_orders)
   }

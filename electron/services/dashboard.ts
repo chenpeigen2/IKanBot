@@ -6,11 +6,13 @@ import {
   EXCLUDED_STATUSES,
   listOrderMoney,
   notInStatuses,
+  receivedByMonth,
   sampleReceivable
 } from './money'
-import { isLocalDate, localDate, localDateOf } from '../../src/shared/date'
+import { isLocalDate, localDate, localDateOf, localMonthOf } from '../../src/shared/date'
 import { PAYMENT_METHOD_LABEL, PAYMENT_STATUS_LABEL, SHIP_STATUS_LABEL } from '../../src/shared/types'
-import type { DashboardStats, MonthlyReportRow, Reminder } from '../../src/shared/types'
+import type { DashboardStats, ExportKind, MonthlyReportRow, Reminder } from '../../src/shared/types'
+import type { OrderMoneyRow } from './money'
 
 /** 本地月初 YYYY-MM-DD（toISOString 是 UTC，拿到的是上个月最后一天） */
 function monthStart(): string {
@@ -52,8 +54,7 @@ export function dashboard(): DashboardStats {
   const monthProfitRaw = monthRows.reduce((s, r) => s + (r.profitRaw * r.exchangeRate), 0)
   const monthProfit = monthMissingCost ? null : monthProfitRaw
 
-  // 两个口径各用一个常量：作废/失效单不进销售与在途，但真收到的钱留在现金流里
-  const cash = notInStatuses('o.payment_status', CASHFLOW_EXCLUDED_STATUSES)
+  // 作废/失效单不进销售与在途（真收到的钱留在现金流里，那份口径在 money.receivedByMonth）
   const sales = notInStatuses('payment_status', EXCLUDED_STATUSES)
   // 「在途」= 正式单里还没结清的：结算完/失效/作废/草稿都不算，集合从常量推，别再手写一遍状态
   const openOrder = notInStatuses('payment_status', [...EXCLUDED_STATUSES, 'settled'])
@@ -79,17 +80,20 @@ export function dashboard(): DashboardStats {
            END AS done_at
          FROM orders o2
        ) WHERE done_at IS NOT NULL AND date(done_at) >= date(?)) AS completed_this_month,
-      (SELECT COALESCE(SUM(p.amount * o.exchange_rate), 0) FROM payments p
-         JOIN orders o ON o.id = p.order_id
-         WHERE date(p.paid_at) >= date(?) AND ${cash.sql}) AS month_received,
       (SELECT COUNT(*) FROM orders WHERE date(created_at, 'localtime') >= date(?) AND ${sales.sql}) AS month_new_orders`,
-    [...openOrder.params, ...sales.params, mStart, mStart, ...cash.params, mStart, ...sales.params]
+    [...openOrder.params, ...sales.params, mStart, mStart, ...sales.params]
   ) as Record<string, unknown>
+
+  // 本月到账：走 money.ts 里唯一一份「按到账月算收到多少钱」的实现。
+  // 以前这里和月度报表各写一遍 SUM，两处会各自漂出两个数。
+  const thisMonth = localMonthOf(localDate())
+  const monthReceived = receivedByMonth().find((m) => m.month === thisMonth)?.amount ?? 0
 
   return {
     ...mapDashboard({
       ...(row ?? {}),
       pending_amount: pendingAmount,
+      month_received: monthReceived,
       month_sales: monthRows.reduce((s, r) => s + r.grandTotalBase, 0),
       month_profit: monthProfitRaw
     }),
@@ -716,68 +720,61 @@ export function reminders(): Reminder[] {
 
 /**
  * 按月统计报表（金额统一折算为基准币）。
- * 销售额/成本/毛利按订单创建月份归集；收款按实际收款月份归集。
  *
- * 口径统一走 services/money.ts：货值 / 成本 / 毛利都跟订单详情、客户页、工作台同一套。
- * 成本没录全的月份，毛利一律给 null（不可信），不许拿 0 成本凑一个漂亮的数。
+ * 两套归月口径同时存在于一张表里，列名必须写清楚，别让人以为能纵向相减：
+ *   销售额 / 成本 / 毛利 / 折让 / 短款 / 坏账 —— 按订单创建月份
+ *   收款 —— 按实际到账月份（走 money.receivedByMonth，与工作台同一个数）
+ *
+ * 口径统一走 services/money.ts：货值 / 成本 / 毛利 / 核销都跟订单详情、客户页、工作台同一套。
+ * 成本没录全的月份，毛利一律给 null（不可信），不许拿 0 成本凑一个漂亮的数，
+ * 也不许再加一列「已录成本单的毛利」——半可信的毛利列比空白更容易被当成真数。
  */
 export function monthlyReport(): MonthlyReportRow[] {
-  const db = getDb()
-  // 销售额 / 成本 / 毛利：按订单创建月份（用 money.ts 的同一套计算）
-  // 销售额 = 含费用合计（与 PI 上的 TOTAL 一致，老板对账不用自己加运费）
-  const rows = listOrderMoney()
   interface MonthAcc {
     month: string
     orders: number
     sales: number
     cost: number
     profit: number
+    discount: number
+    shortage: number
+    badDebt: number
     received: number
     missingCostOrders: number
   }
+  const empty = (month: string): MonthAcc => ({
+    month,
+    orders: 0,
+    sales: 0,
+    cost: 0,
+    profit: 0,
+    discount: 0,
+    shortage: 0,
+    badDebt: 0,
+    received: 0,
+    missingCostOrders: 0
+  })
   const byMonth = new Map<string, MonthAcc>()
-  for (const r of rows) {
-    const cur: MonthAcc = byMonth.get(r.month) ?? {
-      month: r.month,
-      orders: 0,
-      sales: 0,
-      cost: 0,
-      profit: 0,
-      received: 0,
-      missingCostOrders: 0
-    }
+  for (const r of listOrderMoney()) {
+    const cur = byMonth.get(r.month) ?? empty(r.month)
+    const rate = r.exchangeRate
     cur.orders += 1
     cur.sales += r.grandTotalBase
-    cur.cost += r.totalCost * r.exchangeRate
-    cur.profit += r.profitRaw * r.exchangeRate
+    cur.cost += r.costBase
+    cur.profit += r.profitBase
+    // negativeCharges 本身是负数，报表里折让按「让出去多少」写正数
+    cur.discount += -r.negativeCharges * rate
+    cur.shortage += r.shortageAmount * rate
+    cur.badDebt += r.badDebtOutstanding * rate
     if (r.missingCostItems > 0) cur.missingCostOrders += 1
     byMonth.set(r.month, cur)
   }
 
-  // 收款：按实际收款月份归集。现金流口径只排除草稿单——
-  // 作废/失效的单钱真到账了就是到账了，这里必须留着（销售和待收那边才排除）
-  const cash = notInStatuses('o.payment_status', CASHFLOW_EXCLUDED_STATUSES)
-  const payRows = db.all(
-    `SELECT strftime('%Y-%m', p.paid_at) AS month,
-            COALESCE(SUM(p.amount * o.exchange_rate), 0) AS received
-     FROM payments p JOIN orders o ON o.id = p.order_id
-     WHERE ${cash.sql}
-     GROUP BY month`,
-    cash.params
-  ) as Record<string, unknown>[]
-  for (const p of payRows) {
-    const m = String(p.month)
-    const cur: MonthAcc = byMonth.get(m) ?? {
-      month: m,
-      orders: 0,
-      sales: 0,
-      cost: 0,
-      profit: 0,
-      received: 0,
-      missingCostOrders: 0
-    }
-    cur.received += Number(p.received ?? 0)
-    byMonth.set(m, cur)
+  // 收款：按实际到账月份归集（现金流口径的实现在 money.ts，这里只搬运不加总）
+  for (const p of receivedByMonth()) {
+    const cur = byMonth.get(p.month) ?? empty(p.month)
+    cur.received += p.amount
+    byMonth.set(p.month, cur)
   }
 
   return [...byMonth.values()]
@@ -790,143 +787,231 @@ export function monthlyReport(): MonthlyReportRow[] {
         cost: r.cost,
         // 成本没录全的月份：毛利不可信 → null（界面上显示「—」）
         profit: r.missingCostOrders > 0 ? null : r.profit,
+        discount: r.discount,
+        shortage: r.shortage,
+        bad_debt: r.badDebt,
         received: r.received,
         missing_cost_orders: r.missingCostOrders
       })
     )
 }
 
-/** 导出 Excel（CSV，UTF-8 BOM，Excel 直接可打开） */
-export function exportCsv(kind: 'orders' | 'payments' | 'items'): string {
+/**
+ * 导出台账（CSV，UTF-8 BOM，Excel 直接可打开）。
+ *
+ * 三张台账的口径都写在列名和文件名里，Excel 里 SUM 出来的数必须能对上系统：
+ *   orders      —— 与销售额/毛利/待收同一口径（草稿、失效、作废都不在表里）
+ *   orders_all  —— 全量底稿，含草稿与作废，只对历史复盘用，别拿去 SUM
+ *   payments    —— 现金流口径（只排草稿）：作废单到账的钱是真钱，行要在，状态列要写清
+ *   items       —— 款号×颜色×尺码明细，走销售额口径
+ *   monthly     —— 月度汇总，与报表页同一份数
+ * 状态一律中文标签，别再出现一张表写「void」、另一张写「已作废」。
+ */
+export function exportCsv(kind: ExportKind): string {
   const db = getDb()
   const base = getSettings().baseCurrency
-  if (kind === 'orders') {
-    // 金额口径走 services/money.ts（唯一真源）：货值 / 费用 / 含费用合计 / 已收 / 待收
-    const rows = listOrderMoney({ includeVoided: true })
-    const header = [
-      '订单号',
-      'PI号',
-      '客户',
-      '国家',
-      '币种',
-      '汇率',
-      '收款状态',
-      '出货状态',
-      '贸易术语',
-      '装运港',
-      '目的港',
-      '付款方式',
-      '客户PO号',
-      '预计出货日',
-      '创建日期',
-      '货值(原币)',
-      '费用合计(原币)',
-      '含费用合计(原币)',
-      '已收金额(原币)',
-      '待收金额(原币)',
-      '短款核销(原币)',
-      '坏账核销(原币)',
-      '坏账未追回(原币)',
-      `含费用合计(${base})`,
-      `已收金额(${base})`,
-      `待收金额(${base})`
-    ]
-    const lines = rows.map((r) => {
-      const rate = r.exchangeRate
-      return [
-        r.orderNo,
-        r.piNo,
-        r.customerName,
-        r.country,
-        r.currency,
-        rate,
-        PAYMENT_STATUS_LABEL[r.paymentStatus as keyof typeof PAYMENT_STATUS_LABEL] ?? r.paymentStatus,
-        SHIP_STATUS_LABEL[r.shipStatus as keyof typeof SHIP_STATUS_LABEL] ?? r.shipStatus,
-        r.incoterm,
-        r.portOfLoading,
-        r.portOfDestination,
-        r.paymentMethod,
-        r.customerPo,
-        r.expectedShipDate ?? '',
-        localDateOf(r.createdAt),
-        r.goodsValue.toFixed(2),
-        r.chargesTotal.toFixed(2),
-        r.grandTotal.toFixed(2),
-        r.paidAmount.toFixed(2),
-        r.receivable.toFixed(2),
-        r.shortageAmount.toFixed(2),
-        r.badDebtAmount.toFixed(2),
-        r.badDebtOutstanding.toFixed(2),
-        (r.grandTotal * rate).toFixed(2),
-        (r.paidAmount * rate).toFixed(2),
-        (r.receivable * rate).toFixed(2)
-      ].join(',')
-    })
-    return toCsv(header, lines)
+  switch (kind) {
+    case 'orders':
+    case 'orders_all':
+      return ordersCsv(kind === 'orders_all' ? listOrderMoney({ includeVoided: true }) : listOrderMoney(), base)
+    case 'items':
+      return itemsCsv(db, base)
+    case 'monthly':
+      return monthlyCsv(base)
+    case 'payments':
+      return paymentsCsv(db, base)
+    default: {
+      // 加了新 kind 却忘了在这里分支：让编译器在这里叫，别让它静默掉进收款分支
+      const never: never = kind
+      throw new Error(`不支持的导出类型：${String(never)}`)
+    }
   }
+}
 
-  if (kind === 'items') {
-    // 按款号×颜色×尺码 的明细台账：退税、对账、报关核数用
-    const sales = notInStatuses('o.payment_status', EXCLUDED_STATUSES)
-    const rows = db.all(
-      `SELECT o.order_no, o.pi_no, c.company, c.country, o.currency, o.exchange_rate,
-              o.payment_status, o.ship_status, o.created_at,
-              oi.style_no, oi.product_name, oi.color, oi.size, oi.quantity, oi.unit_price,
-              (oi.quantity * oi.unit_price) AS amount
-       FROM order_items oi
-       JOIN orders o ON o.id = oi.order_id
-       JOIN customers c ON c.id = o.customer_id
-       WHERE ${sales.sql}
-       ORDER BY o.created_at DESC, oi.style_no, oi.color, oi.size`,
-      sales.params
-    ) as Record<string, unknown>[]
-    const header = [
-      '订单号',
-      'PI号',
-      '客户',
-      '国家',
-      '款号',
-      '品名',
-      '颜色',
-      '尺码',
-      '数量',
-      '单价',
-      '金额(原币)',
-      '币种',
-      '汇率',
-      `金额(${base})`,
-      '收款状态',
-      '出货状态',
-      '创建日期'
+/** 订单台账：orders 与 orders_all 共用列，只差在传进来的行集 */
+function ordersCsv(rows: OrderMoneyRow[], base: string): string {
+  const header = [
+    '订单号',
+    'PI号',
+    '客户',
+    '国家',
+    '币种',
+    '汇率',
+    '锁汇日期',
+    '收款状态',
+    '出货状态',
+    '贸易术语',
+    '装运港',
+    '目的港',
+    '付款方式',
+    '客户PO号',
+    '预计出货日',
+    '创建日期',
+    '归属月份',
+    '货值(原币)',
+    '费用合计(原币)',
+    '含费用合计(原币)',
+    '成本(原币)',
+    '成本未录全款数',
+    '毛利(原币)',
+    '已收金额(原币)',
+    '待收金额(原币)',
+    '短款核销(原币)',
+    '坏账核销(原币)',
+    '坏账未追回(原币)',
+    `含费用合计(${base})`,
+    `成本(${base})`,
+    `已收金额(${base})`,
+    `待收金额(${base})`
+  ]
+  const lines = rows.map((r) => {
+    const rate = r.exchangeRate
+    return [
+      r.orderNo,
+      r.piNo,
+      r.customerName,
+      r.country,
+      r.currency,
+      rate,
+      r.exchangeRateDate ?? '',
+      PAYMENT_STATUS_LABEL[r.paymentStatus as keyof typeof PAYMENT_STATUS_LABEL] ?? r.paymentStatus,
+      SHIP_STATUS_LABEL[r.shipStatus as keyof typeof SHIP_STATUS_LABEL] ?? r.shipStatus,
+      r.incoterm,
+      r.portOfLoading,
+      r.portOfDestination,
+      r.paymentMethod,
+      r.customerPo,
+      r.expectedShipDate ?? '',
+      localDateOf(r.createdAt),
+      r.month,
+      money2(r.goodsValue),
+      money2(r.chargesTotal),
+      money2(r.grandTotal),
+      money2(r.totalCost),
+      r.missingCostItems || '',
+      // 成本没录全 → 毛利不可信，宁可空着，不许拿 0 成本凑一个好看的数
+      r.missingCostItems > 0 ? '' : money2(r.profitRaw),
+      money2(r.paidAmount),
+      money2(r.receivable),
+      money2(r.shortageAmount),
+      money2(r.badDebtAmount),
+      money2(r.badDebtOutstanding),
+      money2(r.grandTotalBase),
+      money2(r.costBase),
+      money2(r.paidAmount * rate),
+      money2(r.receivable * rate)
     ]
-    const lines = rows.map((r) => {
-      const rate = Number(r.exchange_rate)
-      const amount = Number(r.amount)
-      return [
-        r.order_no,
-        r.pi_no,
-        r.company,
-        r.country,
-        r.style_no,
-        r.product_name,
-        r.color,
-        r.size,
-        Number(r.quantity),
-        Number(r.unit_price).toFixed(2),
-        amount.toFixed(2),
-        r.currency,
-        rate,
-        (amount * rate).toFixed(2),
-        r.payment_status,
-        r.ship_status,
-        localDateOf(String(r.created_at))
-      ].join(',')
-    })
-    return toCsv(header, lines)
-  }
+  })
+  return toCsv(header, lines)
+}
 
-  // 收款流水：现金流口径（草稿单的钱不算真收款），并带上订单状态——
-  // 作废/失效单的钱确实到账了，但看的人得知道这单已经作废
+/** 款号明细台账：款号×颜色×尺码，退税、对账、报关核数用 */
+function itemsCsv(db: ReturnType<typeof getDb>, base: string): string {
+  const sales = notInStatuses('o.payment_status', EXCLUDED_STATUSES)
+  const rows = db.all(
+    `SELECT o.id AS order_id, o.order_no, o.pi_no, c.company, c.country, o.currency, o.exchange_rate,
+            o.payment_status, o.ship_status, o.created_at,
+            oi.style_no, oi.product_name, oi.color, oi.size, oi.quantity, oi.unit_price, oi.unit_cost,
+            (oi.quantity * oi.unit_price) AS amount
+     FROM order_items oi
+     JOIN orders o ON o.id = oi.order_id
+     JOIN customers c ON c.id = o.customer_id
+     WHERE ${sales.sql}
+     ORDER BY o.created_at DESC, oi.style_no, oi.color, oi.size`,
+    sales.params
+  ) as Record<string, unknown>[]
+  // 明细行加起来只等于「货值」，PI 上的 TOTAL 还含运费/折让等费用行。
+  // 报关核数时那截差额最容易被当成漏单，所以把整单的货值/费用一起带上。
+  const orderMoney = new Map(listOrderMoney().map((r) => [r.orderId, r]))
+  const header = [
+    '订单号',
+    'PI号',
+    '客户',
+    '国家',
+    '款号',
+    '品名',
+    '颜色',
+    '尺码',
+    '数量',
+    '单价',
+    '金额(原币)',
+    '单位成本(原币)',
+    '成本(原币)',
+    '币种',
+    '汇率',
+    `金额(${base})`,
+    '收款状态',
+    '出货状态',
+    '创建日期',
+    '该单货值(原币)',
+    '该单费用合计(原币)',
+    '该单含费用合计(原币)'
+  ]
+  const lines = rows.map((r) => {
+    const rate = Number(r.exchange_rate)
+    const amount = Number(r.amount)
+    const o = orderMoney.get(Number(r.order_id))
+    const unitCost = r.unit_cost == null ? null : Number(r.unit_cost)
+    return [
+      r.order_no,
+      r.pi_no,
+      r.company,
+      r.country,
+      r.style_no,
+      r.product_name,
+      r.color,
+      r.size,
+      Number(r.quantity),
+      money2(Number(r.unit_price)),
+      money2(amount),
+      unitCost == null ? '' : money2(unitCost),
+      unitCost == null ? '' : money2(unitCost * Number(r.quantity)),
+      r.currency,
+      rate,
+      money2(amount * rate),
+      PAYMENT_STATUS_LABEL[String(r.payment_status) as keyof typeof PAYMENT_STATUS_LABEL] ?? r.payment_status,
+      SHIP_STATUS_LABEL[String(r.ship_status) as keyof typeof SHIP_STATUS_LABEL] ?? r.ship_status,
+      localDateOf(String(r.created_at)),
+      money2(o?.goodsValue ?? 0),
+      money2(o?.chargesTotal ?? 0),
+      money2(o?.grandTotal ?? 0)
+    ]
+  })
+  return toCsv(header, lines)
+}
+
+/** 月度汇总：与报表页同一份数（销售额按下单月、收款按到账月，列名里写清楚） */
+function monthlyCsv(base: string): string {
+  const header = [
+    '月份',
+    '订单数',
+    `销售额(${base})`,
+    `成本(${base})`,
+    `毛利(${base})`,
+    `折让(${base})`,
+    `短款核销(${base})`,
+    `坏账未追回(${base})`,
+    '成本未录全单数',
+    `收款(${base}·按到账月)`
+  ]
+  const lines = monthlyReport().map((r) => [
+    r.month,
+    r.orders,
+    money2(r.sales),
+    money2(r.cost),
+    r.profit == null ? '' : money2(r.profit),
+    money2(r.discount),
+    money2(r.shortage),
+    money2(r.badDebt),
+    r.missingCostOrders,
+    money2(r.received)
+  ])
+  return toCsv(header, lines)
+}
+
+/** 收款流水：现金流口径（草稿单的钱不算真收款），并带上订单状态——
+ *  作废/失效单的钱确实到账了，但看的人得知道这单已经作废 */
+function paymentsCsv(db: ReturnType<typeof getDb>, base: string): string {
   const cash = notInStatuses('o.payment_status', CASHFLOW_EXCLUDED_STATUSES)
   const rows = db.all(
     `SELECT p.paid_at, o.order_no, o.pi_no, o.payment_status, c.company, o.currency, o.exchange_rate,
@@ -949,30 +1034,45 @@ export function exportCsv(kind: 'orders' | 'payments' | 'items'): string {
     '银行流水号',
     '备注'
   ]
-  const lines = rows.map((r) =>
-    [
-      r.paid_at,
-      r.order_no,
-      r.pi_no,
-      r.company,
-      r.payment_status,
-      r.currency,
-      Number(r.amount).toFixed(2),
-      (Number(r.amount) * Number(r.exchange_rate)).toFixed(2),
-      r.method,
-      r.bank_ref,
-      r.note
-    ].join(',')
-  )
+  const lines = rows.map((r) => [
+    r.paid_at,
+    r.order_no,
+    r.pi_no,
+    r.company,
+    PAYMENT_STATUS_LABEL[String(r.payment_status) as keyof typeof PAYMENT_STATUS_LABEL] ?? r.payment_status,
+    r.currency,
+    money2(Number(r.amount)),
+    money2(Number(r.amount) * Number(r.exchange_rate)),
+    r.method,
+    r.bank_ref,
+    r.note
+  ])
   return toCsv(header, lines)
 }
 
-function toCsv(header: string[], lines: string[]): string {
-  const esc = (v: unknown) => {
-    const s = String(v ?? '')
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
-  }
+/** 报表里用到的金额：四舍五入到分，但保持数字类型（负数不能被当成 Excel 公式加前缀） */
+function money2(v: number): number {
+  return Math.round((Number(v) || 0) * 100) / 100
+}
+
+/**
+ * CSV 单元格。
+ * 文本必须转义：客户名、品名、备注里带逗号或引号是常态，
+ * 不转义整行会往后错位，Excel 里看就是一堆对不上的数。
+ * 以 = + - @ 开头的文本要前置单引号，否则 Excel 会当公式执行（CSV 注入）。
+ * 数字原样输出，不加引号也不加前缀，保证 Excel 里能直接求和。
+ */
+function csvCell(v: unknown): string {
+  if (typeof v === 'number') return Number.isFinite(v) ? String(v) : ''
+  if (typeof v === 'boolean') return v ? '1' : '0'
+  const s = String(v ?? '')
+  const guarded = /^[=+\-@\t]/.test(s) ? `'${s}` : s
+  return /[",\n\r]/.test(guarded) ? `"${guarded.replace(/"/g, '""')}"` : guarded
+}
+
+/** 拼 CSV：调用方只负责给每行的原始值，转义和 BOM 一律在这里做 */
+function toCsv(header: string[], rows: unknown[][]): string {
   return (
-    '﻿' + [header.map(esc).join(','), ...lines.map((l) => l)].join('\r\n') + '\r\n'
+    '﻿' + [header, ...rows].map((r) => r.map(csvCell).join(',')).join('\r\n') + '\r\n'
   )
 }

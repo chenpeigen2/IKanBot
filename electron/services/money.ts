@@ -26,7 +26,7 @@
  */
 import { getDb } from '../db'
 import { localMonthOf } from '../../src/shared/date'
-import type { QuotationCharge } from '../../src/shared/types'
+import type { CustomerReceivable, QuotationCharge } from '../../src/shared/types'
 
 /** 解析费用行 JSON（运费/保险等） */
 export function parseCharges(v: unknown): QuotationCharge[] {
@@ -231,6 +231,8 @@ export interface OrderMoneyRow extends OrderMoney {
   paymentMethod: string
   customerPo: string
   expectedShipDate: string | null
+  /** 锁汇日期：汇率是哪天定下的（税务复核折算要用） */
+  exchangeRateDate: string | null
   /** 折算成基准币的金额 */
   grandTotalBase: number
   receivableBase: number
@@ -302,7 +304,8 @@ export function listOrderMoney(filter: MoneyListFilter = {}): OrderMoneyRow[] {
   const rows = db.all(
     `SELECT o.id, o.order_no, o.pi_no, o.customer_id, c.company AS customer_name, c.country,
             o.currency, o.exchange_rate, o.payment_status, o.ship_status, o.deposit_ratio, o.charges, o.created_at,
-            o.incoterm, o.port_of_loading, o.port_of_destination, o.payment_method, o.customer_po, o.expected_ship_date
+            o.incoterm, o.port_of_loading, o.port_of_destination, o.payment_method, o.customer_po, o.expected_ship_date,
+            o.exchange_rate_date
      FROM orders o JOIN customers c ON c.id = o.customer_id
      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
      ORDER BY o.created_at DESC, o.id DESC`,
@@ -383,6 +386,7 @@ export function listOrderMoney(filter: MoneyListFilter = {}): OrderMoneyRow[] {
       paymentMethod: String(r.payment_method ?? ''),
       customerPo: String(r.customer_po ?? ''),
       expectedShipDate: r.expected_ship_date == null ? null : String(r.expected_ship_date),
+      exchangeRateDate: r.exchange_rate_date == null ? null : String(r.exchange_rate_date),
       grandTotalBase: m.grandTotal * rate,
       receivableBase: m.receivable * rate,
       goodsValueBase: m.goodsValue * rate,
@@ -404,6 +408,59 @@ export function totalReceivable(filter: MoneyListFilter = {}): number {
   const orders = listOrderMoney(filter).reduce((s, r) => s + r.receivableBase, 0)
   const samples = sampleReceivable(filter.customerId)
   return orders + samples
+}
+
+/**
+ * 到账金额按「到账月」归集（基准币），现金流口径：只排除草稿单。
+ *
+ * 这是全项目唯一一份「某个月收到多少钱」的实现——工作台的本月收款、
+ * 月度报表的收款列、月度汇总导出都从这里取，两处各写一遍 SQL
+ * 迟早会漂出两个数（红线：算钱的 SQL 不许在报表里另起一套）。
+ * 已作废/失效单的钱真到账了就是到账了，所以这里用 CASHFLOW 状态集合。
+ */
+export function receivedByMonth(): { month: string; amount: number }[] {
+  const db = getDb()
+  const cash = notInStatuses('o.payment_status', CASHFLOW_EXCLUDED_STATUSES)
+  const rows = db.all(
+    `SELECT p.paid_at AS paid_at, p.amount * o.exchange_rate AS amount_base
+     FROM payments p JOIN orders o ON o.id = p.order_id
+     WHERE ${cash.sql}`,
+    cash.params
+  ) as Record<string, unknown>[]
+  const by = new Map<string, number>()
+  for (const r of rows) {
+    // 老数据里可能有空日期或非 YYYY-MM-DD 的收款日：这些钱认到账，但不认月份，
+    // 不能让它冒出一个 "null" 月把报表撑成垃圾行
+    const m = localMonthOf(String(r.paid_at ?? ''))
+    if (!/^\d{4}-\d{2}$/.test(m)) continue
+    by.set(m, (by.get(m) ?? 0) + Number(r.amount_base ?? 0))
+  }
+  return [...by.entries()].map(([month, amount]) => ({ month, amount })).sort((a, b) => b.month.localeCompare(a.month))
+}
+
+/**
+ * 客户维度欠款榜（基准币）：待收 + 该客户的打样未收。
+ * 走 listOrderMoney 的同一批行，不另写算钱的 SQL。
+ */
+export function receivableByCustomer(): CustomerReceivable[] {
+  const rows = listOrderMoney()
+  const by = new Map<number, CustomerReceivable>()
+  for (const r of rows) {
+    const cur = by.get(r.customerId) ?? {
+      customerId: r.customerId,
+      customerName: r.customerName,
+      orders: 0,
+      goodsBase: 0,
+      sampleBase: 0,
+      totalBase: 0
+    }
+    cur.orders += 1
+    cur.goodsBase += r.receivableBase
+    by.set(r.customerId, cur)
+  }
+  for (const [id, v] of by) v.sampleBase = sampleReceivable(id)
+  for (const v of by.values()) v.totalBase = v.goodsBase + v.sampleBase
+  return [...by.values()].sort((a, b) => b.totalBase - a.totalBase || a.customerName.localeCompare(b.customerName))
 }
 
 /**

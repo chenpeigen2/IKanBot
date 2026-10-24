@@ -10,9 +10,13 @@ import * as quotations from '../services/quotations'
 import * as samples from '../services/samples'
 import * as packing from '../services/packing'
 import * as dashboard from '../services/dashboard'
+import * as money from '../services/money'
 import * as settingsSvc from '../services/settings'
 import * as docsSvc from '../services/docs'
 import { createBackup } from '../services/backup'
+import { EXPORT_FILE_NAME } from '../../src/shared/types'
+import type { ExportKind } from '../../src/shared/types'
+import { localDate } from '../../src/shared/date'
 import { registerUpdaterIpc } from '../services/updater'
 import { copyFileSync } from 'fs'
 import { randomUUID } from 'crypto'
@@ -213,6 +217,7 @@ export function registerIpc(): void {
   handle('dashboard:stats', () => dashboard.dashboard())
   handle('dashboard:reminders', () => dashboard.reminders())
   handle('report:monthly', () => dashboard.monthlyReport())
+  handle('report:receivables', () => money.receivableByCustomer())
 
   /* ---- 设置 ---- */
   handle('settings:get', () => settingsSvc.getSettings())
@@ -281,16 +286,13 @@ export function registerIpc(): void {
     await shell.openPath(dir)
     return dir
   })
-  handle('export:csv', async (kind: 'orders' | 'payments' | 'items') => {
+  handle('export:csv', async (kind: ExportKind) => {
     const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
-    const names: Record<string, string> = {
-      orders: '订单台账.csv',
-      payments: '收款台账.csv',
-      items: '款号明细台账.csv'
-    }
+    // 文件名带上导出当天：两张台账撞在一起时，得能看出哪份是哪一次刷的数
+    const name = EXPORT_FILE_NAME[kind].replace(/\.csv$/, `_${localDate()}.csv`)
     const res = await dialog.showSaveDialog(win, {
       title: '导出 Excel(CSV)',
-      defaultPath: names[kind] ?? '导出.csv',
+      defaultPath: name,
       filters: [{ name: 'CSV', extensions: ['csv'] }]
     })
     if (res.canceled || !res.filePath) return ''

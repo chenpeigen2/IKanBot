@@ -635,6 +635,25 @@ export interface Reminder {
 /** 单据种类 */
 export type DocKind = 'pi' | 'pl' | 'ci' | 'quotation'
 
+/**
+ * 导出台账的种类。
+ * 四层（渲染页 → preload → IPC → services）共用这一个类型，
+ * 谁加了新表，编译器会在每一层都催一遍，不会出现「点得动、类型里不许传」的谎。
+ *
+ * orders 和报表同一个口径（草稿/失效/作废都不算正式订单），列直接 SUM 就是对的；
+ * orders_all 才是全量底稿（含草稿与作废），文件名写死了「仅供复盘」，
+ * 免得两套数据在 Excel 里长成一个样子。
+ */
+export type ExportKind = 'orders' | 'orders_all' | 'payments' | 'items' | 'monthly'
+
+export const EXPORT_FILE_NAME: Record<ExportKind, string> = {
+  orders: '订单台账.csv',
+  orders_all: '订单底稿_含草稿作废_仅供复盘.csv',
+  payments: '收款台账.csv',
+  items: '款号明细台账.csv',
+  monthly: '月度汇总.csv'
+}
+
 /** 打样单（样品单）状态 */
 export type SampleStatus = 'pending' | 'sent' | 'received' | 'cancelled'
 
@@ -753,11 +772,33 @@ export interface SkuSummary {
 export interface MonthlyReportRow {
   month: string
   orders: number
+  /** 销售额（含费用合计，基准币）—— 按订单创建月份 */
   sales: number
   cost: number
   /** 毛利；该月有成本没录全的订单时为 null（不可信，界面显示「—」） */
   profit: number | null
+  /** 折让（负向费用：抵扣/让利，正数表示让出去多少）—— 按订单创建月份 */
+  discount: number
+  /** 短款核销：当场让掉的尾款，已扣进毛利 —— 按订单创建月份 */
+  shortage: number
+  /** 还没追回的坏账：信用损失，不进进货毛利，报表单列 —— 按订单创建月份 */
+  badDebt: number
+  /** 收款：按实际到账月份，不能与上面几列纵向相减 */
   received: number
   /** 该月里成本没录全的订单数：这些单的毛利是假的 */
   missingCostOrders: number
+}
+
+/** 客户维度欠款榜（基准币） */
+export interface CustomerReceivable {
+  customerId: number
+  customerName: string
+  /** 未结订单数（已排除草稿/失效/作废） */
+  orders: number
+  /** 货款待收 */
+  goodsBase: number
+  /** 打样费+快递费待收 */
+  sampleBase: number
+  /** 合计敞口 */
+  totalBase: number
 }

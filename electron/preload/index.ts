@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IKanApi } from '../../src/shared/api'
+import type { CustomerReceivable, ExportKind, MonthlyReportRow } from '../../src/shared/types'
 
 type Result<T> = { ok: true; data: T } | { ok: false; error: string }
 
@@ -139,7 +140,8 @@ const api: IKanApi = {
     reminders: () => call<any[]>('dashboard:reminders')
   },
   report: {
-    monthly: () => call<any[]>('report:monthly')
+    monthly: () => call<MonthlyReportRow[]>('report:monthly'),
+    receivables: () => call<CustomerReceivable[]>('report:receivables')
   },
   settings: {
     get: () => call<any>('settings:get'),
@@ -157,7 +159,7 @@ const api: IKanApi = {
     reveal: () => call<string>('backup:reveal')
   },
   exporter: {
-    csv: (kind: 'orders' | 'payments') => call<string>('export:csv', kind)
+    csv: (kind: ExportKind) => call<string>('export:csv', kind)
   },
   window: {
     hide: () => call<boolean>('window:hide'),

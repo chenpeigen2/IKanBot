@@ -1841,7 +1841,8 @@ check(
 )
 const csvPayAfterVoid = dashboard.exportCsv('payments')
 const cashRow = csvPayAfterVoid.split('\r\n').find((l) => l.includes(cashFlowOrder.orderNo))
-check('收款 CSV 里作废单这行还在，且订单状态列写着 void', !!cashRow && cashRow.includes('void'), cashRow ?? '没找到该行')
+// R7：状态列统一走中文标签，台账、明细、收款三张表写法一致
+check('收款 CSV 里作废单这行还在，且订单状态列写着「已作废」', !!cashRow && cashRow.includes('已作废'), cashRow ?? '没找到该行')
 
 section('数据守卫：汇率不能清空、已转的单不能改钱')
 let rateZeroErr = ''
@@ -3098,6 +3099,235 @@ check(
   JSON.stringify(dashboard.reminders().filter((r) => r.orderId === oVoid.id).map((r) => r.kind))
 )
 saveSettings(sR6)
+
+/* ---------------- R7 报表与导出 ---------------- */
+section('R7 CSV 转义与注入：客户名再野也不能把列撑爆')
+
+/** 按 RFC4180 解析整段 CSV：带引号的字段里可以有逗号、引号、换行 */
+function parseCsv(text: string): string[][] {
+  const out: string[][] = []
+  let row: string[] = []
+  let cell = ''
+  let quoted = false
+  const src = text.replace(/^﻿/, '')
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i]
+    if (quoted) {
+      if (ch === '"') {
+        if (src[i + 1] === '"') {
+          cell += '"'
+          i += 1
+        } else quoted = false
+      } else cell += ch
+    } else if (ch === '"') quoted = true
+    else if (ch === ',') {
+      row.push(cell)
+      cell = ''
+    } else if (ch === '\r' && src[i + 1] === '\n') {
+      row.push(cell)
+      out.push(row)
+      row = []
+      cell = ''
+      i += 1
+    } else cell += ch
+  }
+  if (cell !== '' || row.length) {
+    row.push(cell)
+    out.push(row)
+  }
+  return out
+}
+const r2 = (v: number): number => Math.round((Number(v) || 0) * 100) / 100
+const recOf = (csv: string, colName: string, val: string): { head: string[]; row: string[] } | null => {
+  const recs = parseCsv(csv)
+  const head = recs[0]
+  const idx = head.indexOf(colName)
+  const row = recs.slice(1).find((c) => c[idx] === val)
+  return row ? { head, row } : null
+}
+
+const cWild = customers.saveCustomer({ company: 'Acme, "Head" Office\nHamburg', country: 'DE' })
+const oWild = orders.createOrder({ customerId: cWild.id, currency: 'USD', exchangeRate: 7.2 })
+await orders.addOrderItem(oWild.id, { styleNo: 'A001', productName: 'T, 恤', quantity: 10, unitPrice: 10, unitCost: 6 })
+orders.setPaymentStatus(oWild.id, 'confirmed')
+const csvOrdersRaw = dashboard.exportCsv('orders')
+const wildLedger = recOf(csvOrdersRaw, '订单号', oWild.orderNo)
+check(
+  '客户名里的逗号/引号/换行原样回来，列没有错位',
+  !!wildLedger && wildLedger.row[wildLedger.head.indexOf('客户')] === 'Acme, "Head" Office\nHamburg',
+  JSON.stringify(wildLedger?.row[wildLedger?.head.indexOf('客户') ?? 0])
+)
+const wildRecs = parseCsv(csvOrdersRaw)
+eq(
+  '订单台账每一行的列数都等于表头列数（转义没漏一处）',
+  wildRecs.filter((c) => c.length === wildRecs[0].length).length,
+  wildRecs.length
+)
+check(
+  '订单台账补了锁汇日期（税务复核折算要用）',
+  !!wildLedger && wildLedger.head.includes('锁汇日期') && wildLedger.row[wildLedger.head.indexOf('锁汇日期')] === localDate(),
+  JSON.stringify(wildLedger?.row[wildLedger?.head.indexOf('锁汇日期') ?? 0])
+)
+
+const cEvil = customers.saveCustomer({ company: '=HYPERLINK("http://evil","点我")', country: 'CN' })
+const oEvil = orders.createOrder({ customerId: cEvil.id, currency: 'USD', exchangeRate: 7.2 })
+// 草稿单已经不进订单台账了（R7 口径），要试转义就得把它变成正式单
+orders.setPaymentStatus(oEvil.id, 'confirmed')
+const evilLedger = recOf(dashboard.exportCsv('orders'), '订单号', oEvil.orderNo)
+check(
+  '以 = 开头的客户名被中和：Excel 不会把它当公式跑',
+  !!evilLedger && evilLedger.row[evilLedger.head.indexOf('客户')].startsWith("'="),
+  JSON.stringify(evilLedger?.row[evilLedger.head.indexOf('客户')])
+)
+
+const oNeg = orders.createOrder({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  charges: [{ label: '折让 Discount', amount: -50 }]
+})
+await orders.addOrderItem(oNeg.id, { styleNo: 'A001', productName: 'T恤', quantity: 10, unitPrice: 10, unitCost: 6 })
+orders.setPaymentStatus(oNeg.id, 'confirmed')
+const negLedger = recOf(dashboard.exportCsv('orders'), '订单号', oNeg.orderNo)
+eq(
+  '负数费用导出成数字 -50：不加引号也不加前缀，Excel 里能直接求和',
+  negLedger?.row[negLedger.head.indexOf('费用合计(原币)')],
+  '-50'
+)
+
+section('R7 台账口径：与报表同源，草稿作废不再混进 SUM')
+const oDraftR7 = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.2 })
+const oVoidR7 = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.2 })
+await orders.addOrderItem(oVoidR7.id, { styleNo: 'A001', productName: 'T恤', quantity: 10, unitPrice: 10, unitCost: 6 })
+orders.addPayment(oVoidR7.id, { paidAt: localDate(), amount: 30, method: 'T/T', bankRef: 'R7-VOID-01' })
+orders.voidOrder(oVoidR7.id, '客户取消')
+const ledgerRaw = dashboard.exportCsv('orders')
+check('草稿单不再进订单台账（销售额口径，列可以直接求和）', !recOf(ledgerRaw, '订单号', oDraftR7.orderNo))
+check('作废单也不再进订单台账（它不该出现在收入表里让财务自己筛）', !recOf(ledgerRaw, '订单号', oVoidR7.orderNo))
+const allRaw = dashboard.exportCsv('orders_all')
+check('草稿单在「全量底稿」里：历史一行没丢', !!recOf(allRaw, '订单号', oDraftR7.orderNo))
+const voidAll = recOf(allRaw, '订单号', oVoidR7.orderNo)
+eq('全量底稿里作废单的状态写中文「已作废」', voidAll?.row[voidAll.head.indexOf('收款状态')], '已作废')
+const voidPay = recOf(dashboard.exportCsv('payments'), '银行流水号', 'R7-VOID-01')
+eq('作废单到账的钱仍在收款台账，状态列写「已作废」', voidPay?.row[voidPay.head.indexOf('订单状态')], '已作废')
+
+const ledgerRecs = parseCsv(ledgerRaw)
+const ledgerHead = ledgerRecs[0]
+const sumCol = (name: string): number =>
+  ledgerRecs.slice(1).reduce((s, c) => s + r2(Number(c[ledgerHead.indexOf(name)])), 0)
+const reportSales = dashboard.monthlyReport().reduce((s, r) => s + r2(r.sales), 0)
+check(
+  '台账「含费用合计(基准币)」整列求和 = 报表累计销售额（差不过几分钱）',
+  Math.abs(sumCol('含费用合计(CNY)') - reportSales) < 0.5,
+  `${sumCol('含费用合计(CNY)')} vs ${reportSales}`
+)
+const stR7 = dashboard.dashboard()
+check(
+  '台账「待收金额(基准币)」整列求和 = 工作台待收款里的货款部分',
+  Math.abs(sumCol('待收金额(CNY)') - (stR7.pendingAmount - stR7.pendingSample)) < 0.5,
+  `${sumCol('待收金额(CNY)')} vs ${stR7.pendingAmount - stR7.pendingSample}`
+)
+
+section('R7 月度汇总：折让/短款/坏账导得出去，收款列写明按到账月')
+const csvMonthly = dashboard.exportCsv('monthly')
+const mRecs = parseCsv(csvMonthly)
+const mHead = mRecs[0]
+check('月度汇总能导出去了（成本/毛利/折让/短款/坏账都在列里）', ['成本(CNY)', '毛利(CNY)', '折让(CNY)', '短款核销(CNY)', '坏账未追回(CNY)'].every((h) => mHead.includes(h)), mHead.join('|'))
+check('月度汇总的收款列写明「按到账月」，不会被当成下单月的钱', mHead.some((h) => h.includes('按到账月')), mHead.join('|'))
+eq('月度汇总导出有 BOM（Excel 打开不乱码）', csvMonthly.charCodeAt(0) === 0xfeff, true)
+const thisMonth = localMonthOf(localDate())
+const repThis = dashboard.monthlyReport().find((x) => x.month === thisMonth)
+const csvThis = recOf(csvMonthly, '月份', thisMonth)
+eq(
+  '导出的本月销售额 = 报表页这个月的数',
+  Number(csvThis?.row[mHead.indexOf('销售额(CNY)')]),
+  repThis ? r2(repThis.sales) : 0
+)
+const mShortage = dashboard.monthlyReport().reduce((s, r) => s + r.shortage, 0)
+const moneyShortage = money.listOrderMoney().reduce((s, r) => s + r.shortageAmount * r.exchangeRate, 0)
+check(
+  '月报短款列之和 = money.ts 逐单短款之和（没有另写一套 SQL）',
+  Math.abs(mShortage - moneyShortage) < 0.01,
+  `${mShortage} vs ${moneyShortage}`
+)
+const mBad = dashboard.monthlyReport().reduce((s, r) => s + r.badDebt, 0)
+const moneyBad = money.listOrderMoney().reduce((s, r) => s + r.badDebtOutstanding * r.exchangeRate, 0)
+check('月报坏账列之和 = money.ts 逐单未追回坏账之和', Math.abs(mBad - moneyBad) < 0.01, `${mBad} vs ${moneyBad}`)
+const mDiscount = dashboard.monthlyReport().reduce((s, r) => s + r.discount, 0)
+const moneyDiscount = money.listOrderMoney().reduce((s, r) => s + -r.negativeCharges * r.exchangeRate, 0)
+check('月报折让列 = 负向费用之和（让利看得见）', Math.abs(mDiscount - moneyDiscount) < 0.01, `${mDiscount} vs ${moneyDiscount}`)
+let kindErr = ''
+try {
+  ;(dashboard.exportCsv as (k: unknown) => string)('bogus')
+} catch (e) {
+  kindErr = (e as Error).message
+}
+check('未知导出类型直接报错，不会静默掉进收款分支', kindErr.includes('不支持的导出类型'), kindErr)
+
+section('R7 款号明细台账：成本与整单费用都带上')
+const csvItemsR7 = dashboard.exportCsv('items')
+const iRecs = parseCsv(csvItemsR7)
+const iHead = iRecs[0]
+const iRowsWild = iRecs.slice(1).filter((c) => c[iHead.indexOf('订单号')] === oWild.orderNo)
+check('明细台账补了成本列', iHead.includes('单位成本(原币)') && iHead.includes('成本(原币)'), iHead.join('|'))
+eq('明细里的单位成本 = 录进去的成本', Number(iRowsWild[0]?.[iHead.indexOf('单位成本(原币)')]), 6)
+eq('明细里的成本 = 数量 × 单位成本', Number(iRowsWild[0]?.[iHead.indexOf('成本(原币)')]), 60)
+const iRowsNoCost = iRecs.slice(1).filter((c) => c[iHead.indexOf('款号')] === 'A002')
+check(
+  '没录成本的那行成本留空，不写 0 冒充（有款可算的照实算）',
+  iRowsNoCost.some((c) => c[iHead.indexOf('单位成本(原币)')] === '') &&
+    iRowsNoCost.every((c) => c[iHead.indexOf('单位成本(原币)')] !== '0')
+)
+check('整单的货值/费用/含费用合计一起带上：报关核数那截差额有交代', ['该单货值(原币)', '该单费用合计(原币)', '该单含费用合计(原币)'].every((h) => iHead.includes(h)), iHead.join('|'))
+const iSum = iRowsWild.reduce((s, c) => s + Number(c[iHead.indexOf('金额(原币)')]), 0)
+eq('明细金额之和 = 该单货值（差额就是费用行）', iSum, Number(iRowsWild[0]?.[iHead.indexOf('该单货值(原币)')]))
+const negLedger2 = recOf(csvItemsR7, '订单号', oNeg.orderNo)
+eq(
+  '带折让的单：明细货值 100，含费用合计 50，差额就是 -50 折让',
+  [negLedger2?.row[negLedger2.head.indexOf('该单货值(原币)')], negLedger2?.row[negLedger2.head.indexOf('该单含费用合计(原币)')]],
+  ['100', '50']
+)
+const STATUS_CODES = ['draft', 'sent', 'confirmed', 'partial', 'settled', 'expired', 'void', 'not_prepared', 'preparing', 'packed', 'shipped', 'cleared', 'delivered']
+check(
+  '三张台账的状态一律中文标签，不再吐英文原码',
+  iRowsWild.every((c) => !STATUS_CODES.includes(c[iHead.indexOf('收款状态')])) &&
+    recOf(dashboard.exportCsv('payments'), '订单号', oVoidR7.orderNo)!.row.includes('已作废')
+)
+
+section('R7 到账只有一份算法 + 客户欠款榜')
+eq(
+  '工作台「本月收款」= 月报这个月的收款（两处不再各写一遍 SUM）',
+  dashboard.dashboard().monthReceived,
+  dashboard.monthlyReport().find((x) => x.month === thisMonth)?.received ?? 0
+)
+const dirtyBefore = dashboard.monthlyReport().length
+getDb().run(
+  `INSERT INTO payments(order_id, paid_at, amount, method, bank_ref, note, created_at) VALUES(?,?,?,?,?,?,?)`,
+  [oEvil.id, '', 5, 'T/T', 'R7-DIRTY', '老数据：日期是空的', '2026-01-01T00:00:00.000Z']
+)
+check(
+  '空日期的老收款不会冒出一个垃圾月份',
+  dashboard.monthlyReport().every((r) => /^\d{4}-\d{2}$/.test(r.month)),
+  JSON.stringify(dashboard.monthlyReport().filter((r) => !/^\d{4}-\d{2}$/.test(r.month)).map((r) => r.month))
+)
+getDb().run(`DELETE FROM payments WHERE bank_ref = 'R7-DIRTY'`)
+check('删掉脏行后月份数回到原样（没有多余垃圾月）', dashboard.monthlyReport().length, dirtyBefore)
+const owed = money.receivableByCustomer()
+check(
+  '客户欠款榜合计 = 工作台待收款（货款 + 打样，同一个口径）',
+  Math.abs(owed.reduce((s, o) => s + o.totalBase, 0) - stR7.pendingAmount) < 0.01,
+  `${owed.reduce((s, o) => s + o.totalBase, 0)} vs ${stR7.pendingAmount}`
+)
+check('欠款榜按敞口从大到小排', owed.every((o, i) => i === 0 || owed[i - 1].totalBase >= o.totalBase))
+eq(
+  '各客户打样敞口之和 = sampleReceivable()（打样费没漏也没重算）',
+  r2(owed.reduce((s, o) => s + o.sampleBase, 0)),
+  r2(money.sampleReceivable())
+)
+const wildMoney = money.listOrderMoney().find((x) => x.orderId === oWild.id)!
+const wildOwed = owed.find((o) => o.customerId === cWild.id)
+eq('有未结单的客户在榜上，敞口就是这单的待收（基准币）', wildOwed ? r2(wildOwed.goodsBase) : 0, r2(wildMoney.receivableBase))
+
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

@@ -2,6 +2,8 @@
  * 渲染进程与主进程之间的 API 契约。
  * preload 暴露的 window.api 必须满足此接口。
  */
+import type { CustomerReceivable, ExportKind, MonthlyReportRow } from './types'
+
 export interface IKanApi {
   products: {
     list(keyword?: string, includeInactive?: boolean): Promise<any[]>
@@ -136,7 +138,8 @@ export interface IKanApi {
     reminders(): Promise<any[]>
   }
   report: {
-    monthly(): Promise<any[]>
+    monthly(): Promise<MonthlyReportRow[]>
+    receivables(): Promise<CustomerReceivable[]>
   }
   settings: {
     get(): Promise<any>
@@ -155,7 +158,7 @@ export interface IKanApi {
     reveal(): Promise<string>
   }
   exporter: {
-    csv(kind: 'orders' | 'payments' | 'items'): Promise<string>
+    csv(kind: ExportKind): Promise<string>
   }
   window: {
     hide(): Promise<boolean>
