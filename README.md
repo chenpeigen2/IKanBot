@@ -21,6 +21,10 @@ npm run typecheck    # TypeScript 类型检查
 打包产物在 `release/`：
 - `IKanBot-<版本>-x64.exe` — NSIS 安装包（可选安装目录、创建快捷方式）
 - `IKanBot-<版本>-portable.exe` — 免安装单文件版
+- `IKanBot-<版本>-x64.dmg` / `-arm64.dmg` — macOS 安装镜像（Intel / Apple Silicon）
+- `IKanBot-<版本>-x64.zip` / `-arm64.zip` — macOS 压缩包（自动更新用）
+
+macOS 产物未做代码签名，首次打开需右键 →「打开」。GitHub Actions 会在推送 `v*` 标签时同时构建 Windows 与 macOS。
 
 ---
 

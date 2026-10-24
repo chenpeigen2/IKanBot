@@ -162,6 +162,14 @@ export function registerUpdaterIpc(): void {
         message: '开发模式下不能检查更新，请用打包后的程序测试。'
       }
     }
+    // macOS 产物没有 Apple 开发者签名，Squirrel 无法安装更新；与其报一串英文错误，不如直接说清楚
+    if (process.platform === 'darwin') {
+      return {
+        ...base,
+        status: 'error',
+        message: 'macOS 版暂未做代码签名，应用内自动更新用不了。请到 GitHub Releases 手动下载新的安装包。'
+      }
+    }
     try {
       const result = await autoUpdater.checkForUpdates()
       if (!result) {

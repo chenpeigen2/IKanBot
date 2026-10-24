@@ -35,6 +35,9 @@ function findRcedit() {
 }
 
 exports.default = async function afterPack(context) {
+  // 只处理 Windows 的 exe；macOS 的 .app 由 electron-builder 自己写 Info.plist 和图标。
+  if (context.electronPlatformName !== 'win32') return
+
   const exeName = `${context.packager.appInfo.productFilename}.exe`
   const exePath = join(context.appOutDir, exeName)
   if (!existsSync(exePath)) {

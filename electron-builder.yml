@@ -39,6 +39,17 @@
     "signAndEditExecutable": false,
     "artifactName": "${productName}-${version}-${arch}.${ext}"
   },
+  "mac": {
+    "target": [
+      { "target": "dmg", "arch": ["x64", "arm64"] },
+      { "target": "zip", "arch": ["x64", "arm64"] }
+    ],
+    "category": "public.app-category.business",
+    "icon": "build/icon_1024.png",
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "identity": null,
+    "notarize": false
+  },
   "afterPack": "scripts/after-pack.cjs",
   "nsis": {
     "oneClick": false,

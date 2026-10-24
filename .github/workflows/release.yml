@@ -84,3 +84,69 @@ jobs:
           Get-ChildItem release -Filter *.exe | ForEach-Object {
             Write-Host ("{0}  {1:N1} MB" -f $_.Name, ($_.Length / 1MB))
           }
+
+  build-macos:
+    # 排在 Windows 后面：Windows 先创建 Release，macOS 再往里传，避免两个 job 同时创建同名 Release
+    needs: build-windows
+    runs-on: macos-latest
+    name: macOS x64 + arm64
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 端到端测试
+        run: npm run test:e2e
+
+      - name: 校验图标资源
+        run: |
+          test -f build/icon_1024.png || { echo '缺少 build/icon_1024.png'; exit 1; }
+          test -f electron/resources/tray-16.png || { echo '缺少托盘图标'; exit 1; }
+
+      - name: 构建
+        run: npm run build
+
+      - name: 打包（上传到 Release）
+        if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.publish == true)
+        run: npx electron-builder --mac --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ELECTRON_BUILDER_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 没有 Apple 开发者证书：关闭自动查找签名身份，产物未签名
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: 打包（仅本地产物）
+        if: ${{ !(startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.publish == true)) }}
+        run: npx electron-builder --mac
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: 归档产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: IKanBot-macos
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.blockmap
+            release/latest-mac.yml
+            release/*.yml
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 汇总
+        run: |
+          ls -lh release/*.dmg release/*.zip
