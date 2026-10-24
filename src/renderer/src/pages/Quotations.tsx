@@ -390,7 +390,9 @@ function QuotationDetailModal({
 }) {
   const toast = useToast()
   const navigate = useNavigate()
-  const [preview, setPreview] = useState<{ html: string; render: (pending: boolean) => string } | null>(null)
+  const [preview, setPreview] = useState<{ html: string; render: (pending: boolean) => string; rev: number } | null>(
+    null
+  )
   const [settings, setSettings] = useState<any>(null)
   const [docVersions, setDocVersions] = useState<any[]>([])
   const [events, setEvents] = useState<any[]>([])
@@ -431,23 +433,25 @@ function QuotationDetailModal({
     // 先问存档：这一版存进去会是第几版；没存之前纸上印「待存为第 N 版」（N39，不占还不存在的版本号）
     const rev = await window.api.docs.nextVersion(quotation.qNo, 'quotation')
     const render = (pending: boolean) => renderQuotation({ quotation, settings, images, rev, pending })
-    setPreview({ html: render(true), render })
+    setPreview({ html: render(true), render, rev })
   }
 
   const saveToSystem = async () => {
     if (!preview) return
     try {
+      const savedHtml = preview.render(false)
       const r = await window.api.docs.save({
-        html: preview.render(false),
+        html: savedHtml,
         fileName: `${quotation.qNo}.pdf`,
         docNo: quotation.qNo,
         kind: 'quotation',
         quotationId: quotation.id,
-        amount: quotation.grandTotal
+        amount: quotation.grandTotal,
+        expectedVersion: preview.rev
       })
       toast(`已存档：${r.path}（第 ${r.version} 版）`)
       // 存完屏幕上的纸也换成正式版本号，跟存档表一个号（N39）
-      setPreview({ ...preview, html: preview.render(false) })
+      setPreview({ ...preview, html: savedHtml, rev: r.version })
       // 存档表立刻刷新（不然要关掉详情再打开才看得到）
       const fresh = await window.api.docs.listQuotation(quotation.id)
       setDocVersions(fresh)
@@ -456,10 +460,31 @@ function QuotationDetailModal({
     }
   }
 
+  /** 另存 PDF：先存档拿正式版纸面，再把不带「待存」字样的那份给客户 */
   const saveAs = async () => {
     if (!preview) return
-    const out = await window.api.window.printPdf({ html: preview.html, fileName: `${quotation.qNo}.pdf` })
-    if (out) toast('PDF 已保存')
+    try {
+      const savedHtml = preview.render(false)
+      const r = await window.api.docs.save({
+        html: savedHtml,
+        fileName: `${quotation.qNo}.pdf`,
+        docNo: quotation.qNo,
+        kind: 'quotation',
+        quotationId: quotation.id,
+        amount: quotation.grandTotal,
+        expectedVersion: preview.rev
+      })
+      setPreview({ ...preview, html: savedHtml, rev: r.version })
+      const fresh = await window.api.docs.listQuotation(quotation.id)
+      setDocVersions(fresh)
+      const out = await window.api.window.printPdf({
+        html: savedHtml,
+        fileName: `${quotation.qNo}_v${r.version}.pdf`
+      })
+      toast(out ? `已存档第 ${r.version} 版，PDF 已保存` : `已存档第 ${r.version} 版；没有另存 PDF`)
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
   }
 
   const setResult = async (result: QuotationResult) => {

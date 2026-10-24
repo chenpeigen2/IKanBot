@@ -26,6 +26,8 @@ type PreviewState = {
   html: string
   docNo: string
   amount: number
+  /** 预览时算出的下一版版次；存档时用它核对，纸面和库里必须同号 */
+  rev: number
   title: string
   /**
    * 重新生成纸面 HTML：
@@ -112,6 +114,7 @@ export default function OrderDetail() {
       docNo: order.piNo,
       // 存档金额唯一入口：含费用合计（与 PI 纸面 TOTAL 同一个数）
       amount: orderDocAmount(order),
+      rev,
       title: `PI ${order.piNo}`,
       render
     })
@@ -144,6 +147,7 @@ export default function OrderDetail() {
       docNo: pl.plNo,
       // 存档金额统一用含费用合计（PI / PL 同一个函数：shared/documents.ts orderDocAmount）
       amount: orderDocAmount(order),
+      rev,
       title: `PL ${pl.plNo}`,
       render
     })
@@ -161,18 +165,41 @@ export default function OrderDetail() {
       html: render(true),
       docNo: ciNo,
       amount,
+      rev,
       title: `CI ${ciNo}`,
       render
     })
     setShowCi(false)
   }
 
-  /** 另存为（自己选地方） */
+  /**
+   * 另存为（自己选地方）：先存系统存档，再拿正式版纸面去保存。
+   * 绝不能把预览稿（页脚印「待存为第 N 版」）发给客户或报关行。
+   */
   const savePdf = async () => {
     if (!preview) return
     try {
-      const out = await window.api.window.printPdf({ html: preview.html, fileName: `${preview.docNo}.pdf` })
-      if (out) toast('PDF 已保存')
+      const savedHtml = preview.render(false)
+      const r = await window.api.docs.save({
+        html: savedHtml,
+        fileName: `${preview.docNo}.pdf`,
+        docNo: preview.docNo,
+        kind: preview.kind,
+        orderId: order.id,
+        amount: preview.amount,
+        expectedVersion: preview.rev
+      })
+      setPreview({ ...preview, html: savedHtml, rev: r.version })
+      await load()
+      const out = await window.api.window.printPdf({
+        html: savedHtml,
+        fileName: `${preview.docNo}_v${r.version}.pdf`
+      })
+      toast(
+        out
+          ? `已存档第 ${r.version} 版，PDF 已保存`
+          : `已存档第 ${r.version} 版；没有另存 PDF`
+      )
     } catch (e) {
       toast((e as Error).message, 'error')
     }
@@ -189,11 +216,12 @@ export default function OrderDetail() {
         docNo: preview.docNo,
         kind: preview.kind,
         orderId: order.id,
-        amount: preview.amount
+        amount: preview.amount,
+        expectedVersion: preview.rev
       })
       toast(`已存档到系统：${r.path}（第 ${r.version} 版）`)
       // 存完屏幕上的纸也换成正式版本号，跟存档表一个号（N39）
-      setPreview({ ...preview, html: savedHtml })
+      setPreview({ ...preview, html: savedHtml, rev: r.version })
       await load()
     } catch (e) {
       toast((e as Error).message, 'error')
@@ -2033,7 +2061,23 @@ function PackingTab({
                           }}
                         />
                       </td>
-                      <td className="num faint">{l.grossWeight == null ? '—' : l.grossWeight.toFixed(2)}</td>
+                      <td className="num">
+                        <input
+                          type="number"
+                          step="0.01"
+                          className="col-num-sm"
+                          title="报关/订舱请填实测毛重；留空按净重×系数估算（纸上标 est.）"
+                          defaultValue={l.grossWeight ?? ''}
+                          placeholder="按净重估"
+                          onBlur={async (e) => {
+                            const input = e.target
+                            const v = input.value === '' ? null : Number(input.value)
+                            await saveLine(pl.id, l.id, { grossWeight: v }, () => {
+                              input.value = l.grossWeight == null ? '' : String(l.grossWeight)
+                            })
+                          }}
+                        />
+                      </td>
                       <td>
                         <div className="row" style={{ gap: 3 }}>
                           {(['boxLength', 'boxWidth', 'boxHeight'] as const).map((k) => (

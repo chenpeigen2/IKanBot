@@ -2,8 +2,9 @@
  * 端到端业务逻辑测试：直接调用 service 层，验证核心流程。
  * 运行：npm run test:e2e
  */
-import { openDb, closeDb, getDb } from '../electron/db'
+import { openDb, closeDb, getDb, docsDir } from '../electron/db'
 import * as fs from 'fs'
+import { isAbsolute } from 'path'
 import * as products from '../electron/services/products'
 import * as customers from '../electron/services/customers'
 import * as orders from '../electron/services/orders'
@@ -15,6 +16,8 @@ import * as dashboard from '../electron/services/dashboard'
 import * as money from '../electron/services/money'
 import { getSettings, saveSettings } from '../electron/services/settings'
 import { createBackup } from '../electron/services/backup'
+import * as docs from '../electron/services/docs'
+import { collectDir } from '../electron/services/zip'
 import { renderPi, renderPl, renderQuotation, renderCi, renderSample, orderDocAmount, ciDocAmount } from '../src/shared/documents'
 import { localDate, localMonthOf } from '../src/shared/date'
 
@@ -2566,6 +2569,91 @@ try {
   r2Err = (e as Error).message
 }
 check('只有核销记录也不能改币种', r2Err.includes('核销'), r2Err)
+
+/* ---------------- R4：单据存档版本、路径安全、备份带 PDF、PL 实测毛重 ---------------- */
+section('R4 单据存档：版本唯一、路径安全、备份带 PDF')
+
+const r4no = `R4DOC${Date.now()}`
+const d1 = docs.saveDocFile({
+  pdf: Buffer.from('pdf-v1'),
+  docNo: r4no,
+  kind: 'pi',
+  orderId: order.id,
+  amount: 123.45
+})
+eq('第 1 版存档', d1.version, 1)
+check('存档路径是 data 下的相对路径', !isAbsolute(d1.filePath) && d1.filePath.startsWith('docs/'), d1.filePath)
+check('存档文件名带单据种类（PI / CI 同号也不会互盖）', d1.filePath.includes(`pi_${r4no}_v1.pdf`), d1.filePath)
+check('存档文件真的落盘', fs.existsSync(d1.absolutePath), d1.absolutePath)
+eq('下一版 = 2', docs.nextVersion(r4no, 'pi'), 2)
+
+const d2 = docs.saveDocFile({
+  pdf: Buffer.from('pdf-v2'),
+  docNo: r4no,
+  kind: 'pi',
+  orderId: order.id,
+  amount: 200,
+  expectedVersion: 2
+})
+eq('第 2 版存档', d2.version, 2)
+let staleDocErr = ''
+try {
+  docs.saveDocFile({ pdf: Buffer.from('stale'), docNo: r4no, kind: 'pi', expectedVersion: 1 })
+} catch (e) {
+  staleDocErr = (e as Error).message
+}
+check('纸面版次过期会被拦住，不混版', staleDocErr.includes('纸面是第 1 版') && staleDocErr.includes('重新打开'), staleDocErr)
+eq('被拦后没有多出存档行', docs.listDocVersions(order.id).filter((d) => d.docNo === r4no).length, 2)
+
+let docPathErr = ''
+try {
+  docs.saveDocFile({ pdf: Buffer.from('x'), docNo: '../evil', kind: 'pi' })
+} catch (e) {
+  docPathErr = (e as Error).message
+}
+check('单号带路径穿越会被拦住', docPathErr.includes('存档目录'), docPathErr)
+let docKindErr = ''
+try {
+  docs.saveDocFile({ pdf: Buffer.from('x'), docNo: r4no, kind: 'invoice' })
+} catch (e) {
+  docKindErr = (e as Error).message
+}
+check('不认识的单据种类会被拦住', docKindErr.includes('不认识'), docKindErr)
+
+let dupDocErr = ''
+try {
+  docs.recordDocVersion({ docNo: r4no, kind: 'pi', version: 1, filePath: 'x' })
+} catch (e) {
+  dupDocErr = (e as Error).message
+}
+check('同一版不能记两次（数据库唯一索引兜底）', dupDocErr.length > 0)
+eq('相对路径能解析回真实文件', docs.resolveDocPath(d1.filePath), d1.absolutePath)
+eq('老的绝对路径也能解析', docs.resolveDocPath(d1.absolutePath), d1.absolutePath)
+
+const docEntries = collectDir(docsDir(), 'docs')
+check(
+  '备份会递归带上 docs 子目录里的 PDF',
+  docEntries.some((e) => e.name === `docs/${r4no}/pi_${r4no}_v1.pdf`),
+  docEntries.map((e) => e.name).join(',')
+)
+const backupDocs = await createBackup('docs')
+const backupDocsBuf = fs.readFileSync(backupDocs)
+check('备份 zip 里能搜到单据路径', backupDocsBuf.includes(Buffer.from(`docs/${r4no}/pi_${r4no}_v1.pdf`)))
+
+// PL 毛重：没手工填的印 (est.) 并说明；填了实测值就按实测印
+const plEst = renderPl({ order: full, settings: getSettings(), images: {} }, full.packingLists[0])
+check('PL 推算毛重标 (est.)', plEst.includes('(est.)'))
+check('PL 有「不是过磅值」的说明', plEst.includes('not weighed'))
+const r4pl = full.packingLists[0]
+for (const line of r4pl.lines) {
+  packing.updatePackingListLine(order.id, r4pl.id, line.id, { grossWeight: 20.5 })
+}
+const plManual = renderPl(
+  { order: orders.getOrder(order.id)!, settings: getSettings(), images: {} },
+  packing.listPackingLists(order.id).find((p) => p.id === r4pl.id)!
+)
+check('PL 手工毛重按实测值印', plManual.includes('20.50'))
+check('PL 全部填了实测毛重后不再标 (est.)', !plManual.includes('(est.)'), plManual.includes('(est.)') ? '仍有 est.' : '')
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

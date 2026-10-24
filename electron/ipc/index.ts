@@ -1,6 +1,7 @@
 import { ipcMain, dialog, shell, BrowserWindow } from 'electron'
-import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs'
-import { join } from 'path'
+import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync } from 'fs'
+import { join, basename } from 'path'
+import { tmpdir } from 'os'
 import { imagesDir, docsDir, dataDir } from '../db'
 import * as products from '../services/products'
 import * as customers from '../services/customers'
@@ -25,6 +26,46 @@ function handle<T>(channel: string, fn: (...args: any[]) => T | Promise<T>): voi
       return { ok: false, error: (e as Error).message }
     }
   })
+}
+
+/**
+ * HTML → PDF。
+ *
+ * 以前整段 HTML（含商品图 data URL）塞进 loadURL 的 data: URL，
+ * Chromium 的 URL 长度上限约 2MB，一张手机原图就能让存档/打印直接失败。
+ * 改为先落临时 .html 再 loadFile，大小不受 URL 限制。
+ * 无论成功失败都销毁窗口、删临时文件，避免打印进程越积越多。
+ */
+async function htmlToPdf(html: string): Promise<Buffer> {
+  const file = join(tmpdir(), `ikanbot-print-${randomUUID()}.html`)
+  const printWin = new BrowserWindow({
+    show: false,
+    webPreferences: { offscreen: false, javascript: true, images: true }
+  })
+  try {
+    writeFileSync(file, String(html ?? ''), 'utf8')
+    await printWin.loadFile(file)
+    return await printWin.webContents.printToPDF({
+      printBackground: true,
+      margins: { top: 0, bottom: 0, left: 0, right: 0 },
+      pageSize: 'A4',
+      preferCSSPageSize: true
+    })
+  } finally {
+    if (!printWin.isDestroyed()) printWin.destroy()
+    try {
+      unlinkSync(file)
+    } catch {
+      /* 临时文件删不掉不影响出单 */
+    }
+  }
+}
+
+/** 用户给的文件名只取最后一段，杜绝 ../../ 写出数据目录 */
+function safePdfName(name: unknown): string {
+  const base = basename(String(name ?? '').trim())
+  if (!base || base === '.' || base === '..') return 'document.pdf'
+  return /\.pdf$/i.test(base) ? base : `${base}.pdf`
 }
 
 export function registerIpc(): void {
@@ -250,37 +291,20 @@ export function registerIpc(): void {
     orderId?: number | null
     quotationId?: number | null
     amount?: number
+    /** 纸面上印的版次；与系统实际下一版不一致时拒绝，避免纸面与存档错位 */
+    expectedVersion?: number
   }) => {
-    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
-    const printWin = new BrowserWindow({
-      show: false,
-      webPreferences: { offscreen: false, javascript: true, images: true }
-    })
-    await printWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(payload.html))
-    const pdf = await printWin.webContents.printToPDF({
-      printBackground: true,
-      margins: { top: 0, bottom: 0, left: 0, right: 0 },
-      pageSize: 'A4',
-      preferCSSPageSize: true
-    })
-    printWin.destroy()
-    const dir = join(docsDir(), payload.docNo)
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    const version = docsSvc.nextVersion(payload.docNo, payload.kind)
-    const fileName = `${payload.docNo}_v${version}.pdf`
-    const filePath = join(dir, fileName)
-    writeFileSync(filePath, pdf)
-    docsSvc.recordDocVersion({
-      orderId: payload.orderId ?? null,
-      quotationId: payload.quotationId ?? null,
+    const pdf = await htmlToPdf(payload.html)
+    const saved = docsSvc.saveDocFile({
+      pdf,
       docNo: payload.docNo,
       kind: payload.kind,
-      version,
+      orderId: payload.orderId ?? null,
+      quotationId: payload.quotationId ?? null,
       amount: payload.amount ?? 0,
-      filePath
+      expectedVersion: payload.expectedVersion
     })
-    void win
-    return { path: filePath, version }
+    return { path: saved.absolutePath, filePath: saved.filePath, version: saved.version }
   })
   handle('docs:list', (orderId: number) => docsSvc.listDocVersions(orderId))
   handle('docs:listQuotation', (quotationId: number) => docsSvc.listQuotationDocVersions(quotationId))
@@ -288,9 +312,10 @@ export function registerIpc(): void {
   handle('docs:reveal', async (filePath?: string) => {
     // N34：点「打开目录」要打开**这一版文件**所在的文件夹，而不是整个 docs 根目录
     if (filePath) {
-      if (!existsSync(filePath)) throw new Error('文件已不存在（可能被手工删了）')
-      shell.showItemInFolder(filePath)
-      return filePath
+      const abs = docsSvc.resolveDocPath(filePath)
+      if (!existsSync(abs)) throw new Error('文件已不存在（可能被手工删了）')
+      shell.showItemInFolder(abs)
+      return abs
     }
     const dir = docsDir()
     await shell.openPath(dir)
@@ -299,10 +324,11 @@ export function registerIpc(): void {
   handle('docs:openFile', async (filePath: string) => {
     // N34：每一版直接能打开看
     if (!filePath) throw new Error('没有文件')
-    if (!existsSync(filePath)) throw new Error('文件已不存在（可能被手工删了）')
-    const err = await shell.openPath(filePath)
+    const abs = docsSvc.resolveDocPath(filePath)
+    if (!existsSync(abs)) throw new Error('文件已不存在（可能被手工删了）')
+    const err = await shell.openPath(abs)
     if (err) throw new Error(`打开失败：${err}`)
-    return filePath
+    return abs
   })
 
   /* ---- 窗口 ---- */
@@ -314,26 +340,18 @@ export function registerIpc(): void {
   handle('window:printPdf', async (payload: { html: string; fileName: string; silent?: boolean }) => {
     const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
     if (!win) return ''
-    const printWin = new BrowserWindow({
-      show: false,
-      webPreferences: { offscreen: false, javascript: true, images: true }
-    })
-    await printWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(payload.html))
-    const pdf = await printWin.webContents.printToPDF({
-      printBackground: true,
-      margins: { top: 0, bottom: 0, left: 0, right: 0 },
-      pageSize: 'A4',
-      preferCSSPageSize: true
-    })
-    printWin.destroy()
+    const fileName = safePdfName(payload.fileName)
+    const pdf = await htmlToPdf(payload.html)
     if (payload.silent) {
-      const out = join(imagesDir(), '..', payload.fileName)
+      const dir = join(dataDir(), 'exports')
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+      const out = join(dir, fileName)
       writeFileSync(out, pdf)
       return out
     }
     const res = await dialog.showSaveDialog(win, {
       title: '保存 PDF',
-      defaultPath: payload.fileName,
+      defaultPath: fileName,
       filters: [{ name: 'PDF', extensions: ['pdf'] }]
     })
     if (res.canceled || !res.filePath) return ''

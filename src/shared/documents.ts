@@ -364,6 +364,7 @@ export function renderPl(ctx: DocContext, pl: PackingList): string {
   let totalNet = 0
   let totalGross = 0
   let totalVolume = 0
+  let hasEstimatedGross = false
   const boxNos = new Set<string>()
 
   const rows = pl.lines
@@ -371,6 +372,10 @@ export function renderPl(ctx: DocContext, pl: PackingList): string {
       totalQty += l.quantity
       const net = l.netWeight ?? 0
       const gross = l.grossWeight ?? Number((net * factor).toFixed(2))
+      // 与「净重×系数」一致就当作系统推算值：报关行需要知道哪些毛重不是过磅实测的
+      const grossEstimated =
+        l.grossWeight == null || (net > 0 && Math.abs(Number(l.grossWeight) - net * factor) < 0.005)
+      if (grossEstimated) hasEstimatedGross = true
       totalNet += net
       totalGross += gross
       // 每行 = 一箱，体积为该箱箱规，不乘件数
@@ -388,7 +393,9 @@ export function renderPl(ctx: DocContext, pl: PackingList): string {
         <td class="center">${esc(l.size)}</td>
         <td class="num">${fmtQty(l.quantity)}</td>
         <td class="num">${net ? net.toFixed(2) : '—'}</td>
-        <td class="num">${gross ? gross.toFixed(2) : '—'}</td>
+        <td class="num">${gross ? gross.toFixed(2) : '—'}${
+          grossEstimated ? '<span style="font-size:7pt;color:#666"> (est.)</span>' : ''
+        }</td>
         <td class="center">${
           l.boxLength && l.boxWidth && l.boxHeight
             ? `${l.boxLength}×${l.boxWidth}×${l.boxHeight}`
@@ -473,6 +480,12 @@ export function renderPl(ctx: DocContext, pl: PackingList): string {
       </tr>
     </tfoot>
   </table>
+
+  ${
+    hasEstimatedGross
+      ? '<div class="note" style="font-size:8pt">G.W. marked (est.) is estimated from N.W. × factor, not weighed. Please verify before customs / booking.</div>'
+      : ''
+  }
 
   ${
     pl.note

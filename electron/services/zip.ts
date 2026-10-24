@@ -107,7 +107,10 @@ export function collectDir(dir: string, prefix: string): ZipEntry[] {
   const out: ZipEntry[] = []
   for (const f of readdirSync(dir)) {
     const p = join(dir, f)
-    if (statSync(p).isFile()) {
+    if (statSync(p).isDirectory()) {
+      // 单据按单号分子目录：备份必须把子目录里的 PDF 一起带上
+      out.push(...collectDir(p, `${prefix}/${f}`))
+    } else {
       out.push({ name: `${prefix}/${f}`, data: readFileSync(p) })
     }
   }

@@ -1,10 +1,11 @@
 import { existsSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync } from 'fs'
 import { join } from 'path'
-import { dataDir, imagesDir, backupsDir } from '../db'
+import { dataDir, imagesDir, backupsDir, docsDir } from '../db'
 import { createZip, collectDir } from './zip'
 
 /**
- * 备份：把 db + images 打包成一个 zip（纯 JS 实现，无外部依赖）。
+ * 备份：把 db + images + 单据存档（docs 下的 PDF）打包成一个 zip。
+ * 只备 db 不备 docs，恢复后存档表还在、原单却一版都打不开，退税和收款纠纷时等于没凭据。
  */
 export async function createBackup(note = ''): Promise<string> {
   const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
@@ -17,6 +18,7 @@ export async function createBackup(note = ''): Promise<string> {
     entries.push({ name: 'ikanbot.db', data: readFileSync(dbFile) })
   }
   entries.push(...collectDir(imagesDir(), 'images'))
+  entries.push(...collectDir(docsDir(), 'docs'))
 
   const buf = createZip(entries)
   writeFileSync(target, buf)

@@ -94,7 +94,8 @@ const api: IKanApi = {
       orderId?: number | null
       quotationId?: number | null
       amount?: number
-    }) => call<{ path: string; version: number }>('docs:save', payload),
+      expectedVersion?: number
+    }) => call<{ path: string; filePath: string; version: number }>('docs:save', payload),
     list: (orderId: number) => call<any[]>('docs:list', orderId),
     listQuotation: (quotationId: number) => call<any[]>('docs:listQuotation', quotationId),
     nextVersion: (docNo: string, kind: string) => call<number>('docs:nextVersion', docNo, kind),

@@ -96,7 +96,9 @@ export interface IKanApi {
       orderId?: number | null
       quotationId?: number | null
       amount?: number
-    }): Promise<{ path: string; version: number }>
+      /** 纸面印的版次；与系统下一版不一致会被拒绝，防止纸面/存档错位 */
+      expectedVersion?: number
+    }): Promise<{ path: string; filePath: string; version: number }>
     /** 订单的单据存档列表 */
     list(orderId: number): Promise<any[]>
     /** 报价单的单据存档列表 */

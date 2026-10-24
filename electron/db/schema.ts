@@ -403,5 +403,15 @@ ALTER TABLE orders ADD COLUMN source_revision INTEGER;
 -- 打样单价是打样费，不是大货价；转单必须另填大货单价，绝不静默沿用样品价。
 ALTER TABLE sample_order_items ADD COLUMN goods_unit_price REAL;
 `
+  },
+  {
+    version: 11,
+    name: 'doc_version_unique',
+    sql: `
+-- 存档版本必须唯一：两个窗口同时点「存到系统」时，靠数据库兜底，
+-- 不允许同一张单据出现两条同版记录（否则纸面版次与存档对不上）。
+CREATE UNIQUE INDEX ux_doc_versions_doc_kind_version
+  ON doc_versions(doc_no, kind, version);
+`
   }
 ]
