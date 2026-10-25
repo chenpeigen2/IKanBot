@@ -5126,6 +5126,189 @@ getDb().run("UPDATE sample_orders SET fee_status = 'offset', offset_amount = 0 W
 eq('老抵扣记录只算样品费（USD10 × 7）', samples.getSample(r15Legacy.id)!.feeRecoveredBase, 70)
 eq('新抵扣记录按实际抵掉的金额算（USD40 × 7.2）', samples.getSample(smpOffset.id)!.feeRecoveredBase, 40 * 7.2)
 
+/* ============================================================
+ * 第 16 轮：发出去的单，系统里不许再改（R16）
+ * ============================================================ */
+section('R16 出过 CI 的批次：金额钉在存档上，箱明细/删除/作废全锁')
+const r16Order = orders.createOrder({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R16-FREEZE'
+})
+await orders.addOrderItem(r16Order.id, { styleNo: 'R16-F', productName: '冻结测试', quantity: 100, unitPrice: 10 })
+orders.updateOrderCharges(r16Order.id, [{ label: '运费 Freight', amount: 390 }])
+const r16Pl = packing.createPackingList({
+  orderId: r16Order.id,
+  lines: [{ boxNo: 'R16-1', styleNo: 'R16-F', quantity: 50 }]
+})[0]
+const r16Before = money.packingAmounts(r16Order.id)[0]
+eq('未存档时按整单货值分摊（500 货值 + 195 费用）', r16Before.total, 695)
+docs.saveDocFile({
+  pdf: Buffer.from('%PDF-1.4 r16 freeze'),
+  docNo: ciNoOf('PI-R16-FREEZE', r16Pl.plNo),
+  kind: 'ci',
+  orderId: r16Order.id,
+  amount: r16Before.total
+})
+// 订单后来又补了 100 件：整单货值变成 2000，存档批次的费用份额不能跟着缩水
+await orders.addOrderItem(r16Order.id, { styleNo: 'R16-F', productName: '冻结测试', quantity: 100, unitPrice: 10 })
+const r16After = money.packingAmounts(r16Order.id).find((b) => b.plId === r16Pl.id)!
+eq('补货后已存档批次的总额还是纸面上的 695', r16After.total, 695)
+eq('已存档批次的费用不按新货值重摊', r16After.charges, 195)
+const r16PlB = packing.createPackingList({
+  orderId: r16Order.id,
+  lines: [{ boxNo: 'R16-2', styleNo: 'R16-F', quantity: 50 }]
+}).slice(-1)[0]
+const r16AfterB = money.packingAmounts(r16Order.id).find((b) => b.plId === r16PlB.id)!
+eq('新批次仍按当前整单货值分摊（390 × 500/2000）', r16AfterB.charges, 97.5)
+eq('新批次总额跟着它的货值走', r16AfterB.total, 597.5)
+const r16Line = packing.listPackingLists(r16Order.id).find((p) => p.id === r16Pl.id)!.lines[0]
+check(
+  '出过 CI 的批次箱明细不能改',
+  r8err(() => packing.updatePackingListLine(r16Order.id, r16Pl.id, r16Line.id, { quantity: 40 })).includes(
+    '已经出过 CI'
+  )
+)
+check(
+  '出过 CI 的批次不能加箱',
+  r8err(() =>
+    packing.addPackingListLine(r16Order.id, r16Pl.id, { boxNo: 'R16-3', styleNo: 'R16-F', quantity: 1 })
+  ).includes('已经出过 CI')
+)
+check(
+  '出过 CI 的批次不能删箱',
+  r8err(() => packing.deletePackingListLine(r16Order.id, r16Pl.id, r16Line.id)).includes('已经出过 CI')
+)
+check(
+  '出过 CI 的批次不能删除',
+  r8err(() => packing.deletePackingList(r16Order.id, r16Pl.id)).includes('不能删除')
+)
+check(
+  '出过 CI 的批次不能作废',
+  r8err(() => packing.voidPackingList(r16Order.id, r16Pl.id, '想撤')).includes('不能作废')
+)
+eq(
+  '批次信息（船名/柜号）照旧能补录',
+  packing.updatePackingListInfo(r16Order.id, r16Pl.id, { vessel: 'R16 V.1' }).find((p) => p.id === r16Pl.id)!.vessel,
+  'R16 V.1'
+)
+eq('被拦后箱明细数量没变', packing.listPackingLists(r16Order.id).find((p) => p.id === r16Pl.id)!.lines[0].quantity, 50)
+eq('补货后整单数量仍可改（批次金额按箱单件数算）', orders.updateOrderItem(r16Order.id, orders.getOrder(r16Order.id)!.items[0].id, { quantity: 120 }).items[0].quantity, 120)
+
+section('R16 有单据存档后 PI 号不许改')
+check(
+  '出过 CI 后改 PI 号被拒',
+  r8err(() => orders.updateOrder(r16Order.id, { customerId: c1.id, piNo: 'PI-R16-FREEZE-X' })).includes('PI 号')
+)
+eq('被拒后 PI 号没变', orders.getOrder(r16Order.id)!.piNo, 'PI-R16-FREEZE')
+eq(
+  '原样带上 PI 号保存不被误伤',
+  orders.updateOrder(r16Order.id, { customerId: c1.id, piNo: 'PI-R16-FREEZE', note: 'R16 只改备注' }).note,
+  'R16 只改备注'
+)
+
+section('R16 报价单有存档后不能删')
+const r16Q = quotations.saveQuotation({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: '2026-10-21',
+  items: [{ styleNo: 'R16-Q', quantity: 10, unitPrice: 7.5 }]
+})
+docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r16 quote'), docNo: r16Q.qNo, kind: 'quotation', quotationId: r16Q.id })
+check('有存档的报价单删不掉', r8err(() => quotations.deleteQuotation(r16Q.id)).includes('单据存档'))
+check('拦截提示给出替代方案（已失效）', r8err(() => quotations.deleteQuotation(r16Q.id)).includes('已失效'))
+check('拦截后报价单还在', quotations.getQuotation(r16Q.id) !== null)
+
+section('R16 坏账追回登记的钱不能直接删（核销台账会悬空）')
+const r16Rec = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r16Rec.id, { styleNo: 'R16-REC', quantity: 10, unitPrice: 10 })
+orders.addSettlement(r16Rec.id, { kind: 'bad_debt', amount: 50, reason: 'R16 客户破产' })
+orders.addSettlement(r16Rec.id, { kind: 'recovery', amount: 20, reason: 'R16 追回', paidAt: '2026-10-21' })
+const r16RecPay = orders.getOrder(r16Rec.id)!.payments[0]
+check(
+  '追回款删不掉，提示改走反向收款',
+  r8err(() => orders.deletePayment(r16Rec.id, r16RecPay.id, '想删')).includes('反向收款')
+)
+eq('被拒后追回款还在', orders.getOrder(r16Rec.id)!.payments.length, 1)
+
+section('R16 作废单不能改出货状态；全批作废后订单不能挂着已发货')
+const r16VoidShip = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r16VoidShip.id, { styleNo: 'R16-VOIDSHIP', quantity: 10, unitPrice: 1 })
+orders.voidOrder(r16VoidShip.id, 'R16 作废')
+check(
+  '作废单不能手改出货状态',
+  r8err(() => orders.setShipStatus(r16VoidShip.id, 'packed')).includes('已作废')
+)
+const r16AllVoid = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r16AllVoid.id, { styleNo: 'R16-ALLVOID', quantity: 10, unitPrice: 1 })
+const r16V1 = packing.createPackingList({
+  orderId: r16AllVoid.id,
+  lines: [{ boxNo: 'R16-V1', styleNo: 'R16-ALLVOID', quantity: 5 }]
+})[0]
+const r16V2 = packing.createPackingList({
+  orderId: r16AllVoid.id,
+  lines: [{ boxNo: 'R16-V2', styleNo: 'R16-ALLVOID', quantity: 5 }]
+}).slice(-1)[0]
+eq('装齐后订单状态由批次推成已包装', orders.getOrder(r16AllVoid.id)!.shipStatus, 'packed')
+packing.voidPackingList(r16AllVoid.id, r16V1.id, 'R16 第一批没走')
+eq('作废一批后按剩下的批次重算', orders.getOrder(r16AllVoid.id)!.shipStatus, 'preparing')
+packing.voidPackingList(r16AllVoid.id, r16V2.id, 'R16 第二批也没走')
+eq('全部批次作废后回落到未备货，不挂已发货', orders.getOrder(r16AllVoid.id)!.shipStatus, 'not_prepared')
+
+section('R16 打样转单后客户、收款状态锁定；漏传明细不再清空')
+const r16CustA = customers.saveCustomer({ company: 'R16-SAMPLE-A' })
+const r16CustB = customers.saveCustomer({ company: 'R16-SAMPLE-B' })
+const r16Sample = samples.saveSample({
+  customerId: r16CustA.id,
+  expressFee: 5,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: '2026-10-21',
+  items: [{ styleNo: 'R16-S1', productName: '打样', quantity: 1, unitPrice: 10, goodsUnitPrice: 10 }]
+})
+const r16NoteOnly = samples.saveSample({ id: r16Sample.id, note: 'R16 只改备注' })
+eq('漏传 items 的编辑不清空样品行', r16NoteOnly.items.length, 1)
+eq('漏传 items 的编辑不清空样品费', r16NoteOnly.items[0].quantity * r16NoteOnly.items[0].unitPrice, 10)
+const r16Converted = samples.convertSampleToOrder(r16Sample.id, { offsetSampleFee: true, paymentStatus: 'draft' })
+check(
+  '转单后不能换客户',
+  r8err(() => samples.saveSample({ id: r16Sample.id, customerId: r16CustB.id })).includes('客户不能再改')
+)
+check(
+  '转单后不能把已抵扣改回收款状态',
+  r8err(() => samples.saveSample({ id: r16Sample.id, feeStatus: 'paid' })).includes('收款状态不能再改')
+)
+check(
+  '活着的订单还靠打样单作原始凭据，删不掉',
+  r8err(() => samples.deleteSample(r16Sample.id)).includes('先作废订单')
+)
+orders.voidOrder(r16Converted.id, 'R16 作废转出的订单')
+samples.deleteSample(r16Sample.id)
+check('订单作废后打样单可以删（提示与实现一致）', samples.getSample(r16Sample.id) === null)
+
+section('R16 实收数量不能超过改完后的箱明细')
+const r16Recv = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r16Recv.id, { styleNo: 'R16-RECV', quantity: 100, unitPrice: 1 })
+const r16RecvPl = packing.createPackingList({
+  orderId: r16Recv.id,
+  lines: [
+    { boxNo: 'R16-A', styleNo: 'R16-RECV', quantity: 30 },
+    { boxNo: 'R16-B', styleNo: 'R16-RECV', quantity: 20 }
+  ]
+})[0]
+packing.updatePackingListInfo(r16Recv.id, r16RecvPl.id, { receivedQty: 40 })
+const r16RecvLineA = packing.listPackingLists(r16Recv.id)[0].lines.find((l) => l.boxNo === 'R16-A')!
+packing.updatePackingListLine(r16Recv.id, r16RecvPl.id, r16RecvLineA.id, { quantity: 20 })
+eq('改箱后件数正好等于实收，放行', packing.listPackingLists(r16Recv.id)[0].lines.reduce((s, l) => s + l.quantity, 0), 40)
+check(
+  '删箱后件数少于已登记的实收，拦下',
+  r8err(() => packing.deletePackingListLine(r16Recv.id, r16RecvPl.id, r16RecvLineA.id)).includes('实收')
+)
+eq('被拦后两箱都还在（事务回滚）', packing.listPackingLists(r16Recv.id)[0].lines.length, 2)
+
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
 console.log(`通过 ${passed} 项，失败 ${failed} 项`)

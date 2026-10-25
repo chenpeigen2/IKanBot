@@ -5,6 +5,7 @@ import { logEvent } from './events'
 import { applyShipStatus } from './shipping'
 import { assertOrderWritable } from './orders'
 import { localDate, isLocalDate } from '../../src/shared/date'
+import { ciNoOf } from '../../src/shared/documents'
 import { assertQuantity as assertQtyRule } from '../../src/shared/guards'
 import { SHIP_STATUS_LABEL, SHIP_STATUS_ORDER } from '../../src/shared/types'
 import type { BatchShipStatus, PackingList, PackingListLine } from '../../src/shared/types'
@@ -118,6 +119,24 @@ function assertNotOverPacked(
 }
 
 /**
+ * 这一批出过 CI 吗？出了就是客户手里那张纸的依据：
+ * 箱明细、批次本身都不能再改，否则系统按新箱数重算批次金额，纸面却不会跟着变。
+ * 返回最新一版 CI 的版次（0 = 没出过），报错时能说清楚是哪一版。
+ */
+function archivedCiVersion(orderId: number, plNo: string): number {
+  const db = getDb()
+  const piNo = String(
+    (db.get('SELECT pi_no FROM orders WHERE id = ?', [orderId]) as { pi_no?: string } | null)?.pi_no ?? ''
+  ).trim()
+  if (!piNo) return 0
+  const row = db.get(
+    `SELECT MAX(version) AS v FROM doc_versions WHERE order_id = ? AND kind = 'ci' AND doc_no = ?`,
+    [orderId, ciNoOf(piNo, plNo)]
+  ) as { v?: number | null } | null
+  return Number(row?.v ?? 0)
+}
+
+/**
  * 已出运的批次是给客户的凭据：箱明细一律锁住。
  * 否则把明细删空/改个款号，批次还挂着「已签收」，报关和收款就全对不上了。
  */
@@ -133,6 +152,12 @@ function assertBatchLinesEditable(orderId: number, plId: number): number {
       `装箱单 ${String(cur.pl_no)} 已作废，现在只是留档：箱明细不能改。要接着用这一批，请先「撤销作废」。`
     )
   }
+  const ciVer = archivedCiVersion(orderId, String(cur.pl_no))
+  if (ciVer > 0) {
+    throw new Error(
+      `装箱单 ${String(cur.pl_no)} 已经出过 CI（第 ${ciVer} 版存档），箱明细不能再改：那一批的金额已经按这些箱子印给客户了，改了系统重算的数和纸面就对不上。确实要改，请把整张订单作废后按新单重开。`
+    )
+  }
   const status = cur.ship_status == null ? null : (String(cur.ship_status) as BatchShipStatus)
   if (status && DEPARTED.includes(status)) {
     throw new Error(
@@ -143,6 +168,23 @@ function assertBatchLinesEditable(orderId: number, plId: number): number {
     (db.get('SELECT COUNT(*) AS n FROM packing_list_lines WHERE packing_list_id = ?', [plId]) as { n?: number } | null)
       ?.n ?? 0
   )
+}
+
+/** 箱明细收缩后，已登记的客户实收件数不能比剩下的还多（单据上会是负数短装） */
+function assertReceivedFitsLines(plId: number): void {
+  const row = getDb().get(
+    `SELECT p.received_qty AS received,
+            COALESCE((SELECT SUM(l.quantity) FROM packing_list_lines l
+                      WHERE l.packing_list_id = p.id), 0) AS qty
+     FROM packing_lists p WHERE p.id = ?`,
+    [plId]
+  ) as { received?: number | null; qty?: number } | null
+  const received = row?.received
+  if (received != null && Number(received) > Number(row?.qty ?? 0)) {
+    throw new Error(
+      `这一批登记了客户实收 ${Number(received)} 件，改完箱明细只剩 ${Number(row?.qty ?? 0)} 件——实收不可能比装出去的还多。请先把实收数量改对，或者补上少掉的那一箱。`
+    )
+  }
 }
 
 /**
@@ -293,6 +335,12 @@ export function deletePackingList(orderId: number, plId: number): PackingList[] 
       `装箱单 ${String(cur.pl_no)} 已经作废留档了，就让它留着——纸面发过客户的单据，系统里得查得到。`
     )
   }
+  const ciVer = archivedCiVersion(orderId, String(cur.pl_no))
+  if (ciVer > 0) {
+    throw new Error(
+      `装箱单 ${String(cur.pl_no)} 已经出过 CI（第 ${ciVer} 版存档），不能删除：删了这一批，存档的发票就找不到对应的箱单和金额了。这一批只能留着，和发出去的票对得上。`
+    )
+  }
   const status = cur.ship_status == null ? null : (String(cur.ship_status) as BatchShipStatus)
   if (status && DEPARTED.includes(status)) {
     throw new Error(
@@ -323,6 +371,12 @@ export function voidPackingList(orderId: number, plId: number, reason = ''): Pac
   // 作废/失效单的箱单也是留档的一部分：改它的作废状态会连带改整单出货汇总
   assertOrderWritable(orderId, '作废装箱单')
   if (isVoided(cur)) throw new Error(`装箱单 ${String(cur.pl_no)} 已经是作废状态，不用重复作废`)
+  const ciVer = archivedCiVersion(orderId, String(cur.pl_no))
+  if (ciVer > 0) {
+    throw new Error(
+      `装箱单 ${String(cur.pl_no)} 已经出过 CI（第 ${ciVer} 版存档），不能作废：发票已经按这一批发给客户了，作废会让箱单、发票和订单三边的金额对不上。`
+    )
+  }
   transact(() => {
     db.run('UPDATE packing_lists SET voided_at = ? WHERE id = ? AND order_id = ?', [now(), plId, orderId])
     applyShipStatus(orderId)
@@ -578,6 +632,7 @@ export function updatePackingListLine(
         plId
       ]
     )
+    assertReceivedFitsLines(plId)
     applyShipStatus(orderId)
     // 箱数/净重被改过也要留痕（报关单跟箱单一对不上的时候要拿凭据）
     const changes = describePlLineChange(cur, scale !== 1 ? { ...patch, netWeight: net, grossWeight: gross } : patch)
@@ -673,6 +728,7 @@ export function deletePackingListLine(orderId: number, plId: number, lineId: num
     | null
   transact(() => {
     db.run('DELETE FROM packing_list_lines WHERE id = ? AND packing_list_id = ?', [lineId, plId])
+    assertReceivedFitsLines(plId)
     applyShipStatus(orderId)
     if (cur) {
       logEvent(

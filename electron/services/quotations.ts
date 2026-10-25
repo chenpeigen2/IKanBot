@@ -582,6 +582,17 @@ export function deleteQuotation(id: number): void {
     | { q_no?: string; converted_order_id?: number | null }
     | null
   if (!q) return
+  // 存档的报价 PDF 挂在报价单下（外键 CASCADE）：删报价会把发过客户的纸面索引一起删掉
+  const docCount = Number(
+    (
+      db.get('SELECT COUNT(*) AS n FROM doc_versions WHERE quotation_id = ?', [id]) as { n?: number } | null
+    )?.n ?? 0
+  )
+  if (docCount > 0) {
+    throw new Error(
+      `报价单 ${q.q_no} 已经有 ${docCount} 份单据存档，删了就连同发过客户的报价 PDF 一起查不到了。不要这张报价，请把「状态」改成「已失效」——记录和存档都留着。`
+    )
+  }
   // N31：已转成订单的报价单是那单的原始报价凭据，删了以后订单操作历史里只剩一个查不到的编号
   if (q.converted_order_id) {
     const o = db.get('SELECT order_no FROM orders WHERE id = ?', [Number(q.converted_order_id)]) as

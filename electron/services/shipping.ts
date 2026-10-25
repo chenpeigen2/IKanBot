@@ -126,11 +126,21 @@ export function factoryDeliveredQuantity(orderId: number): number {
  */
 export function applyShipStatus(orderId: number): ShipStatus | null {
   const summary = shipmentSummary(orderId)
-  if (summary.derivedStatus === null) return null
   const db = getDb()
   const cur = (db.get('SELECT ship_status FROM orders WHERE id = ?', [orderId]) as { ship_status?: string } | null)
     ?.ship_status
-  const next = summary.derivedStatus
+  let next: ShipStatus = summary.derivedStatus ?? 'not_prepared'
+  if (summary.derivedStatus === null) {
+    // 只有「有批次、但全被作废」才回落到未备货：箱单都没了，不能还挂着以前推出来的已发货。
+    // 还有升级前的老批次（状态为空）时属于手工模式，订单状态不动。
+    const counts = db.get(
+      `SELECT COUNT(*) AS total,
+              COALESCE(SUM(CASE WHEN voided_at IS NULL THEN 1 ELSE 0 END), 0) AS live
+       FROM packing_lists WHERE order_id = ?`,
+      [orderId]
+    ) as { total?: number; live?: number } | null
+    if (!(Number(counts?.total ?? 0) > 0 && Number(counts?.live ?? 0) === 0)) return null
+  }
   db.run('UPDATE orders SET ship_status = ? WHERE id = ?', [next, orderId])
   // 整单状态由批次推着走，跃迁要进操作历史：日后说「哪天算已出运」得有一条凭据。
   // 只在真的换了状态才写——改一格箱重也会走到这里，不然历史会被刷屏。

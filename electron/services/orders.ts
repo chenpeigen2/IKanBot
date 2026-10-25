@@ -680,6 +680,12 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
   const docCount = Number(
     (db.get('SELECT COUNT(*) AS n FROM doc_versions WHERE order_id = ?', [id]) as { n?: number } | null)?.n ?? 0
   )
+  // PI 号印在已经发出去的单据上，CI 号又是由 PI 号派生的：改了号，重印的纸和客户手里那张对不上
+  if (newPiNo !== oldPiNo && docCount > 0) {
+    throw new Error(
+      `这张单已经有 ${docCount} 份单据存档，PI 号 ${oldPiNo} 印在纸面上、CI 号也由它派生，不能再改。确实要换号，请作废这张单后按新单重开。`
+    )
+  }
   const plCount = Number(
     (db.get('SELECT COUNT(*) AS n FROM packing_lists WHERE order_id = ?', [id]) as { n?: number } | null)?.n ?? 0
   )
@@ -1371,6 +1377,19 @@ export function deletePayment(orderId: number, paymentId: number, reason = ''): 
   if (!row) throw new Error('这条收款记录已经不存在了，刷新页面后再试。')
   // 作废/失效单只能看：删收款会改写它的已收金额，等于把留档凭据又改活
   assertOrderWritable(orderId, '删收款')
+  // 这笔钱可能已经用于短款核销/坏账追回：直接删掉，核销台账里就留着一个指向不存在流水的 payment_id
+  const usedBy = db.get(
+    'SELECT kind, amount, at FROM order_settlements WHERE order_id = ? AND payment_id = ? ORDER BY id LIMIT 1',
+    [orderId, paymentId]
+  ) as { kind?: string; amount?: number; at?: string } | null
+  if (usedBy) {
+    const kind = String(usedBy.kind ?? '')
+    throw new Error(
+      kind === 'recovery'
+        ? `这笔收款是坏账追回时自动登记的（${String(usedBy.at ?? '')}，${Number(usedBy.amount ?? 0).toFixed(2)}），和核销台账绑在一起，不能删除。如果要退汇，请单独登记一笔反向收款并写明原因。`
+        : `这笔收款已经用于核销（${String(usedBy.at ?? '')}，${Number(usedBy.amount ?? 0).toFixed(2)}），不能直接删除：删了核销台账会指向一条不存在的流水。请先撤销对应的核销记录，再删收款。`
+    )
+  }
   const why = String(reason ?? '').trim()
   // 删掉的是钱到账的凭据，操作历史必须能回答「删了多少钱、哪一天、哪笔流水、为什么」
   if (!why) {
@@ -1653,6 +1672,7 @@ export function setShipStatus(orderId: number, next: ShipStatus, note = ''): Ord
     | { ship_status: string }
     | null
   if (!cur) throw new Error('订单不存在')
+  assertOrderWritable(orderId, '改出货状态')
   // 手工状态只能用这一份枚举：把「部分出运」这种派生值钉在订单上，
   // 没有批次兜底时它就永久挂着，列表和导出会显示一个本不该出现在手工位的状态
   if (!(SHIP_STATUS_ORDER as string[]).includes(next)) {

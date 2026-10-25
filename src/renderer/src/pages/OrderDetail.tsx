@@ -705,7 +705,9 @@ export default function OrderDetail() {
                   <div className="hint">
                     {order.shipSummary?.batchCount > 0
                       ? '装箱单是升级前的老批次，出运状态还没标，整单仍按手工状态推进。到「装箱单」里补上状态后，会自动改由批次汇总。'
-                      : '还没有装箱单批次，这张单仍按手工状态推进。'}
+                      : order.packingLists?.length
+                        ? '装箱单批次都已作废，整单按未备货计；要接着出货请撤销作废或新建批次。'
+                        : '还没有装箱单批次，这张单仍按手工状态推进。'}
                   </div>
                 )}
               </div>

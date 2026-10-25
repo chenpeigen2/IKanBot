@@ -24,6 +24,7 @@ import type {
   SampleOrderItem,
   SampleStatus
 } from '../../src/shared/types'
+import { SAMPLE_FEE_STATUS_LABEL } from '../../src/shared/types'
 
 function now(): string {
   return new Date().toISOString()
@@ -234,6 +235,7 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
   // 空白行（款号都没填）忽略；填了款号的行必须过闸门——
   // 以前 filter 直接把数量≤0 的行丢掉，用户打了一半数字保存后那一行凭空消失，
   // 既不知道少了一行，也不知道为什么少
+  const itemsProvided = input.items !== undefined
   const items = (input.items ?? []).filter((i) => i.styleNo.trim())
   items.forEach((it) => {
     const who = `样品行 ${it.styleNo}`
@@ -241,7 +243,17 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
     // 免费样是真实业务，样品行的单价允许 0
     assertUnitPrice(it.unitPrice, `${who} 的单价`, true)
   })
-  const sampleFee = items.reduce((sum, i) => sum + i.quantity * Number(i.unitPrice ?? 0), 0)
+  // 漏传 items ≠ 清空：只改快递单号的编辑不能把样品行和样品费一起抹掉
+  const storedFee = before
+    ? Number(
+        (
+          db.get('SELECT COALESCE(SUM(quantity * unit_price), 0) AS fee FROM sample_order_items WHERE sample_order_id = ?', [
+            Number(before.id)
+          ]) as { fee?: number } | null
+        )?.fee ?? 0
+      )
+    : 0
+  const sampleFee = itemsProvided ? items.reduce((sum, i) => sum + i.quantity * Number(i.unitPrice ?? 0), 0) : storedFee
   const keep = (key: keyof SampleInput, col: string): unknown =>
     input[key] === undefined ? before?.[col] : input[key]
   const keepNum = (key: keyof SampleInput, col: string): number => Number(keep(key, col) ?? 0)
@@ -280,14 +292,8 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
       const o = db.get('SELECT order_no FROM orders WHERE id = ?', [Number(before.converted_order_id)]) as
         | { order_no?: string }
         | null
-      const oldFee = (
-        db.all('SELECT quantity, unit_price FROM sample_order_items WHERE sample_order_id = ?', [id]) as Record<
-          string,
-          unknown
-        >[]
-      ).reduce((sum, r) => sum + Number(r.quantity) * Number(r.unit_price), 0)
       const moneyChanged =
-        Math.abs(oldFee - sampleFee) > 0.001 ||
+        Math.abs(storedFee - sampleFee) > 0.001 ||
         Math.abs(expressFee - Number(before.express_fee ?? 0)) > 0.001 ||
         Math.abs(exchangeRate - Number(before.exchange_rate ?? 0)) > 0.001 ||
         (input.currency !== undefined && input.currency !== String(before.currency)) ||
@@ -298,9 +304,17 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
           `这张打样单已经转成订单 ${o?.order_no ?? ''}，样品费、快递费、汇率都是那单的依据，不能再改。要改请直接改订单。`
         )
       }
-      // 已经抵扣到订单的样品费，不能再改回「未收」——否则同一笔钱收两次
-      if (String(before.fee_status) === 'offset' && feeStatus !== 'offset') {
-        throw new Error('这张打样单的样品费已经抵扣到订单，不能改回未收（否则同一笔钱会收两次）')
+      // 客户也锁：换个人，样品费抵扣和应收就串到另一家账上
+      if (input.customerId !== undefined && Number(input.customerId) !== Number(before.customer_id)) {
+        throw new Error(
+          `这张打样单已经转成订单 ${o?.order_no ?? ''}，客户不能再改：样品费抵扣和应收都记在这个客户名下。要改请直接改订单。`
+        )
+      }
+      // 收款状态也锁：已收/已抵扣改成未收，同一笔钱会在待收里再收一次
+      if (feeStatus !== String(before.fee_status)) {
+        throw new Error(
+          `这张打样单已经转成订单 ${o?.order_no ?? ''}，样品费的收款状态不能再改（现在是「${SAMPLE_FEE_STATUS_LABEL[before.fee_status as SampleFeeStatus] ?? before.fee_status}」）：它和那单的抵扣、应收是绑在一起的。`
+        )
       }
     }
     // 改号时查重（不改号就不管）
@@ -328,7 +342,7 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
       `UPDATE sample_orders SET ${cells.map(([col]) => `${col}=?`).join(', ')}, updated_at=? WHERE id=?`,
       [...cells.map(([, v]) => v as string | number | null), ts, id]
     )
-    db.run('DELETE FROM sample_order_items WHERE sample_order_id = ?', [id])
+    if (itemsProvided) db.run('DELETE FROM sample_order_items WHERE sample_order_id = ?', [id])
   } else {
     let sampleNo = requestedNo
     if (!sampleNo) {
@@ -367,31 +381,33 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
     id = Number(res.lastInsertRowid)
   }
 
-  for (const it of items) {
-    // 手打的款号：商品库里有就记上（以后能跟款号台账对上）
-    let productId = it.productId ?? null
-    if (!productId) {
-      const hit = db.get('SELECT id FROM products WHERE UPPER(style_no) = UPPER(?) LIMIT 1', [
-        String(it.styleNo ?? '').trim()
-      ]) as { id?: number } | null
-      productId = hit?.id ?? null
+  if (itemsProvided) {
+    for (const it of items) {
+      // 手打的款号：商品库里有就记上（以后能跟款号台账对上）
+      let productId = it.productId ?? null
+      if (!productId) {
+        const hit = db.get('SELECT id FROM products WHERE UPPER(style_no) = UPPER(?) LIMIT 1', [
+          String(it.styleNo ?? '').trim()
+        ]) as { id?: number } | null
+        productId = hit?.id ?? null
+      }
+      db.run(
+        `INSERT INTO sample_order_items(sample_order_id, product_id, style_no, product_name, composition, color, size, quantity, unit_price, goods_unit_price)
+         VALUES(?,?,?,?,?,?,?,?,?,?)`,
+        [
+          id,
+          productId,
+          it.styleNo,
+          it.productName ?? '',
+          it.composition ?? '',
+          it.color ?? '',
+          it.size ?? '',
+          it.quantity,
+          Number(it.unitPrice ?? 0),
+          it.goodsUnitPrice == null || Number(it.goodsUnitPrice) <= 0 ? null : Number(it.goodsUnitPrice)
+        ]
+      )
     }
-    db.run(
-      `INSERT INTO sample_order_items(sample_order_id, product_id, style_no, product_name, composition, color, size, quantity, unit_price, goods_unit_price)
-       VALUES(?,?,?,?,?,?,?,?,?,?)`,
-      [
-        id,
-        productId,
-        it.styleNo,
-        it.productName ?? '',
-        it.composition ?? '',
-        it.color ?? '',
-        it.size ?? '',
-        it.quantity,
-        Number(it.unitPrice ?? 0),
-        it.goodsUnitPrice == null || Number(it.goodsUnitPrice) <= 0 ? null : Number(it.goodsUnitPrice)
-      ]
-    )
   }
   return getSample(id)!
 }
@@ -401,8 +417,11 @@ export function deleteSample(id: number): void {
   if (!s) return
   if (s.convertedOrderId) {
     const o = getOrder(s.convertedOrderId)
-    if (o) {
-      throw new Error(`这张打样单已经转成订单 ${o.orderNo}，删了以后就查不到原始打样记录了。请先作废订单，再删打样单。`)
+    // 活着的订单还靠这张打样单作原始凭据；订单已作废，留档订单本身就能追溯，同意删
+    if (o && o.paymentStatus !== 'void') {
+      throw new Error(
+        `这张打样单已经转成订单 ${o.orderNo}，删了以后就查不到原始打样记录了。确实不要了，请先作废订单，再删打样单。`
+      )
     }
   }
   getDb().run('DELETE FROM sample_orders WHERE id = ?', [id])

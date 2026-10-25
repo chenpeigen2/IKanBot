@@ -26,6 +26,7 @@
  */
 import { getDb } from '../db'
 import { localMonthOf } from '../../src/shared/date'
+import { ciNoOf } from '../../src/shared/documents'
 import { NON_BILLING_STATUSES } from '../../src/shared/billing'
 import type { CustomerReceivable, PackingAmount, PackingAmountLine, QuotationCharge } from '../../src/shared/types'
 
@@ -448,6 +449,11 @@ export function listOrderMoney(filter: MoneyListFilter = {}): OrderMoneyRow[] {
  * 保证各批金额相加正好等于 PI 的含费用合计（三份单据加起来对不上 PI，
  * 报关和退税核销时这条差异最难解释）。
  *
+ * 已经出过 CI 的批次：纸面金额已经发给客户，系统重算不能把它改掉。
+ * 那一批的费用不再按当前整单货值重新分摊，而是从存档 CI 的总额倒推——
+ * 否则订单后来补几行货，旧批次的费用份额会悄悄变少/变多，和客户手里那张纸对不上。
+ * 只有还没出过 CI 的批次继续按比例分摊，分币差也只补给这类批次。
+ *
  * 作废的批次一条不算：那批没走成，钱也不该记在它头上。
  */
 export function packingAmounts(orderId: number): PackingAmount[] {
@@ -456,7 +462,20 @@ export function packingAmounts(orderId: number): PackingAmount[] {
     'SELECT style_no, color, size, quantity, unit_price FROM order_items WHERE order_id = ?',
     [orderId]
   ) as Record<string, unknown>[]
-  const orderRow = db.get('SELECT charges FROM orders WHERE id = ?', [orderId]) as { charges?: unknown } | null
+  const orderRow = db.get('SELECT pi_no, charges FROM orders WHERE id = ?', [orderId]) as
+    | { pi_no?: string; charges?: unknown }
+    | null
+  // 每个批次最新一版 CI 的纸面总额（按批次号精确匹配；老版整单 CI 不参与）
+  const archivedCi = new Map<string, number>()
+  const piNo = String(orderRow?.pi_no ?? '').trim()
+  if (piNo) {
+    const ciRows = db.all(
+      `SELECT doc_no, version, amount FROM doc_versions
+       WHERE order_id = ? AND kind = 'ci' ORDER BY version`,
+      [orderId]
+    ) as { doc_no?: string; version?: number; amount?: number }[]
+    for (const r of ciRows) archivedCi.set(String(r.doc_no ?? ''), Number(r.amount ?? 0))
+  }
   const money = computeOrderMoney({
     items: itemRows.map((r) => ({
       quantity: Number(r.quantity ?? 0),
@@ -532,16 +551,24 @@ export function packingAmounts(orderId: number): PackingAmount[] {
   const chargesTotal = money.chargesTotal
   const chargeRows = parseCharges(orderRow?.charges).filter((c) => c.label.trim())
   let shareSum = 0
+  const pinned = new Set<number>()
   for (const b of list) {
     b.goods = r2(b.goodsExact)
     // 订单里没有这一款（升级前的老数据或敲错款号）时单价按 0：宁可少算，不编一个数出来
-    b.charges = goodsAll > 0 ? r2((chargesTotal * b.goods) / goodsAll) : 0
+    const archivedTotal = archivedCi.get(piNo ? ciNoOf(piNo, b.plNo) : '') ?? 0
+    if (archivedTotal > 0) {
+      b.charges = r2(archivedTotal - b.goods)
+      pinned.add(b.plId)
+    } else {
+      b.charges = goodsAll > 0 ? r2((chargesTotal * b.goods) / goodsAll) : 0
+    }
     shareSum = r2(shareSum + b.charges)
   }
   const packedGoods = list.reduce((s, b) => s + b.goods, 0)
   if (list.length > 0 && goodsAll > 0 && Math.abs(packedGoods - goodsAll) < 0.005) {
-    const last = list[list.length - 1]
-    last.charges = r2(last.charges + r2(chargesTotal - shareSum))
+    // 分币差只能落在还能重算的批次上；落在存档批次上就等于改了纸面金额
+    const last = [...list].reverse().find((b) => !pinned.has(b.plId))
+    if (last) last.charges = r2(last.charges + r2(chargesTotal - shareSum))
   }
   for (const b of list) {
     b.total = r2(b.goods + b.charges)
