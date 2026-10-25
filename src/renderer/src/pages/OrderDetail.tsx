@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   Modal, useToast, money, num, fmtDate, fmtDateTime, Empty, Menu,
-  Button, PaymentTag, ShipTag, clientKey, LoadError
+  Button, PaymentTag, ShipTag, clientKey, LoadError, PromptModal
 } from '../ui'
 import {
   PAYMENT_METHOD_LABEL,
@@ -340,8 +340,16 @@ export default function OrderDetail() {
     }
   }
 
-  /** 作废：记录全留，但不再进货值 / 待收 / 毛利 */
+  /** 作废：记录全留，但不再进货值 / 待收 / 毛利；有单据存档/箱单时先核对凭据 */
   const voidOrder = async () => {
+    const liveDocs = docVersions.filter((d: any) => !d.voidedAt).length
+    const livePls = (order.packingLists ?? []).filter((p: any) => !p.voidedAt).length
+    const credentials =
+      liveDocs > 0 || livePls > 0
+        ? `\n\n这张单还有 ${[liveDocs > 0 ? `${liveDocs} 版单据存档` : '', livePls > 0 ? `${livePls} 批箱单` : '']
+            .filter(Boolean)
+            .join(' 和 ')}——客户手里的 PI/CI 不会跟着消失，作废前请先核对这些凭据的处理。`
+        : ''
     if (
       !confirm(
         `确认作废订单 ${order.orderNo}？\n\n` +
@@ -349,12 +357,13 @@ export default function OrderDetail() {
             order.paidAmount,
             order.currency
           )}。\n` +
-          '作废后：收款记录、操作历史、单据存档全部保留，只是不再计入销售额、待收款和毛利。'
+          '作废后：收款记录、操作历史、单据存档全部保留，只是不再计入销售额、待收款和毛利。' +
+          credentials
       )
     )
       return
     try {
-      await window.api.orders.void(order.id, '手动作废')
+      await window.api.orders.void(order.id, '手动作废', { confirmDocs: true })
       toast('订单已作废，记录全部保留')
       await load()
     } catch (e) {
@@ -964,6 +973,8 @@ function CiModal({
   const [loadError, setLoadError] = useState('')
   // 整单/批次 CI 重叠确认：不硬挡（先整单后补批次是合法顺序），但必须看着重叠金额亲手勾
   const [confirmOverlap, setConfirmOverlap] = useState(false)
+  // CI 合计 ≠ PI 合计（调了费用行）时的确认：报关调价允许，但要亲手认下这个差异
+  const [confirmDiff, setConfirmDiff] = useState(false)
 
   useEffect(() => {
     let alive = true
@@ -994,6 +1005,14 @@ function CiModal({
   const overlapAmount = liveBatchCi.reduce((s: number, d: any) => s + (Number(d.amount) || 0), 0)
   const overlap = batchId == null ? liveBatchCi.length > 0 : liveWholeCi
 
+  const chargeTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
+  const goods = sel ? sel.goods : order.totalAmount
+  const feeTotal = sel ? sel.charges : chargeTotal
+  const total = sel ? sel.total : order.totalAmount + chargeTotal
+  const piTotal = Number(order.grandTotal ?? order.totalAmount)
+  const mismatch = !sel && Math.abs(total - piTotal) > 0.005
+  const clean = charges.filter((c) => c.label.trim())
+
   // 挡住的理由要说人话：没单价也照出，报关行会按 0 申报，事后补税比退单贵
   const blocked: string[] = []
   if (batchId != null) {
@@ -1013,18 +1032,16 @@ function CiModal({
         : `这张单已存档整单 CI，再按批次开票金额会重叠——勾选下方确认才能继续`
     )
   }
+  if (mismatch && !confirmDiff) {
+    blocked.push(
+      `CI 合计 ${money(total, order.currency)} 与订单应收 ${money(piTotal, order.currency)} 相差 ` +
+        `${money(Math.abs(total - piTotal), order.currency)}——收款仍按订单口径，报关调价要有意为之，勾选下方确认`
+    )
+  }
 
   const docNo = ciNoOf(order.piNo, selPl?.plNo)
   const existing = docVersions.filter((d) => d.kind === 'ci' && d.docNo === docNo)
   const lastVer = existing.reduce((m, d) => Math.max(m, Number(d.version) || 0), 0)
-
-  const chargeTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
-  const goods = sel ? sel.goods : order.totalAmount
-  const feeTotal = sel ? sel.charges : chargeTotal
-  const total = sel ? sel.total : order.totalAmount + chargeTotal
-  const piTotal = Number(order.grandTotal ?? order.totalAmount)
-  const mismatch = !sel && Math.abs(total - piTotal) > 0.005
-  const clean = charges.filter((c) => c.label.trim())
 
   return (
     <Modal
@@ -1056,6 +1073,7 @@ function CiModal({
           onChange={(e) => {
             setBatchId(e.target.value ? Number(e.target.value) : null)
             setConfirmOverlap(false)
+            setConfirmDiff(false)
           }}
         >
           <option value="">整单（按 PI 合计开一张）</option>
@@ -1082,6 +1100,21 @@ function CiModal({
             {batchId == null
               ? `订单已按批次出过 CI（合计 ${overlapAmount.toFixed(2)}）。再按整单开一张，客户手里会有两张金额重叠的发票，报关和收汇可能重复申报。我确认要出这张重叠的 CI。`
               : `订单已按整单出过 CI。再按批次开一张，两张发票金额重叠，报关和收汇可能重复申报。我确认要出这张重叠的 CI。`}
+          </span>
+        </label>
+      ) : null}
+      {!sel && mismatch ? (
+        <label className="field" style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={confirmDiff}
+            onChange={(e) => setConfirmDiff(e.target.checked)}
+            style={{ marginTop: 4 }}
+          />
+          <span>
+            CI 合计 {money(total, order.currency)} 与订单应收 {money(piTotal, order.currency)} 相差{' '}
+            {money(Math.abs(total - piTotal), order.currency)}。收款和待收仍按订单口径计算，差异只留痕不进账——
+            报关调价是有意为之请勾选确认；是录错了请改费用行或明细。
           </span>
         </label>
       ) : null}
@@ -2844,8 +2877,10 @@ function EditBatchModal({
           ['柜号', pl.containerNo, form.containerNo],
           ['船名航次', pl.vessel, form.vessel],
           ['ETD', pl.etdDate ?? '', form.etdDate],
+          ['实际开船', pl.atdDate ?? '', form.atdDate],
           ['封条号', pl.sealNo, form.sealNo],
-          ['提单号', pl.blNo, form.blNo]
+          ['提单号', pl.blNo, form.blNo],
+          ['单据日期', pl.docDate ?? '', form.docDate]
         ]
         const changed = paper.filter(([, a, b]) => String(a ?? '') !== String(b ?? '')).map(([l]) => l)
         if (
@@ -3353,6 +3388,7 @@ const EVENT_KIND_LABEL: Record<string, string> = {
   settlement: '核销',
   settlement_reverse: '撤销核销',
   doc_void: '作废单据存档',
+  doc_amount_diff: 'CI 金额差异留痕',
   sample_offset_back: '打样抵扣回退'
 }
 
@@ -3373,21 +3409,22 @@ function TimelineTab({
   onChanged: () => Promise<void>
 }) {
   const toast = useToast()
+  // Electron 不支持 window.prompt：作废原因用自建输入弹窗收
+  const [voidTarget, setVoidTarget] = useState<any | null>(null)
 
   /** 作废一版存档：批次与金额恢复按当前数据计算，可重出正确的一版；原因必填 */
-  const voidDoc = async (d: any) => {
-    const reason = window.prompt(
-      `作废存档 ${d.docNo} 第 ${d.version} 版（金额 ${Number(d.amount).toFixed(2)}）。\n` +
-        `作废后这一版不再被当作纸面金额的依据，批次与金额恢复按当前数据计算，可以重出正确的一版；记录和 PDF 会留着。\n` +
-        `请写明作废原因（必填）：`
-    )
-    if (!reason || !reason.trim()) return
+  const voidDoc = async (reason: string) => {
+    const d = voidTarget
+    if (!d) return false
+    if (!reason) return false
     try {
-      await window.api.docs.void(d.id, reason.trim())
+      await window.api.docs.void(d.id, reason)
       toast(`已作废 ${d.docNo} 第 ${d.version} 版存档`)
+      setVoidTarget(null)
       await onChanged()
     } catch (e) {
       toast((e as Error).message, 'error')
+      return false
     }
   }
 
@@ -3453,8 +3490,8 @@ function TimelineTab({
                       >
                         所在文件夹
                       </Button>
-                      {d.voidedAt ? null : (
-                        <Button variant="ghost" size="sm" onClick={() => void voidDoc(d)}>
+                      {d.voidedAt || d.kind !== 'ci' ? null : (
+                        <Button variant="ghost" size="sm" onClick={() => setVoidTarget(d)}>
                           作废
                         </Button>
                       )}
@@ -3489,6 +3526,22 @@ function TimelineTab({
           ))}
         </div>
       )}
+      {voidTarget ? (
+        <PromptModal
+          title={`作废存档 ${voidTarget.docNo} 第 ${voidTarget.version} 版（金额 ${Number(voidTarget.amount).toFixed(2)}）`}
+          label={
+            <>
+              作废后这一版不再被当作纸面金额的依据，批次与金额恢复按当前数据计算，可以重出正确的一版；记录和 PDF 会留着。
+              <br />
+              请写明作废原因（必填，会记进操作历史）：
+            </>
+          }
+          okText="作废存档"
+          multiline
+          onOk={(reason) => voidDoc(reason)}
+          onClose={() => setVoidTarget(null)}
+        />
+      ) : null}
     </div>
   )
 }

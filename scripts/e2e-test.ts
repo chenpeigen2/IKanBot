@@ -5045,7 +5045,12 @@ const r15OpsPlB = packing.createPackingList({
   lines: [{ boxNo: 'R15-VOID-B', styleNo: 'R15-VOIDOPS', quantity: 5 }]
 }).slice(-1)[0]
 packing.voidPackingList(r15VoidOps.id, r15OpsPlB.id, '这一批没走成')
-orders.voidOrder(r15VoidOps.id, 'R15 作废')
+// R19 起作废带凭据的单要先核对：直接作废被拦，勾了「凭据已核对」才放行
+check(
+  '还挂着箱单的订单直接作废会被拦下核对凭据',
+  r8err(() => orders.voidOrder(r15VoidOps.id, 'R15 作废')).includes('凭据')
+)
+orders.voidOrder(r15VoidOps.id, 'R15 作废', { confirmDocs: true })
 const r15OpsSettle = orders.listSettlements(r15VoidOps.id)[0]
 check(
   '作废单不能删收款',
@@ -5591,6 +5596,115 @@ eq(
     (getDb().get('SELECT value AS v FROM counters WHERE name = ?', [r18CounterName]) as { v?: number } | null)!.v
   ),
   r18CounterBefore
+)
+
+/* ============================================================
+ * 第 19 轮：凭据通道收口（R19）
+ * ============================================================ */
+
+section('R19 作废凭据闸门：挂着存档/箱单的订单先核对再作废')
+
+const r19Gate = orders.createOrder({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R19-GATE'
+})
+await orders.addOrderItem(r19Gate.id, { styleNo: 'R19-GATE', quantity: 10, unitPrice: 10 })
+packing.createPackingList({ orderId: r19Gate.id, lines: [{ boxNo: 'R19-G1', styleNo: 'R19-GATE', quantity: 10 }] })
+check(
+  '有箱单的订单直接作废被拦',
+  r8err(() => orders.voidOrder(r19Gate.id, '客户取消')).includes('凭据')
+)
+orders.voidOrder(r19Gate.id, '客户取消', { confirmDocs: true })
+check('勾了凭据已核对就能作废', orders.getOrder(r19Gate.id)!.paymentStatus, 'void')
+check(
+  '作废历史里写明核对过哪些凭据',
+  orders.listEvents(r19Gate.id).slice(-1)[0].note.includes('凭据已核对')
+)
+
+section('R19 作废通道只认 CI：PI/箱单/报价存档作不了废，作废单的存档也不能动')
+
+const r19Kind = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R19-KIND' })
+await orders.addOrderItem(r19Kind.id, { styleNo: 'R19-KIND', quantity: 5, unitPrice: 10 })
+docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r19 pi'), docNo: 'PI-R19-KIND', kind: 'pi', orderId: r19Kind.id, amount: 50 })
+const r19PiVer = docs.listDocVersions(r19Kind.id)[0]
+check(
+  '作废 PI 存档被拦（它不参与锁定）',
+  r8err(() => docs.voidDocVersion(r19PiVer.id, '试一下')).includes('只有 CI')
+)
+const r19KindCi = docs.saveDocFile({
+  pdf: Buffer.from('%PDF-1.4 r19 kind ci'),
+  docNo: ciNoOf('PI-R19-KIND'),
+  kind: 'ci',
+  orderId: r19Kind.id,
+  amount: 50
+})
+eq('CI 存档记为第 1 版', r19KindCi.version, 1)
+check('CI 存档照常能作废', docs.voidDocVersion(docs.listDocVersions(r19Kind.id).find((d) => d.kind === 'ci')!.id, '改数重出').length > 0)
+orders.voidOrder(r19Kind.id, '客户取消', { confirmDocs: true })
+// 作废后重出的一版（留档），也不能再作废
+const r19KindCiV2 = docs.saveDocFile({
+  pdf: Buffer.from('%PDF-1.4 r19 kind ci v2'),
+  docNo: ciNoOf('PI-R19-KIND'),
+  kind: 'ci',
+  orderId: r19Kind.id,
+  amount: 50
+})
+eq('重出记为第 2 版', r19KindCiV2.version, 2)
+check(
+  '作废订单的 CI 存档不能再作废',
+  r8err(() =>
+    docs.voidDocVersion(docs.listDocVersions(r19Kind.id).find((d) => d.kind === 'ci' && !d.voidedAt)!.id, '再试')
+  ).includes('已作废')
+)
+
+section('R19 落账前复查重叠 + CI 金额差异留痕')
+
+const r19Overlap = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R19-OVL' })
+await orders.addOrderItem(r19Overlap.id, { styleNo: 'R19-OVL', quantity: 20, unitPrice: 10 })
+const r19OvlPl = packing.createPackingList({ orderId: r19Overlap.id, lines: [{ boxNo: 'R19-O1', styleNo: 'R19-OVL', quantity: 10 }] })[0]
+const r19OvlAmt = money.packingAmounts(r19Overlap.id).find((b) => b.plId === r19OvlPl.id)!
+docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r19 batch'), docNo: ciNoOf('PI-R19-OVL', r19OvlPl.plNo), kind: 'ci', orderId: r19Overlap.id, amount: r19OvlAmt.total })
+check(
+  'saveDocFile 自己也会拦未确认的重叠（不是只有 IPC 那道）',
+  r8err(() =>
+    docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r19 whole'), docNo: ciNoOf('PI-R19-OVL'), kind: 'ci', orderId: r19Overlap.id, amount: 200 })
+  ).includes('重叠')
+)
+check(
+  '带确认标记就能落账',
+  docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r19 whole ok'), docNo: ciNoOf('PI-R19-OVL'), kind: 'ci', orderId: r19Overlap.id, amount: 100, confirmOverlap: true }).version > 0
+)
+check(
+  'CI 金额与应收口径不一致时留了差异痕',
+  orders.listEvents(r19Overlap.id).some((e) => e.kind === 'doc_amount_diff' && e.note.includes('相差'))
+)
+const r19Match = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R19-MATCH' })
+await orders.addOrderItem(r19Match.id, { styleNo: 'R19-MATCH', quantity: 10, unitPrice: 10 })
+docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r19 match'), docNo: ciNoOf('PI-R19-MATCH'), kind: 'ci', orderId: r19Match.id, amount: 100 })
+check('金额一致时不留差异痕', !orders.listEvents(r19Match.id).some((e) => e.kind === 'doc_amount_diff'))
+
+section('R19 零金额 CI 也是纸面依据：批次照样钉住')
+
+const r19Zero = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R19-ZERO' })
+await orders.addOrderItem(r19Zero.id, { styleNo: 'R19-ZERO', quantity: 100, unitPrice: 10 })
+orders.updateOrderCharges(r19Zero.id, [{ label: '运费 Freight', amount: 200 }])
+const r19ZeroPl = packing.createPackingList({ orderId: r19Zero.id, lines: [{ boxNo: 'R19-Z1', styleNo: 'R19-ZERO', quantity: 50 }] })[0]
+docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r19 zero'), docNo: ciNoOf('PI-R19-ZERO', r19ZeroPl.plNo), kind: 'ci', orderId: r19Zero.id, amount: 0 })
+const r19ZeroAmt = money.packingAmounts(r19Zero.id).find((b) => b.plId === r19ZeroPl.id)!
+eq('0 金额存档钉出 0 元批次（不按当前数据重算）', r19ZeroAmt.total, 0)
+check('另一批拿走全部剩余费用', money.packingAmounts(r19Zero.id).reduce((s, b) => s + b.charges, 0) <= 200.01)
+
+section('R19 收款历史写明汇率快照口径')
+
+const r19Rate = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r19Rate.id, { styleNo: 'R19-RATE', quantity: 10, unitPrice: 10 })
+orders.addPayment(r19Rate.id, { paidAt: addDays(localDate(), -3), amount: 20, method: 'T/T', bankRef: 'R19-RATE-P' })
+check(
+  '补录过去日期的到账，历史里写明按录入时汇率钉快照',
+  orders.listEvents(r19Rate.id).some((e) => e.kind === 'payment' && e.note.includes('钉快照') && e.note.includes('汇率按 7'))
 )
 
 /* ---------------- 汇总 ---------------- */

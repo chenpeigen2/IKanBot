@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Modal, useToast, money, Empty, Button, LoadError } from '../ui'
+import { Modal, useToast, money, Empty, Button, LoadError, PromptModal } from '../ui'
 import { imageUrl } from '../imageUrl'
 import type { Product, ProductImage } from '../../../shared/types'
 
@@ -58,6 +58,7 @@ export default function Products() {
   const [includeInactive, setIncludeInactive] = useState(false)
   const [baseCurrency, setBaseCurrency] = useState('CNY')
   const [showImport, setShowImport] = useState(false)
+  const [copyFrom, setCopyFrom] = useState<Product | null>(null)
   /** 读取失败不能装成「还没有商品」 */
   const [loadError, setLoadError] = useState('')
 
@@ -166,14 +167,22 @@ export default function Products() {
   }
 
   const copyProduct = async (p: Product) => {
-    const no = prompt(`复制款号「${p.styleNo}」，请输入新款号：`, `${p.styleNo}-COPY`)
-    if (!no) return
+    setCopyFrom(p)
+  }
+
+  const doCopy = async (no: string) => {
+    if (!copyFrom) return false
+    if (!no) {
+      toast('新款号不能为空', 'error')
+      return false
+    }
     try {
-      await window.api.products.copy(p.id, no.trim())
+      await window.api.products.copy(copyFrom.id, no)
       toast('已复制，可编辑后保存')
       await load()
     } catch (e) {
       toast((e as Error).message, 'error')
+      return false
     }
   }
 
@@ -605,6 +614,17 @@ export default function Products() {
             setShowImport(false)
             await load()
           }}
+        />
+      ) : null}
+
+      {copyFrom ? (
+        <PromptModal
+          title={`复制款号「${copyFrom.styleNo}」`}
+          label="请输入新款号："
+          initial={`${copyFrom.styleNo}-COPY`}
+          okText="复制"
+          onOk={(no) => doCopy(no)}
+          onClose={() => setCopyFrom(null)}
         />
       ) : null}
     </>

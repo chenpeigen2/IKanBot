@@ -56,7 +56,7 @@ export interface IKanApi {
     updateCharges(id: number, charges: any[]): Promise<any>
     remove(id: number): Promise<void>
     /** 作废订单（客户取消 / 建错单）：记录全留，不进货值/待收/毛利 */
-    void(id: number, reason?: string): Promise<any>
+    void(id: number, reason?: string, opts?: { confirmDocs?: boolean }): Promise<any>
     addItem(orderId: number, item: any): Promise<any>
     /** 批量加行：一个事务，第 3 行不合格时前两行也不会已经躺在库里 */
     addItems(orderId: number, items: any[]): Promise<any>

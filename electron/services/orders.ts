@@ -916,13 +916,33 @@ function describeOrderChange(before: Record<string, unknown>, input: OrderInput)
  * 记录全部保留（收款流水、操作历史、单据存档），但不再进货值 / 待收 / 毛利。
  * 老板的规矩：所有订单必须留痕，真删除只留给「建错字」的空单。
  */
-export function voidOrder(id: number, reason = ''): OrderDetail {
+export function voidOrder(id: number, reason = '', opts: { confirmDocs?: boolean } = {}): OrderDetail {
   const db = getDb()
   const cur = db.get('SELECT order_no, payment_status FROM orders WHERE id = ?', [id]) as
     | { order_no: string; payment_status: string }
     | null
   if (!cur) throw new Error('订单不存在')
   if (cur.payment_status === 'void') return getOrder(id)!
+  // 凭据核对闸门：PI/CI 已发到客户手里、批次已出运的单不能一键作废——
+  // 作废后系统退出应收口径，但客户手里的纸面凭据不会消失，报关/收汇在途的钱会和系统脱节。
+  // 不拦死（真要作废是合法终态），但要人先核对再勾确认，操作历史里留下核对痕迹。
+  const docCount = Number(
+    (db.get('SELECT COUNT(*) AS n FROM doc_versions WHERE order_id = ? AND voided_at IS NULL', [id]) as { n?: number } | null)
+      ?.n ?? 0
+  )
+  const plCount = Number(
+    (db.get('SELECT COUNT(*) AS n FROM packing_lists WHERE order_id = ? AND voided_at IS NULL', [id]) as { n?: number } | null)
+      ?.n ?? 0
+  )
+  if ((docCount > 0 || plCount > 0) && !opts.confirmDocs) {
+    const parts: string[] = []
+    if (docCount > 0) parts.push(`${docCount} 版单据存档（PI/CI 可能已发到客户手里）`)
+    if (plCount > 0) parts.push(`${plCount} 批箱单`)
+    throw new Error(
+      `这张订单还有 ${parts.join(' 和 ')}。作废后系统不再认账，但这些纸面凭据不会消失，` +
+        `报关/收汇在途的钱会和系统脱节。请先核对这些凭据的处理，在作废确认框里勾选「凭据已核对」再作废。`
+    )
+  }
   transact(() => {
     db.run('UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?', ['void', now(), id])
     // 下单抵扣的样品费不能跟着凭空消失：订单作废退出应收口径，
@@ -951,7 +971,15 @@ export function voidOrder(id: number, reason = ''): OrderDetail {
         `打样单 ${String(s.sample_no ?? '')} 的样品费抵扣随订单作废回退为未收`
       )
     }
-    logEvent(id, 'void', cur.payment_status, 'void', `作废订单 ${cur.order_no}${reason ? '：' + reason : ''}`)
+    logEvent(
+      id,
+      'void',
+      cur.payment_status,
+      'void',
+      `作废订单 ${cur.order_no}${reason ? '：' + reason : ''}${
+        docCount > 0 || plCount > 0 ? `（凭据已核对：${docCount} 版单据存档、${plCount} 批箱单）` : ''
+      }`
+    )
   })
   return getOrder(id)!
 }
@@ -1457,7 +1485,9 @@ export function addPayment(
       'payment',
       null,
       null,
-      `收款 ${amount.toFixed(2)}（${paidAt}${p.bankRef ? `，流水号 ${p.bankRef}` : `，${p.method ?? 'T/T'}`}）`
+      `收款 ${amount.toFixed(2)}（${paidAt}${p.bankRef ? `，流水号 ${p.bankRef}` : `，${p.method ?? 'T/T'}`}）` +
+        // 补录过去日期的到账也是按「录入时刻」的订单汇率钉快照：口径写进历史，月报对不上时查得到原因
+        `；汇率按 ${rate} 钉快照`
     )
     recomputePaymentStatus(orderId)
   })

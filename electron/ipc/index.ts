@@ -163,7 +163,9 @@ export function registerIpc(): void {
   )
   handle('orders:delete', (id: number) => orders.deleteOrder(id))
   /** 作废订单（客户取消 / 建错单）：记录全留，不进货值/待收/毛利 */
-  handle('orders:void', (id: number, reason?: string) => orders.voidOrder(id, reason ?? ''))
+  handle('orders:void', (id: number, reason?: string, opts?: { confirmDocs?: boolean }) =>
+    orders.voidOrder(id, reason ?? '', { confirmDocs: opts?.confirmDocs === true })
+  )
   handle('orders:addItem', (orderId: number, item: orders.OrderItemInput) =>
     orders.addOrderItem(orderId, item)
   )
@@ -385,7 +387,8 @@ export function registerIpc(): void {
       orderId: payload.orderId ?? null,
       quotationId: payload.quotationId ?? null,
       amount: payload.amount ?? 0,
-      expectedVersion: payload.expectedVersion
+      expectedVersion: payload.expectedVersion,
+      confirmOverlap: payload.confirmOverlap === true
     })
     return { path: saved.absolutePath, filePath: saved.filePath, version: saved.version }
   })

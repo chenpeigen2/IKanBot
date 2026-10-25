@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, createContext, useContext, useRef, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { localDateOf } from '../../shared/date'
+import { Button } from './ui/Button'
 
 /* ---------------- 轻量 UI 组件 ---------------- */
 
@@ -59,6 +60,84 @@ export function Empty({
       {hint ? <div className="empty-hint">{hint}</div> : null}
       {action ? <div className="empty-action">{action}</div> : null}
     </div>
+  )
+}
+
+/**
+ * 输入弹窗：Electron 不支持 window.prompt（调用即抛异常），
+ * 需要用户敲一句话（作废原因、新款号）时一律用这个。
+ * onOk 返回 false 表示校验没过、不关弹窗。
+ */
+export function PromptModal({
+  title,
+  label,
+  initial = '',
+  okText = '确定',
+  multiline = false,
+  onOk,
+  onClose
+}: {
+  title: string
+  label: React.ReactNode
+  initial?: string
+  okText?: string
+  multiline?: boolean
+  onOk: (value: string) => boolean | void | Promise<boolean | void>
+  onClose: () => void
+}) {
+  const [value, setValue] = useState(initial)
+  const [busy, setBusy] = useState(false)
+  const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null)
+  useEffect(() => {
+    inputRef.current?.focus()
+    inputRef.current?.select()
+  }, [])
+  const submit = async () => {
+    if (busy) return
+    setBusy(true)
+    try {
+      const ok = await onOk(value.trim())
+      if (ok !== false) onClose()
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Modal
+      title={title}
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose}>取消</Button>
+          <Button variant="primary" disabled={busy} onClick={() => void submit()}>
+            {okText}
+          </Button>
+        </>
+      }
+    >
+      <div className="field">
+        <label>{label}</label>
+        {multiline ? (
+          <textarea
+            ref={inputRef as any}
+            rows={3}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            style={{ width: '100%' }}
+          />
+        ) : (
+          <input
+            ref={inputRef as any}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void submit()
+            }}
+            style={{ width: '100%' }}
+          />
+        )}
+      </div>
+    </Modal>
   )
 }
 

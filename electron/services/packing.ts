@@ -282,8 +282,9 @@ export function createPackingList(input: PackingListInput): PackingList[] {
   // 跨批次查号放在超装校验之后：用户先看到「数量超了」这个更直接的问题
   for (const no of seenBoxNo) assertBoxNoFreeInOrder(input.orderId, no)
 
-  const plNo = nextNo('PL')
   transact(() => {
+    // 烧号进事务：插入失败（超装校验漏网、并发撞号）时号跟着回滚，不烧空号
+    const plNo = nextNo('PL')
     const res = db.run(
       `INSERT INTO packing_lists(order_id, pl_no, container_no, note, created_at, ship_status)
        VALUES(?,?,?,?,?,'packed')`,

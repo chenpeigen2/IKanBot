@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'fs'
 import { isAbsolute, join, relative, resolve, sep } from 'path'
 import { dataDir, docsDir, getDb, transact } from '../db'
 import { logEvent } from './events'
+import { computeOrderMoney, parseCharges } from './money'
 import { ciNoOf } from '../../src/shared/documents'
 import type { DocKind } from '../../src/shared/types'
 
@@ -27,6 +28,24 @@ export interface DocVersion {
 const DOC_KINDS: DocKind[] = ['pi', 'pl', 'ci', 'quotation']
 /** 单号会直接当目录名用：只允许安全字符，杜绝 ../ 和 Windows 保留字符 */
 const SAFE_DOC_NO = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/
+
+/** 订单应收口径（货值 + 费用行）：喂给 computeOrderMoney 单一真源，不在这里另写聚合 */
+function orderGrandTotal(orderId: number): number {
+  const db = getDb()
+  const items = db.all('SELECT quantity, unit_price FROM order_items WHERE order_id = ?', [orderId]) as Record<
+    string,
+    unknown
+  >[]
+  const charges = parseCharges(
+    (db.get('SELECT charges FROM orders WHERE id = ?', [orderId]) as { charges?: unknown } | null)?.charges
+  )
+  return computeOrderMoney({
+    items: items.map((r) => ({ quantity: Number(r.quantity), unitPrice: Number(r.unit_price), unitCost: null })),
+    charges,
+    payments: [],
+    depositRatio: 0
+  }).grandTotal
+}
 
 function now(): string {
   return new Date().toISOString()
@@ -115,6 +134,21 @@ export function voidDocVersion(versionId: number, reason = ''): DocVersion[] {
   if (!row) throw new Error('这一版存档已经不存在了，刷新页面后再试。')
   const v = mapDocVersion(row)
   if (v.voidedAt) throw new Error(`存档 ${v.docNo} 第 ${v.version} 版已经是作废状态，不用重复作废。`)
+  // 作废重出是 CI 专用通道：批次锁定与金额钉住都只认 CI，作废 PI/箱单/报价的存档
+  // 改变不了任何计算，只会污染审计口径；这些纸面要更正直接重出一版即可。
+  if (v.kind !== 'ci') {
+    throw new Error(
+      `只有 CI 存档支持作废重出；${v.docNo} 是 ${v.kind.toUpperCase()} 存档，它不参与锁定，` +
+        `作废它改变不了任何计算——纸面要更正直接重出一版即可。`
+    )
+  }
+  if (v.orderId != null) {
+    const st = String(
+      (db.get('SELECT payment_status FROM orders WHERE id = ?', [v.orderId]) as { payment_status?: string } | null)
+        ?.payment_status ?? ''
+    )
+    if (st === 'void') throw new Error('这张订单已作废，存档是留档凭据，不能再作废。')
+  }
   transact(() => {
     db.run('UPDATE doc_versions SET voided_at = ?, void_reason = ? WHERE id = ?', [now(), why, versionId])
     if (v.orderId != null) {
@@ -146,6 +180,8 @@ export function saveDocFile(input: {
   quotationId?: number | null
   amount?: number
   expectedVersion?: number
+  /** CI 与已存档批次/整单 CI 重叠时是否已由人确认（预览弹窗勾选后带来） */
+  confirmOverlap?: boolean
 }): { filePath: string; absolutePath: string; version: number } {
   const docNo = assertDocNo(input.docNo)
   const kind = assertDocKind(input.kind)
@@ -185,14 +221,36 @@ export function saveDocFile(input: {
   }
 
   try {
-    recordDocVersion({
-      orderId: input.orderId ?? null,
-      quotationId: input.quotationId ?? null,
-      docNo,
-      kind,
-      version,
-      amount: input.amount ?? 0,
-      filePath
+    transact(() => {
+      // 落账前复查重叠：预览阶段的检查隔着秒级的 PDF 生成，两个预览并发存档会双双放行——
+      // 检查与记账放进同一事务，落库的一刻不可能夹带未经确认的重叠
+      if (kind === 'ci' && input.orderId != null) {
+        assertCiNoOverlap(input.orderId, docNo, input.confirmOverlap === true)
+      }
+      recordDocVersion({
+        orderId: input.orderId ?? null,
+        quotationId: input.quotationId ?? null,
+        docNo,
+        kind,
+        version,
+        amount: input.amount ?? 0,
+        filePath
+      })
+      // CI 金额与应收口径的差异留痕：报关调价是设计允许的（理由写在纸面上），
+      // 收款仍按订单口径——但差异必须留在账上，事后对账才知道这不是录错
+      if (kind === 'ci' && input.orderId != null && input.amount != null) {
+        const diff = Number(input.amount) - orderGrandTotal(input.orderId)
+        if (Math.abs(diff) > 0.005) {
+          logEvent(
+            input.orderId,
+            'doc_amount_diff',
+            null,
+            null,
+            `CI 存档 ${docNo} 第 ${version} 版金额 ${Number(input.amount).toFixed(2)} 与订单应收 ` +
+              `${orderGrandTotal(input.orderId).toFixed(2)} 相差 ${diff.toFixed(2)}；收款仍按订单口径，差异理由应写在纸面上`
+          )
+        }
+      }
     })
   } catch (e) {
     try {
@@ -202,7 +260,7 @@ export function saveDocFile(input: {
     }
     const msg = (e as Error).message ?? ''
     if (/UNIQUE|unique/i.test(msg)) {
-      throw new Error(`这张单据第 ${version} 版已经存过了（可能另一窗口同时点了存档）。请刷新后再看。`)
+      throw new Error(`单据 ${docNo} 第 ${version} 版已经存过了（可能另一窗口同时点了存档）。请刷新后核对存档列表。`)
     }
     throw e
   }

@@ -559,8 +559,9 @@ export function packingAmounts(orderId: number): PackingAmount[] {
   for (const b of list) {
     b.goods = r2(b.goodsExact)
     // 订单里没有这一款（升级前的老数据或敲错款号）时单价按 0：宁可少算，不编一个数出来
-    const archivedTotal = archivedCi.get(piNo ? ciNoOf(piNo, b.plNo) : '') ?? 0
-    if (archivedTotal > 0) {
+    // 存档在就钉（不看金额是否 > 0）：0 金额的 CI 也是纸面依据，重算等于改纸面
+    if (archivedCi.has(piNo ? ciNoOf(piNo, b.plNo) : '')) {
+      const archivedTotal = archivedCi.get(piNo ? ciNoOf(piNo, b.plNo) : '') ?? 0
       b.charges = r2(archivedTotal - b.goods)
       pinned.add(b.plId)
       pinnedGoods += b.goodsExact
