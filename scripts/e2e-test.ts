@@ -30,7 +30,7 @@ import {
   ciDocAmount,
   ciNoOf
 } from '../src/shared/documents'
-import { localDate, localMonthOf } from '../src/shared/date'
+import { localDate, localMonthOf, addDays } from '../src/shared/date'
 import { isBillingStatus, shownRemaining } from '../src/shared/billing'
 import { likeContains } from '../electron/services/search'
 import { INCOTERMS } from '../src/shared/types'
@@ -1800,6 +1800,7 @@ check(
 /* ---------------- N28：作废代替删除 ---------------- */
 section('N28：有款的单不能物理删除，只能作废')
 const r28 = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.15 })
+orders.setPaymentStatus(r28.id, 'confirmed')
 await orders.addOrderItem(r28.id, {
   styleNo: 'A001',
   productName: '纯棉圆领T恤',
@@ -2330,6 +2331,7 @@ check('订单列表能按款号搜到', byStyleOrders.some((o) => o.id === r20.i
 section('收款与应收：日期、删款留痕、币种守卫、客户页口径')
 
 const r1Order = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.1 })
+orders.setPaymentStatus(r1Order.id, 'confirmed')
 await orders.addOrderItem(r1Order.id, {
   styleNo: 'R1-GUARD',
   productName: 'R1 守卫',
@@ -3150,7 +3152,7 @@ check(
   `${stR6.pendingUnconfirmed + stR6.pendingDeposit + stR6.pendingBalance + stR6.pendingSample} vs ${stR6.pendingAmount}`
 )
 const doneBefore = dashboard.dashboard().completedThisMonth
-const oSigned = orders.createOrder({ customerId: cR6.id, currency: 'USD', exchangeRate: 7.2 })
+const oSigned = orders.createOrder({ customerId: cR6.id, currency: 'USD', exchangeRate: 7.2, paymentStatus: 'confirmed' })
 getDb().run("UPDATE orders SET ship_status = 'delivered' WHERE id = ?", [oSigned.id])
 eq(
   '只有 updated_at 动过的单不再被算成「本月完成」（要批次签收或状态事件）',
@@ -3274,6 +3276,7 @@ eq(
 section('R7 台账口径：与报表同源，草稿作废不再混进 SUM')
 const oDraftR7 = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.2 })
 const oVoidR7 = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.2 })
+orders.setPaymentStatus(oVoidR7.id, 'confirmed')
 await orders.addOrderItem(oVoidR7.id, { styleNo: 'A001', productName: 'T恤', quantity: 10, unitPrice: 10, unitCost: 6 })
 orders.addPayment(oVoidR7.id, { paidAt: localDate(), amount: 30, method: 'T/T', bankRef: 'R7-VOID-01' })
 orders.voidOrder(oVoidR7.id, '客户取消')
@@ -4630,7 +4633,7 @@ const qR13 = quotations.saveQuotation({
   status: 'confirmed',
   items: [{ styleNo: 'R13-Q', quantity: 10, unitPrice: 5 }]
 })
-getDb().run('UPDATE quotations SET updated_at = ? WHERE id = ?', [dAgoIso(20), qR13.id])
+getDb().run('UPDATE quotations SET confirmed_at = ? WHERE id = ?', [dAgoIso(20), qR13.id])
 const remR13 = dashboard.reminders()
 check(
   '已确认 20 天没转单 → 工作台催转订单',
@@ -5153,7 +5156,8 @@ docs.saveDocFile({
   amount: r16Before.total
 })
 // 订单后来又补了 100 件：整单货值变成 2000，存档批次的费用份额不能跟着缩水
-await orders.addOrderItem(r16Order.id, { styleNo: 'R16-F', productName: '冻结测试', quantity: 100, unitPrice: 10 })
+const r16Item = orders.getOrder(r16Order.id)!.items[0]
+await orders.updateOrderItem(r16Order.id, r16Item.id, { quantity: 200 })
 const r16After = money.packingAmounts(r16Order.id).find((b) => b.plId === r16Pl.id)!
 eq('补货后已存档批次的总额还是纸面上的 695', r16After.total, 695)
 eq('已存档批次的费用不按新货值重摊', r16After.charges, 195)
@@ -5162,8 +5166,13 @@ const r16PlB = packing.createPackingList({
   lines: [{ boxNo: 'R16-2', styleNo: 'R16-F', quantity: 50 }]
 }).slice(-1)[0]
 const r16AfterB = money.packingAmounts(r16Order.id).find((b) => b.plId === r16PlB.id)!
-eq('新批次仍按当前整单货值分摊（390 × 500/2000）', r16AfterB.charges, 97.5)
-eq('新批次总额跟着它的货值走', r16AfterB.total, 597.5)
+eq('未存档批次只分剩余费用（(390−195) × 500/1500）', r16AfterB.charges, 65)
+eq('新批次总额跟着它的货值走', r16AfterB.total, 565)
+eq(
+  '两批费用相加不超过订单费用合计（不会再拿整单 390 摊第二遍）',
+  money.packingAmounts(r16Order.id).reduce((s, b) => s + b.charges, 0),
+  260
+)
 const r16Line = packing.listPackingLists(r16Order.id).find((p) => p.id === r16Pl.id)!.lines[0]
 check(
   '出过 CI 的批次箱明细不能改',
@@ -5308,6 +5317,138 @@ check(
   r8err(() => packing.deletePackingListLine(r16Recv.id, r16RecvPl.id, r16RecvLineA.id)).includes('实收')
 )
 eq('被拦后两箱都还在（事务回滚）', packing.listPackingLists(r16Recv.id)[0].lines.length, 2)
+
+/* ---------------- R17 时间与口径 ---------------- */
+section('R17 报价时间线：发出日与确认日各记各的')
+
+const r17Settings = getSettings()
+saveSettings({ ...r17Settings, remindConfirmDays: 25, remindBalanceDays: 25 })
+
+const r17QSent = quotations.saveQuotation({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  status: 'sent',
+  items: [{ styleNo: 'R17-Q', quantity: 10, unitPrice: 5 }]
+})
+const r17QSentRow = getDb().get('SELECT sent_at FROM quotations WHERE id = ?', [r17QSent.id]) as
+  | Record<string, unknown>
+  | null
+check('保存成「已发出」时就写下发出日', Boolean(r17QSentRow?.sent_at))
+
+const r17QMeta = quotations.saveQuotation({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  items: [{ styleNo: 'R17-Q2', quantity: 20, unitPrice: 6 }]
+})
+quotations.updateQuotationMeta(r17QMeta.id, { status: 'sent' })
+const r17QMetaSent = getDb().get('SELECT sent_at FROM quotations WHERE id = ?', [r17QMeta.id]) as
+  | Record<string, unknown>
+  | null
+check('从「草稿」改成「已发出」也补上发出日', Boolean(r17QMetaSent?.sent_at))
+quotations.updateQuotationMeta(r17QMeta.id, { status: 'confirmed' })
+const r17QConfirmed = getDb().get('SELECT confirmed_at FROM quotations WHERE id = ?', [r17QMeta.id]) as
+  | Record<string, unknown>
+  | null
+check('改成「已确认」时写下确认日', Boolean(r17QConfirmed?.confirmed_at))
+
+// 把确认日改成 30 天前，再补一次报价结果：等待天数必须还按确认日算
+const r17ConfirmOld = addDays(localDate(), -30)
+getDb().run('UPDATE quotations SET confirmed_at = ? WHERE id = ?', [r17ConfirmOld, r17QMeta.id])
+quotations.updateQuotationMeta(r17QMeta.id, { result: 'pending' })
+const r17QAfter = getDb().get('SELECT confirmed_at FROM quotations WHERE id = ?', [r17QMeta.id]) as
+  | Record<string, unknown>
+  | null
+eq('补结果不会把确认日刷新成今天', String(r17QAfter?.confirmed_at ?? ''), r17ConfirmOld)
+const r17QuoteRem = dashboard.reminders().find((r) => r.kind === 'quote' && r.orderNo === r17QMeta.qNo && r.message.includes('已确认'))
+eq('确认 30 天没转单的报价仍按确认日起算', r17QuoteRem?.days, 30)
+
+section('R17 提醒时钟：出运一分未收按出货事件起算，改备注不清零')
+
+const r17Ship = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r17Ship.id, { styleNo: 'R17-SHIP', quantity: 10, unitPrice: 10 })
+orders.setShipStatus(r17Ship.id, 'shipped', '手工推进出货')
+const r17ShipEvent = getDb().get(
+  "SELECT id FROM order_events WHERE order_id = ? AND kind = 'ship_status' AND to_status = 'shipped' ORDER BY id DESC LIMIT 1",
+  [r17Ship.id]
+) as { id?: number } | null
+// 事件在 30 天前，而 updated_at 是刚才：提醒必须认事件，不能认「最后修改日」
+getDb().run('UPDATE order_events SET at = ? WHERE id = ?', [
+  new Date(Date.now() - 30 * 86400000).toISOString(),
+  Number(r17ShipEvent?.id ?? 0)
+])
+getDb().run('UPDATE orders SET updated_at = ? WHERE id = ?', [new Date().toISOString(), r17Ship.id])
+const r17ShipRem = dashboard.reminders().find((r) => r.orderId === r17Ship.id && r.message.includes('一分未收'))
+eq('出运 30 天一分未收按出货事件起算', r17ShipRem?.days, 30)
+
+section('R17 本月完成数：作废单不再算完成')
+
+const r17DoneBefore = dashboard.dashboard().completedThisMonth
+const r17Done = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r17Done.id, { styleNo: 'R17-DONE', quantity: 10, unitPrice: 10 })
+orders.setShipStatus(r17Done.id, 'delivered', '本月完成口径测试')
+eq('签收后计入本月完成', dashboard.dashboard().completedThisMonth, r17DoneBefore + 1)
+orders.voidOrder(r17Done.id, 'R17 本月完成口径测试作废')
+eq('作废后从本月完成里退出', dashboard.dashboard().completedThisMonth, r17DoneBefore)
+
+section('R17 欠款榜：未结单数只数还欠钱的单')
+
+const r17BoardCustomer = customers.saveCustomer({ company: 'R17 欠款榜口径' })
+const r17BoardPaid = orders.createOrder({
+  customerId: r17BoardCustomer.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(r17BoardPaid.id, { styleNo: 'R17-BOARD-A', quantity: 10, unitPrice: 10 })
+orders.addPayment(r17BoardPaid.id, { paidAt: localDate(), amount: 100, method: 'T/T', bankRef: 'R17-BOARD-P' })
+const r17BoardOpen = orders.createOrder({
+  customerId: r17BoardCustomer.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(r17BoardOpen.id, { styleNo: 'R17-BOARD-B', quantity: 10, unitPrice: 10 })
+const r17BoardRow = money.receivableByCustomer().find((r) => r.customerId === r17BoardCustomer.id)
+eq('收齐的那单不算未结单', r17BoardRow?.orders, 1)
+eq('欠款榜敞口只算还欠的货款（100 美元 × 汇率 7）', r17BoardRow?.goodsBase, 700)
+
+section('R17 收款守门：不许填未来、草稿单不许收款')
+
+const r17PayOrder = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r17PayOrder.id, { styleNo: 'R17-PAY', quantity: 10, unitPrice: 10 })
+const r17FutureErr = r8err(() =>
+  orders.addPayment(r17PayOrder.id, { paidAt: addDays(localDate(), 1), amount: 10, method: 'T/T' })
+)
+check('收款日期填明天会被拦下', r17FutureErr.includes('还没到'), r17FutureErr)
+const r17DraftPay = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7 })
+await orders.addOrderItem(r17DraftPay.id, { styleNo: 'R17-DRAFT-PAY', quantity: 10, unitPrice: 10 })
+const r17DraftErr = r8err(() =>
+  orders.addPayment(r17DraftPay.id, { paidAt: localDate(), amount: 10, method: 'T/T' })
+)
+check('草稿单登记收款被拦下', r17DraftErr.includes('草稿'), r17DraftErr)
+check('提示说明这笔钱会从本月到账里消失', r17DraftErr.includes('本月到账'), r17DraftErr)
+
+section('R17 明细唯一：同款同色同码不许两行')
+
+const r17Dup = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r17Dup.id, { styleNo: 'R17-DUP', color: 'Black', size: 'M', quantity: 10, unitPrice: 10 })
+const r17DupErr = r8err(() =>
+  orders.addOrderItem(r17Dup.id, { styleNo: 'R17-DUP', color: 'Black', size: 'M', quantity: 5, unitPrice: 12 })
+)
+check('重复的款号/颜色/尺码被拦下', r17DupErr.includes('同一款只能有一行'), r17DupErr)
+const r17DupB = await orders.addOrderItem(r17Dup.id, {
+  styleNo: 'R17-DUP-B',
+  color: 'Black',
+  size: 'M',
+  quantity: 5,
+  unitPrice: 12
+})
+const r17DupBItem = r17DupB.items.find((i) => i.styleNo === 'R17-DUP-B')!
+const r17DupSwapErr = r8err(() => orders.updateOrderItem(r17Dup.id, r17DupBItem.id, { styleNo: 'R17-DUP' }))
+check('把另一行改成已有款号也被拦下', r17DupSwapErr.includes('已经有明细'), r17DupSwapErr)
+eq('被拦后明细仍是两行，没有多出重复款', orders.getOrder(r17Dup.id)!.items.length, 2)
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

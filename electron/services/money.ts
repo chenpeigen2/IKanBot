@@ -452,7 +452,9 @@ export function listOrderMoney(filter: MoneyListFilter = {}): OrderMoneyRow[] {
  * 已经出过 CI 的批次：纸面金额已经发给客户，系统重算不能把它改掉。
  * 那一批的费用不再按当前整单货值重新分摊，而是从存档 CI 的总额倒推——
  * 否则订单后来补几行货，旧批次的费用份额会悄悄变少/变多，和客户手里那张纸对不上。
- * 只有还没出过 CI 的批次继续按比例分摊，分币差也只补给这类批次。
+ * 还没出过 CI 的批次只分「剩余费用」（总费用 − 已存档批次的费用），分母也换成
+ * 剩余货值：拿整单 total 再摊一遍，多批 CI 的合计会超过订单总额，或者全部存档后
+ * 把差额永久留在纸面之外。分币差只补给还没存档、且剩余货值已经全部装箱的那一批。
  *
  * 作废的批次一条不算：那批没走成，钱也不该记在它头上。
  */
@@ -550,8 +552,9 @@ export function packingAmounts(orderId: number): PackingAmount[] {
   const goodsAll = money.goodsValue
   const chargesTotal = money.chargesTotal
   const chargeRows = parseCharges(orderRow?.charges).filter((c) => c.label.trim())
-  let shareSum = 0
   const pinned = new Set<number>()
+  let pinnedGoods = 0
+  let pinnedCharges = 0
   for (const b of list) {
     b.goods = r2(b.goodsExact)
     // 订单里没有这一款（升级前的老数据或敲错款号）时单价按 0：宁可少算，不编一个数出来
@@ -559,16 +562,26 @@ export function packingAmounts(orderId: number): PackingAmount[] {
     if (archivedTotal > 0) {
       b.charges = r2(archivedTotal - b.goods)
       pinned.add(b.plId)
-    } else {
-      b.charges = goodsAll > 0 ? r2((chargesTotal * b.goods) / goodsAll) : 0
+      pinnedGoods += b.goodsExact
+      pinnedCharges = r2(pinnedCharges + b.charges)
     }
+  }
+  // 剩下能分的只有「还没被纸面金额占掉的费用」，分母也要扣掉已存档的货值
+  const restCharges = r2(chargesTotal - pinnedCharges)
+  const restGoods = goodsAll - pinnedGoods
+  let shareSum = 0
+  let unpinnedGoods = 0
+  for (const b of list) {
+    if (pinned.has(b.plId)) continue
+    unpinnedGoods += b.goodsExact
+    b.charges = restGoods > 0 ? r2((restCharges * b.goods) / restGoods) : 0
     shareSum = r2(shareSum + b.charges)
   }
-  const packedGoods = list.reduce((s, b) => s + b.goods, 0)
-  if (list.length > 0 && goodsAll > 0 && Math.abs(packedGoods - goodsAll) < 0.005) {
-    // 分币差只能落在还能重算的批次上；落在存档批次上就等于改了纸面金额
+  if (list.length > 0 && restGoods > 0 && Math.abs(unpinnedGoods - restGoods) < 0.005) {
+    // 剩余货值已经全部装箱，才把分币差补到还能重算的批次上：
+    // 落在存档批次上等于改纸面金额，落在还没装箱的货值上等于提前收费
     const last = [...list].reverse().find((b) => !pinned.has(b.plId))
-    if (last) last.charges = r2(last.charges + r2(chargesTotal - shareSum))
+    if (last) last.charges = r2(last.charges + r2(restCharges - shareSum))
   }
   for (const b of list) {
     b.total = r2(b.goods + b.charges)
@@ -655,7 +668,8 @@ export function receivableByCustomer(): CustomerReceivable[] {
       sampleBase: 0,
       totalBase: 0
     }
-    cur.orders += 1
+    // 「未结单数」只数还欠着钱的单：收齐的单挂在欠款榜上会让客户以为还有账没对清
+    if (r.receivableBase > 0.001) cur.orders += 1
     cur.goodsBase += r.receivableBase
     by.set(r.customerId, cur)
   }
@@ -684,7 +698,10 @@ export function receivableByCustomer(): CustomerReceivable[] {
     })
   }
   for (const v of by.values()) v.totalBase = v.goodsBase + v.sampleBase
-  return [...by.values()].sort((a, b) => b.totalBase - a.totalBase || a.customerName.localeCompare(b.customerName))
+  // 敞口为 0 的客户不上欠款榜：收齐了还挂在榜上，业务员会以为账没对清
+  return [...by.values()]
+    .filter((v) => v.totalBase > 0.001)
+    .sort((a, b) => b.totalBase - a.totalBase || a.customerName.localeCompare(b.customerName))
 }
 
 /**

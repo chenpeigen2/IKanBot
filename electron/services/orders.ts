@@ -1033,12 +1033,50 @@ function resolveItemCost(orderId: number, item: { unitCost?: number | null; cost
   return item.unitCost ?? null
 }
 
+/**
+ * 同一个 款号×颜色×尺码 只许有一行明细。
+ * 两行不同单价会按数量加权出一个中间价，已经出过 CI 的批次货值跟着变，
+ * 纸面金额却被存档钉住——费用倒推出来就可能是负数。
+ */
+function assertSkuUnique(
+  orderId: number,
+  sku: { styleNo: string; color: string; size: string },
+  exceptItemId?: number
+): void {
+  const row = getDb().get(
+    `SELECT id FROM order_items
+     WHERE order_id = ? AND style_no = ? AND color = ? AND size = ?${exceptItemId ? ' AND id != ?' : ''}
+     LIMIT 1`,
+    exceptItemId
+      ? [orderId, sku.styleNo, sku.color, sku.size, exceptItemId]
+      : [orderId, sku.styleNo, sku.color, sku.size]
+  )
+  if (!row) return
+  const label = [sku.styleNo || '未填款号', sku.color, sku.size].filter(Boolean).join(' / ')
+  throw new Error(
+    `款号 ${label} 已经有明细了。同一款只能有一行：两行不同单价会按数量加权，把已经发出去的 CI 金额算乱。请直接改那一行的数量或单价。`
+  )
+}
+
+/** 已经装进未作废批次的款号不许再加一行：那批的 CI 金额按当时明细算，补一行会把纸面金额改掉 */
+function assertSkuNotPacked(orderId: number, sku: { styleNo: string; color: string; size: string }): void {
+  const packed = packedQty(orderId, sku)
+  if (packed <= 0) return
+  const label = [sku.styleNo || '未填款号', sku.color, sku.size].filter(Boolean).join(' / ')
+  throw new Error(
+    `款号 ${label} 已经装了 ${packed} 件箱，不能再新加一行：这一批的 CI 金额是按当时明细的单价算的，补一行同款会让纸面金额对不上。要补货请改对应箱明细，或按新批次装。`
+  )
+}
+
 /** 插一行的底层动作：数量/单价闸门 + 插入 + 逐行留痕（批量入口共用一个事务） */
 function insertOrderItem(orderId: number, item: OrderItemInput): void {
   const db = getDb()
   const who = `款号 ${item.styleNo || '未填'}`
   assertQuantity(item.quantity, `${who} 的数量`)
   assertUnitPrice(item.unitPrice, `${who} 的单价`)
+  const sku = { styleNo: item.styleNo, color: item.color ?? '', size: item.size ?? '' }
+  assertSkuUnique(orderId, sku)
+  assertSkuNotPacked(orderId, sku)
   db.run(
     `INSERT INTO order_items(order_id, product_id, style_no, product_name, composition, color, size, quantity, unit_price, unit_cost)
      VALUES(?,?,?,?,?,?,?,?,?,?)`,
@@ -1133,6 +1171,11 @@ export function updateOrderItem(
     throw new Error(
       `款号 ${curSku.styleNo} ${curSku.color}/${curSku.size} 已经装了 ${packed} 件箱，不能直接换款号/颜色/尺码；请先到「装箱单」里处理这一款的箱明细（已出运的批次要先把状态改回「已包装」）。`
     )
+  }
+  if (skuChanged) {
+    // 换过去的款也必须守两条：明细不重复、不能撞上已经装箱的款
+    assertSkuUnique(orderId, nextSku, itemId)
+    assertSkuNotPacked(orderId, nextSku)
   }
   if (!skuChanged && patch.quantity !== undefined && Number(patch.quantity) < packed) {
     assertNotBelowPacked(orderId, curSku)
@@ -1267,10 +1310,19 @@ export function replaceOrderItems(orderId: number, items: OrderItemInput[]): Ord
     )
   }
   // 整批先过闸门再动库：不能删完旧明细才发现第 3 行数量是负数
+  const seenSku = new Map<string, number>()
   items.forEach((it, i) => {
     const who = `第 ${i + 1} 行（款号 ${it.styleNo || '未填'}）`
     assertQuantity(it.quantity, `${who} 的数量`)
     assertUnitPrice(it.unitPrice, `${who} 的单价`)
+    const key = [it.styleNo, it.color ?? '', it.size ?? ''].join('|')
+    const first = seenSku.get(key)
+    if (first !== undefined) {
+      throw new Error(
+        `${who} 和第 ${first} 行是同一个 款号/颜色/尺码。同一款只能有一行：两行不同单价会按数量加权，把批次货值算乱。请合并数量后重试。`
+      )
+    }
+    seenSku.set(key, i + 1)
   })
   // 整批替换连同留痕、状态重算放进同一个事务：只删干净一半就失败，是最难查的那种单
   transact(() => {
@@ -1335,10 +1387,26 @@ export function addPayment(
 ): OrderDetail {
   const db = getDb()
   assertOrderWritable(orderId, '登记收款')
+  // 草稿不进现金流（month_received / 月报 / 月度汇总都排除草稿），
+  // 在草稿上登记收款，这笔钱会从所有到账报表里消失——先把状态推到「已发出」再收钱
+  const st = db.get('SELECT order_no, payment_status FROM orders WHERE id = ?', [orderId]) as
+    | { order_no?: string; payment_status?: string }
+    | null
+  if (String(st?.payment_status ?? '') === 'draft') {
+    throw new Error(
+      `订单 ${String(st?.order_no ?? '')} 还是草稿：草稿不进现金流，登记了也不会出现在「本月到账」和月报里。请先把收款状态改成「已发出」或「已确认」，再登记收款。`
+    )
+  }
   const paidAt = String(p.paidAt ?? '').trim()
   // 空日期会让这笔钱从「本月收款」和月报里消失，只剩订单上的已收能看见
   if (!isLocalDate(paidAt)) {
     throw new Error('收款日期要填完整（例如 2026-10-24）。空日期的收款不会进本月收款和月报。')
+  }
+  // 钱不可能在未来到账：填成明年会把「本月到账」和账期催款一起带偏
+  if (paidAt > localDate()) {
+    throw new Error(
+      `收款日期 ${paidAt} 还没到。请填银行水单上的实际到账日，最晚是今天（${localDate()}）。`
+    )
   }
   const amount = Number(p.amount)
   if (!Number.isFinite(amount) || amount <= 0) {

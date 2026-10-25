@@ -397,6 +397,13 @@ function saveQuotationInner(input: QuotationInput): QuotationDetail {
     const billJson = billForQuotation(nextCustomerId, input, before)
     // 发出时间：只在「这次真的发出去了」时刷新，改价重发重新计时
     const sentAt = status === 'sent' && oldStatus !== 'sent' ? ts : (before.sent_at as string | null) ?? null
+    // 确认时间：客户点头那一刻记下来。改备注/补结果只动 updated_at，不许把等待天数清零
+    const confirmedAt =
+      status === 'confirmed'
+        ? oldStatus === 'confirmed'
+          ? ((before.confirmed_at as string | null) ?? null)
+          : ts
+        : null
 
     /** 只写这次传了的列，没传的保留原值——见 keepCharges/keepValidUntil 上面的注释 */
     const keep = (key: keyof QuotationInput, col: string): unknown => (input[key] === undefined ? before[col] : input[key])
@@ -423,7 +430,8 @@ function saveQuotationInner(input: QuotationInput): QuotationDetail {
       ['result', result],
       ['revision', revision],
       ['bill_to_json', billJson],
-      ['sent_at', sentAt]
+      ['sent_at', sentAt],
+      ['confirmed_at', confirmedAt]
     ]
     db.run(
       `UPDATE quotations SET ${cells.map(([col]) => `${col}=?`).join(', ')}, updated_at=? WHERE id=?`,
@@ -437,8 +445,8 @@ function saveQuotationInner(input: QuotationInput): QuotationDetail {
     const res = db.run(
       `INSERT INTO quotations(q_no, customer_id, status, result, currency, exchange_rate, exchange_rate_date, base_currency, incoterm,
         port_of_loading, port_of_destination, payment_method, deposit_ratio, valid_until, customer_po, note,
-        charges, bill_to_json, converted_order_id, revision, sent_at, created_at, updated_at)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,1,?,?,?)`,
+        charges, bill_to_json, converted_order_id, revision, sent_at, confirmed_at, created_at, updated_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,1,?,?,?,?)`,
       [
         qNo,
         input.customerId,
@@ -459,6 +467,7 @@ function saveQuotationInner(input: QuotationInput): QuotationDetail {
         charges,
         billJson,
         status === 'sent' ? ts : null,
+        status === 'confirmed' ? ts : null,
         ts,
         ts
       ]
@@ -614,14 +623,24 @@ export function updateQuotationMeta(
   meta: { status?: QuotationStatus; result?: QuotationResult }
 ): QuotationDetail {
   const db = getDb()
-  const cur = db.get('SELECT status, result FROM quotations WHERE id = ?', [id]) as
-    | { status: string; result: string }
+  const cur = db.get('SELECT status, result, sent_at, confirmed_at FROM quotations WHERE id = ?', [id]) as
+    | { status: string; result: string; sent_at: string | null; confirmed_at: string | null }
     | null
   if (!cur) throw new Error('报价单不存在')
-  db.run('UPDATE quotations SET status=?, result=?, updated_at=? WHERE id=?', [
-    meta.status ?? cur.status,
+  const ts = now()
+  const status = meta.status ?? (cur.status as QuotationStatus)
+  const statusChanged = status !== cur.status
+  // 只在这里改状态时，也要把「发出/确认」的时间钉下来：
+  // 工作台的等待天数按这两列起算，否则改一次状态还得靠 updated_at 猜
+  const sentAt = status === 'sent' && statusChanged ? ts : cur.sent_at ?? null
+  const confirmedAt =
+    status === 'confirmed' ? (cur.status === 'confirmed' ? cur.confirmed_at ?? null : ts) : null
+  db.run('UPDATE quotations SET status=?, result=?, sent_at=?, confirmed_at=?, updated_at=? WHERE id=?', [
+    status,
     meta.result ?? cur.result,
-    now(),
+    sentAt,
+    confirmedAt,
+    ts,
     id
   ])
   const parts: string[] = []

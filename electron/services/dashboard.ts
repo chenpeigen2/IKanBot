@@ -95,9 +95,10 @@ export function dashboard(): DashboardStats {
              ELSE NULL
            END AS done_at
          FROM orders o2
+         WHERE ${sales.sql}
        ) WHERE done_at IS NOT NULL AND date(done_at) >= date(?)) AS completed_this_month,
       (SELECT COUNT(*) FROM orders WHERE date(created_at, 'localtime') >= date(?) AND ${sales.sql}) AS month_new_orders`,
-    [...openOrder.params, ...sales.params, mStart, mStart, ...sales.params]
+    [...openOrder.params, ...sales.params, ...sales.params, mStart, mStart, ...sales.params]
   ) as Record<string, unknown>
 
   // 本月到账：走 money.ts 里唯一一份「按到账月算收到多少钱」的实现。
@@ -537,6 +538,16 @@ export function reminders(): Reminder[] {
     const cur = shipClock.get(id) ?? ''
     if (at > cur) shipClock.set(id, at)
   }
+  // 批次没填实际开船/签收日时，退回整单出货事件的时间：
+  // 手工把老单改成已出运也会留一条 ship_status 事件，不能拿 updated_at 兜底（改备注就清零）
+  const shipEventClock = new Map<number, string>()
+  for (const e of db.all(
+    `SELECT order_id, MAX(at) AS at FROM order_events
+     WHERE kind = 'ship_status' AND to_status IN ('shipped', 'cleared', 'delivered', 'partial_shipped')
+     GROUP BY order_id`
+  ) as Record<string, unknown>[]) {
+    shipEventClock.set(Number(e.order_id), String(e.at))
+  }
 
   for (const r of moneyRows) {
     if (r.receivable <= 0.001) continue
@@ -562,7 +573,7 @@ export function reminders(): Reminder[] {
     // 一分未收：货走了就必须催，不能因为没收过定金就当没事
     const shipped = ['shipped', 'cleared', 'delivered', 'partial_shipped'].includes(String(row.ship_status))
     if (!shipped) continue
-    const since = shipClock.get(r.orderId) ?? String(row.updated_at ?? '')
+    const since = shipClock.get(r.orderId) ?? shipEventClock.get(r.orderId) ?? String(row.updated_at ?? '')
     const days = daysFrom(since)
     if (days === null || days < s.remindBalanceDays) continue
     const method = PAYMENT_METHOD_LABEL[r.paymentMethod as keyof typeof PAYMENT_METHOD_LABEL] ?? r.paymentMethod
@@ -615,15 +626,18 @@ export function reminders(): Reminder[] {
   }
 
   for (const q of db.all(
-    `SELECT q.q_no, q.created_at, q.updated_at, q.sent_at, q.valid_until, q.status, c.company AS customer_name
+    `SELECT q.q_no, q.created_at, q.sent_at, q.confirmed_at, q.valid_until, q.status, c.company AS customer_name
      FROM quotations q JOIN customers c ON c.id = q.customer_id
      WHERE q.status IN ('sent', 'confirmed') AND q.converted_order_id IS NULL`
   ) as Record<string, unknown>[]) {
     const qNo = String(q.q_no)
     const who = String(q.customer_name)
     if (String(q.status) === 'confirmed') {
-      // 客户已经点头却没人转订单，是最容易被忘掉的一笔生意：报价会过期，汇率也天天在动
-      const days = daysFrom(String(q.updated_at ?? '') || String(q.sent_at ?? '') || String(q.created_at ?? ''))
+      // 客户已经点头却没人转订单，是最容易被忘掉的一笔生意：报价会过期，汇率也天天在动。
+      // 起算点只认确认日：改备注/补结果会把 updated_at 刷新，但生意并没有往前挪
+      const days = daysFrom(
+        String(q.confirmed_at ?? '') || String(q.sent_at ?? '') || String(q.created_at ?? '')
+      )
       if (days !== null && days >= s.remindConfirmDays) {
         add(
           {

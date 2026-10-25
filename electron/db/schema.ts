@@ -485,6 +485,17 @@ ALTER TABLE packing_list_lines ADD COLUMN gross_est INTEGER;
 -- 0 = 老记录，读取时回退到「只算样品费」的旧口径。
 ALTER TABLE sample_orders ADD COLUMN offset_amount REAL NOT NULL DEFAULT 0;
 `
+  },
+  {
+    version: 17,
+    name: 'quotation_confirmed_at',
+    sql: `
+-- 客户点头的那一天。工作台的「报价已确认 N 天还没转单」必须按它算：
+-- 和 sent_at 同一个道理，拿 updated_at 会让改个备注、补个结果就把天数清零，
+-- 拖了一个月没转单的生意永远催不出来。
+-- 老数据留空，读取时回退到 sent_at / created_at，不猜一个没发生过的日期。
+ALTER TABLE quotations ADD COLUMN confirmed_at TEXT;
+`
   }
 ]
 

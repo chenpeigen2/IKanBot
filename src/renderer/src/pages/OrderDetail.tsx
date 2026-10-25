@@ -1887,11 +1887,17 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
           </div>
         ) : null}
 
+        {order.paymentStatus === 'draft' ? (
+          <div className="alert warn">
+            这张单还是草稿：草稿不进现金流，登记了也不会出现在「本月到账」和月报里。请先把收款状态改成「已发出」或「已确认」。
+          </div>
+        ) : null}
         <div className="field-row-3">
           <div className="field">
             <label>收款日期 *</label>
             <input
               type="date"
+              max={localDate()}
               value={form.paidAt}
               onChange={(e) => setForm({ ...form, paidAt: e.target.value })}
             />
@@ -1924,7 +1930,7 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
             <input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} />
           </div>
         </div>
-        <Button variant="primary" onClick={add} disabled={saving}>
+        <Button variant="primary" onClick={add} disabled={saving || order.paymentStatus === 'draft'}>
           {saving ? '保存中…' : '记录收款'}
         </Button>
       </div>
