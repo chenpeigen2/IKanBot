@@ -6003,6 +6003,111 @@ check(
   r22Csv.slice(0, 160)
 )
 
+// ⑤ R23 拆分收款：一笔水单拆到多张单，整批一个事务
+section('R23 水单拆分收款：整批落账、整批回滚')
+
+const r23C = customers.saveCustomer({
+  company: 'R23 Remittance Co',
+  contact: 'Nina',
+  email: 'nina@r23.com',
+  phone: '',
+  country: 'DE',
+  address: '',
+  zipCode: '',
+  attn: '',
+  paymentPref: ''
+})
+const r23o1 = orders.createOrder({ customerId: r23C.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R23-A' })
+await orders.addOrderItem(r23o1.id, { styleNo: 'R23-A', quantity: 10, unitPrice: 10 })
+const r23o2 = orders.createOrder({ customerId: r23C.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R23-B' })
+await orders.addOrderItem(r23o2.id, { styleNo: 'R23-B', quantity: 5, unitPrice: 8 })
+
+orders.batchAddPayments([
+  { orderId: r23o1.id, paidAt: localDate(), amount: 30, bankRef: 'SWIFT-R23-001', method: 'T/T' },
+  { orderId: r23o2.id, paidAt: localDate(), amount: 10, bankRef: 'SWIFT-R23-001', method: 'T/T' }
+])
+eq('两张单各落一笔收款', (getDb().get('SELECT COUNT(*) AS n FROM payments WHERE order_id IN (?,?)', [r23o1.id, r23o2.id]) as { n: number }).n, 2)
+const r23pay1 = getDb().all('SELECT bank_ref, note FROM payments WHERE order_id = ?', [r23o1.id]) as Record<string, unknown>[]
+check('整批共用同一个流水号', r23pay1.every((p) => p.bank_ref === 'SWIFT-R23-001'))
+check('收款备注注明拆分', String(r23pay1[0].note ?? '').includes('水单拆分'), String(r23pay1[0].note))
+eq('A 单收 30 后待收剩 70', orders.getOrder(r23o1.id)!.remaining, 70)
+eq('B 单收 10 后待收剩 30', orders.getOrder(r23o2.id)!.remaining, 30)
+
+const r23paidBefore = (getDb().get('SELECT COUNT(*) AS n FROM payments WHERE order_id = ?', [r23o1.id]) as { n: number }).n
+let r23RollErr = ''
+try {
+  orders.batchAddPayments([
+    { orderId: r23o1.id, paidAt: localDate(), amount: 10, bankRef: 'SWIFT-R23-002' },
+    // 第二笔日期在未来：批次入口不预检日期，让事务内的守门把整批顶回来
+    { orderId: r23o2.id, paidAt: '2099-01-01', amount: 10, bankRef: 'SWIFT-R23-002' }
+  ])
+} catch (e) {
+  r23RollErr = (e as Error).message
+}
+check('中途一笔不合格整批被拦', r23RollErr.includes('整批已回滚'), r23RollErr)
+eq('回滚后 A 单没有多出半笔收款', (getDb().get('SELECT COUNT(*) AS n FROM payments WHERE order_id = ?', [r23o1.id]) as { n: number }).n, r23paidBefore)
+let r23RefErr = ''
+try {
+  orders.batchAddPayments([{ orderId: r23o1.id, paidAt: localDate(), amount: 5, bankRef: '' }])
+} catch (e) {
+  r23RefErr = (e as Error).message
+}
+check('拆分收款必须带流水号', r23RefErr.includes('流水号'), r23RefErr)
+
+const r23rows = money.listOrderMoney({ customerId: r23C.id }).filter((r) => r.receivable > 0.001)
+eq('拆分后客户名下待收的仍是这两张单', r23rows.length, 2)
+eq('待收视图里 A 单剩 70', r23rows.find((r) => r.orderId === r23o1.id)!.receivable, 70)
+
+// ⑥ R23 费用行闸门：建单 / 报价都拦 Infinity 和 NaN（序列化后变 null、按 0 算）
+section('R23 费用行闸门：非有限数进不了订单和报价')
+
+let r23ChargeErr = ''
+try {
+  orders.createOrder({
+    customerId: c1.id,
+    currency: 'USD',
+    piNo: 'PI-R23-CHG',
+    charges: [{ label: '运费', amount: Infinity }]
+  })
+} catch (e) {
+  r23ChargeErr = (e as Error).message
+}
+check('建单费用 Infinity 被拦下', r23ChargeErr.includes('有效数字'), r23ChargeErr)
+let r23QChargeErr = ''
+try {
+  quotations.saveQuotation({
+    customerId: c1.id,
+    currency: 'USD',
+    exchangeRate: 7,
+    exchangeRateDate: localDate(),
+    incoterm: 'FOB',
+    paymentMethod: 'tt_deposit',
+    items: [{ styleNo: 'R23-QCHG', color: 'Red', size: 'M', quantity: 1, unitPrice: 5 }],
+    charges: [{ label: '运费', amount: NaN }]
+  })
+} catch (e) {
+  r23QChargeErr = (e as Error).message
+}
+check('报价费用 NaN 被拦下', r23QChargeErr.includes('有效数字'), r23QChargeErr)
+
+// ⑦ R23 过期报价批准沿用：价格照旧，有效期重置为新的承诺并留痕
+section('R23 过期转单：有效期重置并留痕')
+
+const r23Q = quotations.saveQuotation({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: localDate(),
+  incoterm: 'FOB',
+  paymentMethod: 'tt_deposit',
+  validUntil: addDays(localDate(), -10),
+  items: [{ styleNo: 'R23-EXP', color: 'Blue', size: 'L', quantity: 10, unitPrice: 6 }]
+})
+const r23ExpOrder = quotations.convertToOrder(r23Q.id, { override: { approvedBy: '老板', reason: 'R23 客户认旧价' } })
+const r23ExpFresh = orders.getOrder(r23ExpOrder.id)!
+check('过期转单有效期被重置到未来', !!r23ExpFresh.validUntil && r23ExpFresh.validUntil > localDate(), String(r23ExpFresh.validUntil))
+check('转单留痕写明有效期重置', r23ExpFresh.note.includes('重置'), r23ExpFresh.note)
+
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
 console.log(`通过 ${passed} 项，失败 ${failed} 项`)

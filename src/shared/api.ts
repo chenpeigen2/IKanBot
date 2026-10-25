@@ -65,6 +65,10 @@ export interface IKanApi {
     replaceItems(orderId: number, items: any[]): Promise<any>
     summarizeSkus(orderId: number): Promise<any[]>
     addPayment(orderId: number, p: any): Promise<any>
+    /** 拆分收款：一笔水单拆到多张单，整批一个事务，任一笔失败全部回滚 */
+    batchAddPayments(
+      entries: { orderId: number; paidAt: string; amount: number; method?: string; bankRef?: string; note?: string }[]
+    ): Promise<any[]>
     deletePayment(orderId: number, paymentId: number, reason: string): Promise<any>
     listSettlements(orderId: number): Promise<any[]>
     addSettlement(orderId: number, input: any): Promise<any>
@@ -162,6 +166,8 @@ export interface IKanApi {
   report: {
     monthly(): Promise<MonthlyReportRow[]>
     receivables(): Promise<CustomerReceivable[]>
+    /** 某客户名下订单的金额行（拆分收款弹窗与对账导出同一份口径） */
+    customerOrderRows(customerId: number): Promise<any[]>
   }
   settings: {
     get(): Promise<any>

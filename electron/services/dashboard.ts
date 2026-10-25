@@ -1125,9 +1125,11 @@ function monthlyCsv(base: string): string {
 /** 收款流水：现金流口径（草稿单的钱不算真收款），并带上订单状态——
  *  作废/失效单的钱确实到账了，但看的人得知道这单已经作废 */
 function paymentsCsv(db: ReturnType<typeof getDb>, base: string): string {
+  // 折算汇率与 money.ts receivedByMonth 同一口径：收款快照优先，没有快照才退回订单汇率
   const cash = notInStatuses('o.payment_status', CASHFLOW_EXCLUDED_STATUSES)
   const rows = db.all(
-    `SELECT p.paid_at, o.order_no, o.pi_no, o.payment_status, c.company, o.currency, o.exchange_rate,
+    `SELECT p.paid_at, o.order_no, o.pi_no, o.payment_status, c.company, o.currency,
+            COALESCE(p.exchange_rate, o.exchange_rate) AS exchange_rate,
             p.amount, p.method, p.bank_ref, p.note
      FROM payments p JOIN orders o ON o.id=p.order_id JOIN customers c ON c.id=o.customer_id
      WHERE ${cash.sql}

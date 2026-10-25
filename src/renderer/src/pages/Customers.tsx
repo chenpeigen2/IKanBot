@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Modal, useToast, money, Empty, fmtDate, PaymentTag, ShipTag, Button, LoadError } from '../ui'
+import { localDate } from '../../../shared/date'
 import { INCOTERMS, PAYMENT_METHOD_LABEL, type PaymentMethod } from '../../../shared/types'
 import type { Customer } from '../../../shared/types'
 
@@ -84,6 +85,17 @@ export default function Customers() {
     null
   )
   const [includeInactive, setIncludeInactive] = useState(false)
+  /** 水单拆分收款：一笔水单按行分摊到该客户名下的待收单 */
+  const [split, setSplit] = useState<{
+    c: Customer
+    rows: any[]
+    paidAt: string
+    bankRef: string
+    method: string
+    note: string
+    amounts: Record<number, string>
+    saving: boolean
+  } | null>(null)
   /** 读取失败不能装成「没有客户」 */
   const [loadError, setLoadError] = useState('')
 
@@ -158,6 +170,65 @@ export default function Customers() {
       window.api.customers.stylePriceHistory({ customerId: c.id })
     ])
     setDetail({ c, stats, orders, base: settings?.baseCurrency ?? 'CNY', prices })
+  }
+
+  const openSplit = async (c: Customer) => {
+    try {
+      const rows = (await window.api.report.customerOrderRows(c.id)).filter((r) => r.receivable > 0.001)
+      if (!rows.length) {
+        toast('该客户名下没有待收的订单，不用拆', 'error')
+        return
+      }
+      setSplit({ c, rows, paidAt: localDate(), bankRef: '', method: 'T/T', note: '', amounts: {}, saving: false })
+    } catch (e) {
+      toast((e as Error).message || '待收订单没加载出来', 'error')
+    }
+  }
+
+  const saveSplit = async () => {
+    if (!split) return
+    const bankRef = split.bankRef.trim()
+    if (!bankRef) {
+      toast('先填银行流水号：拆分收款靠它把几笔收款归成同一笔水单，对账时找得到来路', 'error')
+      return
+    }
+    const filled = split.rows.map((r) => ({ row: r, amount: Number(split.amounts[r.orderId] ?? 0) })).filter((x) => x.amount > 0)
+    if (!filled.length) {
+      toast('至少给一张单填「本次收款」的金额', 'error')
+      return
+    }
+    if (new Set(filled.map((x) => x.row.currency)).size > 1) {
+      toast('选中的几张单币种不同：一笔水单只拆同一币种的单，其他币种请单独登记', 'error')
+      return
+    }
+    const over = filled.filter((x) => x.amount > x.row.receivable + 0.001)
+    if (
+      over.length &&
+      !window.confirm(
+        `${over.map((x) => x.row.orderNo).join('、')} 本次收款超过了该单待收金额。超额一般意味着金额填错了，确认按实收登记吗？`
+      )
+    ) {
+      return
+    }
+    setSplit({ ...split, saving: true })
+    try {
+      await window.api.orders.batchAddPayments(
+        filled.map((x) => ({
+          orderId: x.row.orderId,
+          paidAt: split.paidAt,
+          amount: x.amount,
+          method: split.method,
+          bankRef,
+          note: split.note.trim()
+        }))
+      )
+      toast(`已按水单 ${bankRef} 拆分登记 ${filled.length} 笔收款`)
+      setSplit(null)
+      await load()
+    } catch (e) {
+      toast((e as Error).message, 'error')
+      setSplit((s) => (s ? { ...s, saving: false } : s))
+    }
   }
 
   return (
@@ -649,7 +720,12 @@ export default function Customers() {
 
           {/* 客户问「我还欠哪几张 PI」时不用再逐单手抄：对账单导出走订单台账同一份口径 */}
           {detail.orders.length > 0 ? (
-            <div style={{ marginTop: 10 }}>
+            <div style={{ marginTop: 10, display: 'flex', gap: 8 }}>
+              {detail.stats.outstanding > 0 ? (
+                <Button variant="primary" onClick={() => void openSplit(detail.c)}>
+                  水单拆分收款
+                </Button>
+              ) : null}
               <Button
                 onClick={async () => {
                   try {
@@ -664,6 +740,96 @@ export default function Customers() {
               </Button>
             </div>
           ) : null}
+        </Modal>
+      ) : null}
+
+      {split ? (
+        <Modal title={`水单拆分收款 · ${split.c.company}`} onClose={() => setSplit(null)} size="wide">
+          <p className="faint" style={{ marginTop: 0 }}>
+            客户一笔水单付多张 PI 时，在这里按行分摊：整批共用一个流水号，任何一笔没登进去整批都会退回，不会出现落一半的钱。
+          </p>
+          <div className="price-calc mb">
+            <div>
+              <span className="muted">到账日</span>
+              <input
+                type="date"
+                value={split.paidAt}
+                max={localDate()}
+                onChange={(e) => setSplit({ ...split, paidAt: e.target.value })}
+              />
+            </div>
+            <div>
+              <span className="muted">银行流水号</span>
+              <input
+                value={split.bankRef}
+                placeholder="水单上的流水号（必填）"
+                onChange={(e) => setSplit({ ...split, bankRef: e.target.value })}
+              />
+            </div>
+            <div>
+              <span className="muted">方式</span>
+              <select value={split.method} onChange={(e) => setSplit({ ...split, method: e.target.value })}>
+                {['T/T', 'L/C', 'PayPal', '西联', '其他'].map((m) => (
+                  <option key={m}>{m}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <span className="muted">备注</span>
+              <input
+                value={split.note}
+                placeholder="选填，如「客户水单 2026-10」"
+                onChange={(e) => setSplit({ ...split, note: e.target.value })}
+              />
+            </div>
+          </div>
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>订单号</th>
+                  <th>PI号</th>
+                  <th>状态</th>
+                  <th className="num">待收</th>
+                  <th className="num">本次收款</th>
+                </tr>
+              </thead>
+              <tbody>
+                {split.rows.map((r) => {
+                  const amt = split.amounts[r.orderId] ?? ''
+                  const over = Number(amt) > r.receivable + 0.001
+                  return (
+                    <tr key={r.orderId}>
+                      <td className="mono">{r.orderNo}</td>
+                      <td className="mono">{r.piNo || '—'}</td>
+                      <td>
+                        <PaymentTag status={r.paymentStatus} />
+                      </td>
+                      <td className="num">{money(r.receivable, r.currency)}</td>
+                      <td className="num">
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          style={{ width: 120, textAlign: 'right' }}
+                          value={amt}
+                          placeholder="0"
+                          onChange={(e) => setSplit({ ...split, amounts: { ...split.amounts, [r.orderId]: e.target.value } })}
+                        />
+                        {over ? <div className="faint">超过待收，提交时会再确认</div> : null}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ marginTop: 12, display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <Button onClick={() => setSplit(null)}>取消</Button>
+            <Button variant="primary" disabled={split.saving} onClick={() => void saveSplit()}>
+              {split.saving ? '登记中…' : '整批登记'}
+            </Button>
+          </div>
         </Modal>
       ) : null}
     </>

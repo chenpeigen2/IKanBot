@@ -7,7 +7,7 @@
 import { getDb, nextNo, transact } from '../db'
 import { mapQuotation, mapQuotationItem, mapCustomer } from '../db/mappers'
 import { getSettings } from './settings'
-import { createOrder, getOrder, assertSkuListUnique } from './orders'
+import { createOrder, getOrder, assertSkuListUnique, assertChargeAmounts } from './orders'
 import { logEvent } from './events'
 import { computeOrderMoney, costInOrderCurrency } from './money'
 import { likeAny } from './search'
@@ -322,6 +322,7 @@ function saveQuotationInner(input: QuotationInput): QuotationDetail {
   const settings = getSettings()
   // 费用行与有效期是「编辑时没传 ≠ 要清空」的列：先按传了的算，
   // 走到更新分支时再用数据库原值兜住漏传（见下面的 keepCharges/keepValidUntil）
+  assertChargeAmounts(input.charges ?? [])
   const charges = JSON.stringify((input.charges ?? []).filter((c) => c.label.trim()))
   const validUntil = input.validUntil ?? addDays(localDate(), settings.piValidDays)
   // 汇率必须手动填：系统不拿默认值蒙人，也不替人编锁定日期
@@ -714,9 +715,13 @@ export function convertToOrder(
 
   const currentGrand = q.grandTotal
   const diff = snapGrand - currentGrand
-  const overrideNote = expired
+  let overrideNote = expired
     ? `报价已过期，经 ${approvedBy} 批准沿用（原因：${overrideReason}）`
     : ''
+  // 批准沿用的是「价格」：有效期是当时报盘的时间承诺，跟着旧日期转单，
+  // 新 PI 当天就挂「有效期已逾期」的催办。重置为新 PI 的标准有效期并留痕。
+  const freshValidUntil = expired ? addDays(today, getSettings().piValidDays) : snap.validUntil
+  if (expired) overrideNote += `；有效期已从 ${snap.validUntil || '未填'} 重置为 ${freshValidUntil}`
 
   // 转单挡：存档里的同款两行不能原样带进订单（老数据；新存的报价单在源头已拦）
   assertSkuListUnique(snap.items, `报价单 ${q.qNo} 第 ${targetRevision} 版存档`)
@@ -733,7 +738,7 @@ export function convertToOrder(
       portOfDestination: snap.portOfDestination,
       paymentMethod: snap.paymentMethod,
       depositRatio: snap.depositRatio,
-      validUntil: snap.validUntil,
+      validUntil: freshValidUntil,
       customerPo: snap.customerPo,
       charges: snap.charges,
       // 抬头按报价那一版带走（老存档没有就沿用客户档案）

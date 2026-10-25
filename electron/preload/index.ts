@@ -67,6 +67,7 @@ const api: IKanApi = {
     replaceItems: (orderId: number, items: any[]) => call<any>('orders:replaceItems', orderId, items),
     summarizeSkus: (orderId: number) => call<any[]>('orders:summarizeSkus', orderId),
     addPayment: (orderId: number, p: any) => call<any>('orders:addPayment', orderId, p),
+    batchAddPayments: (entries: any[]) => call<any[]>('orders:batchAddPayments', entries),
     deletePayment: (orderId: number, paymentId: number, reason: string) =>
       call<any>('orders:deletePayment', orderId, paymentId, reason),
     listSettlements: (orderId: number) => call<any[]>('orders:listSettlements', orderId),
@@ -159,7 +160,8 @@ const api: IKanApi = {
   },
   report: {
     monthly: () => call<MonthlyReportRow[]>('report:monthly'),
-    receivables: () => call<CustomerReceivable[]>('report:receivables')
+    receivables: () => call<CustomerReceivable[]>('report:receivables'),
+    customerOrderRows: (customerId: number) => call<any[]>('report:customerOrderRows', customerId)
   },
   settings: {
     get: () => call<any>('settings:get'),

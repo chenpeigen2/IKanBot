@@ -181,6 +181,7 @@ export function registerIpc(): void {
   )
   handle('orders:summarizeSkus', (orderId: number) => orders.summarizeSkus(orderId))
   handle('orders:addPayment', (orderId: number, p: any) => orders.addPayment(orderId, p))
+  handle('orders:batchAddPayments', (entries: orders.BatchPaymentEntry[]) => orders.batchAddPayments(entries))
   handle('orders:deletePayment', (orderId: number, paymentId: number, reason?: string) =>
     orders.deletePayment(orderId, paymentId, reason ?? '')
   )
@@ -255,6 +256,7 @@ export function registerIpc(): void {
   handle('dashboard:reminders', () => dashboard.reminders())
   handle('report:monthly', () => dashboard.monthlyReport())
   handle('report:receivables', () => money.receivableByCustomer())
+  handle('report:customerOrderRows', (customerId: number) => money.listOrderMoney({ customerId }))
 
   /* ---- 设置 ---- */
   handle('settings:get', () => settingsSvc.getSettings())

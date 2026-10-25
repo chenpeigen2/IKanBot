@@ -587,6 +587,8 @@ export function createOrder(input: OrderInput): OrderDetail {
   if (input.exchangeRate !== undefined && !(Number(input.exchangeRate) > 0)) {
     throw new Error('汇率必须填大于 0 的数。0 或空值会让这张单从待收和毛利里消失，请按今天钉盘的汇率填。')
   }
+  // 费用行同一套闸门：Infinity/NaN 过 JSON.stringify 会变 null，落库后费用按 0 算
+  assertChargeAmounts(input.charges ?? [])
   const validUntil = input.validUntil ?? addDays(localDate(), settings.piValidDays)
   // 汇率锁定日期：默认记今天（本地日期）
   const rateDate = input.exchangeRateDate ?? localDate()
@@ -1048,7 +1050,7 @@ export function deleteOrder(id: number): void {
  * 费用金额必须是有限数：输入框里删空会给出 NaN，JSON 一序列化就成了 null，
  * 落库后费用行看着在、金额却按 0 算，CI/PI 合计和应收会静默少掉一笔。
  */
-function assertChargeAmounts(charges: QuotationCharge[]): void {
+export function assertChargeAmounts(charges: QuotationCharge[]): void {
   for (const c of charges) {
     const amount = Number(c.amount)
     if (!Number.isFinite(amount)) {
@@ -1550,6 +1552,64 @@ export function addPayment(
     recomputePaymentStatus(orderId)
   })
   return getOrder(orderId)!
+}
+
+/** 一笔水单拆到多张单：每笔的落账参数（流水号必须整批一致，对账靠它归组） */
+export interface BatchPaymentEntry {
+  orderId: number
+  paidAt: string
+  amount: number
+  method?: string
+  bankRef?: string
+  note?: string
+}
+
+/**
+ * 拆分收款：一个事务循环落 N 笔。任何一笔被守门拦下（草稿、日期、金额…）
+ * 整批回滚——银行水单是一笔钱，账上要么整笔都在、要么一笔没有，
+ * 落一半会让「水单总额」和「系统里的收款」对不上。
+ */
+export function batchAddPayments(entries: BatchPaymentEntry[]): OrderDetail[] {
+  if (!entries.length) throw new Error('没有要登记的收款：至少选一张单填金额。')
+  const bankRef = String(entries[0].bankRef ?? '').trim()
+  if (!bankRef) {
+    throw new Error('拆分收款必须填银行流水号：这是同一笔水单拆到多张单的凭据，对账时靠它把几笔收款归成一组。')
+  }
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i]
+    if (String(e.bankRef ?? '').trim() !== bankRef) {
+      throw new Error(`第 ${i + 1} 笔的流水号和第一笔不一致。拆分收款整批共用同一个流水号，不同的水单请分开登记。`)
+    }
+    if (!Number.isFinite(Number(e.amount)) || Number(e.amount) <= 0) {
+      throw new Error(`第 ${i + 1} 笔收款金额必须是大于 0 的数。`)
+    }
+  }
+  const results: OrderDetail[] = []
+  transact(() => {
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i]
+      try {
+        results.push(
+          addPayment(e.orderId, {
+            paidAt: e.paidAt,
+            amount: Number(e.amount),
+            method: e.method,
+            bankRef,
+            note: [String(e.note ?? '').trim() || null, `水单拆分 ${i + 1}/${entries.length}`]
+              .filter(Boolean)
+              .join('；')
+          })
+        )
+      } catch (err) {
+        const no = String(
+          (getDb().get('SELECT order_no FROM orders WHERE id = ?', [e.orderId]) as { order_no?: string } | null)
+            ?.order_no ?? `#${e.orderId}`
+        )
+        throw new Error(`第 ${i + 1} 笔（订单 ${no}）没登进去，整批已回滚：${(err as Error).message}`)
+      }
+    }
+  })
+  return results
 }
 
 export function deletePayment(orderId: number, paymentId: number, reason = ''): OrderDetail {
