@@ -1893,9 +1893,17 @@ const cashRow = csvPayAfterVoid.split('\r\n').find((l) => l.includes(cashFlowOrd
 check('收款 CSV 里作废单这行还在，且订单状态列写着「已作废」', !!cashRow && cashRow.includes('已作废'), cashRow ?? '没找到该行')
 
 section('数据守卫：汇率不能清空、已转的单不能改钱')
+// 用一张还在走的正式单验证：作废单在 R14 起连编辑入口都进不去
+const rateGuardOrder = orders.createOrder({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  baseCurrency: 'CNY',
+  paymentStatus: 'confirmed'
+})
 let rateZeroErr = ''
 try {
-  orders.updateOrder(cashFlowOrder.id, {
+  orders.updateOrder(rateGuardOrder.id, {
     customerId: c1.id,
     currency: 'USD',
     exchangeRate: 0,
@@ -1905,7 +1913,7 @@ try {
   rateZeroErr = (e as Error).message
 }
 check('编辑订单把汇率清成 0 会被拦住', rateZeroErr.includes('汇率'), rateZeroErr)
-eq('被拦住后订单汇率没被改成 1', orders.getOrder(cashFlowOrder.id)?.exchangeRate, 7)
+eq('被拦住后订单汇率没被改成 1', orders.getOrder(rateGuardOrder.id)?.exchangeRate, 7)
 
 // 已转订单的报价单：明细/价格不许事后改
 let qLockedErr = ''
@@ -4611,6 +4619,270 @@ check(
   ),
   JSON.stringify(remR13.filter((r) => r.orderNo === qR13.qNo).map((r) => r.message))
 )
+
+/* ============================================================
+ * 第 14 轮：分批出 CI 与 R13 回归（R14）
+ * ============================================================ */
+/** 按批次出 CI 的入参：与 OrderDetail 的 openCi 同一套取数（明细/金额/船期都来自批次） */
+function ciBatchOf(order: any, pl: any): any {
+  const a = money.packingAmounts(order.id).find((x) => x.plId === pl.id)!
+  return {
+    plNo: pl.plNo,
+    docDate: pl.docDate || String(pl.createdAt).slice(0, 10),
+    lines: a.lines.map((l) => {
+      const it = order.items.find(
+        (x: any) => x.styleNo === l.styleNo && x.color === l.color && x.size === l.size
+      )
+      return { ...l, productName: it?.productName ?? '', composition: it?.composition ?? '' }
+    }),
+    goods: a.goods,
+    quantity: a.quantity,
+    charges: a.chargeLines,
+    total: a.total,
+    containerNo: pl.containerNo || undefined,
+    vessel: pl.vessel || undefined,
+    etdDate: pl.etdDate || undefined,
+    blNo: pl.blNo || undefined
+  }
+}
+
+section('R14 批次金额：单批货值 + 按货值分摊费用，各批相加 = 整单')
+const r14 = orders.createOrder({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R14-CI',
+  portOfLoading: 'Shanghai',
+  portOfDestination: 'Hamburg',
+  vessel: 'ORDER-VESSEL',
+  etdDate: '2026-11-20'
+})
+await orders.addOrderItem(r14.id, {
+  styleNo: 'R14-A',
+  productName: '批次甲',
+  color: 'Black',
+  size: 'M',
+  quantity: 100,
+  unitPrice: 10
+})
+await orders.addOrderItem(r14.id, {
+  styleNo: 'R14-B',
+  productName: '批次乙',
+  color: 'Red',
+  size: 'L',
+  quantity: 50,
+  unitPrice: 20
+})
+orders.updateOrderCharges(r14.id, [
+  { label: '运费 Freight', amount: 300 },
+  { label: '保险费 Insurance', amount: 90 }
+])
+const r14PlA = packing.createPackingList({
+  orderId: r14.id,
+  containerNo: 'CONT-A',
+  lines: [{ boxNo: 'R14-A-1', styleNo: 'R14-A', color: 'Black', size: 'M', quantity: 100 }]
+})[0]
+packing.updatePackingListInfo(r14.id, r14PlA.id, {
+  containerNo: 'CONT-A',
+  vessel: 'VESSEL-A',
+  etdDate: '2026-12-01',
+  blNo: 'BL-A',
+  docDate: '2026-12-02'
+})
+const r14PlB = packing.createPackingList({
+  orderId: r14.id,
+  lines: [{ boxNo: 'R14-B-1', styleNo: 'R14-B', color: 'Red', size: 'L', quantity: 50 }]
+}).slice(-1)[0]
+packing.updatePackingListInfo(r14.id, r14PlB.id, { docDate: '2026-12-03' })
+
+const r14Amts = money.packingAmounts(r14.id)
+eq('两批都已算出金额', r14Amts.length, 2)
+const r14AmtA = r14Amts.find((a) => a.plId === r14PlA.id)!
+const r14AmtB = r14Amts.find((a) => a.plId === r14PlB.id)!
+eq('A 批货值 = 100 × 10', r14AmtA.goods, 1000)
+eq('A 批费用按货值一半分摊 = 390 / 2', r14AmtA.charges, 195)
+eq('A 批合计', r14AmtA.total, 1195)
+eq('B 批货值 = 50 × 20', r14AmtB.goods, 1000)
+eq('B 批合计', r14AmtB.total, 1195)
+eq(
+  '两批合计相加 = PI 含费用合计',
+  r2(r14AmtA.total + r14AmtB.total),
+  Number(orders.getOrder(r14.id)!.grandTotal)
+)
+eq('A 批费用行相加 = A 批分摊费用', r2(r14AmtA.chargeLines.reduce((s, c) => s + c.amount, 0)), r14AmtA.charges)
+eq('A 批只有自己的 SKU', r14AmtA.lines.map((l) => l.styleNo), ['R14-A'])
+eq('A 批件数', r14AmtA.quantity, 100)
+eq('A 批明细行金额 = 件数 × 单价', r14AmtA.lines[0].amount, 1000)
+
+section('R14 批次金额：分币差落在最后一批，各批相加正好等于整单')
+const r14Round = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r14Round.id, { styleNo: 'R14-ROUND', quantity: 300, unitPrice: 1 })
+orders.updateOrderCharges(r14Round.id, [{ label: '运费 Freight', amount: 100 }])
+for (let i = 0; i < 3; i += 1) {
+  packing.createPackingList({
+    orderId: r14Round.id,
+    lines: [{ boxNo: `R14-R-${i + 1}`, styleNo: 'R14-ROUND', quantity: 100 }]
+  })
+}
+const r14RoundAmts = money.packingAmounts(r14Round.id)
+eq('三批货值各 100', r14RoundAmts.map((a) => a.goods), [100, 100, 100])
+eq('100 元费用按 33.33 / 33.33 / 33.34 分摊', r14RoundAmts.map((a) => a.charges), [33.33, 33.33, 33.34])
+eq(
+  '三批合计相加 = PI 含费用合计（分币差不丢）',
+  r2(r14RoundAmts.reduce((s, a) => s + a.total, 0)),
+  Number(orders.getOrder(r14Round.id)!.grandTotal)
+)
+check(
+  '每批费用行相加 = 本批分摊费用',
+  r14RoundAmts.every((a) => r2(a.chargeLines.reduce((s, c) => s + c.amount, 0)) === a.charges)
+)
+
+section('R14 按批次出 CI：号带批次后缀，只印本批的明细、金额与船期')
+const r14Full = orders.getOrder(r14.id)!
+const r14PlAFull = r14Full.packingLists.find((p) => p.id === r14PlA.id)!
+const r14PlBFull = r14Full.packingLists.find((p) => p.id === r14PlB.id)!
+check('CI 号按批次派生（PI → CI + 批次号）', ciNoOf('PI-9', 'PL-3') === 'CI-9-PL-3')
+const ciA = renderCi(
+  { order: r14Full, settings: getSettings(), images: {} },
+  { batch: ciBatchOf(r14Full, r14PlAFull) }
+)
+check('批次 CI 号带这批的批次号', ciA.includes(`CI No.:</b> CI-R14-CI-${r14PlAFull.plNo}`), r14PlAFull.plNo)
+check('批次 CI 印「仅本批」', ciA.includes('this shipment only / 仅本批'))
+check('批次 CI 用这批的纸面日期', ciA.includes('<b>Date:</b> 2026-12-02'))
+check('批次 CI 印本批柜号', ciA.includes('Container No.: CONT-A'))
+check('批次 CI 印本批船名', ciA.includes('Vessel/Voyage: VESSEL-A'))
+check('批次 CI 印本批 ETD', ciA.includes('ETD: 2026-12-01'))
+check('批次 CI 印本批提单号', ciA.includes('B/L No.: BL-A'))
+check('批次 CI 合计 = 本批货值 + 分摊费用', ciA.includes('USD 1,195.00'))
+check('批次 CI 不印别批的款号', !ciA.includes('R14-B'))
+check('批次 CI 只印本批件数', ciA.includes('>100<') && !ciA.includes('>150<'))
+
+const ciB = renderCi(
+  { order: r14Full, settings: getSettings(), images: {} },
+  { batch: ciBatchOf(r14Full, r14PlBFull) }
+)
+check('批次没填船名时退回整单船名', ciB.includes('Vessel/Voyage: ORDER-VESSEL'))
+check('批次没填 ETD 时退回整单 ETD', ciB.includes('ETD: 2026-11-20'))
+check('没填提单号就不印 B/L', !ciB.includes('B/L No.'))
+check('另一批用自己的纸面日期', ciB.includes('<b>Date:</b> 2026-12-03'))
+const ciWhole = renderCi({ order: r14Full, settings: getSettings(), images: {} })
+check('整单 CI 号不带批次后缀', ciWhole.includes('CI No.:</b> CI-R14-CI<br>'))
+check('整单 CI 合计仍是 PI 含费用合计', ciWhole.includes('USD 2,390.00'))
+check('整单 CI 两批的款都在', ciWhole.includes('R14-A') && ciWhole.includes('R14-B'))
+
+section('R14 批次金额：作废批次不算金额，撤销作废后回来')
+packing.voidPackingList(r14.id, r14PlB.id, '订舱取消')
+eq('作废的那批不再出金额', money.packingAmounts(r14.id).map((a) => a.plId), [r14PlA.id])
+packing.unvoidPackingList(r14.id, r14PlB.id)
+eq('撤销作废后两批都在', money.packingAmounts(r14.id).length, 2)
+
+section('R14 批次金额：老数据里对不上款号的箱不出单价，也不编数')
+const r14Legacy = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r14Legacy.id, { styleNo: 'R14-LEG', quantity: 10, unitPrice: 5 })
+orders.updateOrderCharges(r14Legacy.id, [{ label: '运费 Freight', amount: 10 }])
+const r14LegacyPl = packing.createPackingList({
+  orderId: r14Legacy.id,
+  lines: [{ boxNo: 'R14-L-1', styleNo: 'R14-LEG', quantity: 5 }]
+})[0]
+// 升级前的老数据：箱单上有订单里找不到的款号（现在的新装箱会被超装校验拦住）
+getDb().run(
+  `INSERT INTO packing_list_lines(packing_list_id, box_no, style_no, color, size, quantity)
+   VALUES(?,?,?,?,?,?)`,
+  [r14LegacyPl.id, 'R14-L-2', 'R14-LEGACY', 'Blue', 'S', 3]
+)
+const r14LegacyAmt = money.packingAmounts(r14Legacy.id).find((a) => a.plId === r14LegacyPl.id)!
+eq('对不上的款号被点出来', r14LegacyAmt.unknownSkus, ['R14-LEGACY'])
+eq('对不上的箱不计货值', r14LegacyAmt.goods, 25)
+eq('件数照实算', r14LegacyAmt.quantity, 8)
+eq('费用只按能对上单价的部分分摊', r14LegacyAmt.charges, 5)
+
+section('R14 导出回归：关键词 / 日期筛选都不放开草稿、失效、作废')
+const r14Ok = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R14KW-OK' })
+const r14Draft = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, piNo: 'PI-R14KW-DRAFT' })
+const r14VoidExport = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R14KW-VOID' })
+orders.voidOrder(r14VoidExport.id, '客户取消')
+const r14ExpExport = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R14KW-EXP' })
+orders.setPaymentStatus(r14ExpExport.id, 'expired')
+const r14KwCsv = dashboard.exportCsv('orders', { keyword: 'R14KW' })
+check('关键词导出台账含正常单', r14KwCsv.includes(r14Ok.orderNo))
+check(
+  '关键词导出不含草稿 / 失效 / 作废',
+  ![r14Draft.orderNo, r14ExpExport.orderNo, r14VoidExport.orderNo].some((no) => r14KwCsv.includes(no)),
+  [r14Draft.orderNo, r14ExpExport.orderNo, r14VoidExport.orderNo].join(',')
+)
+const r14DateCsv = dashboard.exportCsv('orders', { from: localDate(), to: localDate() })
+check('按日期导出含正常单', r14DateCsv.includes(r14Ok.orderNo))
+check(
+  '按日期导出不含草稿 / 失效 / 作废',
+  ![r14Draft.orderNo, r14ExpExport.orderNo, r14VoidExport.orderNo].some((no) => r14DateCsv.includes(no))
+)
+check('停在草稿页签导出仍能拿到草稿', dashboard.exportCsv('orders', { paymentStatus: 'draft' }).includes(r14Draft.orderNo))
+check('停在全量底稿仍能拿到作废单', dashboard.exportCsv('orders_all').includes(r14VoidExport.orderNo))
+
+section('R14 作废/失效不能再被改活或改内容')
+const r14Void = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+const r14VoidItem = await orders.addOrderItem(r14Void.id, { styleNo: 'R14-VOID', quantity: 10, unitPrice: 10 })
+const r14VoidItemId = r14VoidItem.items[0].id
+orders.voidOrder(r14Void.id, '客户取消')
+check(
+  '作废单不能整单编辑',
+  r8err(() => orders.updateOrder(r14Void.id, { customerId: c1.id, note: '偷偷改' })).includes('已作废')
+)
+check(
+  '作废单不能改抬头',
+  r8err(() => orders.setOrderParties(r14Void.id, { shipTo: { company: 'X' } })).includes('已作废')
+)
+check(
+  '作废单不能改回收款状态',
+  r8err(() => orders.setPaymentStatus(r14Void.id, 'confirmed')).includes('不能改回收款状态')
+)
+check(
+  '作废单不能改明细行',
+  r8err(() => orders.updateOrderItem(r14Void.id, r14VoidItemId, { quantity: 5 })).includes('已作废')
+)
+check('作废单不能删明细行', r8err(() => orders.removeOrderItem(r14Void.id, r14VoidItemId)).includes('已作废'))
+check(
+  '作废单不能整体替换明细',
+  r8err(() => orders.replaceOrderItems(r14Void.id, [{ styleNo: 'X', quantity: 1, unitPrice: 1 }])).includes('已作废')
+)
+check('作废单不能改费用', r8err(() => orders.updateOrderCharges(r14Void.id, [])).includes('已作废'))
+eq('作废状态没被偷偷改回来', orders.getOrder(r14Void.id)!.paymentStatus, 'void')
+eq('作废单的明细也没被改', orders.getOrder(r14Void.id)!.items[0].quantity, 10)
+
+const r14Exp = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r14Exp.id, { styleNo: 'R14-EXP', quantity: 10, unitPrice: 10 })
+orders.setPaymentStatus(r14Exp.id, 'expired')
+check(
+  '失效单不能整单编辑',
+  r8err(() => orders.updateOrder(r14Exp.id, { customerId: c1.id, note: '偷偷改' })).includes('已失效')
+)
+check(
+  '失效单不能改抬头',
+  r8err(() => orders.setOrderParties(r14Exp.id, { billTo: { company: 'Y' } })).includes('已失效')
+)
+check(
+  '失效单不能整体替换明细',
+  r8err(() => orders.replaceOrderItems(r14Exp.id, [{ styleNo: 'X', quantity: 1, unitPrice: 1 }])).includes('已失效')
+)
+orders.setPaymentStatus(r14Exp.id, 'confirmed')
+eq('改回正式单后能正常编辑', orders.updateOrder(r14Exp.id, { customerId: c1.id, note: '恢复后正常' }).note, '恢复后正常')
+
+section('R14 费用金额必须是有限数')
+const r14NaN = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+check(
+  '整单保存时费用 NaN 被拒',
+  r8err(() =>
+    orders.updateOrder(r14NaN.id, { customerId: c1.id, charges: [{ label: '运费 Freight', amount: NaN }] })
+  ).includes('不是有效数字')
+)
+check(
+  '单独保存费用 Infinity 被拒',
+  r8err(() => orders.updateOrderCharges(r14NaN.id, [{ label: '运费 Freight', amount: Infinity }])).includes(
+    '不是有效数字'
+  )
+)
+eq('被拒后订单没有落下费用行', orders.getOrder(r14NaN.id)!.charges.length, 0)
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

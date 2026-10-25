@@ -586,6 +586,18 @@ export interface PackingList {
   lines: PackingListLine[]
 }
 
+/** 批次里的一个 SKU（同一款拆多箱也合成一行），批次 CI 的明细行 */
+export interface PackingAmountLine {
+  styleNo: string
+  color: string
+  size: string
+  quantity: number
+  /** 订单该 SKU 的加权单价（同一款多行单价不同时按数量加权） */
+  unitPrice: number
+  /** 本批金额 = quantity × unitPrice（用于纸面显示；合计以 goods 为准） */
+  amount: number
+}
+
 /** 一个装箱批次的纸面金额（原币）：本批货值 + 按货值分摊的费用 */
 export interface PackingAmount {
   plId: number
@@ -598,6 +610,12 @@ export interface PackingAmount {
   charges: number
   /** 本批含费用合计：分批出运的几张单据金额相加 = PI 含费用合计 */
   total: number
+  /** 本批明细（按 SKU 汇总）：批次 CI 直接用这份，不在渲染层另算 */
+  lines: PackingAmountLine[]
+  /** 本批费用行（按货值分摊；各行相加正好等于 charges） */
+  chargeLines: QuotationCharge[]
+  /** 箱明细里有、订单明细里没有的款号（单价无法确定，出 CI 前必须拦） */
+  unknownSkus: string[]
 }
 
 /** 一张订单的出货汇总：状态由批次 + 件数推导 */

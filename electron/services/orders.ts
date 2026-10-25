@@ -616,6 +616,7 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
   const ts = now()
   const before = db.get('SELECT * FROM orders WHERE id = ?', [id]) as Record<string, unknown> | null
   if (!before) throw new Error('订单不存在')
+  assertOrderWritable(id, '改这张单')
   // 单号是凭据：编辑时把 PI 号改成别人的号要拦住（改成自己的号不算重号）
   const oldPiNo = String(before.pi_no ?? '').trim()
   const newPiNo = input.piNo === undefined ? oldPiNo : String(input.piNo).trim()
@@ -661,6 +662,7 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
   if (input.exchangeRateDate !== undefined) rateDate = input.exchangeRateDate
   else if (newRate !== oldRate) rateDate = localDate()
   // 费用行（运费/保险）：传了就按传的改，没传就保持原样（不能一个字段没传就把费用清空）
+  if (input.charges !== undefined) assertChargeAmounts(input.charges)
   const chargesJson =
     input.charges === undefined
       ? String(before.charges ?? '[]')
@@ -744,6 +746,7 @@ export function setOrderParties(
   const db = getDb()
   const row = db.get('SELECT * FROM orders WHERE id = ?', [orderId]) as Record<string, unknown> | null
   if (!row) throw new Error('订单不存在')
+  assertOrderWritable(orderId, '改抬头')
   const customerRow = db.get('SELECT * FROM customers WHERE id = ?', [Number(row.customer_id)]) as
     | Record<string, unknown>
     | null
@@ -878,12 +881,27 @@ export function deleteOrder(id: number): void {
   db.run('DELETE FROM orders WHERE id = ?', [id])
 }
 
+/**
+ * 费用金额必须是有限数：输入框里删空会给出 NaN，JSON 一序列化就成了 null，
+ * 落库后费用行看着在、金额却按 0 算，CI/PI 合计和应收会静默少掉一笔。
+ */
+function assertChargeAmounts(charges: QuotationCharge[]): void {
+  for (const c of charges) {
+    const amount = Number(c.amount)
+    if (!Number.isFinite(amount)) {
+      const who = String(c.label ?? '').trim() || '未命名费用'
+      throw new Error(`费用「${who}」的金额不是有效数字（${String(c.amount)}），请填一个金额再保存。`)
+    }
+  }
+}
+
 /** 只改费用行（运费/保险），其他字段一个都不动 */
 export function updateOrderCharges(orderId: number, charges: QuotationCharge[]): OrderDetail {
   const db = getDb()
   const before = db.get('SELECT charges FROM orders WHERE id = ?', [orderId]) as Record<string, unknown> | null
   if (!before) throw new Error('订单不存在')
   assertOrderWritable(orderId, '改费用行')
+  assertChargeAmounts(charges)
   const clean = charges.filter((c) => c.label.trim())
   db.run('UPDATE orders SET charges=?, updated_at=? WHERE id=?', [JSON.stringify(clean), now(), orderId])
   const parts = describeChargeChange(parseCharges(before.charges), clean)
@@ -1041,24 +1059,6 @@ export function updateOrderItem(
       : patch.unitCost !== undefined
         ? patch.unitCost
         : (cur.unit_cost as number | null)
-  db.run(
-    `UPDATE order_items SET product_id=?, style_no=?, product_name=?, composition=?, color=?, size=?, quantity=?, unit_price=?, unit_cost=?
-     WHERE id=? AND order_id=?`,
-    [
-      patch.productId !== undefined ? patch.productId : (cur.product_id as number | null),
-      patch.styleNo ?? (cur.style_no as string),
-      patch.productName ?? (cur.product_name as string),
-      patch.composition ?? (cur.composition as string),
-      patch.color ?? (cur.color as string),
-      patch.size ?? (cur.size as string),
-      patch.quantity ?? (cur.quantity as number),
-      patch.unitPrice ?? (cur.unit_price as number),
-      nextCost,
-      itemId,
-      orderId
-    ]
-  )
-  db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
   const baseChanges = describeItemChange(cur, patch)
   const costNote =
     patch.costBase === undefined
@@ -1067,11 +1067,32 @@ export function updateOrderItem(
           nextCost == null ? '—' : nextCost
         }）`
   const changes = baseChanges + costNote
-  if (changes) logEvent(orderId, 'item_update', null, null, `修改明细 ${patch.styleNo ?? cur.style_no}：${changes}`)
-  // 件数变了，订单的「装够没有 / 走了没有」跟着变
-  applyShipStatus(orderId)
-  // 金额变了，收款状态要重算（加单加到收不够要从「已收款」退回「部分收款」）
-  recomputePaymentStatus(orderId)
+  // 改行、留痕、重算状态必须一起成一起败：以前中途抛错会留下「行改了、状态没改」的单
+  transact(() => {
+    db.run(
+      `UPDATE order_items SET product_id=?, style_no=?, product_name=?, composition=?, color=?, size=?, quantity=?, unit_price=?, unit_cost=?
+       WHERE id=? AND order_id=?`,
+      [
+        patch.productId !== undefined ? patch.productId : (cur.product_id as number | null),
+        patch.styleNo ?? (cur.style_no as string),
+        patch.productName ?? (cur.product_name as string),
+        patch.composition ?? (cur.composition as string),
+        patch.color ?? (cur.color as string),
+        patch.size ?? (cur.size as string),
+        patch.quantity ?? (cur.quantity as number),
+        patch.unitPrice ?? (cur.unit_price as number),
+        nextCost,
+        itemId,
+        orderId
+      ]
+    )
+    db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
+    if (changes) logEvent(orderId, 'item_update', null, null, `修改明细 ${patch.styleNo ?? cur.style_no}：${changes}`)
+    // 件数变了，订单的「装够没有 / 走了没有」跟着变
+    applyShipStatus(orderId)
+    // 金额变了，收款状态要重算（加单加到收不够要从「已收款」退回「部分收款」）
+    recomputePaymentStatus(orderId)
+  })
   return getOrder(orderId)!
 }
 
@@ -1114,21 +1135,23 @@ export function removeOrderItem(orderId: number, itemId: number): OrderDetail {
       `款号 ${String(cur.style_no)} ${String(cur.color)}/${String(cur.size)} 已经装了 ${packed} 件箱，不能直接删这一行；请先到「装箱单」里删掉对应箱明细（已出运的批次要先把状态改回「已包装」）。`
     )
   }
-  db.run('DELETE FROM order_items WHERE id = ? AND order_id = ?', [itemId, orderId])
-  db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
-  logEvent(
-    orderId,
-    'item_remove',
-    null,
-    null,
-    `删除明细 ${cur.style_no} ${cur.color}/${cur.size} × ${cur.quantity}（单价 ${Number(
-      cur.unit_price ?? 0
-    ).toFixed(2)}）`
-  )
-  // 件数变了，订单的「装够没有 / 走了没有」跟着变
-  applyShipStatus(orderId)
-  // 金额变了，收款状态要重算
-  recomputePaymentStatus(orderId)
+  transact(() => {
+    db.run('DELETE FROM order_items WHERE id = ? AND order_id = ?', [itemId, orderId])
+    db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
+    logEvent(
+      orderId,
+      'item_remove',
+      null,
+      null,
+      `删除明细 ${cur.style_no} ${cur.color}/${cur.size} × ${cur.quantity}（单价 ${Number(
+        cur.unit_price ?? 0
+      ).toFixed(2)}）`
+    )
+    // 件数变了，订单的「装够没有 / 走了没有」跟着变
+    applyShipStatus(orderId)
+    // 金额变了，收款状态要重算
+    recomputePaymentStatus(orderId)
+  })
   return getOrder(orderId)!
 }
 
@@ -1157,8 +1180,8 @@ export function replaceOrderItems(orderId: number, items: OrderItemInput[]): Ord
     assertQuantity(it.quantity, `${who} 的数量`)
     assertUnitPrice(it.unitPrice, `${who} 的单价`)
   })
-  db.exec('BEGIN')
-  try {
+  // 整批替换连同留痕、状态重算放进同一个事务：只删干净一半就失败，是最难查的那种单
+  transact(() => {
     db.run('DELETE FROM order_items WHERE order_id = ?', [orderId])
     for (const item of items) {
       db.run(
@@ -1180,14 +1203,10 @@ export function replaceOrderItems(orderId: number, items: OrderItemInput[]): Ord
     }
     db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
     applyShipStatus(orderId)
-    db.exec('COMMIT')
-  } catch (e) {
-    db.exec('ROLLBACK')
-    throw e
-  }
-  logEvent(orderId, 'item_replace', null, null, `批量生成 ${items.length} 个 SKU 行`)
-  // 金额变了，收款状态要重算
-  recomputePaymentStatus(orderId)
+    logEvent(orderId, 'item_replace', null, null, `批量生成 ${items.length} 个 SKU 行`)
+    // 金额变了，收款状态要重算
+    recomputePaymentStatus(orderId)
+  })
   return getOrder(orderId)!
 }
 
@@ -1574,8 +1593,14 @@ export function setPaymentStatus(orderId: number, next: PaymentStatus, note = ''
     | { payment_status: string }
     | null
   if (!cur) throw new Error('订单不存在')
-  db.run('UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?', [next, now(), orderId])
-  logEvent(orderId, 'payment_status', cur.payment_status, next, note)
+  // 作废是留档终态：从这里改回 confirmed 就等于把一张已取消的单偷偷塞回台账和应收
+  if (cur.payment_status === 'void' && next !== 'void') {
+    throw new Error('这张单已作废，不能改回收款状态：作废是留档终态，要接着做生意请按新单重开。')
+  }
+  transact(() => {
+    db.run('UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?', [next, now(), orderId])
+    logEvent(orderId, 'payment_status', cur.payment_status, next, note)
+  })
   return getOrder(orderId)!
 }
 

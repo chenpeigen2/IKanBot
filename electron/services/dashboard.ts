@@ -11,6 +11,7 @@ import {
 } from './money'
 import { factoryDeliveredQuantity } from './shipping'
 import { isLocalDate, localDate, localDateOf, localMonthOf } from '../../src/shared/date'
+import { isBillingStatus } from '../../src/shared/billing'
 import { PAYMENT_METHOD_LABEL, PAYMENT_STATUS_LABEL, SHIP_STATUS_LABEL } from '../../src/shared/types'
 import type {
   DashboardStats,
@@ -897,10 +898,13 @@ export function exportCsv(kind: ExportKind, filter?: OrderExportFilter): string 
     case 'orders':
     case 'orders_all':
       // 有筛选时「所见即所得」：停在「已作废 / 草稿 / 已失效」页签导出的必须是屏幕上的行，
-      // 不能因为台账口径把行集先剔光、最后只导出一个表头。无筛选时仍是台账口径，
-      // 与报表页 SUM 出来的数对得上。
+      // 不能因为台账口径把行集先剔光、最后只导出一个表头。
+      // 但日期/关键词/正常状态筛选仍走台账口径——把草稿、失效单混进「订单台账」，
+      // Excel 里 SUM 出来的数就不等于销售额了。只有筛的本身就是非计费状态才放开全量行集。
       return ordersCsv(
-        kind === 'orders_all' || filter ? listOrderMoney({ includeVoided: true }) : listOrderMoney(),
+        kind === 'orders_all' || (filter?.paymentStatus && !isBillingStatus(filter.paymentStatus))
+          ? listOrderMoney({ includeVoided: true })
+          : listOrderMoney(),
         base,
         kind === 'orders' ? filter : undefined
       )

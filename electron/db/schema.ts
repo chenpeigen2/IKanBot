@@ -459,7 +459,9 @@ ALTER TABLE packing_lists ADD COLUMN received_qty REAL;
 ALTER TABLE packing_lists ADD COLUMN doc_date TEXT;
 
 -- 批次作废留档：订舱被货代取消、整批发错时，纸面箱单可能已经发到客户邮箱了。
--- 只能「消失」是不行的——作废的批次不参与汇总、不占箱号，但记录和存档一条不动。
+-- 只能「消失」是不行的——作废的批次不参与汇总，但记录和存档一条不动。
+-- 箱号按订单连续、作废批次也继续占号：拆成两批出货时，客户手里那张纸上的箱号
+-- 不能因为重排号码而指到另一批货，所以不能复用作废批次的箱号。
 ALTER TABLE packing_lists ADD COLUMN voided_at TEXT;
 `
   },

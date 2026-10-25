@@ -109,11 +109,21 @@ function bankFor(settings: AppSettings, currency: string) {
   return settings.banks.find((b) => b.currency === currency)
 }
 
-/** CI 号由 PI 号派生；没有 PI 前缀就补 CI-，别把整串原样当发票号 */
-export function ciNoOf(piNo: string): string {
+/**
+ * CI 号由 PI 号派生；没有 PI 前缀就补 CI-，别把整串原样当发票号。
+ * 分批出运时带批次后缀：批次号由系统发、不会因为插批/作废而变，
+ * 同一个 CI 号下就不会再存两张金额不同的发票。
+ */
+export function ciNoOf(piNo: string, batchNo?: string): string {
   const raw = String(piNo ?? '').trim()
-  if (!raw) return 'CI'
-  return /^PI/i.test(raw) ? raw.replace(/^PI/i, 'CI') : `CI-${raw}`
+  const base = !raw ? 'CI' : /^PI/i.test(raw) ? raw.replace(/^PI/i, 'CI') : `CI-${raw}`
+  const batch = String(batchNo ?? '').trim()
+  return batch ? `${base}-${batch}` : base
+}
+
+/** 一张装箱单的纸面日期：补录过就用补录的，否则用建单当天（本地日） */
+export function plDocDateOf(pl: PackingList): string {
+  return pl.docDate || localDateOf(pl.createdAt)
 }
 
 /**
@@ -125,10 +135,10 @@ export function ciDocDateOf(order: OrderDetail): string {
   let latest: PackingList | null = null
   for (const p of order.packingLists) {
     if (p.voidedAt) continue
-    const d = p.docDate || localDateOf(p.createdAt)
-    if (!latest || d > (latest.docDate || localDateOf(latest.createdAt))) latest = p
+    const d = plDocDateOf(p)
+    if (!latest || d > plDocDateOf(latest)) latest = p
   }
-  return latest ? latest.docDate || localDateOf(latest.createdAt) : localDateOf(order.createdAt)
+  return latest ? plDocDateOf(latest) : localDateOf(order.createdAt)
 }
 
 /**
@@ -496,6 +506,7 @@ export function renderPl(ctx: DocContext, pl: PackingList): string {
         <b>PI No.:</b> ${esc(order.piNo)}
         ${pl.containerNo ? `<br><b>Container:</b> ${esc(pl.containerNo)}` : ''}
         ${pl.sealNo || order.sealNo ? `<br><b>Seal No.:</b> ${esc(pl.sealNo || order.sealNo)}` : ''}
+        ${pl.blNo ? `<br><b>B/L No.:</b> ${esc(pl.blNo)}` : ''}
         ${pl.vessel || order.vessel ? `<br><b>Vessel/Voyage:</b> ${esc(pl.vessel || order.vessel)}` : ''}
         ${pl.etdDate || order.etdDate ? `<br><b>ETD:</b> ${esc(pl.etdDate || order.etdDate)}` : ''}
       </div>
@@ -729,6 +740,29 @@ export function renderQuotation(ctx: QuotationDocContext): string {
  *  CI — Commercial Invoice（商业发票，报关用）
  * =================================================================== */
 
+/** 按批次出 CI 的入参：明细与金额全部来自 services/money.packingAmounts（单一口径） */
+export interface CiBatchOptions {
+  plNo: string
+  docDate: string
+  lines: {
+    styleNo: string
+    productName?: string
+    composition?: string
+    color: string
+    size: string
+    quantity: number
+    unitPrice: number
+  }[]
+  goods: number
+  quantity: number
+  charges: QuotationCharge[]
+  total: number
+  containerNo?: string
+  vessel?: string
+  etdDate?: string
+  blNo?: string
+}
+
 export interface CiOptions {
   /** 费用行（运费/保险等）：不给就取订单上的费用行，保证 CI 与 PI 同一套数字 */
   charges?: QuotationCharge[]
@@ -736,6 +770,8 @@ export interface CiOptions {
   freight?: number
   /** 兼容：单独给保险费 */
   insurance?: number
+  /** 按批次出：给了就只印这一批的明细、金额和船期，CI 号带批次后缀 */
+  batch?: CiBatchOptions
 }
 
 /**
@@ -761,23 +797,27 @@ export function renderCi(ctx: DocContext, opts: CiOptions = {}): string {
   const bank = bankFor(settings, order.currency)
   const rev = ctx.rev && ctx.rev > 0 ? ctx.rev : 0
   const revLabel = revHeadLabel(rev, !!ctx.pending)
-  const docDate = ciDocDateOf(order)
+  const batch = opts.batch
+  const docDate = batch ? batch.docDate : ciDocDateOf(order)
   const revFoot = revFootHtml(rev, !!ctx.pending, docDate)
-  // CI 与 PI 必须是同一套数字：默认取订单上的费用行
-  const charges = resolveCiCharges(order, opts)
+  // CI 与 PI 必须是同一套数字：整单取订单上的费用行；按批次出则用批次的费用分摊
+  const charges = batch ? batch.charges.filter((c) => c.label.trim()) : resolveCiCharges(order, opts)
   const chargesTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
   // 合计口径 = 货值 + 费用（与 PI 同一个函数：services/money.ts）
-  const total = order.totalAmount + chargesTotal
+  const goodsTotal = batch ? batch.goods : order.totalAmount
+  const total = batch ? batch.total : goodsTotal + chargesTotal
+  const qtyTotal = batch ? batch.quantity : order.totalQuantity
+  const rows = batch ? batch.lines : order.items
 
-  const detailRows = order.items
+  const detailRows = rows
     .map((it, idx) => {
-      const isFirstOfStyle = idx === 0 || order.items[idx - 1].styleNo !== it.styleNo
-      const styleTotal = order.items
+      const isFirstOfStyle = idx === 0 || rows[idx - 1].styleNo !== it.styleNo
+      const styleTotal = rows
         .filter((x) => x.styleNo === it.styleNo)
         .reduce((s, x) => s + x.quantity * x.unitPrice, 0)
       return `<tr>
         <td class="center">${isFirstOfStyle ? esc(it.styleNo) : ''}</td>
-        <td>${isFirstOfStyle ? esc(it.productName) : ''}${
+        <td>${isFirstOfStyle ? esc(it.productName ?? '') : ''}${
           isFirstOfStyle && it.composition
             ? `<br><span style="font-size:8pt;color:#555">${esc(it.composition)}</span>`
             : ''
@@ -796,7 +836,12 @@ export function renderCi(ctx: DocContext, opts: CiOptions = {}): string {
     })
     .join('')
 
-  const ciNo = ciNoOf(order.piNo)
+  const ciNo = ciNoOf(order.piNo, batch?.plNo)
+  // 批次 CI 的船期取本批；没填才退回订单级（与 PL 同一套回退规则）
+  const vessel = batch ? batch.vessel || order.vessel : order.vessel
+  const etd = batch ? batch.etdDate || order.etdDate : order.etdDate
+  const containerNo = batch?.containerNo || ''
+  const blNo = batch?.blNo || ''
 
   return `<!doctype html><html><head><meta charset="utf-8"><style>${PRINT_CSS}</style></head><body>
 <div class="page">
@@ -817,6 +862,7 @@ export function renderCi(ctx: DocContext, opts: CiOptions = {}): string {
         <b>CI No.:</b> ${esc(ciNo)}${revLabel}<br>
         <b>Date:</b> ${esc(docDate)}<br>
         <b>Order No.:</b> ${esc(order.orderNo)}<br>
+        ${batch ? `<b>Batch / 本批:</b> ${esc(batch.plNo)}（this shipment only / 仅本批）<br>` : ''}
         ${order.customerPo ? `<b>Your PO No.:</b> ${esc(order.customerPo)}<br>` : ''}
         <b>Terms:</b> ${esc(order.incoterm)}
       </div>
@@ -854,7 +900,7 @@ export function renderCi(ctx: DocContext, opts: CiOptions = {}): string {
       ${detailRows || '<tr><td colspan="8" class="center" style="padding:14px">（未添加商品）</td></tr>'}
     </tbody>
     <tbody class="totals">
-      <tr class="sub"><td colspan="6" class="right">货值 Goods Value</td><td class="num">${order.totalAmount.toFixed(
+      <tr class="sub"><td colspan="6" class="right">货值 Goods Value</td><td class="num">${goodsTotal.toFixed(
         2
       )}</td><td></td></tr>
       ${charges
@@ -867,7 +913,7 @@ export function renderCi(ctx: DocContext, opts: CiOptions = {}): string {
         .join('')}
       <tr class="total">
         <td colspan="4" class="center">TOTAL / 合计</td>
-        <td class="num">${fmtQty(order.totalQuantity)}</td>
+        <td class="num">${fmtQty(qtyTotal)}</td>
         <td></td>
         <td class="num">${total.toFixed(2)}</td>
         <td></td>
@@ -879,8 +925,10 @@ export function renderCi(ctx: DocContext, opts: CiOptions = {}): string {
     <div class="term">
       <b>Shipment / 运输</b>
       ${esc(tradeTermsText(order.incoterm, order.portOfLoading, order.portOfDestination))}
-      ${order.vessel ? `<div style="margin-top:3px">Vessel/Voyage: ${esc(order.vessel)}</div>` : ''}
-      ${order.etdDate ? `<div>ETD: ${esc(order.etdDate)}</div>` : ''}
+      ${containerNo ? `<div style="margin-top:3px">Container No.: ${esc(containerNo)}</div>` : ''}
+      ${vessel ? `<div style="margin-top:3px">Vessel/Voyage: ${esc(vessel)}</div>` : ''}
+      ${etd ? `<div>ETD: ${esc(etd)}</div>` : ''}
+      ${blNo ? `<div>B/L No.: ${esc(blNo)}</div>` : ''}
       ${order.sealNo ? `<div>Seal No.: ${esc(order.sealNo)}</div>` : ''}
     </div>
     <div class="term">

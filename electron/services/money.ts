@@ -27,7 +27,7 @@
 import { getDb } from '../db'
 import { localMonthOf } from '../../src/shared/date'
 import { NON_BILLING_STATUSES } from '../../src/shared/billing'
-import type { CustomerReceivable, PackingAmount, QuotationCharge } from '../../src/shared/types'
+import type { CustomerReceivable, PackingAmount, PackingAmountLine, QuotationCharge } from '../../src/shared/types'
 
 /** 解析费用行 JSON（运费/保险等） */
 export function parseCharges(v: unknown): QuotationCharge[] {
@@ -489,13 +489,40 @@ export function packingAmounts(orderId: number): PackingAmount[] {
      ORDER BY pl.id, l.id`,
     [orderId]
   ) as Record<string, unknown>[]
-  const byId = new Map<number, PackingAmount>()
+  type BatchAcc = PackingAmount & {
+    /** 未按分舍入的货值：先累加再舍入，批次合计才不会被逐行误差带偏 */
+    goodsExact: number
+    lineMap: Map<string, PackingAmountLine>
+  }
+  const byId = new Map<number, BatchAcc>()
   for (const r of lineRows) {
     const id = Number(r.pl_id)
-    const cur = byId.get(id) ?? { plId: id, plNo: String(r.pl_no ?? ''), quantity: 0, goods: 0, charges: 0, total: 0 }
+    const cur =
+      byId.get(id) ??
+      ({
+        plId: id,
+        plNo: String(r.pl_no ?? ''),
+        quantity: 0,
+        goods: 0,
+        charges: 0,
+        total: 0,
+        lines: [],
+        chargeLines: [],
+        unknownSkus: [],
+        goodsExact: 0,
+        lineMap: new Map()
+      } satisfies BatchAcc)
+    const styleNo = String(r.style_no ?? '')
+    const color = String(r.color ?? '')
+    const size = String(r.size ?? '')
+    const key = [styleNo, color, size].join('|')
     const qty = Number(r.quantity ?? 0)
     cur.quantity += qty
-    cur.goods += qty * unitOf([String(r.style_no ?? ''), String(r.color ?? ''), String(r.size ?? '')].join('|'))
+    cur.goodsExact += qty * unitOf(key)
+    const line = cur.lineMap.get(key) ?? { styleNo, color, size, quantity: 0, unitPrice: unitOf(key), amount: 0 }
+    line.quantity += qty
+    line.amount = line.quantity * line.unitPrice
+    cur.lineMap.set(key, line)
     byId.set(id, cur)
   }
   const list = [...byId.values()]
@@ -503,9 +530,10 @@ export function packingAmounts(orderId: number): PackingAmount[] {
 
   const goodsAll = money.goodsValue
   const chargesTotal = money.chargesTotal
+  const chargeRows = parseCharges(orderRow?.charges).filter((c) => c.label.trim())
   let shareSum = 0
   for (const b of list) {
-    b.goods = r2(b.goods)
+    b.goods = r2(b.goodsExact)
     // 订单里没有这一款（升级前的老数据或敲错款号）时单价按 0：宁可少算，不编一个数出来
     b.charges = goodsAll > 0 ? r2((chargesTotal * b.goods) / goodsAll) : 0
     shareSum = r2(shareSum + b.charges)
@@ -515,8 +543,32 @@ export function packingAmounts(orderId: number): PackingAmount[] {
     const last = list[list.length - 1]
     last.charges = r2(last.charges + r2(chargesTotal - shareSum))
   }
-  for (const b of list) b.total = r2(b.goods + b.charges)
-  return list
+  for (const b of list) {
+    b.total = r2(b.goods + b.charges)
+    b.lines = [...b.lineMap.values()]
+    // 费用行按货值比例分摊；分币差落在本批最后一行，保证各行相加 = b.charges
+    b.chargeLines = chargeRows.map((c) => ({
+      label: c.label,
+      amount: goodsAll > 0 ? r2((Number(c.amount) || 0) * b.goods / goodsAll) : 0
+    }))
+    if (b.chargeLines.length) {
+      const sum = r2(b.chargeLines.reduce((s, c) => s + c.amount, 0))
+      const last = b.chargeLines[b.chargeLines.length - 1]
+      last.amount = r2(last.amount + (b.charges - sum))
+    }
+    b.unknownSkus = [...new Set(b.lines.filter((l) => !skuPrice.has([l.styleNo, l.color, l.size].join('|'))).map((l) => l.styleNo))]
+  }
+  return list.map((b) => ({
+    plId: b.plId,
+    plNo: b.plNo,
+    quantity: b.quantity,
+    goods: b.goods,
+    charges: b.charges,
+    total: b.total,
+    lines: b.lines,
+    chargeLines: b.chargeLines,
+    unknownSkus: b.unknownSkus
+  }))
 }
 
 /**

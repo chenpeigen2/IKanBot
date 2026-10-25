@@ -21,9 +21,11 @@ import {
   renderPl,
   renderCi,
   ciNoOf,
+  plDocDateOf,
   orderDocAmount,
   ciDocAmount,
   isGrossEstimated,
+  type CiBatchOptions,
   type ImageMap
 } from '../../../shared/documents'
 import { imageUrl } from '../imageUrl'
@@ -188,24 +190,66 @@ export default function OrderDetail() {
     })
   }
 
-  const openCi = async (charges: { label: string; amount: number }[]) => {
-    const images = await buildImages()
-    const ciNo = ciNoOf(order.piNo)
-    const rev = await window.api.docs.nextVersion(ciNo, 'ci')
-    // 存档金额唯一入口：货值 + 纸上印的费用行（默认费用 = 订单费用 → 与 PI 同一个数）
-    const amount = ciDocAmount(order, charges)
-    const render = (pending: boolean) => renderCi({ order, settings, images, rev, pending }, { charges })
-    setPreview({
-      kind: 'ci',
-      html: render(true),
-      docNo: ciNo,
-      amount,
-      rev,
-      title: `CI ${ciNo}`,
-      notice: bankNotice(),
-      render
-    })
-    setShowCi(false)
+  const openCi = async (charges: { label: string; amount: number }[], batchId?: number) => {
+    try {
+      const images = await buildImages()
+      let docNo = ciNoOf(order.piNo)
+      let amount = ciDocAmount(order, charges)
+      let ciCharges = charges
+      let title = `CI ${docNo}`
+      let batch: CiBatchOptions | undefined
+      if (batchId != null) {
+        const pl = order.packingLists.find((p: any) => p.id === batchId)
+        if (!pl) throw new Error('这一批已经不在了，请刷新后重试')
+        if (pl.voidedAt) throw new Error('这一批已作废，不能再出 CI；作废批次只能查旧存档。')
+        const amounts = await window.api.pl.amounts(order.id)
+        const a = amounts.find((x) => x.plId === batchId)
+        if (!a) throw new Error('这一批没有金额，先补箱明细再出 CI')
+        if (a.lines.length === 0) throw new Error('这一批没有箱明细，先补箱再出 CI')
+        if (a.unknownSkus.length) {
+          throw new Error(
+            `这一批有订单里找不到的款号：${a.unknownSkus.join('、')}。没有单价不能出 CI，请先补齐订单明细或修正箱单款号。`
+          )
+        }
+        docNo = ciNoOf(order.piNo, pl.plNo)
+        amount = a.total
+        ciCharges = a.chargeLines
+        batch = {
+          plNo: pl.plNo,
+          docDate: plDocDateOf(pl),
+          lines: a.lines.map((l) => {
+            const it = order.items.find(
+              (x: any) => x.styleNo === l.styleNo && x.color === l.color && x.size === l.size
+            )
+            return { ...l, productName: it?.productName ?? '', composition: it?.composition ?? '' }
+          }),
+          goods: a.goods,
+          quantity: a.quantity,
+          charges: a.chargeLines,
+          total: a.total,
+          containerNo: pl.containerNo ?? undefined,
+          vessel: pl.vessel ?? undefined,
+          etdDate: pl.etdDate ?? undefined,
+          blNo: pl.blNo ?? undefined
+        }
+        title = `CI ${docNo}（批次 ${pl.plNo}）`
+      }
+      const rev = await window.api.docs.nextVersion(docNo, 'ci')
+      const render = (pending: boolean) => renderCi({ order, settings, images, rev, pending }, { charges: ciCharges, batch })
+      setPreview({
+        kind: 'ci',
+        html: render(true),
+        docNo,
+        amount,
+        rev,
+        title,
+        notice: bankNotice(),
+        render
+      })
+      setShowCi(false)
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
   }
 
   /**
@@ -725,8 +769,9 @@ export default function OrderDetail() {
       {showCi ? (
         <CiModal
           order={order}
+          docVersions={docVersions}
           onClose={() => setShowCi(false)}
-          onPreview={(charges) => void openCi(charges)}
+          onPreview={(charges, batchId) => void openCi(charges, batchId)}
         />
       ) : null}
 
@@ -888,32 +933,84 @@ function ChargesEditor({
 
 function CiModal({
   order,
+  docVersions,
   onClose,
   onPreview
 }: {
   order: any
+  docVersions: any[]
   onClose: () => void
-  onPreview: (charges: { label: string; amount: number }[]) => void
+  onPreview: (charges: { label: string; amount: number }[], batchId?: number) => void
 }) {
   // 费用行默认按订单上的一行行带出来：CI 与 PI 必须是同一套数字
   const [charges, setCharges] = useState<{ uid: string; label: string; amount: number }[]>(
     (order.charges ?? []).map((c: any) => ({ uid: clientKey(), label: String(c.label), amount: Number(c.amount) || 0 }))
   )
+  // 按批次开票：金额、明细、船期都取这一批自己的，不再拿整单数字凑
+  const [batchId, setBatchId] = useState<number | null>(null)
+  const [amounts, setAmounts] = useState<PackingAmount[]>([])
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
+
+  useEffect(() => {
+    let alive = true
+    void window.api.pl
+      .amounts(order.id)
+      .then((rows) => {
+        if (alive) setAmounts(rows)
+      })
+      .catch((e) => {
+        if (alive) setLoadError((e as Error).message)
+      })
+      .finally(() => {
+        if (alive) setLoading(false)
+      })
+    return () => {
+      alive = false
+    }
+  }, [order.id])
+
+  const livePls = (order.packingLists ?? []).filter((p: any) => !p.voidedAt)
+  const selPl = batchId == null ? null : (livePls.find((p: any) => p.id === batchId) ?? null)
+  const sel = batchId == null ? null : (amounts.find((a) => a.plId === batchId) ?? null)
+
+  // 挡住的理由要说人话：没单价也照出，报关行会按 0 申报，事后补税比退单贵
+  const blocked: string[] = []
+  if (batchId != null) {
+    if (loadError) blocked.push(`这一批的金额没读出来：${loadError}`)
+    else if (loading) blocked.push('正在核对这一批的金额…')
+    else if (!selPl) blocked.push('这一批已经不在了，请关掉重开这张单')
+    else if (!sel || sel.lines.length === 0) blocked.push('这一批还没有箱明细，先补箱再出 CI')
+    else if (sel.unknownSkus.length)
+      blocked.push(
+        `箱单上的款号在订单里找不到：${sel.unknownSkus.join('、')}。没有单价不能出 CI，请先补齐订单明细或修正箱单款号。`
+      )
+  }
+
+  const docNo = ciNoOf(order.piNo, selPl?.plNo)
+  const existing = docVersions.filter((d) => d.kind === 'ci' && d.docNo === docNo)
+  const lastVer = existing.reduce((m, d) => Math.max(m, Number(d.version) || 0), 0)
+
   const chargeTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
-  const total = order.totalAmount + chargeTotal
+  const goods = sel ? sel.goods : order.totalAmount
+  const feeTotal = sel ? sel.charges : chargeTotal
+  const total = sel ? sel.total : order.totalAmount + chargeTotal
   const piTotal = Number(order.grandTotal ?? order.totalAmount)
-  const mismatch = Math.abs(total - piTotal) > 0.005
+  const mismatch = !sel && Math.abs(total - piTotal) > 0.005
   const clean = charges.filter((c) => c.label.trim())
+
   return (
     <Modal
       title="商业发票 CI（报关用）"
       onClose={onClose}
       footer={
         <>
-          <Button  onClick={onClose}>
-            取消
-          </Button>
-          <Button variant="primary"  onClick={() => onPreview(clean)}>
+          <Button onClick={onClose}>取消</Button>
+          <Button
+            variant="primary"
+            disabled={blocked.length > 0}
+            onClick={() => onPreview(clean, sel?.plId)}
+          >
             生成 CI 预览
           </Button>
         </>
@@ -922,92 +1019,201 @@ function CiModal({
       <div className="alert info">
         CI 的抬头是 COMMERCIAL INVOICE / 商业发票，跟 PI 不一样，不会让客户以为已经下单。
         <br />
-        运费、保险费已经按订单上的费用行带出来了（PI 上印的就是这同一套数字），确认一眼就行。
+        整单开票时，运费、保险费按订单上的费用行带出来（PI 上印的就是这同一套数字）；分批出运时选批次，只印这一批的货值与分摊费用。
       </div>
-      <div className="row sec-head">
-        <strong className="sec-head">费用（运费 / 保险费 / 其他）</strong>
-        <div className="spacer" />
-        <Button size="sm"
-          
-          onClick={() => setCharges((cs) => [...cs, { uid: clientKey(), label: '运费 Freight', amount: 0 }])}
+
+      <div className="field">
+        <label>开票范围</label>
+        <select
+          value={batchId == null ? '' : String(batchId)}
+          onChange={(e) => setBatchId(e.target.value ? Number(e.target.value) : null)}
         >
-          + 加费用
-        </Button>
+          <option value="">整单（按 PI 合计开一张）</option>
+          {livePls.map((p: any) => {
+            const a = amounts.find((x) => x.plId === p.id)
+            const empty = !a || a.lines.length === 0
+            return (
+              <option key={p.id} value={String(p.id)} disabled={empty}>
+                {`批次 ${p.plNo} · ${a ? `${num(a.quantity)} 件` : '无箱明细'}${empty ? '（不能出 CI）' : ''}`}
+              </option>
+            )
+          })}
+        </select>
       </div>
-      {charges.length === 0 ? (
-        <div className="hint">这张单没有费用行，CI 合计 = 货值。</div>
-      ) : (
-        <div className="table-wrap">
-          <table className="data">
-            <thead>
-              <tr>
-                <th>费用名称</th>
-                <th className="num" style={{ width: '30%' }}>
-                  金额（{order.currency}）
-                </th>
-                <th className="col-num-sm"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {charges.map((c) => (
-                <tr key={c.uid}>
-                  <td>
-                    <input
-                      value={c.label}
-                      onChange={(e) =>
-                        setCharges((cs) => cs.map((x) => (x.uid === c.uid ? { ...x, label: e.target.value } : x)))
-                      }
-                    />
-                  </td>
-                  <td className="num">
-                    <input
-                      type="number"
-                      step="0.01"
-                      className="col-num-lg"
-                      value={c.amount}
-                      onChange={(e) =>
-                        setCharges((cs) =>
-                          cs.map((x) => (x.uid === c.uid ? { ...x, amount: Number(e.target.value) } : x))
-                        )
-                      }
-                    />
-                  </td>
-                  <td className="right">
-                    <Button variant="danger" size="sm"
-                      
-                      onClick={() => setCharges((cs) => cs.filter((x) => x.uid !== c.uid))}
-                    >
-                      删除
-                    </Button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {livePls.length === 0 ? (
+        <div className="hint">这张单还没有未作废的装箱批次，只能按整单开票。</div>
+      ) : null}
+      {lastVer > 0 ? (
+        <div className="alert warn">
+          {sel ? '这一批' : '整单'}已经出过 CI（{docNo} 第 {lastVer} 版）。再存会记为第 {lastVer + 1} 版；
+          纸面金额与上一版不同时，先确认客户手里拿的是哪一版。
         </div>
+      ) : null}
+
+      {sel ? (
+        <>
+          <div className="row sec-head">
+            <strong className="sec-head">本批箱明细（{selPl?.plNo}）</strong>
+            <div className="spacer" />
+            <span className="faint">仅本批 · 共 {num(sel.quantity)} 件</span>
+          </div>
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>款号</th>
+                  <th>颜色 / 尺码</th>
+                  <th className="num">件数</th>
+                  <th className="num">单价</th>
+                  <th className="num">金额</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sel.lines.map((l) => (
+                  <tr key={`${l.styleNo}|${l.color}|${l.size}`}>
+                    <td>{l.styleNo}</td>
+                    <td>
+                      {l.color} / {l.size}
+                    </td>
+                    <td className="num">{num(l.quantity)}</td>
+                    <td className="num">{Number(l.unitPrice).toFixed(2)}</td>
+                    <td className="num">{money(l.amount, order.currency)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="row sec-head">
+            <strong className="sec-head">本批分摊费用</strong>
+          </div>
+          {sel.chargeLines.length === 0 ? (
+            <div className="hint">这张单没有费用行，本批 CI 合计 = 本批货值。</div>
+          ) : (
+            <div className="table-wrap">
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>费用名称</th>
+                    <th className="num">分摊到本批（{order.currency}）</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sel.chargeLines.map((c, i) => (
+                    <tr key={`${c.label}-${i}`}>
+                      <td>{c.label}</td>
+                      <td className="num">{money(c.amount, order.currency)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          <div className="row sec-head">
+            <strong className="sec-head">费用（运费 / 保险费 / 其他）</strong>
+            <div className="spacer" />
+            <Button
+              size="sm"
+              onClick={() => setCharges((cs) => [...cs, { uid: clientKey(), label: '运费 Freight', amount: 0 }])}
+            >
+              + 加费用
+            </Button>
+          </div>
+          {charges.length === 0 ? (
+            <div className="hint">这张单没有费用行，CI 合计 = 货值。</div>
+          ) : (
+            <div className="table-wrap">
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>费用名称</th>
+                    <th className="num" style={{ width: '30%' }}>
+                      金额（{order.currency}）
+                    </th>
+                    <th className="col-num-sm"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {charges.map((c) => (
+                    <tr key={c.uid}>
+                      <td>
+                        <input
+                          value={c.label}
+                          onChange={(e) =>
+                            setCharges((cs) =>
+                              cs.map((x) => (x.uid === c.uid ? { ...x, label: e.target.value } : x))
+                            )
+                          }
+                        />
+                      </td>
+                      <td className="num">
+                        <input
+                          type="number"
+                          step="0.01"
+                          className="col-num-lg"
+                          value={c.amount}
+                          onChange={(e) =>
+                            setCharges((cs) =>
+                              cs.map((x) => (x.uid === c.uid ? { ...x, amount: Number(e.target.value) } : x))
+                            )
+                          }
+                        />
+                      </td>
+                      <td className="right">
+                        <Button
+                          variant="danger"
+                          size="sm"
+                          onClick={() => setCharges((cs) => cs.filter((x) => x.uid !== c.uid))}
+                        >
+                          删除
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
       )}
+
       <div className="price-calc mt">
         <div>
-          <span className="muted">货值</span>
-          <span>{money(order.totalAmount, order.currency)}</span>
+          <span className="muted">{sel ? '本批货值' : '货值'}</span>
+          <span>{money(goods, order.currency)}</span>
         </div>
         <div>
-          <span className="muted">费用</span>
-          <span>{money(chargeTotal, order.currency)}</span>
+          <span className="muted">{sel ? '本批分摊费用' : '费用'}</span>
+          <span>{money(feeTotal, order.currency)}</span>
         </div>
         <div className="total">
           <span>CI 合计</span>
           <span>{money(total, order.currency)}</span>
         </div>
       </div>
-      {mismatch ? (
-        <div className="alert error">
-          CI 合计 {money(total, order.currency)}，与 PI 合计 {money(piTotal, order.currency)} 不一致，确认一下！
-          信用证客户拿到两张不一样的数字，银行会挑不符点。
+      {blocked.map((b) => (
+        <div className="alert error" key={b}>
+          {b}
         </div>
-      ) : (
-        <div className="alert info">CI 合计与 PI 合计一致（{money(piTotal, order.currency)}），可以直接用。</div>
-      )}
+      ))}
+      {sel && !blocked.length ? (
+        <div className="alert info">
+          分批出运按批开票：本批 CI 合计 {money(total, order.currency)}，整张 PI 合计 {money(piTotal, order.currency)}
+          。各批相加才等于整单，单批不必相等。
+        </div>
+      ) : null}
+      {!sel ? (
+        mismatch ? (
+          <div className="alert error">
+            CI 合计 {money(total, order.currency)}，与 PI 合计 {money(piTotal, order.currency)} 不一致，确认一下！
+            信用证客户拿到两张不一样的数字，银行会挑不符点。
+          </div>
+        ) : (
+          <div className="alert info">CI 合计与 PI 合计一致（{money(piTotal, order.currency)}），可以直接用。</div>
+        )
+      ) : null}
     </Modal>
   )
 }
