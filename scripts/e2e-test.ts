@@ -1171,17 +1171,18 @@ const smpOffset = samples.saveSample({
 const offsetOrder = samples.convertSampleToOrder(smpOffset.id, { offsetSampleFee: true, paymentStatus: 'sent' })
 const offsetCharge = (offsetOrder.charges ?? []).find((c: any) => c.amount < 0)
 check('抵扣 → 订单里出现负费用行', !!offsetCharge, JSON.stringify(offsetOrder.charges))
-eq('负费用行金额 = -样品费', offsetCharge?.amount, -15)
+eq('负费用行金额 = -(样品费 15 + 快递费 25)', offsetCharge?.amount, -40)
 const smpOffsetAfter = samples.getSample(smpOffset.id)!
 eq('抵扣后打样单标记为下单抵扣', smpOffsetAfter.feeStatus, 'offset')
-eq('抵扣的样品费算已收回（USD15 × 7.2 折基准币）', smpOffsetAfter.feeRecoveredBase, 15 * 7.2)
+eq('抵扣的样品费+快递费都算已收回（USD40 × 7.2 折基准币）', smpOffsetAfter.feeRecoveredBase, 40 * 7.2)
 eq('抵扣的打样单不计待收', smpOffsetAfter.receivableBase, 0)
 
-// N-4：抵扣转出来的 0 元单不许显示「赚钱」——毛利 = 含费用合计（实收口径）− 成本，负数就写负数
-// 先补录成本（模拟她在订单明细里填成本）：货值 15 − 抵扣 15 − 成本 5 = −5
+// N-4：抵扣转出来的单可能不是 0 元——样品费 15 + 快递费 25 都抵掉，货值 15 − 抵扣 40 = −25
+// 毛利 = 含费用合计（实收口径）− 成本，负数就写负数
+// 先补录成本（模拟她在订单明细里填成本）：货值 15 − 抵扣 40 − 成本 5 = −30
 getDb().run('UPDATE order_items SET unit_cost = 5 WHERE order_id = ?', [offsetOrder.id])
 const offDetail = orders.getOrder(offsetOrder.id)!
-eq('抵扣单含费用合计 = 0（货值 15 被抵扣 15 抵平，一分钱收不到）', offDetail.grandTotal, 0)
+eq('抵扣单含费用合计 = −25（货值 15 被 40 的样品费+快递费抵穿）', offDetail.grandTotal, -25)
 eq(
   '抵扣单毛利 = 含费用合计 − 成本（不再拿货值凑漂亮数）',
   offDetail.totalProfit,
@@ -1421,6 +1422,9 @@ eq('全库报价号无重号', allQNos.length, new Set(allQNos).size)
 getDb().run('DELETE FROM orders WHERE order_no IN (?, ?)', [staleSo, `${staleSo}_piholder`])
 getDb().run('DELETE FROM quotations WHERE q_no = ?', [staleQ])
 getDb().run('DELETE FROM packing_lists WHERE pl_no = ?', [stalePl])
+// 本节为了验 PL 自动号真建了一张箱单，先清掉这张单的箱单再删单
+// （R15 起有箱单的空单也要走作废，不能物理删除）
+getDb().run('DELETE FROM packing_lists WHERE order_id = ?', [soSkipOrder.id])
 orders.deleteOrder(soSkipOrder.id)
 orders.deleteOrder(piDupSrc.id)
 orders.deleteOrder(piSkipOrder.id)
@@ -2366,13 +2370,29 @@ try {
 check('有收款后改币种被拦住', r1CurrencyErr.includes('币种'), r1CurrencyErr)
 eq('被拦后订单币种没变', orders.getOrder(r1Order.id)!.currency, 'USD')
 
-const r1NoPay = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.1 })
-await orders.addOrderItem(r1NoPay.id, {
+// R15：明细单价没有独立币种，已经对外发过的单不能换单位（改汇率也不行，先作废重开）
+const r1CurLocked = orders.createOrder({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7.1,
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(r1CurLocked.id, {
   styleNo: 'R1-NOPAY',
   productName: 'R1 未收款',
   quantity: 1,
   unitPrice: 10
 })
+let r1CurLockErr = ''
+try {
+  orders.updateOrder(r1CurLocked.id, { customerId: c1.id, currency: 'EUR', exchangeRate: 8 })
+} catch (e) {
+  r1CurLockErr = (e as Error).message
+}
+check('有明细就不能换币种（单价会被当成新币种）', r1CurLockErr.includes('不能改币种'), r1CurLockErr)
+eq('被拦后币种没变', orders.getOrder(r1CurLocked.id)!.currency, 'USD')
+
+const r1NoPay = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.1 })
 let r1RateErr = ''
 try {
   orders.updateOrder(r1NoPay.id, { customerId: c1.id, currency: 'EUR', exchangeRate: 7.1 })
@@ -2385,7 +2405,7 @@ const r1Changed = orders.updateOrder(r1NoPay.id, {
   currency: 'EUR',
   exchangeRate: 8
 })
-eq('换币种并重填汇率可以保存', r1Changed.currency, 'EUR')
+eq('空单换币种并重填汇率可以保存', r1Changed.currency, 'EUR')
 eq('换币种后汇率是新的', r1Changed.exchangeRate, 8)
 
 let r1DelErr = ''
@@ -3642,7 +3662,7 @@ check(
   ['received_qty', 'doc_date', 'voided_at'].every((c) => r8Cols.includes(c)),
   r8Cols.join(',')
 )
-eq('迁移一路跑到程序认得的最高版本（v15）', Number((getDb().get('PRAGMA user_version') as { user_version?: number })?.user_version ?? 0), LATEST_DB_VERSION)
+eq('迁移一路跑到程序认得的最高版本（v16）', Number((getDb().get('PRAGMA user_version') as { user_version?: number })?.user_version ?? 0), LATEST_DB_VERSION)
 eq(
   '作废批次仍留在装箱单列表里（只多一个 voidedAt，纸面存档不丢）',
   packing.listPackingLists(r8a.id).filter((p) => p.voidedAt != null).length,
@@ -4883,6 +4903,228 @@ check(
   )
 )
 eq('被拒后订单没有落下费用行', orders.getOrder(r14NaN.id)!.charges.length, 0)
+
+/* ============================================================
+ * 第 15 轮：凭据不可改写 + 打样应收口径（R15）
+ * ============================================================ */
+section('R15 出过 CI 的单：单价与费用行钉住，数量仍可改')
+const r15Lock = orders.createOrder({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R15-LOCK'
+})
+const r15LockItem = (
+  await orders.addOrderItem(r15Lock.id, {
+    styleNo: 'R15-LOCK',
+    productName: '锁价测试',
+    color: 'Blue',
+    size: 'M',
+    quantity: 10,
+    unitPrice: 10
+  })
+).items[0]
+orders.updateOrderCharges(r15Lock.id, [{ label: '运费 Freight', amount: 20 }])
+packing.createPackingList({
+  orderId: r15Lock.id,
+  lines: [{ boxNo: 'R15-LOCK-1', styleNo: 'R15-LOCK', color: 'Blue', size: 'M', quantity: 10 }]
+})
+// 没出 CI 之前改价是正常业务：锁只认「已经发出去的那一版」
+orders.updateOrderItem(r15Lock.id, r15LockItem.id, { unitPrice: 11 })
+eq('出 CI 前改价照旧可以', orders.getOrder(r15Lock.id)!.items[0].unitPrice, 11)
+orders.updateOrderItem(r15Lock.id, r15LockItem.id, { unitPrice: 10 })
+docs.saveDocFile({
+  pdf: Buffer.from('%PDF-1.4 r15 lock'),
+  docNo: 'CI-R15-LOCK',
+  kind: 'ci',
+  orderId: r15Lock.id,
+  amount: 120
+})
+check(
+  '出过 CI 后单价改不动',
+  r8err(() => orders.updateOrderItem(r15Lock.id, r15LockItem.id, { unitPrice: 12 })).includes('已经出过 CI')
+)
+check(
+  '出过 CI 后费用行改不动',
+  r8err(() => orders.updateOrderCharges(r15Lock.id, [{ label: '运费 Freight', amount: 30 }])).includes('已经出过 CI')
+)
+check(
+  '整单保存里夹带改费用也拦得住',
+  r8err(() =>
+    orders.updateOrder(r15Lock.id, { customerId: c1.id, charges: [{ label: '运费 Freight', amount: 30 }] })
+  ).includes('已经出过 CI')
+)
+eq('被拦后明细单价没变', orders.getOrder(r15Lock.id)!.items[0].unitPrice, 10)
+eq('被拦后费用行没变', orders.getOrder(r15Lock.id)!.charges[0].amount, 20)
+// 整单保存通常会把原样费用一起带上：没变就不该误伤别的字段
+check(
+  '整单保存带上原样费用不被误伤',
+  r8err(() =>
+    orders.updateOrder(r15Lock.id, { customerId: c1.id, note: 'R15 只改备注', charges: [{ label: '运费 Freight', amount: 20 }] })
+  ) === ''
+)
+eq('原样保存后备注确实写进去了', orders.getOrder(r15Lock.id)!.note, 'R15 只改备注')
+// 分批金额按箱单件数算，改整单数量不会改写已出运那批的金额 → 数量不锁
+eq('出过 CI 后整单数量仍可改', orders.updateOrderItem(r15Lock.id, r15LockItem.id, { quantity: 12 }).items[0].quantity, 12)
+
+section('R15 汇率印在纸面上：出过单据/核销后不能再改')
+const r15Rate = orders.createOrder({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R15-RATE'
+})
+await orders.addOrderItem(r15Rate.id, { styleNo: 'R15-RATE', quantity: 10, unitPrice: 10 })
+docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r15 rate'), docNo: 'PI-R15-RATE', kind: 'pi', orderId: r15Rate.id })
+check(
+  '出过单据后改汇率被拒',
+  r8err(() => orders.updateOrder(r15Rate.id, { customerId: c1.id, exchangeRate: 7.3 })).includes('汇率')
+)
+eq('被拒后汇率没变', orders.getOrder(r15Rate.id)!.exchangeRate, 7)
+// 只登记了收款、还没出单据：录错汇率要能修（操作历史里留旧值 → 新值）
+const r15RatePay = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r15RatePay.id, { styleNo: 'R15-RATE-PAY', quantity: 10, unitPrice: 10 })
+orders.addPayment(r15RatePay.id, { paidAt: localDate(), amount: 10 })
+eq(
+  '有收款但没出过单据，仍可修正汇率',
+  orders.updateOrder(r15RatePay.id, { customerId: c1.id, exchangeRate: 7.3 }).exchangeRate,
+  7.3
+)
+const r15Cur = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r15Cur.id, { styleNo: 'R15-CUR', quantity: 1, unitPrice: 10 })
+check(
+  '有明细就换币种被拒',
+  r8err(() => orders.updateOrder(r15Cur.id, { customerId: c1.id, currency: 'EUR', exchangeRate: 8 })).includes(
+    '不能改币种'
+  )
+)
+eq('被拒后币种没变', orders.getOrder(r15Cur.id)!.currency, 'USD')
+const r15CurOk = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7 })
+eq(
+  '没有明细的空单换币种照旧可以（重填汇率）',
+  orders.updateOrder(r15CurOk.id, { customerId: c1.id, currency: 'EUR', exchangeRate: 8 }).currency,
+  'EUR'
+)
+const r15CurDraft = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7 })
+await orders.addOrderItem(r15CurDraft.id, { styleNo: 'R15-CUR-DRAFT', quantity: 1, unitPrice: 10 })
+eq(
+  '草稿单还没对外，换币种允许（建单时选错是改错字）',
+  orders.updateOrder(r15CurDraft.id, { customerId: c1.id, currency: 'EUR', exchangeRate: 8 }).currency,
+  'EUR'
+)
+
+section('R15 物理删除只留给真正的空单；作废单不能绕过留档')
+const r15DelDoc = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7 })
+docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r15 del'), docNo: 'PI-R15-DEL', kind: 'pi', orderId: r15DelDoc.id })
+check(
+  '有单据存档的空单不能物理删除',
+  r8err(() => orders.deleteOrder(r15DelDoc.id)).includes('单据存档')
+)
+const r15VoidDel = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7 })
+orders.voidOrder(r15VoidDel.id, '建错单')
+check('作废单不能物理删除（留档终态）', r8err(() => orders.deleteOrder(r15VoidDel.id)).includes('留档'))
+const r15Empty = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7 })
+check('真正的空单还能删', r8err(() => orders.deleteOrder(r15Empty.id)) === '')
+
+section('R15 作废单：收款、核销、箱单都不能再动')
+const r15VoidOps = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r15VoidOps.id, { styleNo: 'R15-VOIDOPS', quantity: 10, unitPrice: 10 })
+const r15OpsPay = orders.addPayment(r15VoidOps.id, { paidAt: localDate(), amount: 10 })
+orders.addSettlement(r15VoidOps.id, { kind: 'bad_debt', amount: 20, reason: 'R15 测试坏账' })
+const r15OpsPlA = packing.createPackingList({
+  orderId: r15VoidOps.id,
+  lines: [{ boxNo: 'R15-VOID-A', styleNo: 'R15-VOIDOPS', quantity: 5 }]
+})[0]
+const r15OpsPlB = packing.createPackingList({
+  orderId: r15VoidOps.id,
+  lines: [{ boxNo: 'R15-VOID-B', styleNo: 'R15-VOIDOPS', quantity: 5 }]
+}).slice(-1)[0]
+packing.voidPackingList(r15VoidOps.id, r15OpsPlB.id, '这一批没走成')
+orders.voidOrder(r15VoidOps.id, 'R15 作废')
+const r15OpsSettle = orders.listSettlements(r15VoidOps.id)[0]
+check(
+  '作废单不能删收款',
+  r8err(() => orders.deletePayment(r15VoidOps.id, r15OpsPay.payments[0].id, '删掉这笔')).includes('已作废')
+)
+check(
+  '作废单不能撤销核销',
+  r8err(() => orders.reverseSettlement(r15VoidOps.id, r15OpsSettle.id, '撤销坏账')).includes('已作废')
+)
+check(
+  '作废单不能作废箱单',
+  r8err(() => packing.voidPackingList(r15VoidOps.id, r15OpsPlA.id, '取消')).includes('已作废')
+)
+check(
+  '作废单不能撤销箱单作废',
+  r8err(() => packing.unvoidPackingList(r15VoidOps.id, r15OpsPlB.id)).includes('已作废')
+)
+eq('作废单的收款还在', orders.getOrder(r15VoidOps.id)!.payments.length, 1)
+eq('作废单的核销还在', orders.listSettlements(r15VoidOps.id).length, 1)
+
+section('R15 欠款榜：只打过样、没下过单的客户也在榜上')
+const r15SampleOnly = customers.saveCustomer({ company: 'R15-ONLY-SAMPLE' })
+samples.saveSample({
+  customerId: r15SampleOnly.id,
+  expressFee: 5,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: '2026-10-21',
+  items: [{ styleNo: 'R15-S1', productName: '只打样', color: 'Grey', size: 'M', quantity: 1, unitPrice: 10, goodsUnitPrice: 10 }]
+})
+const r15Board = money.receivableByCustomer()
+const r15BoardRow = r15Board.find((r) => r.customerId === r15SampleOnly.id)
+eq('只打样的客户也在欠款榜上（样品费 10 + 快递费 5，USD×7）', r15BoardRow?.totalBase, 105)
+eq('这类客户的订单数记 0', r15BoardRow?.orders, 0)
+check(
+  '榜上合计 = 全公司待收（打样费不漏）',
+  Math.abs(r15Board.reduce((s, r) => s + r.totalBase, 0) - money.totalReceivable()) < 0.01
+)
+
+section('R15 已收的打样费不再抵扣一次')
+const r15PaidCust = customers.saveCustomer({ company: 'R15-PAID-SAMPLE' })
+const r15PaidSample = samples.saveSample({
+  customerId: r15PaidCust.id,
+  expressFee: 5,
+  feeStatus: 'paid',
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: '2026-10-21',
+  items: [{ styleNo: 'R15-S2', productName: '已收打样费', color: 'Grey', size: 'L', quantity: 1, unitPrice: 10, goodsUnitPrice: 10 }]
+})
+const r15PaidOrder = samples.convertSampleToOrder(r15PaidSample.id, { offsetSampleFee: true, paymentStatus: 'draft' })
+eq('已收的打样费不再生成抵扣行', r15PaidOrder.charges.length, 0)
+eq('已收标记不被改成下单抵扣', samples.getSample(r15PaidSample.id)!.feeStatus, 'paid')
+const r15WaivedCust = customers.saveCustomer({ company: 'R15-WAIVED-SAMPLE' })
+const r15WaivedSample = samples.saveSample({
+  customerId: r15WaivedCust.id,
+  expressFee: 5,
+  feeStatus: 'waived',
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: '2026-10-21',
+  items: [{ styleNo: 'R15-S4', productName: '免收打样费', color: 'Grey', size: 'M', quantity: 1, unitPrice: 10, goodsUnitPrice: 10 }]
+})
+const r15WaivedOrder = samples.convertSampleToOrder(r15WaivedSample.id, { offsetSampleFee: true, paymentStatus: 'draft' })
+eq('已免收的打样费也不生成抵扣行', r15WaivedOrder.charges.length, 0)
+eq('已免收标记不被改成下单抵扣', samples.getSample(r15WaivedSample.id)!.feeStatus, 'waived')
+
+section('R15 老「下单抵扣」记录不按新口径倒推')
+// R15 之前只抵了样品费，offset_amount 没有记录（0）：读取时按旧口径只算样品费，
+// 不能拿「样品费+快递费」硬套，否则老单会被算成多收回一笔从不存在的钱
+const r15LegacyCust = customers.saveCustomer({ company: 'R15-LEGACY-OFFSET' })
+const r15Legacy = samples.saveSample({
+  customerId: r15LegacyCust.id,
+  expressFee: 5,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: '2026-10-21',
+  items: [{ styleNo: 'R15-S3', productName: '老抵扣', color: 'Grey', size: 'M', quantity: 1, unitPrice: 10, goodsUnitPrice: 10 }]
+})
+getDb().run("UPDATE sample_orders SET fee_status = 'offset', offset_amount = 0 WHERE id = ?", [r15Legacy.id])
+eq('老抵扣记录只算样品费（USD10 × 7）', samples.getSample(r15Legacy.id)!.feeRecoveredBase, 70)
+eq('新抵扣记录按实际抵掉的金额算（USD40 × 7.2）', samples.getSample(smpOffset.id)!.feeRecoveredBase, 40 * 7.2)
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

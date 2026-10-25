@@ -93,7 +93,7 @@ export default function Samples() {
       })
       toast(
         convPi === 'sent'
-          ? `已转成订单 ${order.orderNo}，状态「待确认」${offset ? '，样品费已抵扣' : '，样品费照收'}`
+          ? `已转成订单 ${order.orderNo}，状态「待确认」${offset ? '，样品费及快递费已抵扣' : '，打样费照收'}`
           : `已转成订单 ${order.orderNo}（草稿，不进销售额也不进待收）；PI 发出后记得回订单改成「待确认」`
       )
       setConverting(null)
@@ -306,13 +306,17 @@ export default function Samples() {
               >
                 不抵扣，直接转
               </Button>
-              {/* 抵扣：样品费变成订单里的负费用行，打样单标记「下单抵扣」 */}
+              {/* 抵扣：样品费+快递费变成订单里的负费用行，打样单标记「下单抵扣」 */}
               <Button
                 variant="primary"
-                disabled={converting.items.some((i: any) => !(Number(i.goodsUnitPrice) > 0))}
+                disabled={
+                  converting.items.some((i: any) => !(Number(i.goodsUnitPrice) > 0)) ||
+                  converting.feeStatus === 'paid' ||
+                  converting.feeStatus === 'waived'
+                }
                 onClick={() => void doConvert(true)}
               >
-                样品费抵扣，转订单
+                打样费抵扣，转订单
               </Button>
             </>
           }
@@ -346,6 +350,20 @@ export default function Samples() {
               <span>{money(converting.sampleFee)}</span>
             </div>
             <div>
+              <span className="muted">快递费</span>
+              <span>{money(Number(converting.expressFee) || 0)}</span>
+            </div>
+            <div>
+              <span className="muted">抵扣合计</span>
+              <span>
+                {converting.feeStatus === 'paid'
+                  ? '样品费已收，转单不再抵扣'
+                  : converting.feeStatus === 'waived'
+                    ? '样品费已免收，转单不抵扣'
+                    : money(converting.sampleFee + (Number(converting.expressFee) || 0))}
+              </span>
+            </div>
+            <div>
               <span className="muted">大货单价（转单用）</span>
               <span>
                 {converting.items
@@ -367,8 +385,8 @@ export default function Samples() {
             <div className="hint">不选就点转单会拦住你——草稿单忘了改状态，月底对账会少一笔。</div>
           </div>
           <div className="alert info mt-3">
-            「抵扣」= 样品费从订单金额里扣掉（单据上会印一行「样品费抵扣」，客户对账能看懂），
-            这张打样单会自动标成「下单抵扣」；「不抵扣」= 样品费另外向客户收。
+            「抵扣」= 样品费与快递费一起从订单金额里扣掉（单据上会印一行「样品费及快递费抵扣」，客户对账能看懂），
+            这张打样单会自动标成「下单抵扣」；「不抵扣」= 这两笔另外向客户收。
             选错也没关系，转完在订单里改费用行就行。
           </div>
         </Modal>

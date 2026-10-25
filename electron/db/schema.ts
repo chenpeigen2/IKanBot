@@ -474,6 +474,17 @@ ALTER TABLE packing_lists ADD COLUMN voided_at TEXT;
 -- 标记就当场翻脸——同一张 PDF 前后两次打印结论不一样，报关行据此复核会吃闷亏。
 ALTER TABLE packing_list_lines ADD COLUMN gross_est INTEGER;
 `
+  },
+  {
+    version: 16,
+    name: 'sample_offset_amount',
+    sql: `
+-- 下单抵扣实际抵了多少钱（打样单币种）：R15 起样品费与快递费一起抵进订单，
+-- 但老记录只抵了样品费。没有这个数就只能拿「样品费+快递费」硬套，
+-- 老单会被算成多收回一笔从不存在的钱（公司净垫变负数）。
+-- 0 = 老记录，读取时回退到「只算样品费」的旧口径。
+ALTER TABLE sample_orders ADD COLUMN offset_amount REAL NOT NULL DEFAULT 0;
+`
   }
 ]
 

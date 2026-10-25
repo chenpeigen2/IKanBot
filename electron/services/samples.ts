@@ -87,6 +87,7 @@ function mapSample(r: Record<string, unknown>): SampleOrder {
     factoryCost: Number(r.factory_cost ?? 0),
     feeStatus: String(r.fee_status ?? 'unpaid') as SampleFeeStatus,
     feeNote: String(r.fee_note ?? ''),
+    offsetAmount: Number(r.offset_amount ?? 0),
     currency: String(r.currency ?? 'USD'),
     exchangeRate: Number(r.exchange_rate ?? 0),
     exchangeRateDate: String(r.exchange_rate_date ?? ''),
@@ -143,15 +144,18 @@ function hydrate(s: SampleOrder): SampleOrderDetail {
     sampleFeeBase == null || expressFeeBase == null ? null : sampleFeeBase + expressFeeBase
   // 公司总成本（N33）= 工厂打样费（基准币）+ 快递费（折基准币）
   const companyCostBase = expressFeeBase == null ? null : Number(s.factoryCost ?? 0) + expressFeeBase
-  // 已收回（N33）：只有「已收」「下单抵扣」才算收回；已收时客户连快递费一起付了
-  const feeRecoveredBase =
-    sampleFeeBase == null || expressFeeBase == null
-      ? null
-      : s.feeStatus === 'paid'
-        ? sampleFeeBase + expressFeeBase
-        : s.feeStatus === 'offset'
-          ? sampleFeeBase
-          : 0
+  // 已收回（N33）：paid = 客户连快递费一起付了；
+  // offset = 实际抵进订单的钱（R15 起含快递费；老记录 offset_amount=0，
+  // 按当时的「只抵样品费」算，不能拿新口径倒推成多收回一笔钱）
+  const recoveredFee =
+    s.feeStatus === 'paid'
+      ? sampleFee + Number(s.expressFee ?? 0)
+      : s.feeStatus === 'offset'
+        ? s.offsetAmount > 0
+          ? s.offsetAmount
+          : sampleFee
+        : 0
+  const feeRecoveredBase = hasRate ? recoveredFee * rate : null
   const netAdvanceBase =
     companyCostBase == null || feeRecoveredBase == null ? null : companyCostBase - feeRecoveredBase
   // 待收（N23）：未收才计；取消的单不收钱；汇率必须有，否则工作台会少算 → 标记 rateMissing 提示补
@@ -450,10 +454,16 @@ export function convertSampleToOrder(
 
   const customerDefaults = db_customerDefaults(s.customerId)
 
-  // 样品费抵扣：变成订单里一条负数费用行，单据上印出来，客户对账看得懂
+  // 样品费抵扣：变成订单里一条负数费用行，单据上印出来，客户对账看得懂。
+  // 快递费也是公司垫的、也记在这张打样单的待收里：只抵样品费会让快递费
+  // 在标记「已抵扣」后凭空消失。已收 / 已免收的没有可抵的，别再扣一遍。
+  const offsetTotal =
+    opts.offsetSampleFee && s.feeStatus !== 'paid' && s.feeStatus !== 'waived'
+      ? s.sampleFee + Number(s.expressFee ?? 0)
+      : 0
   const charges =
-    opts.offsetSampleFee && s.sampleFee > 0
-      ? [{ label: '样品费抵扣 Sample Fee (offset)', amount: -s.sampleFee }]
+    offsetTotal > 0
+      ? [{ label: '样品费及快递费抵扣 Sample Fee & Courier (offset)', amount: -offsetTotal }]
       : []
 
   const db = getDb()
@@ -510,13 +520,19 @@ export function convertSampleToOrder(
     db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), order.id])
     // 打样单标记：转过的不能再转；样品费标记为「下单抵扣」（否则以后收不回来还被忘了）
     db.run('UPDATE sample_orders SET converted_order_id = ?, updated_at = ? WHERE id = ?', [order.id, now(), id])
-    if (opts.offsetSampleFee && s.sampleFee > 0) {
-      db.run('UPDATE sample_orders SET fee_status = ?, fee_note = ?, updated_at = ? WHERE id = ?', [
-        'offset',
-        `已抵扣到订单 ${order.orderNo}`,
-        now(),
-        id
-      ])
+    if (offsetTotal > 0) {
+      db.run(
+        'UPDATE sample_orders SET fee_status = ?, fee_note = ?, offset_amount = ?, updated_at = ? WHERE id = ?',
+        [
+          'offset',
+          `已抵扣到订单 ${order.orderNo}（样品费 ${s.sampleFee.toFixed(2)}${
+            Number(s.expressFee ?? 0) > 0 ? ` + 快递费 ${Number(s.expressFee).toFixed(2)}` : ''
+          }）`,
+          offsetTotal,
+          now(),
+          id
+        ]
+      )
     }
     logEvent(
       order.id,
@@ -524,7 +540,7 @@ export function convertSampleToOrder(
       null,
       null,
       `由打样单 ${s.sampleNo} 转成订单，${
-        opts.offsetSampleFee ? `样品费 ${s.sampleFee.toFixed(2)} 抵扣` : '样品费未抵扣'
+        offsetTotal > 0 ? `样品费及快递费 ${offsetTotal.toFixed(2)} 抵扣` : '样品费未抵扣'
       }`
     )
     db.exec('COMMIT')

@@ -633,6 +633,29 @@ export function receivableByCustomer(): CustomerReceivable[] {
     by.set(r.customerId, cur)
   }
   for (const [id, v] of by) v.sampleBase = sampleReceivable(id)
+  // 只打过样、还没下过单的客户也要上榜：打样费也是应收。
+  // 以前只从订单行出发，这类客户的未收在欠款榜上根本不出现，榜上的合计
+  // 也就对不上工作台「待收款金额」（那份是全公司口径，含打样费）。
+  const sampleCustomers = getDb().all(
+    `SELECT DISTINCT s.customer_id AS id, c.company AS company
+     FROM sample_orders s JOIN customers c ON c.id = s.customer_id
+     WHERE s.fee_status = 'unpaid' AND s.status != 'cancelled'`
+  ) as { id?: number; company?: string }[]
+  for (const r of sampleCustomers) {
+    const id = Number(r.id ?? 0)
+    if (!id || by.has(id)) continue
+    const sampleBase = sampleReceivable(id)
+    // 汇率没填时 sampleReceivable 返回 0：先不上榜，打样页会提醒补汇率
+    if (sampleBase <= 0) continue
+    by.set(id, {
+      customerId: id,
+      customerName: String(r.company ?? ''),
+      orders: 0,
+      goodsBase: 0,
+      sampleBase,
+      totalBase: sampleBase
+    })
+  }
   for (const v of by.values()) v.totalBase = v.goodsBase + v.sampleBase
   return [...by.values()].sort((a, b) => b.totalBase - a.totalBase || a.customerName.localeCompare(b.customerName))
 }

@@ -56,6 +56,38 @@ export function assertOrderWritable(orderId: number, action: string): void {
   }
 }
 
+/**
+ * 出过 CI 的单，单价与费用行就是批次金额的输入：
+ * 批次金额 = 箱单件数 × 订单单价 + 费用按货值分摊。改价会让已经发出去的 CI
+ * 与系统里重算的批次金额对不上，而存档的 PDF 又不会跟着变。
+ * 数量不锁：分批金额按箱单件数算，改整单数量不会改写已出运那批的金额。
+ */
+function assertPricingEditable(orderId: number, action: string): void {
+  const row = getDb().get(
+    "SELECT MAX(version) AS v FROM doc_versions WHERE order_id = ? AND kind = 'ci'",
+    [orderId]
+  ) as { v?: number | null } | null
+  const ver = Number(row?.v ?? 0)
+  if (ver > 0) {
+    throw new Error(
+      `这张单已经出过 CI（第 ${ver} 版存档），不能再${action}：批次金额是按当前单价和费用行算的，改了会和已经发出去的 CI 对不上。确实要改，请作废这张单后按新单重开。`
+    )
+  }
+}
+
+/** 费用行是否真的变了（只比标签和金额，空标签不算一行） */
+function sameCharges(a: QuotationCharge[], b: QuotationCharge[]): boolean {
+  const norm = (list: QuotationCharge[]) =>
+    list
+      .map((c) => ({ label: String(c.label ?? '').trim(), amount: Number(c.amount) }))
+      .filter((c) => c.label)
+      .map((c) => `${c.label}|${c.amount.toFixed(4)}`)
+      .sort()
+  const x = norm(a)
+  const y = norm(b)
+  return x.length === y.length && x.every((k, i) => k === y[i])
+}
+
 export interface OrderInput {
   id?: number
   customerId: number
@@ -632,18 +664,48 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
   const oldRate = Number(before.exchange_rate)
   const newCurrency = (input.currency ?? String(before.currency ?? 'USD')) as Currency
   const oldCurrency = String(before.currency ?? 'USD') as Currency
+  const payCount = Number(
+    (db.get('SELECT COUNT(*) AS n FROM payments WHERE order_id = ?', [id]) as { n?: number } | null)?.n ?? 0
+  )
+  const settleCount = Number(
+    (
+      db.get('SELECT COUNT(*) AS n FROM order_settlements WHERE order_id = ?', [id]) as
+        | { n?: number }
+        | null
+    )?.n ?? 0
+  )
+  const itemCount = Number(
+    (db.get('SELECT COUNT(*) AS n FROM order_items WHERE order_id = ?', [id]) as { n?: number } | null)?.n ?? 0
+  )
+  const docCount = Number(
+    (db.get('SELECT COUNT(*) AS n FROM doc_versions WHERE order_id = ?', [id]) as { n?: number } | null)?.n ?? 0
+  )
+  const plCount = Number(
+    (db.get('SELECT COUNT(*) AS n FROM packing_lists WHERE order_id = ?', [id]) as { n?: number } | null)?.n ?? 0
+  )
+  // 汇率印在纸面上（PI/CI 都有 Exchange Rate 一行），也参与核销的账：
+  // 这两样一旦落定，改汇率就会和已发出的纸面、已核定的账对不上。
+  // 只登记了收款、还没出单据时不锁——录错汇率要能修正，操作历史里有旧值 → 新值。
+  if (newRate !== oldRate && (docCount > 0 || settleCount > 0)) {
+    const why =
+      docCount > 0
+        ? `${docCount} 份单据存档（纸面上印着 1 ${oldCurrency} = ${oldRate}）`
+        : `${settleCount} 笔核销`
+    throw new Error(
+      `这张单已经有 ${why}，汇率不能再改：改了会和已经发出去的纸面、已经核定的账对不上。确实要按新汇率重算，请作废这张单后按新单重开。`
+    )
+  }
   if (newCurrency !== oldCurrency) {
+    // 明细单价没有独立币种：已经对外发过（或已出单据/箱单）的单换币种，
+    // 等于把 100 USD 的单价当成 100 EUR 用。草稿还没发出去，允许改错字。
+    const released =
+      String(before.payment_status ?? '') !== 'draft' || docCount > 0 || plCount > 0
+    if (itemCount > 0 && released) {
+      throw new Error(
+        `这张单已经有 ${itemCount} 行明细，而且已经对外发过（不是草稿），不能改币种——单价都是按 ${oldCurrency} 记的，100 ${oldCurrency} 会被当成 100 ${newCurrency}。确实要换币种，请作废这张单后按新单重开。`
+      )
+    }
     // 收款是按原币登记的凭据：改币种会让历史收款、银行流水和客户对账全部错位
-    const payCount = Number(
-      (db.get('SELECT COUNT(*) AS n FROM payments WHERE order_id = ?', [id]) as { n?: number } | null)?.n ?? 0
-    )
-    const settleCount = Number(
-      (
-        db.get('SELECT COUNT(*) AS n FROM order_settlements WHERE order_id = ?', [id]) as
-          | { n?: number }
-          | null
-      )?.n ?? 0
-    )
     if (payCount > 0 || settleCount > 0) {
       const what = payCount > 0 ? `${payCount} 笔收款` : `${settleCount} 笔核销`
       throw new Error(
@@ -662,7 +724,12 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
   if (input.exchangeRateDate !== undefined) rateDate = input.exchangeRateDate
   else if (newRate !== oldRate) rateDate = localDate()
   // 费用行（运费/保险）：传了就按传的改，没传就保持原样（不能一个字段没传就把费用清空）
-  if (input.charges !== undefined) assertChargeAmounts(input.charges)
+  if (input.charges !== undefined) {
+    assertChargeAmounts(input.charges)
+    if (!sameCharges(parseCharges(before.charges), input.charges)) {
+      assertPricingEditable(id, '改费用行')
+    }
+  }
   const chargesJson =
     input.charges === undefined
       ? String(before.charges ?? '[]')
@@ -856,26 +923,41 @@ export function voidOrder(id: number, reason = ''): OrderDetail {
 }
 
 /**
- * 物理删除：只允许删「从没收过钱、也没有明细」的空单。
- * 有钱或有明细的订单必须走「作废」，否则收款凭据和操作历史会一起消失。
+ * 物理删除：只允许删「从没收过钱、也没有明细和任何凭据」的空单。
+ * 有钱、有箱单、有单据存档、有照片的订单必须走「作废」——
+ * 这些记录都是外发过或对过账的凭据，跟着订单一起删掉就再也查不回来了。
  */
 export function deleteOrder(id: number): void {
   const db = getDb()
   const row = db.get(
-    `SELECT o.order_no,
+    `SELECT o.order_no, o.payment_status,
             (SELECT COUNT(*) FROM payments p WHERE p.order_id = o.id) AS pay_cnt,
             (SELECT COUNT(*) FROM order_settlements s WHERE s.order_id = o.id) AS settle_cnt,
-            (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id) AS item_cnt
+            (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id) AS item_cnt,
+            (SELECT COUNT(*) FROM packing_lists pl WHERE pl.order_id = o.id) AS pl_cnt,
+            (SELECT COUNT(*) FROM doc_versions d WHERE d.order_id = o.id) AS doc_cnt,
+            (SELECT COUNT(*) FROM order_photos ph WHERE ph.order_id = o.id) AS photo_cnt,
+            (SELECT COUNT(*) FROM sample_orders so WHERE so.converted_order_id = o.id) AS sample_cnt
      FROM orders o WHERE o.id = ?`,
     [id]
-  ) as { order_no?: string; pay_cnt?: number; settle_cnt?: number; item_cnt?: number } | null
+  ) as Record<string, unknown> | null
   if (!row) throw new Error('订单不存在')
-  const payCnt = Number(row.pay_cnt ?? 0)
-  const settleCnt = Number(row.settle_cnt ?? 0)
-  const itemCnt = Number(row.item_cnt ?? 0)
-  if (payCnt > 0 || settleCnt > 0 || itemCnt > 0) {
+  const orderNo = String(row.order_no ?? '')
+  if (String(row.payment_status ?? '') === 'void') {
+    throw new Error(`订单 ${orderNo} 已经作废，作废单是留档凭据，不能删除；要重新做生意请按新单重开。`)
+  }
+  const cnt = (k: string): number => Number(row[k] ?? 0)
+  const bits: string[] = []
+  if (cnt('item_cnt')) bits.push(`${cnt('item_cnt')} 行明细`)
+  if (cnt('pay_cnt')) bits.push(`${cnt('pay_cnt')} 笔收款`)
+  if (cnt('settle_cnt')) bits.push(`${cnt('settle_cnt')} 笔核销`)
+  if (cnt('pl_cnt')) bits.push(`${cnt('pl_cnt')} 张装箱单`)
+  if (cnt('doc_cnt')) bits.push(`${cnt('doc_cnt')} 份单据存档`)
+  if (cnt('photo_cnt')) bits.push(`${cnt('photo_cnt')} 张照片`)
+  if (cnt('sample_cnt')) bits.push(`由它转出的 ${cnt('sample_cnt')} 张打样单`)
+  if (bits.length > 0) {
     throw new Error(
-      `订单 ${row.order_no} 已经有 ${itemCnt} 行明细、${payCnt} 笔收款、${settleCnt} 笔核销，不能直接删（删了收款与核销凭据、操作历史会一起没有）。请用「作废」：记录全留，只是不再计入销售额和待收款。`
+      `订单 ${orderNo} 已经有 ${bits.join('、')}，不能直接删（删了这些凭据和操作历史会一起没有）。请用「作废」：记录全留，只是不再计入销售额和待收款。`
     )
   }
   db.run('DELETE FROM orders WHERE id = ?', [id])
@@ -903,6 +985,7 @@ export function updateOrderCharges(orderId: number, charges: QuotationCharge[]):
   assertOrderWritable(orderId, '改费用行')
   assertChargeAmounts(charges)
   const clean = charges.filter((c) => c.label.trim())
+  if (!sameCharges(parseCharges(before.charges), clean)) assertPricingEditable(orderId, '改费用行')
   db.run('UPDATE orders SET charges=?, updated_at=? WHERE id=?', [JSON.stringify(clean), now(), orderId])
   const parts = describeChargeChange(parseCharges(before.charges), clean)
   logEvent(orderId, 'update', null, null, parts.length ? `修改费用：${parts.join('；')}` : '修改费用行')
@@ -1052,6 +1135,9 @@ export function updateOrderItem(
   const lineWho = `款号 ${nextSku.styleNo || '未填'} ${nextSku.color}/${nextSku.size}`
   if (patch.quantity !== undefined) assertQuantity(patch.quantity, `${lineWho} 的数量`)
   if (patch.unitPrice !== undefined) assertUnitPrice(patch.unitPrice, `${lineWho} 的单价`)
+  if (patch.unitPrice !== undefined && Number(patch.unitPrice) !== Number(cur.unit_price)) {
+    assertPricingEditable(orderId, '改明细单价')
+  }
   // costBase：没传 = 不动；传了数字 = 按本单汇率折算；传 null = 主动清空（不能当成「没传」）
   const nextCost =
     patch.costBase !== undefined
@@ -1283,6 +1369,8 @@ export function deletePayment(orderId: number, paymentId: number, reason = ''): 
     [paymentId, orderId]
   ) as Record<string, unknown> | null
   if (!row) throw new Error('这条收款记录已经不存在了，刷新页面后再试。')
+  // 作废/失效单只能看：删收款会改写它的已收金额，等于把留档凭据又改活
+  assertOrderWritable(orderId, '删收款')
   const why = String(reason ?? '').trim()
   // 删掉的是钱到账的凭据，操作历史必须能回答「删了多少钱、哪一天、哪笔流水、为什么」
   if (!why) {
@@ -1469,6 +1557,8 @@ export function reverseSettlement(orderId: number, settlementId: number, reason 
     orderId
   ]) as Record<string, unknown> | null
   if (!row) throw new Error('这条核销记录已经不存在了，刷新页面后再试。')
+  // 作废/失效单是留档凭据：撤销核销会改它的待收与坏账，不能再动
+  assertOrderWritable(orderId, '撤销核销')
   const kind = String(row.kind) as SettlementKind
   const amount = Number(row.amount ?? 0)
   if (kind === 'recovery') {

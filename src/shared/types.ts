@@ -868,6 +868,8 @@ export interface SampleOrder {
   feeStatus: SampleFeeStatus
   /** 收款说明（如「已下单抵扣 PO-xxx」） */
   feeNote: string
+  /** 下单抵扣实际抵掉的金额（打样单币种；0 = R15 之前的老记录，只抵过样品费） */
+  offsetAmount: number
   /** 币种（应收要进工作台，必须记币种汇率） */
   currency: string
   /** 汇率：1 currency = exchangeRate 基准币 */

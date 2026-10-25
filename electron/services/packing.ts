@@ -320,6 +320,8 @@ export function voidPackingList(orderId: number, plId: number, reason = ''): Pac
     [plId, orderId]
   ) as Record<string, unknown> | null
   if (!cur) throw new Error('装箱单不存在')
+  // 作废/失效单的箱单也是留档的一部分：改它的作废状态会连带改整单出货汇总
+  assertOrderWritable(orderId, '作废装箱单')
   if (isVoided(cur)) throw new Error(`装箱单 ${String(cur.pl_no)} 已经是作废状态，不用重复作废`)
   transact(() => {
     db.run('UPDATE packing_lists SET voided_at = ? WHERE id = ? AND order_id = ?', [now(), plId, orderId])
@@ -343,6 +345,7 @@ export function unvoidPackingList(orderId: number, plId: number): PackingList[] 
     [plId, orderId]
   ) as Record<string, unknown> | null
   if (!cur) throw new Error('装箱单不存在')
+  assertOrderWritable(orderId, '撤销作废装箱单')
   if (!isVoided(cur)) return listPackingLists(orderId)
   transact(() => {
     db.run('UPDATE packing_lists SET voided_at = NULL WHERE id = ? AND order_id = ?', [plId, orderId])
