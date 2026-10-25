@@ -13,7 +13,7 @@ app.whenReady().then(async () => {
   const res = await win.webContents.executeJavaScript(`(() => {
     const table = document.querySelector('table')
     const ths = [...table.querySelectorAll('thead th')]
-    const rows = [...table.querySelectorAll('tfoot tr')]
+    const rows = [...table.querySelectorAll('tbody.totals tr')]
     const totalRow = rows[rows.length - 1]
     const tds = [...totalRow.querySelectorAll('td')]
     const box = (el) => { const r = el.getBoundingClientRect(); return { l: Math.round(r.left), r: Math.round(r.right), w: Math.round(r.width) } }

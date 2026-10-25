@@ -20,7 +20,16 @@ import { getSettings, saveSettings, markBackupOk, markBackupFail, baseCurrencyLo
 import { createBackup, inspectBackup, listBackups, pruneBackups, restoreBackup } from '../electron/services/backup'
 import * as docs from '../electron/services/docs'
 import { collectDir, createZip, readZip, verifyZip } from '../electron/services/zip'
-import { renderPi, renderPl, renderQuotation, renderCi, renderSample, orderDocAmount, ciDocAmount } from '../src/shared/documents'
+import {
+  renderPi,
+  renderPl,
+  renderQuotation,
+  renderCi,
+  renderSample,
+  orderDocAmount,
+  ciDocAmount,
+  ciNoOf
+} from '../src/shared/documents'
 import { localDate, localMonthOf } from '../src/shared/date'
 import { isBillingStatus, shownRemaining } from '../src/shared/billing'
 import { likeContains } from '../electron/services/search'
@@ -1558,8 +1567,9 @@ function countDocCols(html: string): { head: number; total: number } {
   const head = t[0].match(/<thead>([\s\S]*?)<\/thead>/)
   if (!head) throw new Error('单据表没有表头')
   const headCols = (head[1].match(/<th[\s>]/g) || []).length
-  const foot = t[0].match(/<tfoot>([\s\S]*?)<\/tfoot>/)
-  if (!foot) throw new Error('单据表没有表尾')
+  // 合计区是普通 tbody：tfoot 会被 Chromium 每页重复印，多页单据就会印出好几个 TOTAL
+  const foot = t[0].match(/<tbody class="totals">([\s\S]*?)<\/tbody>/)
+  if (!foot) throw new Error('单据表没有合计区（tbody.totals）')
   for (const r of foot[1].match(/<tr[\s\S]*?<\/tr>/g) || []) {
     if (!r.includes('TOTAL') && !r.includes('合计')) continue
     let n = 0
@@ -4297,6 +4307,133 @@ section('R11-6 单号查重与建单原子化')
     '建单和它的「建单」历史一起成立',
     orders.listEvents(auto.id).some((e) => e.kind === 'create' && e.note.includes(auto.orderNo))
   )
+}
+
+/* ---------------- R12 跨平台 / 打印 / 一致性 ---------------- */
+section('R12 打印分页：页边距、页码、合计只印一次')
+{
+  const base = orders.listOrders({}).find((o) => o.items.length > 0)
+  if (!base) throw new Error('没有带明细的订单，无法验证分页')
+  const many = {
+    ...base,
+    items: Array.from({ length: 10 }, () => base.items)
+      .flat()
+      .map((it, i) => ({ ...it, id: it.id * 1000 + i }))
+  }
+  const html = renderPi({ order: many, settings: getSettings(), images: {} })
+  eq('多行明细分页时 TOTAL 只印一次', (html.match(/TOTAL \/ 合计/g) ?? []).length, 1)
+  check('合计不再放在每页重复的 tfoot 里', !html.includes('<tfoot'))
+  check('打印时整行/签字/条款不被拆开', html.includes('break-inside: avoid'))
+  check('分页规则只在打印时生效，屏幕预览仍是整张纸', html.includes('@media print') && html.includes('width: 210mm'))
+}
+
+section('R12 单据日期与编号：同一张纸一个口径')
+{
+  const o = orders.createOrder({
+    customerId: c1.id,
+    currency: 'USD',
+    exchangeRate: 7.1,
+    piNo: 'PI-R12-CI'
+  })
+  await orders.addOrderItem(o.id, { styleNo: 'R12CI', productName: '测试款', quantity: 10, unitPrice: 2 })
+  const pls = packing.createPackingList({
+    orderId: o.id,
+    lines: [{ boxNo: '1', styleNo: 'R12CI', productName: '测试款', quantity: 10 }]
+  })
+  packing.updatePackingListInfo(o.id, pls[0].id, { docDate: '2026-09-30' })
+  const fresh = orders.getOrder(o.id)!
+  const pl = fresh.packingLists[0]
+  const settingsNow = getSettings()
+
+  const ciHtml = renderCi({ order: fresh, settings: settingsNow, images: {}, rev: 1 }, {})
+  check('CI 日期跟最近一张装箱单同一天', ciHtml.includes('<b>Date:</b> 2026-09-30'), '仍是建单日？')
+  check('CI 号由 PI 号派生（同一张单一个号）', ciHtml.includes(`<b>CI No.:</b> ${ciNoOf('PI-R12-CI')}`))
+  check('PI 号不带前缀时补 CI-，不把原名当发票号', ciNoOf('R12-001') === 'CI-R12-001', ciNoOf('R12-001'))
+
+  const plHtml = renderPl({ order: fresh, settings: settingsNow, images: {}, rev: 1 }, pl)
+  check('PL 抬头与页脚同一个单据日期', plHtml.includes('<b>Date:</b> 2026-09-30') && plHtml.includes('Version 1 / 2026-09-30'))
+
+  // 币种对不上账户：宁可纸上不印收款信息，也不能拿别的币种账号顶替
+  const beforeBanks = settingsNow
+  saveSettings({
+    ...settingsNow,
+    banks: [
+      { currency: 'USD', bankName: 'US Bank', accountName: 'IK', accountNo: 'R12USDONLY', swift: 'X', address: '' }
+    ]
+  })
+  const eur = orders.createOrder({ customerId: c1.id, currency: 'EUR', exchangeRate: 7.8, piNo: 'PI-R12-EUR' })
+  await orders.addOrderItem(eur.id, { styleNo: 'R12EU', productName: '欧单', quantity: 1, unitPrice: 1 })
+  const eurHtml = renderPi({ order: orders.getOrder(eur.id)!, settings: getSettings(), images: {} })
+  check('EUR 单不会印 USD 账号', !eurHtml.includes('R12USDONLY'))
+  saveSettings(beforeBanks)
+}
+
+section('R12 导出台账跟随当前筛选')
+{
+  const kw = 'R12-BOX'
+  const o = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.1, piNo: 'PI-R12-BOX' })
+  await orders.addOrderItem(o.id, { styleNo: 'R12BOX', productName: '箱', quantity: 10, unitPrice: 1 })
+  // 台账口径本来就不含草稿（R7 定死的）；这里用一张正式单验证「筛选后行数 = 列表」
+  orders.setPaymentStatus(o.id, 'sent')
+  const listed = orders.listOrderRows({ keyword: kw, limit: 1000 })
+  const filtered = dashboard.exportCsv('orders', { keyword: kw })
+  const lines = filtered.trim().split(/\r?\n/)
+  eq('筛选导出的行数 = 列表命中数', lines.length - 1, listed.total)
+  check('筛选导出只含命中的单', lines.slice(1).every((l) => l.includes(kw)), lines.slice(1).join(' | '))
+  const allLines = dashboard.exportCsv('orders').trim().split(/\r?\n/)
+  check('不带筛选时仍是全量台账', allLines.length > lines.length)
+
+  const paid = orders.listOrderRows({ paymentStatus: 'paid', limit: 1000 })
+  const paidCsv = dashboard.exportCsv('orders', { paymentStatus: 'paid' })
+  eq('按收款状态导出的行数 = 列表', paidCsv.trim().split(/\r?\n/).length - 1, paid.total)
+}
+
+section('R12 守门：收款状态白名单 / 箱号查重')
+{
+  const o = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.1, piNo: 'PI-R12-ST' })
+  await orders.addOrderItem(o.id, { styleNo: 'R12ST', productName: '状态', quantity: 10, unitPrice: 1 })
+  const before = orders.getOrder(o.id)!.paymentStatus
+  let badStatus = ''
+  try {
+    orders.setPaymentStatus(o.id, 'wat' as never)
+  } catch (e) {
+    badStatus = (e as Error).message
+  }
+  check('非法收款状态被拒，并列出可选值', badStatus.includes('不是收款状态') && badStatus.includes('草稿'), badStatus)
+  eq('被拒后收款状态没变', orders.getOrder(o.id)!.paymentStatus, before)
+
+  let dupBox = ''
+  try {
+    packing.createPackingList({
+      orderId: o.id,
+      lines: [
+        { boxNo: 'B1', styleNo: 'R12ST', productName: '状态', quantity: 5 },
+        { boxNo: 'B1', styleNo: 'R12ST', productName: '状态', quantity: 5 }
+      ]
+    })
+  } catch (e) {
+    dupBox = (e as Error).message
+  }
+  check('同一批重复箱号被拒', dupBox.includes('箱号') && dupBox.includes('两次'), dupBox)
+  eq('被拒后没有留下半截装箱单', packing.listPackingLists(o.id).length, 0)
+
+  const pls = packing.createPackingList({
+    orderId: o.id,
+    lines: [
+      { boxNo: 'B1', styleNo: 'R12ST', productName: '状态', quantity: 5 },
+      { boxNo: 'B2', styleNo: 'R12ST', productName: '状态', quantity: 5 }
+    ]
+  })
+  const lines = pls[0].lines
+  const second = lines.find((l) => l.boxNo === 'B2')!
+  let dupEdit = ''
+  try {
+    packing.updatePackingListLine(o.id, pls[0].id, second.id, { boxNo: 'B1' })
+  } catch (e) {
+    dupEdit = (e as Error).message
+  }
+  check('把箱号改成同批已有的号也被拒', dupEdit.includes('已经用过'), dupEdit)
+  eq('被拒的改箱号没有落库', packing.listPackingLists(o.id)[0].lines.find((l) => l.id === second.id)!.boxNo, 'B2')
 }
 
 /* ---------------- 汇总 ---------------- */

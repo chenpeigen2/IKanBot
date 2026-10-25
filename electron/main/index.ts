@@ -54,6 +54,11 @@ function createWindow(): void {
     mainWindow?.show()
   })
 
+  // mac 上关窗不退出：引用要跟着窗口一起清掉，否则点托盘会拿到已销毁的实例
+  mainWindow.on('closed', () => {
+    mainWindow = null
+  })
+
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url)
     return { action: 'deny' }
@@ -123,10 +128,14 @@ function createWindow(): void {
 }
 
 function showMainWindow(): void {
-  if (mainWindow) {
-    mainWindow.show()
-    mainWindow.focus()
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    // cmd+W 关掉窗口后（darwin 不退出），托盘/快捷键要能把窗口重新建出来
+    createWindow()
+    return
   }
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
 }
 
 function createTray(): void {

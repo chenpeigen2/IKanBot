@@ -2,7 +2,14 @@
  * 渲染进程与主进程之间的 API 契约。
  * preload 暴露的 window.api 必须满足此接口。
  */
-import type { CustomerReceivable, ExportKind, MonthlyReportRow, OrderListPage, PackingAmount } from './types'
+import type {
+  CustomerReceivable,
+  ExportKind,
+  MonthlyReportRow,
+  OrderExportFilter,
+  OrderListPage,
+  PackingAmount
+} from './types'
 
 export interface IKanApi {
   products: {
@@ -179,11 +186,11 @@ export interface IKanApi {
     restore(path: string): Promise<{ restarted: boolean }>
   }
   exporter: {
-    csv(kind: ExportKind): Promise<string>
+    csv(kind: ExportKind, filter?: OrderExportFilter): Promise<string>
   }
   window: {
     hide(): Promise<boolean>
-    printPdf(payload: { html: string; fileName: string; silent?: boolean }): Promise<string>
+    printPdf(payload: { html: string; fileName: string; silent?: boolean; docNo?: string }): Promise<string>
     print(): Promise<boolean>
   }
   /** 应用内自动更新 */

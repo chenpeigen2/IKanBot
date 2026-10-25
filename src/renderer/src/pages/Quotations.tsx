@@ -493,7 +493,8 @@ function QuotationDetailModal({
       setDocVersions(fresh)
       const out = await window.api.window.printPdf({
         html: savedHtml,
-        fileName: `${quotation.qNo}_v${r.version}.pdf`
+        fileName: `${quotation.qNo}_v${r.version}.pdf`,
+        docNo: quotation.qNo
       })
       toast(out ? `已存档第 ${r.version} 版，PDF 已保存` : `已存档第 ${r.version} 版；没有另存 PDF`)
     } catch (e) {

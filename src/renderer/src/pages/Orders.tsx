@@ -102,14 +102,37 @@ export default function Orders() {
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const hasFilter = Boolean(kw || statusTab || shipStatus || from || to)
 
+  /** 导出跟着屏幕上的筛选走；「导出全部」另走一趟，不靠人去清筛选 */
+  const exportCsv = async (all: boolean) => {
+    try {
+      const filter =
+        all || !hasFilter
+          ? undefined
+          : {
+              keyword: kw || undefined,
+              paymentStatus: statusTab || undefined,
+              shipStatus: shipStatus || undefined,
+              from: from || undefined,
+              to: to || undefined
+            }
+      const out = await window.api.exporter.csv('orders', filter)
+      if (out) toast(all ? '订单台账（全部）已导出' : hasFilter ? '已按当前筛选导出' : '订单台账已导出')
+    } catch (e) {
+      toast((e as Error).message || '导出没成功', 'error')
+    }
+  }
+
   return (
     <>
       <div className="topbar">
         <h1>订单</h1>
         <div className="spacer" />
-        <Button  onClick={() => window.api.exporter.csv('orders')}>
+        <Button onClick={() => void exportCsv(false)} title="台账口径：草稿 / 失效 / 作废不计入；有筛选时只导当前筛选">
           导出 Excel
         </Button>
+        {hasFilter ? (
+          <Button onClick={() => void exportCsv(true)}>导出全部</Button>
+        ) : null}
         <Button variant="primary"  onClick={() => setShowCreate(true)}>
           + 新建订单
         </Button>

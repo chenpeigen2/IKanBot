@@ -2,6 +2,7 @@ import { ipcMain, dialog, shell, BrowserWindow } from 'electron'
 import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync } from 'fs'
 import { join, basename, resolve, sep } from 'path'
 import { tmpdir } from 'os'
+import { pathToFileURL } from 'url'
 import { imagesDir, docsDir, dataDir, backupsDir } from '../db'
 import * as products from '../services/products'
 import * as customers from '../services/customers'
@@ -15,7 +16,7 @@ import * as settingsSvc from '../services/settings'
 import * as docsSvc from '../services/docs'
 import { createBackup, inspectBackup, listBackups, pickBackup, restoreBackup } from '../services/backup'
 import { EXPORT_FILE_NAME } from '../../src/shared/types'
-import type { ExportKind } from '../../src/shared/types'
+import type { ExportKind, OrderExportFilter } from '../../src/shared/types'
 import { localDate } from '../../src/shared/date'
 import { registerUpdaterIpc } from '../services/updater'
 import { handle } from './handle'
@@ -30,18 +31,31 @@ import { randomUUID } from 'crypto'
  * 改为先落临时 .html 再 loadFile，大小不受 URL 限制。
  * 无论成功失败都销毁窗口、删临时文件，避免打印进程越积越多。
  */
-async function htmlToPdf(html: string): Promise<Buffer> {
+function escapeFooter(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)
+}
+
+export async function htmlToPdf(html: string, docLabel = ''): Promise<Buffer> {
   const file = join(tmpdir(), `ikanbot-print-${randomUUID()}.html`)
   const printWin = new BrowserWindow({
     show: false,
     webPreferences: { offscreen: false, javascript: true, images: true }
   })
+  const label = escapeFooter(docLabel)
   try {
     writeFileSync(file, String(html ?? ''), 'utf8')
-    await printWin.loadFile(file)
+    // 用标准 file URL 加载：Windows 用户名带空格/短路径时 loadFile 会拼出带反斜杠的 URL 而失败
+    await printWin.loadURL(pathToFileURL(file).href)
     return await printWin.webContents.printToPDF({
       printBackground: true,
-      margins: { top: 0, bottom: 0, left: 0, right: 0 },
+      // 多页单据每一页都要有页边距：边距由打印区域给，footer 才放得下单号与页码
+      displayHeaderFooter: true,
+      headerTemplate: '<div></div>',
+      footerTemplate: `<div style="width:100%;padding:0 12mm;font-size:8px;color:#555;display:flex;justify-content:space-between;font-family:'Segoe UI','Microsoft YaHei',sans-serif">
+        <span>${label}</span><span>Page <span class="pageNumber"></span> / <span class="totalPages"></span></span>
+      </div>`,
+      // 12mm / 14mm（英寸）：与单据原来的内边距一致，第一页几何不变
+      margins: { top: 0.4724, bottom: 0.5512, left: 0.4724, right: 0.4724 },
       pageSize: 'A4',
       preferCSSPageSize: true
     })
@@ -292,7 +306,7 @@ export function registerIpc(): void {
   handle('images:url', (fileName: string) => {
     const p = safeImage(fileName)
     if (!p) return ''
-    return `file:///${p.replace(/\\/g, '/')}`
+    return pathToFileURL(p).href
   })
   ipcMain.on('images:baseDir', (e) => {
     e.returnValue = imagesDir()
@@ -301,7 +315,17 @@ export function registerIpc(): void {
     const p = safeImage(fileName)
     if (!p) return ''
     const ext = p.split('.').pop()?.toLowerCase() ?? 'jpg'
-    const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg'
+    // SVG 也得按自己的 MIME 进来：一律当 jpeg 会让纸面 logo 直接空白
+    const mime =
+      ext === 'png'
+        ? 'image/png'
+        : ext === 'webp'
+          ? 'image/webp'
+          : ext === 'gif'
+            ? 'image/gif'
+            : ext === 'svg'
+              ? 'image/svg+xml'
+              : 'image/jpeg'
     const buf = readFileSync(p)
     return `data:${mime};base64,${buf.toString('base64')}`
   })
@@ -322,7 +346,7 @@ export function registerIpc(): void {
     await shell.openPath(dir)
     return dir
   })
-  handle('export:csv', async (kind: ExportKind) => {
+  handle('export:csv', async (kind: ExportKind, filter?: OrderExportFilter) => {
     const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
     // 文件名带上导出当天：两张台账撞在一起时，得能看出哪份是哪一次刷的数
     const name = EXPORT_FILE_NAME[kind].replace(/\.csv$/, `_${localDate()}.csv`)
@@ -332,7 +356,7 @@ export function registerIpc(): void {
       filters: [{ name: 'CSV', extensions: ['csv'] }]
     })
     if (res.canceled || !res.filePath) return ''
-    writeFileSync(res.filePath, dashboard.exportCsv(kind), 'utf8')
+    writeFileSync(res.filePath, dashboard.exportCsv(kind, filter), 'utf8')
     return res.filePath
   })
 
@@ -348,7 +372,7 @@ export function registerIpc(): void {
     /** 纸面上印的版次；与系统实际下一版不一致时拒绝，避免纸面与存档错位 */
     expectedVersion?: number
   }) => {
-    const pdf = await htmlToPdf(payload.html)
+    const pdf = await htmlToPdf(payload.html, payload.docNo)
     const saved = docsSvc.saveDocFile({
       pdf,
       docNo: payload.docNo,
@@ -391,11 +415,12 @@ export function registerIpc(): void {
     win?.hide()
     return true
   })
-  handle('window:printPdf', async (payload: { html: string; fileName: string; silent?: boolean }) => {
+  handle('window:printPdf', async (payload: { html: string; fileName: string; silent?: boolean; docNo?: string }) => {
     const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
     if (!win) return ''
     const fileName = safePdfName(payload.fileName)
-    const pdf = await htmlToPdf(payload.html)
+    // 页脚印这一份纸的单号：散页后也能认出它属于哪张单
+    const pdf = await htmlToPdf(payload.html, payload.docNo || basename(fileName, '.pdf'))
     if (payload.silent) {
       const dir = join(dataDir(), 'exports')
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true })

@@ -248,6 +248,20 @@ function listWhere(filter: OrderListFilter): { sql: string; params: Bind[] } {
 }
 
 /**
+ * 当前筛选命中的订单 id，与订单列表共用同一个 listWhere。
+ * 导出台账拿它过滤：页面上筛出几张，Excel 里就是几张，合计才对得上。
+ */
+export function listOrderIds(filter: OrderListFilter = {}): number[] {
+  const db = getDb()
+  const w = listWhere(filter)
+  const rows = db.all(
+    `SELECT o.id FROM orders o JOIN customers c ON c.id = o.customer_id ${w.sql}`,
+    w.params
+  ) as { id?: number }[]
+  return rows.map((r) => Number(r.id))
+}
+
+/**
  * 全量展开的订单列表：每张单都要展开明细 / 收款 / 装箱 / 抬头。
  * 页面列表不许用它（用 listOrderRows），这里留给脚本和口径校验当参照。
  */
@@ -1535,6 +1549,11 @@ export function setShipStatus(orderId: number, next: ShipStatus, note = ''): Ord
 /** 人工设置收款状态（会打断自动流转） */
 export function setPaymentStatus(orderId: number, next: PaymentStatus, note = ''): OrderDetail {
   const db = getDb()
+  // 与出货状态同一套守门：非法值一旦入库，这单就从待收、月报、催款里静默消失
+  if (!(next in PAYMENT_STATUS_LABEL)) {
+    const allowed = Object.values(PAYMENT_STATUS_LABEL).join(' / ')
+    throw new Error(`「${String(next)}」不是收款状态，请选择：${allowed}`)
+  }
   const cur = db.get('SELECT payment_status FROM orders WHERE id = ?', [orderId]) as
     | { payment_status: string }
     | null

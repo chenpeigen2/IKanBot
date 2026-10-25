@@ -20,6 +20,7 @@ import {
   renderPi,
   renderPl,
   renderCi,
+  ciNoOf,
   orderDocAmount,
   ciDocAmount,
   isGrossEstimated,
@@ -38,6 +39,8 @@ type PreviewState = {
   amount: number
   /** 作废批次的留档预览：纸还能查，但不能再存成新版本（存档是发客户的凭据） */
   voided?: boolean
+  /** 纸面缺项提醒（如本币种没配银行账户）：显示在预览上方，不属于纸面 */
+  notice?: string
   /** 预览时算出的下一版版次；存档时用它核对，纸面和库里必须同号 */
   rev: number
   title: string
@@ -123,6 +126,12 @@ export default function OrderDetail() {
     return map
   }
 
+  /** 币种没有对应账户时纸面不印收款信息——宁可空着，也不能拿别的币种账号顶替 */
+  const bankNotice = (): string | undefined =>
+    settings && !(settings.banks ?? []).some((b: any) => b.currency === order.currency)
+      ? `本单用 ${order.currency} 结算，但设置里没有 ${order.currency} 账户：纸上不会印收款账号（不会拿别的币种顶替）。请到「设置 → 收款账户」补一个。`
+      : undefined
+
   const openPi = async () => {
     const images = await buildImages()
     // 存进去会是第几版：先问存档；没存之前纸上印「待存为第 N 版」（N39，不占还不存在的版本号）
@@ -136,6 +145,7 @@ export default function OrderDetail() {
       amount: orderDocAmount(order),
       rev,
       title: `PI ${order.piNo}`,
+      notice: bankNotice(),
       render
     })
   }
@@ -180,7 +190,7 @@ export default function OrderDetail() {
 
   const openCi = async (charges: { label: string; amount: number }[]) => {
     const images = await buildImages()
-    const ciNo = order.piNo.replace(/^PI/, 'CI')
+    const ciNo = ciNoOf(order.piNo)
     const rev = await window.api.docs.nextVersion(ciNo, 'ci')
     // 存档金额唯一入口：货值 + 纸上印的费用行（默认费用 = 订单费用 → 与 PI 同一个数）
     const amount = ciDocAmount(order, charges)
@@ -192,6 +202,7 @@ export default function OrderDetail() {
       amount,
       rev,
       title: `CI ${ciNo}`,
+      notice: bankNotice(),
       render
     })
     setShowCi(false)
@@ -218,7 +229,8 @@ export default function OrderDetail() {
       await load()
       const out = await window.api.window.printPdf({
         html: savedHtml,
-        fileName: `${preview.docNo}_v${r.version}.pdf`
+        fileName: `${preview.docNo}_v${r.version}.pdf`,
+        docNo: preview.docNo
       })
       toast(
         out
@@ -745,6 +757,7 @@ export default function OrderDetail() {
             </>
           }
         >
+          {preview.notice ? <div className="alert warn">{preview.notice}</div> : null}
           <div
             className="doc-preview"
             dangerouslySetInnerHTML={{ __html: preview.html }}

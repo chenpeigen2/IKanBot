@@ -100,9 +100,35 @@ function revFootHtml(rev: number, pending: boolean, dateText: string): string {
     : `<div style="${style}">Version ${rev} / ${esc(dateText)} / 版本 ${rev}</div>`
 }
 
-/** 银行账户：按订单币种匹配，未匹配则取第一个 */
+/**
+ * 银行账户：只认订单币种。
+ * 匹配不到就**不印**——退回「第一个账户」会把 USD 账号印在 EUR 单上，
+ * 客户照汇被退回，手续费和到账时间全赔进去，而纸上看着还像是对的。
+ */
 function bankFor(settings: AppSettings, currency: string) {
-  return settings.banks.find((b) => b.currency === currency) ?? settings.banks[0]
+  return settings.banks.find((b) => b.currency === currency)
+}
+
+/** CI 号由 PI 号派生；没有 PI 前缀就补 CI-，别把整串原样当发票号 */
+export function ciNoOf(piNo: string): string {
+  const raw = String(piNo ?? '').trim()
+  if (!raw) return 'CI'
+  return /^PI/i.test(raw) ? raw.replace(/^PI/i, 'CI') : `CI-${raw}`
+}
+
+/**
+ * CI 的纸面日期：跟最近一张未作废装箱单走（报关发票与装箱单/提单要同一天），
+ * 没有批次才退回建单日。以前固定用建单日——3 月下的单 9 月出运，
+ * 发票日期早于装运，报关行直接退单重开。
+ */
+export function ciDocDateOf(order: OrderDetail): string {
+  let latest: PackingList | null = null
+  for (const p of order.packingLists) {
+    if (p.voidedAt) continue
+    const d = p.docDate || localDateOf(p.createdAt)
+    if (!latest || d > (latest.docDate || localDateOf(latest.createdAt))) latest = p
+  }
+  return latest ? latest.docDate || localDateOf(latest.createdAt) : localDateOf(order.createdAt)
 }
 
 /**
@@ -169,6 +195,17 @@ const PRINT_CSS = `
   .note { margin-top: 8px; border: 1px solid #333; padding: 5px 8px; font-size: 9pt; line-height: 1.6; }
   .sign { margin-top: 22px; display: flex; justify-content: space-between; font-size: 9.5pt; }
   .sign > div { width: 45%; border-top: 1px solid #333; padding-top: 4px; }
+
+  /*
+   * 多页单据：页边距交给打印区域（printToPDF 的 margins），每一页都留同样的边，
+   * 而不是只有第一页有 padding、第二页直接压到纸边。
+   * 屏幕预览仍按 .page 的 210mm 纸张尺寸显示，所以这些覆盖只在打印时生效。
+   */
+  @media print {
+    .page { width: auto; min-height: 0; padding: 0; }
+    thead { display: table-header-group; }
+    tr, .sign, .terms, .note, .totals { break-inside: avoid; }
+  }
 `
 
 /* ===================================================================
@@ -316,7 +353,7 @@ export function renderPi(ctx: DocContext): string {
     <tbody>
       ${detailRows || '<tr><td colspan="8" class="center" style="padding:14px">（未添加商品）</td></tr>'}
     </tbody>
-    <tfoot>
+    <tbody class="totals">
       ${chargeRows}
       <tr class="total">
         <td colspan="5" class="center">TOTAL / 合计</td>
@@ -325,7 +362,7 @@ export function renderPi(ctx: DocContext): string {
         <td class="num">${order.grandTotal.toFixed(2)}</td>
         <td></td>
       </tr>
-    </tfoot>
+    </tbody>
   </table>
 
   <div class="terms">
@@ -386,7 +423,8 @@ export function renderPl(ctx: DocContext, pl: PackingList): string {
   const factor = settings.grossWeightFactor
   const rev = ctx.rev && ctx.rev > 0 ? ctx.rev : 0
   const revLabel = revHeadLabel(rev, !!ctx.pending)
-  const revFoot = revFootHtml(rev, !!ctx.pending, localDateOf(pl.createdAt))
+  // 页脚与抬头同一个日期：补录过单据日期的箱单，同一张纸上不能印两个「出单日」
+  const revFoot = revFootHtml(rev, !!ctx.pending, pl.docDate || localDateOf(pl.createdAt))
 
   let totalQty = 0
   let totalNet = 0
@@ -495,7 +533,7 @@ export function renderPl(ctx: DocContext, pl: PackingList): string {
     <tbody>
       ${rows || '<tr><td colspan="10" class="center" style="padding:14px">（无明细）</td></tr>'}
     </tbody>
-    <tfoot>
+    <tbody class="totals">
       <tr class="total">
         <td colspan="5" class="center">TOTAL / 合计（${boxNos.size + unnumberedBoxes} 箱 / ${
           boxNos.size + unnumberedBoxes
@@ -506,7 +544,7 @@ export function renderPl(ctx: DocContext, pl: PackingList): string {
         <td></td>
         <td class="num">${totalVolume.toFixed(3)}</td>
       </tr>
-    </tfoot>
+    </tbody>
   </table>
 
   ${
@@ -642,7 +680,7 @@ export function renderQuotation(ctx: QuotationDocContext): string {
     <tbody>
       ${detailRows || '<tr><td colspan="9" class="center" style="padding:14px">（未添加商品）</td></tr>'}
     </tbody>
-    <tfoot>
+    <tbody class="totals">
       ${chargeRows}
       <tr class="total">
         <td colspan="5" class="center">TOTAL / 合计</td>
@@ -651,7 +689,7 @@ export function renderQuotation(ctx: QuotationDocContext): string {
         <td class="num">${q.grandTotal.toFixed(2)}</td>
         <td></td>
       </tr>
-    </tfoot>
+    </tbody>
   </table>
 
   <div class="terms">
@@ -723,7 +761,8 @@ export function renderCi(ctx: DocContext, opts: CiOptions = {}): string {
   const bank = bankFor(settings, order.currency)
   const rev = ctx.rev && ctx.rev > 0 ? ctx.rev : 0
   const revLabel = revHeadLabel(rev, !!ctx.pending)
-  const revFoot = revFootHtml(rev, !!ctx.pending, localDateOf(order.createdAt))
+  const docDate = ciDocDateOf(order)
+  const revFoot = revFootHtml(rev, !!ctx.pending, docDate)
   // CI 与 PI 必须是同一套数字：默认取订单上的费用行
   const charges = resolveCiCharges(order, opts)
   const chargesTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
@@ -757,7 +796,7 @@ export function renderCi(ctx: DocContext, opts: CiOptions = {}): string {
     })
     .join('')
 
-  const ciNo = order.piNo.replace(/^PI/, 'CI')
+  const ciNo = ciNoOf(order.piNo)
 
   return `<!doctype html><html><head><meta charset="utf-8"><style>${PRINT_CSS}</style></head><body>
 <div class="page">
@@ -776,7 +815,7 @@ export function renderCi(ctx: DocContext, opts: CiOptions = {}): string {
       <div class="title-cn">商业发票</div>
       <div class="meta">
         <b>CI No.:</b> ${esc(ciNo)}${revLabel}<br>
-        <b>Date:</b> ${esc(localDateOf(order.createdAt))}<br>
+        <b>Date:</b> ${esc(docDate)}<br>
         <b>Order No.:</b> ${esc(order.orderNo)}<br>
         ${order.customerPo ? `<b>Your PO No.:</b> ${esc(order.customerPo)}<br>` : ''}
         <b>Terms:</b> ${esc(order.incoterm)}
@@ -814,7 +853,7 @@ export function renderCi(ctx: DocContext, opts: CiOptions = {}): string {
     <tbody>
       ${detailRows || '<tr><td colspan="8" class="center" style="padding:14px">（未添加商品）</td></tr>'}
     </tbody>
-    <tfoot>
+    <tbody class="totals">
       <tr class="sub"><td colspan="6" class="right">货值 Goods Value</td><td class="num">${order.totalAmount.toFixed(
         2
       )}</td><td></td></tr>
@@ -833,7 +872,7 @@ export function renderCi(ctx: DocContext, opts: CiOptions = {}): string {
         <td class="num">${total.toFixed(2)}</td>
         <td></td>
       </tr>
-    </tfoot>
+    </tbody>
   </table>
 
   <div class="terms">
@@ -961,7 +1000,7 @@ export function renderSample(ctx: SampleDocContext): string {
     <tbody>
       ${rows || '<tr><td colspan="7" class="center" style="padding:14px">（无明细）</td></tr>'}
     </tbody>
-    <tfoot>
+    <tbody class="totals">
       <tr class="sub"><td colspan="5" class="right">样品费 Sample Fee</td><td></td><td class="num">${s.sampleFee.toFixed(
         2
       )}</td></tr>
@@ -974,7 +1013,7 @@ export function renderSample(ctx: SampleDocContext): string {
         <td></td>
         <td class="num">${s.totalFee.toFixed(2)}</td>
       </tr>
-    </tfoot>
+    </tbody>
   </table>
 
   ${s.note ? `<div class="note"><b>Remarks / 备注</b><br>${esc(s.note).replace(/\n/g, '<br>')}</div>` : ''}

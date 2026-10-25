@@ -144,6 +144,24 @@ function assertBatchLinesEditable(orderId: number, plId: number): number {
   )
 }
 
+/**
+ * 同一张装箱单里箱号不能重。
+ * 箱号重复时纸面按去重算箱数，体积和毛重却逐行累加——
+ * 一张单上「1 箱」配着两箱的 CBM，订舱和提单件数当场对不上。
+ */
+function assertBoxNoFree(plId: number, boxNo: string | undefined, exceptLineId?: number): void {
+  const no = String(boxNo ?? '').trim()
+  if (!no) return
+  const hit = getDb().get('SELECT id FROM packing_list_lines WHERE packing_list_id = ? AND box_no = ? AND id != ?', [
+    plId,
+    no,
+    exceptLineId ?? -1
+  ])
+  if (hit) {
+    throw new Error(`箱号「${no}」在这张装箱单里已经用过了：一箱只能占一行，重复箱号会让箱数和体积对不上`)
+  }
+}
+
 export interface PackingListInput {
   orderId: number
   containerNo?: string
@@ -185,7 +203,15 @@ export function createPackingList(input: PackingListInput): PackingList[] {
   if (input.lines.length === 0) throw new Error('装箱单至少要有一箱，先生成箱明细再保存')
   // 同一 SKU 可能拆成好几箱，先按 SKU 合计再校验，免得逐行放行、加起来超了
   const bySku = new Map<string, { sku: { styleNo?: string; color?: string; size?: string }; qty: number }>()
+  const seenBoxNo = new Set<string>()
   for (const l of input.lines) {
+    const boxNo = String(l.boxNo ?? '').trim()
+    if (boxNo) {
+      if (seenBoxNo.has(boxNo)) {
+        throw new Error(`箱号「${boxNo}」在这一批里出现了两次：一箱只能占一行，否则箱数和体积对不上`)
+      }
+      seenBoxNo.add(boxNo)
+    }
     assertStyleNo(l.styleNo)
     assertQuantity(l.quantity)
     assertWeight(l.netWeight, '净重')
@@ -478,6 +504,9 @@ export function updatePackingListLine(
   if (patch.styleNo !== undefined) assertStyleNo(patch.styleNo)
   assertWeight(patch.netWeight, '净重')
   assertWeight(patch.grossWeight, '毛重')
+  if (patch.boxNo !== undefined && String(patch.boxNo ?? '').trim() !== String(cur.box_no ?? '').trim()) {
+    assertBoxNoFree(plId, patch.boxNo, lineId)
+  }
   // 数量改动（或换了颜色/尺码）时守住订单总量：把自己这一行的旧值排除后再算
   const nextSku = {
     styleNo: patch.styleNo ?? (cur.style_no as string),
@@ -579,6 +608,7 @@ export function addPackingListLine(
   assertBatchLinesEditable(orderId, plId)
   assertStyleNo(line.styleNo)
   assertQuantity(line.quantity)
+  assertBoxNoFree(plId, line.boxNo)
   assertNotOverPacked(orderId, line, Number(line.quantity) || 0)
   // 现场补一箱时按同批里同款的箱子带上箱规和单位净重，别让人再手敲一遍尺寸
   const twin = db.get(

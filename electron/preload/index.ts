@@ -1,6 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IKanApi } from '../../src/shared/api'
-import type { CustomerReceivable, ExportKind, MonthlyReportRow, OrderListPage, PackingAmount } from '../../src/shared/types'
+import type {
+  CustomerReceivable,
+  ExportKind,
+  MonthlyReportRow,
+  OrderExportFilter,
+  OrderListPage,
+  PackingAmount
+} from '../../src/shared/types'
 
 type Result<T> = { ok: true; data: T } | { ok: false; error: string }
 
@@ -172,11 +179,11 @@ const api: IKanApi = {
     restore: (path: string) => call<{ restarted: boolean }>('backup:restore', path)
   },
   exporter: {
-    csv: (kind: ExportKind) => call<string>('export:csv', kind)
+    csv: (kind: ExportKind, filter?: OrderExportFilter) => call<string>('export:csv', kind, filter)
   },
   window: {
     hide: () => call<boolean>('window:hide'),
-    printPdf: (payload: { html: string; fileName: string; silent?: boolean }) =>
+    printPdf: (payload: { html: string; fileName: string; silent?: boolean; docNo?: string }) =>
       call<string>('window:printPdf', payload),
     print: () => call<boolean>('window:print')
   },

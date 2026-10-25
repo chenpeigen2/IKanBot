@@ -12,7 +12,14 @@ import {
 import { factoryDeliveredQuantity } from './shipping'
 import { isLocalDate, localDate, localDateOf, localMonthOf } from '../../src/shared/date'
 import { PAYMENT_METHOD_LABEL, PAYMENT_STATUS_LABEL, SHIP_STATUS_LABEL } from '../../src/shared/types'
-import type { DashboardStats, ExportKind, MonthlyReportRow, Reminder } from '../../src/shared/types'
+import type {
+  DashboardStats,
+  ExportKind,
+  MonthlyReportRow,
+  OrderExportFilter,
+  Reminder
+} from '../../src/shared/types'
+import { listOrderIds } from './orders'
 import type { OrderMoneyRow } from './money'
 
 /** 本地月初 YYYY-MM-DD（toISOString 是 UTC，拿到的是上个月最后一天） */
@@ -866,13 +873,17 @@ export function monthlyReport(): MonthlyReportRow[] {
  *   monthly     —— 月度汇总，与报表页同一份数
  * 状态一律中文标签，别再出现一张表写「void」、另一张写「已作废」。
  */
-export function exportCsv(kind: ExportKind): string {
+export function exportCsv(kind: ExportKind, filter?: OrderExportFilter): string {
   const db = getDb()
   const base = getSettings().baseCurrency
   switch (kind) {
     case 'orders':
     case 'orders_all':
-      return ordersCsv(kind === 'orders_all' ? listOrderMoney({ includeVoided: true }) : listOrderMoney(), base)
+      return ordersCsv(
+        kind === 'orders_all' ? listOrderMoney({ includeVoided: true }) : listOrderMoney(),
+        base,
+        kind === 'orders' ? filter : undefined
+      )
     case 'items':
       return itemsCsv(db, base)
     case 'monthly':
@@ -888,7 +899,12 @@ export function exportCsv(kind: ExportKind): string {
 }
 
 /** 订单台账：orders 与 orders_all 共用列，只差在传进来的行集 */
-function ordersCsv(rows: OrderMoneyRow[], base: string): string {
+function ordersCsv(rows: OrderMoneyRow[], base: string, filter?: OrderExportFilter): string {
+  if (filter) {
+    // 不另写一份筛选 SQL：拿列表同一个 listWhere 算出的 id 再过滤，口径只此一处
+    const keep = new Set(listOrderIds(filter))
+    rows = rows.filter((r) => keep.has(r.orderId))
+  }
   const header = [
     '订单号',
     'PI号',

@@ -385,11 +385,16 @@ export default function Samples() {
               <Button variant="primary"
                 
                 onClick={async () => {
-                  const out = await window.api.window.printPdf({
-                    html: preview.html,
-                    fileName: `${preview.no}.pdf`
-                  })
-                  if (out) toast('PDF 已保存')
+                  try {
+                    const out = await window.api.window.printPdf({
+                      html: preview.html,
+                      fileName: `${preview.no}.pdf`,
+                      docNo: preview.no
+                    })
+                    if (out) toast('PDF 已保存')
+                  } catch (e) {
+                    toast((e as Error).message || 'PDF 没存成', 'error')
+                  }
                 }}
               >
                 另存为 PDF

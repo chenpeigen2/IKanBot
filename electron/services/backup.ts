@@ -6,6 +6,7 @@ import { dataDir, imagesDir, backupsDir, docsDir, closeDb } from '../db'
 import { LATEST_DB_VERSION } from '../db/schema'
 import { createZip, collectDir, readZip, verifyZip, type ZipEntry } from './zip'
 import { markBackupFail, markBackupOk } from './settings'
+import { localDate } from '../../src/shared/date'
 
 /**
  * 备份：把 db + images + 单据存档（docs 下的 PDF）打包成一个 zip。
@@ -71,8 +72,23 @@ export function pruneBackups(keep = 30): void {
   }
 }
 
-/** 启动时自动备份一次（同一天已有则跳过） */
+/**
+ * 启动时自动备份一次（同一天已有则跳过）。
+ * 以前每次启动都打包：崩溃重启几次就把 30 份历史挤成同一天，
+ * 真出事要退回上周时一份都没有。设置页和这里的注释都写「每天一次」，得兑现。
+ */
 export function autoBackupOnStart(): void {
+  const dir = backupsDir()
+  const today = localDate()
+  const doneToday = readdirSync(dir).some((f) => {
+    if (!/^ikanbot-\d{14}-auto\.zip$/.test(f)) return false
+    try {
+      return localDate(new Date(statSync(join(dir, f)).mtimeMs)) === today
+    } catch {
+      return false
+    }
+  })
+  if (doneToday) return
   // 备份失败不能拖住启动，但也不能当没事发生：
   // 记进设置里的 lastBackupError，工作台会一直挂着「最近一次备份没成功」，
   // 免得软件悄悄用了半年，某天要恢复时才发现一份能用的都没有。

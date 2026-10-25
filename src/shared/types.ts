@@ -771,6 +771,18 @@ export const EXPORT_FILE_NAME: Record<ExportKind, string> = {
   monthly: '月度汇总.csv'
 }
 
+/**
+ * 导出台账时跟随订单列表的筛选（排序与分页不参与）。
+ * 页面上筛出几张，Excel 里就该是几张——否则同一客户的对账单和页面合计对不上。
+ */
+export interface OrderExportFilter {
+  keyword?: string
+  paymentStatus?: string
+  shipStatus?: string
+  from?: string
+  to?: string
+}
+
 /** 打样单（样品单）状态 */
 export type SampleStatus = 'pending' | 'sent' | 'received' | 'cancelled'
 
