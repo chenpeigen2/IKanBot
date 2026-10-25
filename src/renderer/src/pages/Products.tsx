@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Modal, useToast, money, Empty, Button } from '../ui'
+import { Modal, useToast, money, Empty, Button, LoadError } from '../ui'
 import { imageUrl } from '../imageUrl'
 import type { Product, ProductImage } from '../../../shared/types'
 
@@ -58,10 +58,17 @@ export default function Products() {
   const [includeInactive, setIncludeInactive] = useState(false)
   const [baseCurrency, setBaseCurrency] = useState('CNY')
   const [showImport, setShowImport] = useState(false)
+  /** 读取失败不能装成「还没有商品」 */
+  const [loadError, setLoadError] = useState('')
 
   const load = async (kw = keyword) => {
-    const rows = await window.api.products.list(kw, includeInactive)
-    setList(rows)
+    try {
+      const rows = await window.api.products.list(kw, includeInactive)
+      setList(rows)
+      setLoadError('')
+    } catch (e) {
+      setLoadError((e as Error).message || '商品列表没加载出来')
+    }
   }
 
   useEffect(() => {
@@ -232,7 +239,9 @@ export default function Products() {
 
         <div className="card">
           <div className="card-body tight">
-            {list.length === 0 ? (
+            {loadError ? (
+              <LoadError what="商品列表" message={loadError} onRetry={() => void load()} />
+            ) : list.length === 0 ? (
               <Empty text="还没有商品，点右上角「新增商品」开始录入" />
             ) : (
               <div className="table-wrap">

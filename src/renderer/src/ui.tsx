@@ -62,6 +62,34 @@ export function Empty({
   )
 }
 
+/**
+ * 加载失败：跟「空」分开说。
+ * 空 = 真的没有数据；失败 = 我们没算出来。两者长一个样，
+ * 老板会以为今天真的一单没有（工作台还会顺口说一句「一切顺利」）。
+ */
+export function LoadError({
+  what,
+  message,
+  onRetry
+}: {
+  /** 没加载出来的是什么，例如「订单列表」 */
+  what: string
+  message: string
+  onRetry: () => void
+}) {
+  return (
+    <div className="empty error">
+      <div className="empty-title">{what}没加载出来</div>
+      <div className="empty-hint">{message || '读取数据时出错了，稍后再试一次。'}</div>
+      <div className="empty-action">
+        <button className="btn" onClick={onRetry}>
+          重新加载
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /* ---------------- 溢出菜单（页头「更多」） ---------------- */
 
 export type MenuItem = {

@@ -4,7 +4,7 @@
  * 关键约定：报价单存在自己的表里，完全不参与销售额 / 毛利 / 待收款统计，
  * 也不会出现在订单列表里。它只有一个出口：转成正式订单。
  */
-import { getDb, nextNo } from '../db'
+import { getDb, nextNo, transact } from '../db'
 import { mapQuotation, mapQuotationItem, mapCustomer } from '../db/mappers'
 import { getSettings } from './settings'
 import { createOrder, getOrder } from './orders'
@@ -13,6 +13,7 @@ import { computeOrderMoney, costInOrderCurrency } from './money'
 import { likeAny } from './search'
 import { billPartyOf, emptyParty, parseParty, patchParty, stringifyParty } from '../../src/shared/party'
 import { localDate, addDays } from '../../src/shared/date'
+import { assertQuantity, assertUnitPrice } from '../../src/shared/guards'
 import type {
   Currency,
   Incoterm,
@@ -299,10 +300,26 @@ function billForQuotation(customerId: number, input: QuotationInput, before?: Re
   return stringifyParty(patchParty(base, input.billTo))
 }
 
+/**
+ * 保存报价单。整段写包在一个事务里：主表、明细「删旧插新」、版本冻结、历史是一件事，
+ * 中途抛错（比如第 3 行明细没过校验）不能留下「明细被删光、只剩半张单」的现场。
+ */
 export function saveQuotation(input: QuotationInput): QuotationDetail {
+  return transact(() => saveQuotationInner(input))
+}
+
+function saveQuotationInner(input: QuotationInput): QuotationDetail {
   const db = getDb()
   const ts = now()
+  // 明细闸门先过一遍再动库：删旧插新之前就知道哪一行不合规
+  input.items.forEach((it, i) => {
+    const who = `第 ${i + 1} 行（款号 ${it.styleNo || '未填'}）`
+    assertQuantity(it.quantity, `${who} 的数量`)
+    assertUnitPrice(it.unitPrice, `${who} 的单价`)
+  })
   const settings = getSettings()
+  // 费用行与有效期是「编辑时没传 ≠ 要清空」的列：先按传了的算，
+  // 走到更新分支时再用数据库原值兜住漏传（见下面的 keepCharges/keepValidUntil）
   const charges = JSON.stringify((input.charges ?? []).filter((c) => c.label.trim()))
   const validUntil = input.validUntil ?? addDays(localDate(), settings.piValidDays)
   // 汇率必须手动填：系统不拿默认值蒙人，也不替人编锁定日期
@@ -350,6 +367,10 @@ export function saveQuotation(input: QuotationInput): QuotationDetail {
     })()
     const oldRate = Number(before.exchange_rate)
     const oldDate = (before.exchange_rate_date as string | null) ?? null
+    // 「这次没传」不等于「要清空」：漏传费用/有效期时保留数据库原值，
+    // 否则编辑一次就把费用表写成空、有效期推到「今天+N」，客户手里那张纸悄悄变了
+    const keepCharges = input.charges === undefined ? oldCharges : input.charges
+    const keepValidUntil = input.validUntil === undefined ? ((before.valid_until as string | null) ?? validUntil) : validUntil
     // 汇率没变就沿用原来的日期；变了就记今天（谁改的谁负责）
     if (!rateDate) rateDate = oldRate === rate ? oldDate ?? localDate() : localDate()
     // 状态/结果没传就保持原样（编辑一张已转订单的报价单不能把状态打回草稿）
@@ -357,51 +378,56 @@ export function saveQuotation(input: QuotationInput): QuotationDetail {
     status = input.status ?? (before.status as QuotationStatus)
     result = input.result ?? (before.result as QuotationResult)
     revision = Number(before.revision ?? 1) + 1
-    changeNote = describeChange(oldItems, input.items, oldCharges, input.charges ?? [])
+    changeNote = describeChange(oldItems, input.items, oldCharges, keepCharges)
     // 条款也是报价的一部分：改 FOB/CIF、付款方式、有效期、汇率必须留痕
     const termBits: string[] = []
     const nextIncoterm = input.incoterm ?? (before.incoterm as Incoterm)
     const nextPayment = input.paymentMethod ?? (before.payment_method as PaymentMethod)
     if (nextIncoterm !== before.incoterm) termBits.push(`贸易术语 ${before.incoterm} → ${nextIncoterm}`)
     if (nextPayment !== before.payment_method) termBits.push(`付款方式 ${before.payment_method} → ${nextPayment}`)
-    if (validUntil !== before.valid_until) termBits.push(`有效期 ${before.valid_until || '未填'} → ${validUntil || '未填'}`)
+    if (keepValidUntil !== before.valid_until)
+      termBits.push(`有效期 ${before.valid_until || '未填'} → ${keepValidUntil || '未填'}`)
     if (Math.abs(oldRate - rate) > 0.0001) termBits.push(`汇率 ${oldRate} → ${rate}`)
     if (termBits.length) changeNote = changeNote ? `${changeNote}；${termBits.join('；')}` : termBits.join('；')
 
     // 改之前先把当前版冻结：客户手里那张纸必须能原样找回来
     freezeQuotationVersion(qId, Number(before.revision ?? 1))
 
-    const billJson = billForQuotation(input.customerId, input, before)
+    const nextCustomerId = input.customerId ?? Number(before.customer_id)
+    const billJson = billForQuotation(nextCustomerId, input, before)
     // 发出时间：只在「这次真的发出去了」时刷新，改价重发重新计时
     const sentAt = status === 'sent' && oldStatus !== 'sent' ? ts : (before.sent_at as string | null) ?? null
 
+    /** 只写这次传了的列，没传的保留原值——见 keepCharges/keepValidUntil 上面的注释 */
+    const keep = (key: keyof QuotationInput, col: string): unknown => (input[key] === undefined ? before[col] : input[key])
+    const keepText = (key: keyof QuotationInput, col: string): string => {
+      const v = keep(key, col)
+      return v == null ? '' : String(v)
+    }
+    const cells: Array<[string, unknown]> = [
+      ['customer_id', nextCustomerId],
+      ['currency', keepText('currency', 'currency') || 'USD'],
+      ['exchange_rate', rate],
+      ['exchange_rate_date', rateDate],
+      ['base_currency', keepText('baseCurrency', 'base_currency') || settings.baseCurrency],
+      ['incoterm', keepText('incoterm', 'incoterm') || 'FOB'],
+      ['port_of_loading', keepText('portOfLoading', 'port_of_loading')],
+      ['port_of_destination', keepText('portOfDestination', 'port_of_destination')],
+      ['payment_method', keepText('paymentMethod', 'payment_method') || 'tt_deposit'],
+      ['deposit_ratio', keep('depositRatio', 'deposit_ratio') ?? settings.defaultDepositRatio],
+      ['valid_until', keepValidUntil],
+      ['customer_po', keepText('customerPo', 'customer_po')],
+      ['note', keepText('note', 'note')],
+      ['charges', JSON.stringify(keepCharges.filter((c) => c.label.trim()))],
+      ['status', status],
+      ['result', result],
+      ['revision', revision],
+      ['bill_to_json', billJson],
+      ['sent_at', sentAt]
+    ]
     db.run(
-      `UPDATE quotations SET customer_id=?, currency=?, exchange_rate=?, exchange_rate_date=?, base_currency=?, incoterm=?,
-        port_of_loading=?, port_of_destination=?, payment_method=?, deposit_ratio=?, valid_until=?,
-        customer_po=?, note=?, charges=?, status=?, result=?, revision=?, bill_to_json=?, sent_at=?, updated_at=? WHERE id=?`,
-      [
-        input.customerId,
-        input.currency ?? 'USD',
-        rate,
-        rateDate,
-        input.baseCurrency ?? settings.baseCurrency,
-        input.incoterm ?? 'FOB',
-        input.portOfLoading ?? '',
-        input.portOfDestination ?? '',
-        input.paymentMethod ?? 'tt_deposit',
-        input.depositRatio ?? settings.defaultDepositRatio,
-        validUntil,
-        input.customerPo ?? '',
-        input.note ?? '',
-        charges,
-        status,
-        result,
-        revision,
-        billJson,
-        sentAt,
-        ts,
-        qId
-      ]
+      `UPDATE quotations SET ${cells.map(([col]) => `${col}=?`).join(', ')}, updated_at=? WHERE id=?`,
+      [...cells.map(([, v]) => v as string | number | null), ts, qId]
     )
     db.run('DELETE FROM quotation_items WHERE quotation_id = ?', [qId])
   } else {

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import { money, moneyOrDash, num, fmtDate, PaymentTag, ShipTag, Button } from '../ui'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { money, moneyOrDash, num, fmtDate, PaymentTag, ShipTag, Button, LoadError } from '../ui'
 import type { DashboardStats, Reminder } from '../../../shared/types'
 
 /** 待办类型的中文短标签（2 个字，扫一眼就知道该干什么） */
@@ -28,37 +28,45 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
   const [reminders, setReminders] = useState<Reminder[]>([])
   const [recent, setRecent] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
+  /** 加载失败要单独说：失败时既不能显示成「加载中」，更不能说「一切顺利」 */
+  const [loadError, setLoadError] = useState('')
   /** 展开过的「同一单多条事由」（key 是单号，收起状态不落库，刷新后回到默认） */
   const [openGroups, setOpenGroups] = useState<Set<string>>(new Set())
 
-  useEffect(() => {
-    let alive = true
-    const load = async () => {
-      try {
-        const [s, r, o] = await Promise.all([
-          window.api.dashboard.stats(),
-          window.api.dashboard.reminders(),
-          window.api.orders.list({})
-        ])
-        if (!alive) return
-        setStats(s)
-        setReminders(r)
-        setRecent(o.rows.slice(0, 10))
-      } finally {
-        if (alive) setLoading(false)
-      }
+  const aliveRef = useRef(true)
+  const load = useCallback(async () => {
+    try {
+      const [s, r, o] = await Promise.all([
+        window.api.dashboard.stats(),
+        window.api.dashboard.reminders(),
+        window.api.orders.list({})
+      ])
+      if (!aliveRef.current) return
+      setStats(s)
+      setReminders(r)
+      setRecent(o.rows.slice(0, 10))
+      setLoadError('')
+    } catch (e) {
+      if (!aliveRef.current) return
+      setLoadError((e as Error).message || '工作台数据没算出来')
+    } finally {
+      if (aliveRef.current) setLoading(false)
     }
-    load()
+  }, [])
+
+  useEffect(() => {
+    aliveRef.current = true
+    void load()
     // 工作台是「早上打开看一眼」的页面：交期与天数每天都在动，挂着不刷新就成了昨日新闻
-    const timer = setInterval(load, REFRESH_MS)
+    const timer = setInterval(() => void load(), REFRESH_MS)
     const onFocus = () => void load()
     window.addEventListener('focus', onFocus)
     return () => {
-      alive = false
+      aliveRef.current = false
       clearInterval(timer)
       window.removeEventListener('focus', onFocus)
     }
-  }, [])
+  }, [load])
 
   // 同一张单的几条事由挨着放：默认只摊开最要紧的一条，其余点「还有 N 条」再看
   const groups = useMemo(() => {
@@ -112,6 +120,25 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
     )
   }
 
+  // 一次都没读成功：整页只摆一句「没算出来 + 重试」，绝不拿 0 和「一切顺利」糊过去
+  if (loadError && !stats) {
+    return (
+      <>
+        <div className="topbar">
+          <h1>工作台</h1>
+          <div className="spacer" />
+          <Button onClick={() => onNavigate('/orders')}>查看全部订单</Button>
+          <Button variant="primary" onClick={() => onNavigate('/orders?new=1')}>
+            + 新建订单
+          </Button>
+        </div>
+        <div className="content">
+          <LoadError what="工作台" message={loadError} onRetry={() => void load()} />
+        </div>
+      </>
+    )
+  }
+
   return (
     <>
       <div className="topbar">
@@ -126,6 +153,13 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
       </div>
 
       <div className="content">
+        {loadError ? (
+          <div className="alert error">
+            这次刷新没成功：{loadError}
+            <br />
+            下面还是上一次读到的数，点「工作台」重新进来可以再试。
+          </div>
+        ) : null}
         <div className="stat-grid">
           {/* R4-S1：统计卡默认全黑；一屏最多 1 张卡上色。
               卡 2「待收款金额」用橙（钱还没到手，要动手），是本屏唯一的彩色卡；

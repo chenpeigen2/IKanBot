@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Modal, useToast, money, Empty, fmtDate, PaymentTag, ShipTag, Button } from '../ui'
+import { Modal, useToast, money, Empty, fmtDate, PaymentTag, ShipTag, Button, LoadError } from '../ui'
 import { INCOTERMS, PAYMENT_METHOD_LABEL, type PaymentMethod } from '../../../shared/types'
 import type { Customer } from '../../../shared/types'
 
@@ -84,9 +84,16 @@ export default function Customers() {
     null
   )
   const [includeInactive, setIncludeInactive] = useState(false)
+  /** 读取失败不能装成「没有客户」 */
+  const [loadError, setLoadError] = useState('')
 
   const load = async (kw = keyword) => {
-    setList(await window.api.customers.list(kw, includeInactive))
+    try {
+      setList(await window.api.customers.list(kw, includeInactive))
+      setLoadError('')
+    } catch (e) {
+      setLoadError((e as Error).message || '客户列表没加载出来')
+    }
   }
 
   useEffect(() => {
@@ -192,7 +199,9 @@ export default function Customers() {
 
         <div className="card">
           <div className="card-body tight">
-            {list.length === 0 ? (
+            {loadError ? (
+              <LoadError what="客户列表" message={loadError} onRetry={() => void load()} />
+            ) : list.length === 0 ? (
               <Empty
                 text={
                   keyword

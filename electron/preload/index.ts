@@ -53,6 +53,7 @@ const api: IKanApi = {
     /** 作废订单（客户取消 / 建错单）：记录全留，不进货值/待收/毛利 */
     void: (id: number, reason?: string) => call<any>('orders:void', id, reason),
     addItem: (orderId: number, item: any) => call<any>('orders:addItem', orderId, item),
+    addItems: (orderId: number, items: any[]) => call<any>('orders:addItems', orderId, items),
     updateItem: (orderId: number, itemId: number, patch: any) =>
       call<any>('orders:updateItem', orderId, itemId, patch),
     removeItem: (orderId: number, itemId: number) => call<any>('orders:removeItem', orderId, itemId),

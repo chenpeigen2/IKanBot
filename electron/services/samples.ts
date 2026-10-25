@@ -6,9 +6,10 @@
  *  - 但公司垫的钱（快递费、样品费）要记账，所以单独一张表、单独一个页面
  *  - 样品单号、快递单号都能查（客户来问「上次那个样品寄到哪了」）
  */
-import { getDb, nextNo } from '../db'
+import { getDb, nextNo, transact } from '../db'
 import { mapCustomer } from '../db/mappers'
 import { localDate } from '../../src/shared/date'
+import { assertQuantity, assertUnitPrice } from '../../src/shared/guards'
 import { getSettings } from './settings'
 import { createOrder, getOrder } from './orders'
 import { logEvent } from './events'
@@ -210,13 +211,39 @@ export function getSample(id: number): SampleOrderDetail | null {
 
 /** 新建 / 修改打样单 */
 export function saveSample(input: SampleInput): SampleOrderDetail {
+  return transact(() => saveSampleInner(input))
+}
+
+function saveSampleInner(input: SampleInput): SampleOrderDetail {
   const db = getDb()
   const ts = now()
-  const items = (input.items ?? []).filter((i) => i.styleNo.trim() && i.quantity > 0)
+  // 编辑时先把旧行取出来：字段「没传」不等于「是 0 / 是空」，
+  // 漏传快递费、工厂打样费、收发日期都只能保留原值，不能顺手清零
+  const before = input.id
+    ? ((db.get('SELECT * FROM sample_orders WHERE id = ?', [input.id]) as Record<string, unknown> | null))
+    : null
+  if (input.id && !before) throw new Error('打样单不存在')
+  // 空白行（款号都没填）忽略；填了款号的行必须过闸门——
+  // 以前 filter 直接把数量≤0 的行丢掉，用户打了一半数字保存后那一行凭空消失，
+  // 既不知道少了一行，也不知道为什么少
+  const items = (input.items ?? []).filter((i) => i.styleNo.trim())
+  items.forEach((it) => {
+    const who = `样品行 ${it.styleNo}`
+    assertQuantity(it.quantity, `${who} 的数量`)
+    // 免费样是真实业务，样品行的单价允许 0
+    assertUnitPrice(it.unitPrice, `${who} 的单价`, true)
+  })
   const sampleFee = items.reduce((sum, i) => sum + i.quantity * Number(i.unitPrice ?? 0), 0)
-  const expressFee = Number(input.expressFee ?? 0)
-  const feeStatus = (input.feeStatus ?? 'unpaid') as SampleFeeStatus
-  const exchangeRate = Number(input.exchangeRate ?? 0)
+  const keep = (key: keyof SampleInput, col: string): unknown =>
+    input[key] === undefined ? before?.[col] : input[key]
+  const keepNum = (key: keyof SampleInput, col: string): number => Number(keep(key, col) ?? 0)
+  const keepText = (key: keyof SampleInput, col: string): string => {
+    const v = keep(key, col)
+    return v == null ? '' : String(v)
+  }
+  const expressFee = keepNum('expressFee', 'express_fee')
+  const feeStatus = (keep('feeStatus', 'fee_status') ?? 'unpaid') as SampleFeeStatus
+  const exchangeRate = keepNum('exchangeRate', 'exchange_rate')
   // N23：未收的打样费要进工作台待收款，折算必须有汇率——没有就不许存（跟订单一个规矩）
   if (feeStatus === 'unpaid' && sampleFee + expressFee > 0 && exchangeRate <= 0) {
     throw new Error('这张打样单还有应收没结（样品费+快递费），请先按今天钉盘的汇率填上汇率')
@@ -238,7 +265,6 @@ export function saveSample(input: SampleInput): SampleOrderDetail {
     )
 
   if (id) {
-    const before = db.get('SELECT * FROM sample_orders WHERE id = ?', [id]) as Record<string, unknown> | null
     if (!before) throw new Error('打样单不存在')
     // 已转订单的打样单：钱的部分（样品费合计 / 快递费 / 汇率）是那单的依据，
     // 事后一改订单就对不上。颜色、尺码、品名这些描述性的字眼照旧能改。
@@ -272,30 +298,27 @@ export function saveSample(input: SampleInput): SampleOrderDetail {
     // 改号时查重（不改号就不管）
     const finalNo = requestedNo || String(before.sample_no)
     if (finalNo !== String(before.sample_no) && noTaken(finalNo, id)) throw noDupErr(finalNo)
+    const cells: Array<[string, unknown]> = [
+      ['sample_no', finalNo],
+      ['customer_id', keep('customerId', 'customer_id')],
+      ['sample_date', keepText('sampleDate', 'sample_date') || localDate()],
+      ['courier', keepText('courier', 'courier')],
+      ['tracking_no', keepText('trackingNo', 'tracking_no')],
+      ['express_fee', expressFee],
+      ['status', keepText('status', 'status') || (before.status as SampleStatus)],
+      ['note', keepText('note', 'note')],
+      ['shipped_at', keepText('shippedAt', 'shipped_at')],
+      ['received_at', keepText('receivedAt', 'received_at')],
+      ['factory_cost', keepNum('factoryCost', 'factory_cost')],
+      ['fee_status', feeStatus],
+      ['fee_note', keepText('feeNote', 'fee_note')],
+      ['currency', keepText('currency', 'currency') || 'USD'],
+      ['exchange_rate', exchangeRate],
+      ['exchange_rate_date', keepText('exchangeRateDate', 'exchange_rate_date')]
+    ]
     db.run(
-      `UPDATE sample_orders SET sample_no=?, customer_id=?, sample_date=?, courier=?, tracking_no=?, express_fee=?,
-        status=?, note=?, shipped_at=?, received_at=?, factory_cost=?, fee_status=?, fee_note=?,
-        currency=?, exchange_rate=?, exchange_rate_date=?, updated_at=? WHERE id=?`,
-      [
-        finalNo,
-        input.customerId,
-        input.sampleDate ?? localDate(),
-        input.courier ?? '',
-        input.trackingNo ?? '',
-        expressFee,
-        input.status ?? (before.status as SampleStatus),
-        input.note ?? '',
-        input.shippedAt ?? '',
-        input.receivedAt ?? '',
-        Number(input.factoryCost ?? 0),
-        feeStatus,
-        input.feeNote ?? '',
-        input.currency ?? (before.currency as string) ?? 'USD',
-        exchangeRate || Number(before.exchange_rate ?? 0),
-        input.exchangeRateDate ?? (before.exchange_rate_date as string) ?? '',
-        ts,
-        id
-      ]
+      `UPDATE sample_orders SET ${cells.map(([col]) => `${col}=?`).join(', ')}, updated_at=? WHERE id=?`,
+      [...cells.map(([, v]) => v as string | number | null), ts, id]
     )
     db.run('DELETE FROM sample_order_items WHERE sample_order_id = ?', [id])
   } else {

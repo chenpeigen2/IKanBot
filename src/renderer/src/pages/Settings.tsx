@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useToast, Card, Button, clientKey } from '../ui'
+import { useToast, Card, Button, clientKey, LoadError } from '../ui'
 import { imageUrl } from '../imageUrl'
 import { CURRENCIES } from '../../../shared/types'
 import type { BackupPreview, DataPaths, UpdateStatus } from '../../../shared/api'
@@ -44,9 +44,20 @@ export default function Settings() {
   const [restorePath, setRestorePath] = useState('')
   const [restoreInfo, setRestoreInfo] = useState<BackupPreview | null>(null)
   const [restoring, setRestoring] = useState(false)
+  /** 设置读不出来时别停在「加载中…」：给一句话和一次重试 */
+  const [loadError, setLoadError] = useState('')
+
+  const loadSettings = async () => {
+    try {
+      setS(withBankUids(await window.api.settings.get()))
+      setLoadError('')
+    } catch (e) {
+      setLoadError((e as Error).message || '设置没读出来')
+    }
+  }
 
   useEffect(() => {
-    void window.api.settings.get().then((r) => setS(withBankUids(r)))
+    void loadSettings()
     void window.api.settings.baseLocked().then(setBaseLocked)
     void window.api.app.paths().then(setPaths)
     // 一进来先问主进程要当前状态：进度那一份只认主进程存的，页面刷新也不会丢
@@ -58,7 +69,17 @@ export default function Settings() {
     return window.api.updater.on((info) => setUpdate(info))
   }, [])
 
-  if (!s) return <div className="content">加载中…</div>
+  if (!s) {
+    return (
+      <div className="content">
+        {loadError ? (
+          <LoadError what="设置" message={loadError} onRetry={() => void loadSettings()} />
+        ) : (
+          <div className="empty loading">加载中…</div>
+        )}
+      </div>
+    )
+  }
 
   const save = async () => {
     try {
@@ -285,6 +306,22 @@ export default function Settings() {
               </div>
             ))
           )}
+        </Card>
+
+        <Card title="这台电脑谁在用" actions={<span className="faint">签在每一条操作历史上</span>}>
+          <div className="field">
+            <label>操作员名字</label>
+            <input
+              className="w-md"
+              maxLength={40}
+              value={s.operator ?? ''}
+              placeholder="例如：陈培根"
+              onChange={(e) => setS({ ...s, operator: e.target.value })}
+            />
+            <div className="hint">
+              开单、改交期、收款、作废、删照片这些动作都会记下是谁做的。换人用这台电脑时改这里就行。
+            </div>
+          </div>
         </Card>
 
         <Card title="业务默认值">

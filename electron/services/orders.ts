@@ -1,4 +1,4 @@
-import { getDb, nextNo } from '../db'
+import { getDb, nextNo, transact } from '../db'
 import { mapOrder, mapOrderItem, mapPayment, mapPackingList, mapPackingListLine, mapEvent, mapSkuSummary, mapOrderPhoto, mapCustomer, mapSettlement } from '../db/mappers'
 import { getSettings } from './settings'
 import { computeOrderMoney, costInOrderCurrency, moneyForOrders, parseCharges } from './money'
@@ -8,7 +8,8 @@ import { logEvent } from './events'
 import { addDays, daysBetween, isLocalDate, localDate, localDayAfterUtc, localDayStartUtc } from '../../src/shared/date'
 import { billPartyOf, emptyParty, parseParty, patchParty, shipPartyOf, stringifyParty } from '../../src/shared/party'
 import { isBillingStatus } from '../../src/shared/billing'
-import { SETTLEMENT_KIND_LABEL, SHIP_STATUS_LABEL, SHIP_STATUS_ORDER } from '../../src/shared/types'
+import { assertQuantity, assertUnitPrice } from '../../src/shared/guards'
+import { PAYMENT_STATUS_LABEL, SETTLEMENT_KIND_LABEL, SHIP_STATUS_LABEL, SHIP_STATUS_ORDER } from '../../src/shared/types'
 import type {
   Currency,
   Incoterm,
@@ -517,8 +518,6 @@ export function createOrder(input: OrderInput): OrderDetail {
   const ts = now()
   const orderNo = nextNo('SO')
   const piNo = input.piNo?.trim() || nextNo('PI')
-  // 单号是凭据：手工指定的 PI 号不能跟别的订单撞号（与打样单号同一条规矩，N-3）
-  if (input.piNo?.trim() && piNoTaken(input.piNo.trim())) throw piDupErr(piNo)
   const validUntil = input.validUntil ?? addDays(localDate(), settings.piValidDays)
   // 汇率锁定日期：默认记今天（本地日期）
   const rateDate = input.exchangeRateDate ?? localDate()
@@ -528,47 +527,55 @@ export function createOrder(input: OrderInput): OrderDetail {
   const chargesJson = JSON.stringify((input.charges ?? []).filter((c) => c.label.trim()))
   const parties = partiesForOrder(input.customerId, input)
 
-  const res = db.run(
-    `INSERT INTO orders(order_no, customer_id, pi_no, payment_status, ship_status, currency, exchange_rate,
-      base_currency, incoterm, port_of_loading, port_of_destination, payment_method, deposit_ratio,
-      valid_until, expected_ship_date, expected_arrival_date, customer_po, note,
-      exchange_rate_date, factory, factory_due_date, cut_off_date, etd_date, vessel, seal_no, charges,
-      bill_to_json, ship_to_json, created_at, updated_at)
-     VALUES(?,?,?,?,'not_prepared',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    [
-      orderNo,
-      input.customerId,
-      piNo,
-      status,
-      input.currency ?? 'USD',
-      input.exchangeRate ?? 1,
-      input.baseCurrency ?? settings.baseCurrency,
-      input.incoterm ?? 'FOB',
-      input.portOfLoading ?? '',
-      input.portOfDestination ?? '',
-      input.paymentMethod ?? 'tt_deposit',
-      input.depositRatio ?? settings.defaultDepositRatio,
-      validUntil,
-      input.expectedShipDate ?? null,
-      input.expectedArrivalDate ?? null,
-      input.customerPo ?? '',
-      input.note ?? '',
-      rateDate,
-      input.factory ?? '',
-      input.factoryDueDate ?? null,
-      input.cutOffDate ?? null,
-      input.etdDate ?? null,
-      input.vessel ?? '',
-      input.sealNo ?? '',
-      chargesJson,
-      parties.bill,
-      parties.ship,
-      ts,
-      ts
-    ]
-  )
-  const orderId = Number(res.lastInsertRowid)
-  logEvent(orderId, 'create', null, status, `创建订单 ${orderNo}`)
+  // 查重、建单、留痕放进同一个事务：要么这张单连同它的「建单」历史一起成立，
+  // 要么一行都不留——不能出现一张查不到来历的空单
+  const orderId = transact(() => {
+    // 单号是凭据：手工指定的 PI 号不能跟别的订单撞号（与打样单号同一条规矩，N-3）。
+    // 查重放在事务里，查完到写入之间没有别人能插一张同号的单进来。
+    if (input.piNo?.trim() && piNoTaken(input.piNo.trim())) throw piDupErr(piNo)
+    const res = db.run(
+      `INSERT INTO orders(order_no, customer_id, pi_no, payment_status, ship_status, currency, exchange_rate,
+        base_currency, incoterm, port_of_loading, port_of_destination, payment_method, deposit_ratio,
+        valid_until, expected_ship_date, expected_arrival_date, customer_po, note,
+        exchange_rate_date, factory, factory_due_date, cut_off_date, etd_date, vessel, seal_no, charges,
+        bill_to_json, ship_to_json, created_at, updated_at)
+       VALUES(?,?,?,?,'not_prepared',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        orderNo,
+        input.customerId,
+        piNo,
+        status,
+        input.currency ?? 'USD',
+        input.exchangeRate ?? 1,
+        input.baseCurrency ?? settings.baseCurrency,
+        input.incoterm ?? 'FOB',
+        input.portOfLoading ?? '',
+        input.portOfDestination ?? '',
+        input.paymentMethod ?? 'tt_deposit',
+        input.depositRatio ?? settings.defaultDepositRatio,
+        validUntil,
+        input.expectedShipDate ?? null,
+        input.expectedArrivalDate ?? null,
+        input.customerPo ?? '',
+        input.note ?? '',
+        rateDate,
+        input.factory ?? '',
+        input.factoryDueDate ?? null,
+        input.cutOffDate ?? null,
+        input.etdDate ?? null,
+        input.vessel ?? '',
+        input.sealNo ?? '',
+        chargesJson,
+        parties.bill,
+        parties.ship,
+        ts,
+        ts
+      ]
+    )
+    const id = Number(res.lastInsertRowid)
+    logEvent(id, 'create', null, status, `创建订单 ${orderNo}`)
+    return id
+  })
   return getOrder(orderId)!
 }
 
@@ -578,9 +585,12 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
   const before = db.get('SELECT * FROM orders WHERE id = ?', [id]) as Record<string, unknown> | null
   if (!before) throw new Error('订单不存在')
   // 单号是凭据：编辑时把 PI 号改成别人的号要拦住（改成自己的号不算重号）
-  const newPiNo = (input.piNo ?? '').trim()
-  if (newPiNo && newPiNo !== String(before.pi_no ?? '') && piNoTaken(newPiNo, id))
-    throw piDupErr(newPiNo)
+  const oldPiNo = String(before.pi_no ?? '').trim()
+  const newPiNo = input.piNo === undefined ? oldPiNo : String(input.piNo).trim()
+  if (newPiNo && newPiNo !== oldPiNo && piNoTaken(newPiNo, id)) throw piDupErr(newPiNo)
+  // 已经开出去的 PI 号要被报关、要被对账，清空等于把凭据抹了还不留话
+  if (oldPiNo && !newPiNo)
+    throw new Error(`PI 号 ${oldPiNo} 已经写在这张单上，不能清空——确实不要这个号请作废这张单后重开。`)
 
   // 汇率是锁定的凭据：清空或填 0 不许悄悄落成 1——
   // 1 会让整单金额按错汇率折算，四张单据、报表、待收全跟着错
@@ -626,53 +636,68 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
 
   // 抬头快照：换了客户就按新客户重新钉一次；没换客户则保住单子上原有的快照，
   // 只把用户这次明确改动的字段写进去（改档案绝不会顺带动到已发出的单据）
-  const customerChanged = Number(before.customer_id) !== Number(input.customerId)
-  const fresh = partiesForOrder(input.customerId, {})
+  // customerId 也可能整条没传（只改备注的编辑）——那时这张单还挂在原客户名下
+  const nextCustomerId = input.customerId === undefined ? Number(before.customer_id) : Number(input.customerId)
+  const customerChanged = Number(before.customer_id) !== nextCustomerId
+  const fresh = partiesForOrder(nextCustomerId, {})
   const baseBill = (customerChanged ? null : parseParty(before.bill_to_json)) ?? parseParty(fresh.bill) ?? emptyParty()
   const baseShip = (customerChanged ? null : parseParty(before.ship_to_json)) ?? parseParty(fresh.ship) ?? emptyParty()
   const billJson = stringifyParty(patchParty(baseBill, input.billTo))
   const shipJson = stringifyParty(patchParty(baseShip, input.shipTo))
 
-  db.run(
-    `UPDATE orders SET customer_id=?, currency=?, exchange_rate=?, base_currency=?, incoterm=?,
-      port_of_loading=?, port_of_destination=?, payment_method=?, deposit_ratio=?, valid_until=?,
-      expected_ship_date=?, expected_arrival_date=?, customer_po=?, note=?, pi_no=?,
-      exchange_rate_date=?, factory=?, factory_due_date=?, cut_off_date=?, etd_date=?, vessel=?, seal_no=?,
-      charges=?, bill_to_json=?, ship_to_json=?, updated_at=?
-     WHERE id=?`,
-    [
-      input.customerId,
-      newCurrency,
-      newRate,
-      input.baseCurrency ?? getSettings().baseCurrency,
-      input.incoterm ?? 'FOB',
-      input.portOfLoading ?? '',
-      input.portOfDestination ?? '',
-      input.paymentMethod ?? 'tt_deposit',
-      input.depositRatio ?? getSettings().defaultDepositRatio,
-      input.validUntil ?? null,
-      input.expectedShipDate ?? null,
-      input.expectedArrivalDate ?? null,
-      input.customerPo ?? '',
-      input.note ?? '',
-      input.piNo ?? '',
-      rateDate,
-      input.factory ?? '',
-      input.factoryDueDate ?? null,
-      input.cutOffDate ?? null,
-      input.etdDate ?? null,
-      input.vessel ?? '',
-      input.sealNo ?? '',
-      chargesJson,
-      billJson,
-      shipJson,
-      ts,
-      id
-    ]
-  )
-  logEvent(id, 'update', null, null, describeOrderChange(before, input))
-  // 收款金额变了，状态可能需要重算
-  recomputePaymentStatus(id)
+  /**
+   * 只写「这次真的传了」的列：input 里没有的键保留数据库原值。
+   * 以前这里是全量替换（input.x ?? null），调用方少传一个日期，
+   * 那张单的交期 / ETD / 截关就被静默清空——单据早发出去了，界面上看不出少了东西。
+   * 语义：undefined = 这次没提，保留原值；null 或 '' = 用户明确清空。
+   */
+  const keep = (key: keyof OrderInput, col: string): unknown => (input[key] === undefined ? before[col] : input[key])
+  /** 日期列收口：空串一律存 NULL，不让 '' 混进日期比较 */
+  const keepDate = (key: keyof OrderInput, col: string): string | null => {
+    const v = keep(key, col)
+    return v === '' || v == null ? null : String(v)
+  }
+  const keepText = (key: keyof OrderInput, col: string): string => {
+    const v = keep(key, col)
+    return v == null ? '' : String(v)
+  }
+  const settings = getSettings()
+  const cells: Array<[string, unknown]> = [
+    ['customer_id', nextCustomerId],
+    ['currency', newCurrency],
+    ['exchange_rate', newRate],
+    ['base_currency', keepText('baseCurrency', 'base_currency') || settings.baseCurrency],
+    ['incoterm', keepText('incoterm', 'incoterm') || 'FOB'],
+    ['port_of_loading', keepText('portOfLoading', 'port_of_loading')],
+    ['port_of_destination', keepText('portOfDestination', 'port_of_destination')],
+    ['payment_method', keepText('paymentMethod', 'payment_method') || 'tt_deposit'],
+    ['deposit_ratio', keep('depositRatio', 'deposit_ratio') ?? settings.defaultDepositRatio],
+    ['valid_until', keepDate('validUntil', 'valid_until')],
+    ['expected_ship_date', keepDate('expectedShipDate', 'expected_ship_date')],
+    ['expected_arrival_date', keepDate('expectedArrivalDate', 'expected_arrival_date')],
+    ['customer_po', keepText('customerPo', 'customer_po')],
+    ['note', keepText('note', 'note')],
+    ['pi_no', newPiNo],
+    ['exchange_rate_date', rateDate],
+    ['factory', keepText('factory', 'factory')],
+    ['factory_due_date', keepDate('factoryDueDate', 'factory_due_date')],
+    ['cut_off_date', keepDate('cutOffDate', 'cut_off_date')],
+    ['etd_date', keepDate('etdDate', 'etd_date')],
+    ['vessel', keepText('vessel', 'vessel')],
+    ['seal_no', keepText('sealNo', 'seal_no')],
+    ['charges', chargesJson],
+    ['bill_to_json', billJson],
+    ['ship_to_json', shipJson]
+  ]
+  transact(() => {
+    db.run(
+      `UPDATE orders SET ${cells.map(([col]) => `${col}=?`).join(', ')}, updated_at=? WHERE id=?`,
+      [...cells.map(([, v]) => v as string | number | null), ts, id]
+    )
+    logEvent(id, 'update', null, null, describeOrderChange(before, input))
+    // 收款金额变了，状态可能需要重算
+    recomputePaymentStatus(id)
+  })
   return getOrder(id)!
 }
 
@@ -729,25 +754,37 @@ export function setOrderParties(
 /** 生成一条人话版的「改了什么」记录 */
 function describeOrderChange(before: Record<string, unknown>, input: OrderInput): string {
   const parts: string[] = []
-  const cmp = (label: string, key: string, val: unknown) => {
-    const old = before[key]
-    const next = val ?? ''
-    if (String(old ?? '') !== String(next ?? '')) {
-      parts.push(`${label} ${old === null || old === undefined || old === '' ? '空' : old} → ${next === '' ? '空' : next}`)
-    }
+  const shown = (v: unknown): string => (v === null || v === undefined || v === '' ? '空' : String(v))
+  /**
+   * 只比「这次真的传了」的字段。漏传一个日期不等于把它清空，
+   * 否则一次只改备注的保存会在历史里留下一串「交期 xxx → 空」，反而把真改动淹了。
+   */
+  const cmp = (label: string, key: keyof OrderInput, col: string) => {
+    if (input[key] === undefined) return
+    const old = before[col]
+    const next = input[key]
+    if (shown(old) !== shown(next)) parts.push(`${label} ${shown(old)} → ${shown(next)}`)
   }
-  cmp('币种', 'currency', input.currency)
-  cmp('汇率', 'exchange_rate', input.exchangeRate)
-  cmp('贸易术语', 'incoterm', input.incoterm)
-  cmp('装运港', 'port_of_loading', input.portOfLoading)
-  cmp('目的港', 'port_of_destination', input.portOfDestination)
-  cmp('付款方式', 'payment_method', input.paymentMethod)
-  cmp('定金比例', 'deposit_ratio', input.depositRatio)
-  cmp('PI号', 'pi_no', input.piNo)
-  cmp('客户PO', 'customer_po', input.customerPo)
-  cmp('工厂', 'factory', input.factory)
-  cmp('船名航次', 'vessel', input.vessel)
-  cmp('封条号', 'seal_no', input.sealNo)
+  cmp('币种', 'currency', 'currency')
+  cmp('汇率', 'exchangeRate', 'exchange_rate')
+  cmp('贸易术语', 'incoterm', 'incoterm')
+  cmp('装运港', 'portOfLoading', 'port_of_loading')
+  cmp('目的港', 'portOfDestination', 'port_of_destination')
+  cmp('付款方式', 'paymentMethod', 'payment_method')
+  cmp('定金比例', 'depositRatio', 'deposit_ratio')
+  cmp('PI号', 'piNo', 'pi_no')
+  cmp('客户PO', 'customerPo', 'customer_po')
+  cmp('工厂', 'factory', 'factory')
+  cmp('船名航次', 'vessel', 'vessel')
+  cmp('封条号', 'sealNo', 'seal_no')
+  cmp('备注', 'note', 'note')
+  // 日期改动最容易扯皮：客户说交期改过没、报关卡的是哪一版——逐条记 before → after
+  cmp('有效期', 'validUntil', 'valid_until')
+  cmp('预计开船', 'expectedShipDate', 'expected_ship_date')
+  cmp('预计到港', 'expectedArrivalDate', 'expected_arrival_date')
+  cmp('工厂交期', 'factoryDueDate', 'factory_due_date')
+  cmp('截关日', 'cutOffDate', 'cut_off_date')
+  cmp('ETD', 'etdDate', 'etd_date')
   // 费用行也要留痕（运费改了多少）
   if (input.charges !== undefined) {
     const oldCharges = parseCharges(before.charges)
@@ -856,8 +893,12 @@ function resolveItemCost(orderId: number, item: { unitCost?: number | null; cost
   return item.unitCost ?? null
 }
 
-export function addOrderItem(orderId: number, item: OrderItemInput): OrderDetail {
+/** 插一行的底层动作：数量/单价闸门 + 插入 + 逐行留痕（批量入口共用一个事务） */
+function insertOrderItem(orderId: number, item: OrderItemInput): void {
   const db = getDb()
+  const who = `款号 ${item.styleNo || '未填'}`
+  assertQuantity(item.quantity, `${who} 的数量`)
+  assertUnitPrice(item.unitPrice, `${who} 的单价`)
   db.run(
     `INSERT INTO order_items(order_id, product_id, style_no, product_name, composition, color, size, quantity, unit_price, unit_cost)
      VALUES(?,?,?,?,?,?,?,?,?,?)`,
@@ -874,12 +915,28 @@ export function addOrderItem(orderId: number, item: OrderItemInput): OrderDetail
       resolveItemCost(orderId, item)
     ]
   )
-  db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
   logEvent(orderId, 'item_add', null, null, `添加 SKU ${item.styleNo} ${item.color}/${item.size} × ${item.quantity}`)
-  // 件数变了，订单的「装够没有 / 走了没有」跟着变
-  applyShipStatus(orderId)
-  // 金额变了，应收总额 / 定金 / 待收都变了，收款状态要重算（可以往上也可以往下）
-  recomputePaymentStatus(orderId)
+}
+
+export function addOrderItem(orderId: number, item: OrderItemInput): OrderDetail {
+  return addOrderItems(orderId, [item])
+}
+
+/**
+ * 批量加行：整批一个事务。
+ * 以前是前端循环调 addItem——第 3 行没过校验时前两行已经躺在库里，
+ * 订单明细半截，用户只看到一条报错，不知道单子已经多了两行来路不明的 SKU。
+ */
+export function addOrderItems(orderId: number, items: OrderItemInput[]): OrderDetail {
+  const db = getDb()
+  transact(() => {
+    for (const item of items) insertOrderItem(orderId, item)
+    db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
+    // 件数变了，订单的「装够没有 / 走了没有」跟着变
+    applyShipStatus(orderId)
+    // 金额变了，应收总额 / 定金 / 待收都变了，收款状态要重算（可以往上也可以往下）
+    recomputePaymentStatus(orderId)
+  })
   return getOrder(orderId)!
 }
 
@@ -938,6 +995,10 @@ export function updateOrderItem(
   if (!skuChanged && patch.quantity !== undefined && Number(patch.quantity) < packed) {
     assertNotBelowPacked(orderId, curSku)
   }
+  // 数量/单价闸门：只校验这次真的传了的键（没传是「不改」，不是「填 0」）
+  const lineWho = `款号 ${nextSku.styleNo || '未填'} ${nextSku.color}/${nextSku.size}`
+  if (patch.quantity !== undefined) assertQuantity(patch.quantity, `${lineWho} 的数量`)
+  if (patch.unitPrice !== undefined) assertUnitPrice(patch.unitPrice, `${lineWho} 的单价`)
   // costBase：没传 = 不动；传了数字 = 按本单汇率折算；传 null = 主动清空（不能当成「没传」）
   const nextCost =
     patch.costBase !== undefined
@@ -1053,6 +1114,12 @@ export function replaceOrderItems(orderId: number, items: OrderItemInput[]): Ord
       `这张单已经装了 ${packed} 件箱，不能整体替换明细；请逐行调整，或先到「装箱单」里处理箱明细（已出运的批次要先把状态改回「已包装」）。`
     )
   }
+  // 整批先过闸门再动库：不能删完旧明细才发现第 3 行数量是负数
+  items.forEach((it, i) => {
+    const who = `第 ${i + 1} 行（款号 ${it.styleNo || '未填'}）`
+    assertQuantity(it.quantity, `${who} 的数量`)
+    assertUnitPrice(it.unitPrice, `${who} 的单价`)
+  })
   db.exec('BEGIN')
   try {
     db.run('DELETE FROM order_items WHERE order_id = ?', [orderId])
@@ -1428,7 +1495,13 @@ export function recomputePaymentStatus(orderId: number): PaymentStatus {
 
   if (next !== status) {
     db.run('UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?', [next, now(), orderId])
-    logEvent(orderId, 'status_auto', status, next, `收款状态自动流转为 ${next}`)
+    logEvent(
+      orderId,
+      'status_auto',
+      status,
+      next,
+      `收款状态自动流转为 ${PAYMENT_STATUS_LABEL[next as keyof typeof PAYMENT_STATUS_LABEL] ?? next}`
+    )
   }
   return next
 }
@@ -1586,5 +1659,19 @@ export function addOrderPhoto(
 }
 
 export function deleteOrderPhoto(orderId: number, photoId: number): void {
-  getDb().run('DELETE FROM order_photos WHERE id = ? AND order_id = ?', [photoId, orderId])
+  const db = getDb()
+  const row = db.get('SELECT * FROM order_photos WHERE id = ? AND order_id = ?', [photoId, orderId]) as Record<
+    string,
+    unknown
+  > | null
+  if (!row) return
+  db.run('DELETE FROM order_photos WHERE id = ? AND order_id = ?', [photoId, orderId])
+  // 验货照是出货争议时的证据，删掉必须留痕：谁、什么时候、删的是哪一张
+  logEvent(
+    orderId,
+    'photo',
+    null,
+    null,
+    `删除${String(row.kind) === 'container' ? '柜照' : '验货照'}${row.note ? `（${String(row.note)}）` : ''}`
+  )
 }

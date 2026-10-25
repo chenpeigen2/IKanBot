@@ -3993,6 +3993,312 @@ const r9rawIpc = fs
   .filter((f) => /ipcMain\s*\.\s*handle\s*\(/.test(fs.readFileSync(join(r9svcDir, f), 'utf8')))
 eq('服务层里没有自己注册的通道（都走 ipc/handle 那一个壳）', r9rawIpc, [])
 
+/* ---------------- R11：错误处理 / 空状态 / 历史 ---------------- */
+section('R11-1 编辑时漏传的字段不再被静默清空')
+{
+  const r11o = orders.createOrder({
+    customerId: c1.id,
+    currency: 'USD',
+    exchangeRate: 7.15,
+    piNo: 'R11PI001',
+    customerPo: 'PO-11',
+    vessel: 'MSC USA',
+    sealNo: 'SEAL-9',
+    note: '原备注',
+    expectedShipDate: '2026-11-30',
+    etdDate: '2026-11-20',
+    cutOffDate: '2026-11-15'
+  })
+  orders.updateOrder(r11o.id, { note: '只改了备注' })
+  const kept = orders.getOrder(r11o.id)!
+  eq('漏传交期不再被清空', kept.expectedShipDate, '2026-11-30')
+  eq('漏传 ETD 不再被清空', kept.etdDate, '2026-11-20')
+  eq('漏传截关日不再被清空', kept.cutOffDate, '2026-11-15')
+  eq('漏传客户 PO 不再被清空', kept.customerPo, 'PO-11')
+  eq('漏传船名不再被清空', kept.vessel, 'MSC USA')
+  eq('漏传铅封号不再被清空', kept.sealNo, 'SEAL-9')
+  eq('漏传客户不改变挂靠的客户', kept.customer?.id, c1.id)
+  eq('传了的字段照旧写进去', kept.note, '只改了备注')
+  orders.updateOrder(r11o.id, { etdDate: null })
+  eq('明确清空仍然生效（null ≠ 没传）', orders.getOrder(r11o.id)!.etdDate, null)
+  let piErr = ''
+  try {
+    orders.updateOrder(r11o.id, { piNo: '' })
+  } catch (e) {
+    piErr = (e as Error).message
+  }
+  check('已经写上的 PI 号不许编辑时空掉', piErr.includes('PI 号'), piErr)
+  check('被拦下来的那次没把 PI 号改掉', orders.getOrder(r11o.id)!.piNo, 'R11PI001')
+
+  const r11q = quotations.saveQuotation({
+    customerId: c1.id,
+    currency: 'USD',
+    exchangeRate: 7.15,
+    validUntil: '2026-12-31',
+    charges: [{ label: '运费 Freight', amount: 50 }],
+    items: [{ styleNo: 'A001', quantity: 10, unitPrice: 7.5 }]
+  })
+  const r11qEdit = quotations.saveQuotation({
+    id: r11q.id,
+    customerId: c1.id,
+    currency: 'USD',
+    exchangeRate: 7.15,
+    items: [{ styleNo: 'A001', quantity: 12, unitPrice: 7.5 }]
+  })
+  eq('报价单漏传费用不再被清空', r11qEdit.charges.length, 1)
+  eq('报价单漏传有效期不再被推到「今天+N」', r11qEdit.validUntil, '2026-12-31')
+  eq('报价单传了的数量照旧生效', r11qEdit.items[0].quantity, 12)
+
+  const r11s = samples.saveSample({
+    customerId: c1.id,
+    sampleDate: '2026-10-21',
+    courier: '顺丰',
+    trackingNo: 'SF123456789',
+    expressFee: 120,
+    factoryCost: 300,
+    shippedAt: '2026-10-23',
+    currency: 'USD',
+    exchangeRate: 7.15,
+    items: [{ styleNo: 'A001', color: 'Black', size: 'M', quantity: 2, unitPrice: 15 }]
+  })
+  const r11sEdit = samples.saveSample({
+    id: r11s.id,
+    customerId: c1.id,
+    items: [{ styleNo: 'A001', color: 'Black', size: 'M', quantity: 3, unitPrice: 15 }]
+  })
+  eq('打样单漏传快递费不再被清零', r11sEdit.expressFee, 120)
+  eq('打样单漏传工厂打样费不再被清零', r11sEdit.factoryCost, 300)
+  eq('打样单漏传寄样日期不再被清掉', r11sEdit.shippedAt, '2026-10-23')
+  eq('打样单漏传单号不再改号', r11sEdit.sampleNo, r11s.sampleNo)
+  eq('打样单传了的明细照旧替换', r11sEdit.totalQuantity, 3)
+}
+
+section('R11-1 保存中途抛错：整单回滚，不留半截明细')
+{
+  const rbQ = quotations.saveQuotation({
+    customerId: c1.id,
+    currency: 'USD',
+    exchangeRate: 7.15,
+    items: [
+      { styleNo: 'A001', quantity: 10, unitPrice: 7.5 },
+      { styleNo: 'A002', quantity: 5, unitPrice: 9 }
+    ]
+  })
+  let rbErr = ''
+  try {
+    quotations.saveQuotation({
+      id: rbQ.id,
+      customerId: c1.id,
+      currency: 'USD',
+      exchangeRate: 7.15,
+      items: [
+        { styleNo: 'A001', quantity: 30, unitPrice: 7.5 },
+        // 商品库里不存在的 product_id：外键会在插到这一行时抛错
+        { styleNo: 'A002', quantity: 5, unitPrice: 9, productId: 999999 }
+      ]
+    })
+  } catch (e) {
+    rbErr = (e as Error).message
+  }
+  check('坏明细让整次保存失败', rbErr !== '', rbErr)
+  const afterRb = quotations.getQuotation(rbQ.id)!
+  eq('回滚后明细行数没少', afterRb.items.length, 2)
+  eq('回滚后第一行还是原来那个数量（新值没写进去）', afterRb.items[0].quantity, 10)
+
+  const rbO = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.15 })
+  await orders.addOrderItem(rbO.id, { styleNo: 'A001', color: 'Black', size: 'M', quantity: 10, unitPrice: 8 })
+  let rbOErr = ''
+  try {
+    orders.replaceOrderItems(rbO.id, [
+      { styleNo: 'A009', color: 'Red', size: 'S', quantity: 1, unitPrice: 8 },
+      { styleNo: 'A010', color: 'Blue', size: 'L', quantity: 1, unitPrice: 8, productId: 999999 }
+    ])
+  } catch (e) {
+    rbOErr = (e as Error).message
+  }
+  check('批量替换明细时坏行让整批失败', rbOErr !== '', rbOErr)
+  const afterRO = orders.getOrder(rbO.id)!
+  eq('回滚后原有那一行还在（没被删掉）', afterRO.items.length, 1)
+  eq('回滚后原有那行数量没变', afterRO.items[0].quantity, 10)
+}
+
+section('R11-2 明细闸门：负数、半件、没填价格都进不了库')
+{
+  const g = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.15 })
+  const errOf = (fn: () => unknown): string => {
+    try {
+      fn()
+      return ''
+    } catch (e) {
+      return (e as Error).message
+    }
+  }
+  check(
+    '负数量被拦',
+    errOf(() => orders.addOrderItem(g.id, { styleNo: 'A001', quantity: -30, unitPrice: 8 })).includes('1 件以上')
+  )
+  check('半件被拦', errOf(() => orders.addOrderItem(g.id, { styleNo: 'A001', quantity: 1.5, unitPrice: 8 })).includes('不是整件'))
+  check(
+    '清空数量（Number(「」)=0）被拦，不再静默存 0 件行',
+    errOf(() => orders.addOrderItem(g.id, { styleNo: 'A001', quantity: 0, unitPrice: 8 })).includes('1 件以上')
+  )
+  check('单价没填（按 0 保存）被拦', errOf(() => orders.addOrderItem(g.id, { styleNo: 'A001', quantity: 10, unitPrice: 0 })).includes('单价'))
+  check('负单价被拦', errOf(() => orders.addOrderItem(g.id, { styleNo: 'A001', quantity: 10, unitPrice: -8 })).includes('负数'))
+  const gOne = orders.addOrderItem(g.id, { styleNo: 'A001', color: 'Black', size: 'M', quantity: 10, unitPrice: 8 })
+  check('已有行改成负数也被拦', errOf(() => orders.updateOrderItem(g.id, gOne.items[0].id, { quantity: -5 })).includes('1 件以上'))
+  check('已有行单价改成负数也被拦', errOf(() => orders.updateOrderItem(g.id, gOne.items[0].id, { unitPrice: -1 })).includes('负数'))
+  eq('闸门拦下的这几次一行都没进库', orders.getOrder(g.id)!.items.length, 1)
+  eq('没被改坏的那行数量还是原值', orders.getOrder(g.id)!.items[0].quantity, 10)
+
+  const gq = quotations.saveQuotation({
+    customerId: c1.id,
+    currency: 'USD',
+    exchangeRate: 7.15,
+    items: [{ styleNo: 'A001', quantity: 10, unitPrice: 7.5 }]
+  })
+  check(
+    '报价行数量为 0 直接报错（不再悄悄把半填的一行丢掉）',
+    errOf(() =>
+      quotations.saveQuotation({
+        id: gq.id,
+        customerId: c1.id,
+        currency: 'USD',
+        exchangeRate: 7.15,
+        items: [
+          { styleNo: 'A001', quantity: 10, unitPrice: 7.5 },
+          { styleNo: 'A002', quantity: 0, unitPrice: 9 }
+        ]
+      })
+    ).includes('1 件以上')
+  )
+  eq('报错的这次保存没把报价明细改掉', quotations.getQuotation(gq.id)!.items.length, 1)
+
+  // 免费样是真实业务：样品行的单价允许 0，数量仍然要 ≥1
+  const free = samples.saveSample({
+    customerId: c1.id,
+    feeStatus: 'paid',
+    items: [{ styleNo: 'A001', color: '', size: '', quantity: 2, unitPrice: 0 }]
+  })
+  check('免费样品行（单价 0）仍然允许保存', free.id > 0)
+  check(
+    '样品行负数量仍然被拦',
+    errOf(() =>
+      samples.saveSample({
+        customerId: c1.id,
+        feeStatus: 'paid',
+        items: [{ styleNo: 'A001', color: '', size: '', quantity: -1, unitPrice: 0 }]
+      })
+    ).includes('1 件以上')
+  )
+  // 装箱与明细共用同一条闸门（规矩写在 src/shared/guards，不在两处各写一份）
+  const gpl = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.15 })
+  orders.addOrderItem(gpl.id, { styleNo: 'A001', color: 'Black', size: 'M', quantity: 10, unitPrice: 8 })
+  let plErr = ''
+  try {
+    packing.createPackingList({
+      orderId: gpl.id,
+      lines: [{ styleNo: 'A001', color: 'Black', size: 'M', quantity: 0 } as any]
+    })
+  } catch (e) {
+    plErr = (e as Error).message
+  }
+  check('装箱数量为 0 仍被同一条闸门拦下', plErr.includes('1 件以上'), plErr)
+  check('装箱的报错仍然带着「删掉那一行」', plErr.includes('删掉那一行'), plErr)
+}
+
+section('R11-5 批量加行：坏一行整批不进库')
+{
+  const b = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.15 })
+  let bErr = ''
+  try {
+    orders.addOrderItems(b.id, [
+      { styleNo: 'A001', color: 'Black', size: 'M', quantity: 10, unitPrice: 8 },
+      { styleNo: 'A002', color: 'Navy', size: 'L', quantity: 20, unitPrice: 9 },
+      { styleNo: 'A003', color: 'Red', size: 'S', quantity: 0, unitPrice: 7 }
+    ])
+  } catch (e) {
+    bErr = (e as Error).message
+  }
+  check('批量里第 3 行不合格让整批失败', bErr.includes('数量'), bErr)
+  eq('前两行没有偷偷躺在库里', orders.getOrder(b.id)!.items.length, 0)
+  const okBatch = orders.addOrderItems(b.id, [
+    { styleNo: 'A001', color: 'Black', size: 'M', quantity: 10, unitPrice: 8 },
+    { styleNo: 'A002', color: 'Navy', size: 'L', quantity: 20, unitPrice: 9 }
+  ])
+  eq('两行都合规时一次加两行', okBatch.items.length, 2)
+  eq('批量加行的件数直接进整单件数', okBatch.totalQuantity, 30)
+  eq('批量加行仍然逐行留痕', orders.listEvents(b.id).filter((e) => e.kind === 'item_add').length, 2)
+}
+
+section('R11-4 操作历史答得出「谁改的」')
+{
+  const beforeOp = getSettings()
+  saveSettings({ ...beforeOp, operator: '林小满' })
+  const h = orders.createOrder({
+    customerId: c1.id,
+    currency: 'USD',
+    exchangeRate: 7.15,
+    validUntil: '2026-11-30',
+    expectedShipDate: '2026-12-10'
+  })
+  const born = orders.listEvents(h.id)
+  check('建单就有历史记录', born.length > 0)
+  check(
+    '建单时每条历史都盖上设置里的操作员',
+    born.every((e) => e.actor === '林小满'),
+    JSON.stringify(born.map((e) => e.actor))
+  )
+
+  orders.updateOrder(h.id, { expectedShipDate: '2026-12-20', cutOffDate: '2026-12-01' })
+  const moveEv = orders.listEvents(h.id).slice(-1)[0]
+  eq('交期确实写进库了', orders.getOrder(h.id)!.expectedShipDate, '2026-12-20')
+  check('历史里写成 before → after', moveEv.note.includes('预计开船 2026-12-10 → 2026-12-20'), moveEv.note)
+  check('同一次新增的截关日也留痕', moveEv.note.includes('截关日 空 → 2026-12-01'), moveEv.note)
+
+  orders.updateOrder(h.id, { note: '客户催货' })
+  const noteEv = orders.listEvents(h.id).slice(-1)[0]
+  check('只改备注的那次，历史不会把没传的交期说成清空', !noteEv.note.includes('预计开船'), noteEv.note)
+  check('备注改动本身要留痕', noteEv.note.includes('备注 空 → 客户催货'), noteEv.note)
+
+  const photo = orders.addOrderPhoto(h.id, 'inspection-x.jpg', 'inspection', '尾期验货')
+  orders.deleteOrderPhoto(h.id, photo.id)
+  const photoEv = orders.listEvents(h.id).slice(-1)[0]
+  check('删验货照也进历史，并说明删的是哪一张', photoEv.note.includes('删除验货照') && photoEv.note.includes('尾期验货'), photoEv.note)
+
+  // 换人：新动作盖新名字，旧记录一个都不改写
+  saveSettings({ ...getSettings(), operator: '周文娟' })
+  orders.voidOrder(h.id, '客户取消')
+  const allEv = orders.listEvents(h.id)
+  eq('换人后的新历史盖新名字', allEv.slice(-1)[0].actor, '周文娟')
+  eq('换人前写下的历史仍然是原操作员', allEv[0].actor, '林小满')
+  saveSettings(beforeOp)
+}
+
+section('R11-6 单号查重与建单原子化')
+{
+  orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.15, piNo: 'R11DUP001' })
+  const before = orders.listOrders({}).length
+  let dupMsg = ''
+  try {
+    orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.15, piNo: 'R11DUP001' })
+  } catch (e) {
+    dupMsg = (e as Error).message
+  }
+  check('同一个 PI 号建第二张单被拦住', dupMsg.includes('已经存在'), dupMsg)
+  check('报错说清楚该怎么改', dupMsg.includes('换一个号'), dupMsg)
+  eq('被拦住的那次没有留下空单', orders.listOrders({}).length, before)
+
+  // 手工号也算「已占用」：自动号必须跳过它，不能第二天又生成同一个号
+  const auto = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.15 })
+  check('自动生成的 PI 号不撞手工号', auto.piNo !== 'R11DUP001', auto.piNo)
+  const allPi = orders.listOrders({}).map((o) => o.piNo).filter(Boolean)
+  eq('全库 PI 号仍然无重号', allPi.length, new Set(allPi).size)
+  check(
+    '建单和它的「建单」历史一起成立',
+    orders.listEvents(auto.id).some((e) => e.kind === 'create' && e.note.includes(auto.orderNo))
+  )
+}
+
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
 console.log(`通过 ${passed} 项，失败 ${failed} 项`)

@@ -89,7 +89,11 @@ export default function EditOrderModal({
     void window.api.orders.ports().then(setPorts)
   }, [])
 
+  // 保存期间按住按钮：一次改单要写主表 + 历史 + 状态重算，连点两下会把同一份改动提交两遍
+  const [busy, setBusy] = useState(false)
+
   const save = async () => {
+    if (busy) return
     const rate = Number(form.exchangeRate)
     const paidCount = (order.payments ?? []).length
     // 收款是按原币登记的：已经收过钱的单不许换币种，否则客户对账和银行流水都会错位
@@ -116,6 +120,7 @@ export default function EditOrderModal({
       )
       if (!ok) return
     }
+    setBusy(true)
     try {
       await window.api.orders.update(order.id, {
         customerId: form.customerId,
@@ -146,6 +151,8 @@ export default function EditOrderModal({
       await onSaved()
     } catch (e) {
       toast((e as Error).message, 'error')
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -162,10 +169,10 @@ export default function EditOrderModal({
       size="wide"
       footer={
         <>
-          <Button  onClick={onClose}>
+          <Button onClick={onClose}>
             取消
           </Button>
-          <Button variant="primary"  onClick={save}>
+          <Button variant="primary" disabled={busy} onClick={save}>
             保存修改
           </Button>
         </>

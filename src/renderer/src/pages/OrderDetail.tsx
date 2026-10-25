@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   Modal, useToast, money, num, fmtDate, fmtDateTime, Empty, Menu,
-  Button, PaymentTag, ShipTag, clientKey
+  Button, PaymentTag, ShipTag, clientKey, LoadError
 } from '../ui'
 import {
   PAYMENT_METHOD_LABEL,
@@ -68,23 +68,30 @@ export default function OrderDetail() {
   const [editPayment, setEditPayment] = useState(false)
   const [editShip, setEditShip] = useState(false)
   const [docVersions, setDocVersions] = useState<any[]>([])
+  /** 读不出来就明说并给重试，不能永远停在「加载中…」 */
+  const [loadError, setLoadError] = useState('')
 
   const load = async () => {
-    const [o, s, e, dv] = await Promise.all([
-      window.api.orders.get(orderId),
-      window.api.settings.get(),
-      window.api.orders.events(orderId),
-      window.api.docs.list(orderId)
-    ])
-    if (!o) {
-      toast('订单不存在', 'error')
-      navigate('/orders')
-      return
+    try {
+      const [o, s, e, dv] = await Promise.all([
+        window.api.orders.get(orderId),
+        window.api.settings.get(),
+        window.api.orders.events(orderId),
+        window.api.docs.list(orderId)
+      ])
+      if (!o) {
+        toast('订单不存在', 'error')
+        navigate('/orders')
+        return
+      }
+      setOrder(o)
+      setSettings(s)
+      setEvents(e)
+      setDocVersions(dv)
+      setLoadError('')
+    } catch (e) {
+      setLoadError((e as Error).message || '这张订单没读出来')
     }
-    setOrder(o)
-    setSettings(s)
-    setEvents(e)
-    setDocVersions(dv)
   }
 
   useEffect(() => {
@@ -290,7 +297,17 @@ export default function OrderDetail() {
     }
   }
 
-  if (!order) return <div className="content">加载中…</div>
+  if (!order) {
+    return (
+      <div className="content">
+        {loadError ? (
+          <LoadError what="这张订单" message={loadError} onRetry={() => void load()} />
+        ) : (
+          <div className="empty loading">加载中…</div>
+        )}
+      </div>
+    )
+  }
 
   return (
     <>
@@ -1005,14 +1022,17 @@ function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<voi
   }
 
   // 已装箱/已出运的明细改不动：报错要说给人听，输入框也要跟着回退到真实值
-  const saveItem = async (itemId: number, patch: Record<string, unknown>, okMsg?: string) => {
+  const saveItem = async (itemId: number, patch: Record<string, unknown>, okMsg?: string): Promise<boolean> => {
+    let ok = false
     try {
       await window.api.orders.updateItem(order.id, itemId, patch)
+      ok = true
       if (okMsg) toast(okMsg)
     } catch (e) {
       toast((e as Error).message, 'error')
     }
     await refresh()
+    return ok
   }
 
   const removeItem = async (itemId: number) => {
@@ -1100,9 +1120,15 @@ function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<voi
                       className="col-num-sm"
                       defaultValue={it.quantity}
                       onBlur={async (e) => {
+                        // 清空 = 没改，不是「改成 0」；被服务层拦下来的数要弹回真值，
+                        // 不然格子里显示 500、账上还是 300，用户带着错数去跟工厂排产
+                        if (e.target.value.trim() === '') {
+                          e.target.value = String(it.quantity)
+                          return
+                        }
                         const v = Number(e.target.value)
                         if (v === it.quantity) return
-                        await saveItem(it.id, { quantity: v })
+                        if (!(await saveItem(it.id, { quantity: v }))) e.target.value = String(it.quantity)
                       }}
                     />
                   </td>
@@ -1113,9 +1139,13 @@ function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<voi
                       className="col-num"
                       defaultValue={it.unitPrice}
                       onBlur={async (e) => {
+                        if (e.target.value.trim() === '') {
+                          e.target.value = String(it.unitPrice)
+                          return
+                        }
                         const v = Number(e.target.value)
                         if (v === it.unitPrice) return
-                        await saveItem(it.id, { unitPrice: v })
+                        if (!(await saveItem(it.id, { unitPrice: v }))) e.target.value = String(it.unitPrice)
                       }}
                     />
                   </td>
@@ -1236,33 +1266,53 @@ function AddItemsModal({
     return out
   }, [picked])
 
+  const [busy, setBusy] = useState(false)
+
   const submit = async () => {
-    if (!picked) return
-    const items = rows
-      .filter((r) => (grid[r.key] ?? '').trim() !== '' && Number(grid[r.key]) > 0)
-      .map((r) => ({
-        productId: picked.id,
-        styleNo: picked.styleNo,
-        productName: picked.name,
-        composition: picked.composition,
-        color: r.color,
-        size: r.size,
-        quantity: Number(grid[r.key]),
-        unitPrice: colorPrice[r.color] ? Number(colorPrice[r.color]) : Number(price) || 0,
-        // 交工厂价（基准币），由服务端按本单汇率折算——前端不自己除，免得又算出两套数
-        costBase: picked.costPrice
-      }))
+    if (busy || !picked) return
+    const rows2 = rows.filter((r) => (grid[r.key] ?? '').trim() !== '')
+    const half = rows2.filter((r) => !Number.isInteger(Number(grid[r.key])) || Number(grid[r.key]) <= 0)
+    if (half.length > 0) {
+      toast(
+        `这几格填的数量不是 1 件以上的整数：${half.map((r) => `${r.color}/${r.size}「${grid[r.key]}」`).join('、')}。不做的组合请留空`,
+        'error'
+      )
+      return
+    }
+    const items = rows2.map((r) => ({
+      productId: picked.id,
+      styleNo: picked.styleNo,
+      productName: picked.name,
+      composition: picked.composition,
+      color: r.color,
+      size: r.size,
+      quantity: Number(grid[r.key]),
+      unitPrice: colorPrice[r.color] ? Number(colorPrice[r.color]) : Number(price) || 0,
+      // 交工厂价（基准币），由服务端按本单汇率折算——前端不自己除，免得又算出两套数
+      costBase: picked.costPrice
+    }))
     if (items.length === 0) {
       toast('请至少填写一个 SKU 的数量', 'error')
       return
     }
+    const noPrice = items.filter((i) => !(i.unitPrice > 0))
+    if (noPrice.length > 0) {
+      toast(
+        `这 ${noPrice.length} 个组合还没单价（${noPrice.map((i) => `${i.color}/${i.size}`).join('、')}）。按 0 保存会把整单金额、应收和毛利一起做成 0——请先在「单价」里填价`,
+        'error'
+      )
+      return
+    }
+    setBusy(true)
     try {
-      await window.api.orders.addItem(order.id, items[0])
-      for (const it of items.slice(1)) await window.api.orders.addItem(order.id, it)
+      // 一次批量调用：整批一个事务，第 3 行不合格时前两行不会已经躺在库里
+      await window.api.orders.addItems(order.id, items)
       toast(`已添加 ${items.length} 个 SKU`)
       await onDone()
     } catch (e) {
       toast((e as Error).message, 'error')
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -1276,7 +1326,7 @@ function AddItemsModal({
           <Button  onClick={onClose}>
             取消
           </Button>
-          <Button variant="primary"  onClick={submit}>
+          <Button variant="primary" disabled={busy} onClick={submit}>
             添加到订单
           </Button>
         </>
@@ -2988,6 +3038,36 @@ function CreatePlModal({
 
 /* ================= 时间线 ================= */
 
+/** 没写 note 的历史也要说人话，不能把 payment_status 这种内部字段名摆给业务看 */
+const EVENT_KIND_LABEL: Record<string, string> = {
+  create: '创建订单',
+  update: '修改订单',
+  party_update: '修改抬头',
+  item_add: '添加明细',
+  item_update: '修改明细',
+  item_replace: '替换明细',
+  payment: '记录收款',
+  payment_delete: '删除收款',
+  payment_status: '收款状态变更',
+  status_auto: '收款状态自动流转',
+  ship_status: '出货状态变更',
+  void: '作废订单',
+  photo: '照片变动',
+  pl_create: '新建装箱单',
+  pl_delete: '删除装箱单',
+  pl_line_update: '修改箱明细',
+  pl_unvoid: '撤销作废批次',
+  settlement: '核销',
+  settlement_reverse: '撤销核销'
+}
+
+/** 状态值按事件类型翻译：收款事件印中文收款状态，出货事件印中文出货状态 */
+function statusText(kind: string, v: string | null): string {
+  if (!v) return '—'
+  const table = kind === 'ship_status' || kind === 'pl_unvoid' ? SHIP_STATUS_LABEL : PAYMENT_STATUS_LABEL
+  return (table as Record<string, string>)[v] ?? v
+}
+
 function TimelineTab({ events, docVersions }: { events: any[]; docVersions: any[] }) {
   const toast = useToast()
   return (
@@ -3056,10 +3136,13 @@ function TimelineTab({ events, docVersions }: { events: any[]; docVersions: any[
             <div key={e.id} className="timeline-item">
               <span className="timeline-dot" />
               <div className="timeline-main">
-                <div>{e.note || e.kind}</div>
+                <div>
+                  {e.note || EVENT_KIND_LABEL[e.kind] || e.kind}
+                  {e.actor ? <span className="faint"> · {e.actor}</span> : null}
+                </div>
                 {e.fromStatus || e.toStatus ? (
                   <div className="timeline-time">
-                    {e.fromStatus ?? '—'} → {e.toStatus ?? '—'}
+                    {statusText(e.kind, e.fromStatus)} → {statusText(e.kind, e.toStatus)}
                   </div>
                 ) : null}
               </div>
@@ -3078,9 +3161,15 @@ function PhotosTab({ order, onChange }: { order: any; onChange: () => Promise<vo
   const toast = useToast()
   const [photos, setPhotos] = useState<any[]>([])
   const [kind, setKind] = useState<'inspection' | 'container'>('inspection')
+  const [loadError, setLoadError] = useState('')
 
   const load = async () => {
-    setPhotos(await window.api.orders.photos(order.id))
+    try {
+      setPhotos(await window.api.orders.photos(order.id))
+      setLoadError('')
+    } catch (e) {
+      setLoadError((e as Error).message || '照片没加载出来')
+    }
   }
 
   useEffect(() => {
@@ -3089,12 +3178,16 @@ function PhotosTab({ order, onChange }: { order: any; onChange: () => Promise<vo
   }, [order.id])
 
   const upload = async () => {
-    const files = await window.api.images.pick()
-    if (files.length === 0) return
-    for (const f of files) await window.api.orders.addPhoto(order.id, f, kind, '')
-    toast(`已上传 ${files.length} 张`)
-    await load()
-    await onChange()
+    try {
+      const files = await window.api.images.pick()
+      if (files.length === 0) return
+      for (const f of files) await window.api.orders.addPhoto(order.id, f, kind, '')
+      toast(`已上传 ${files.length} 张`)
+      await load()
+      await onChange()
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
   }
 
   return (
@@ -3113,7 +3206,9 @@ function PhotosTab({ order, onChange }: { order: any; onChange: () => Promise<vo
         <span className="faint">照片存在本机，跟单走，客户要的时候直接发</span>
       </div>
 
-      {photos.length === 0 ? (
+      {loadError ? (
+        <LoadError what="验货 / 装柜照" message={loadError} onRetry={() => void load()} />
+      ) : photos.length === 0 ? (
         <Empty text="还没有照片。验货时拍的几张传上来，客户要的时候直接发。" />
       ) : (
         <div className="photo-grid">
@@ -3126,8 +3221,12 @@ function PhotosTab({ order, onChange }: { order: any; onChange: () => Promise<vo
                   
                   onClick={async () => {
                     if (!confirm('删除这张照片？')) return
-                    await window.api.orders.delPhoto(order.id, p.id)
-                    await load()
+                    try {
+                      await window.api.orders.delPhoto(order.id, p.id)
+                      await load()
+                    } catch (e) {
+                      toast((e as Error).message, 'error')
+                    }
                   }}
                 >
                   删除

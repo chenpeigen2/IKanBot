@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Modal, useToast, money, moneyOrDash, num, Empty, fmtDate, today, ActionMenu, SampleStatusTag, Button, SampleFeeTag, clientKey } from '../ui'
+import { Modal, useToast, money, moneyOrDash, num, Empty, fmtDate, today, ActionMenu, SampleStatusTag, Button, SampleFeeTag, clientKey, LoadError } from '../ui'
 import {
   SAMPLE_STATUS_LABEL,
   SAMPLE_STATUS_ORDER,
@@ -46,10 +46,17 @@ export default function Samples() {
   const [converting, setConverting] = useState<any | null>(null)
   /** N-2：转单前必须问一句 PI 发不发（草稿单不进销售额/待收，忘了改状态就是对账事故） */
   const [convPi, setConvPi] = useState<'' | 'draft' | 'sent'>('')
+  /** 读取失败不能装成「没有打样单」 */
+  const [loadError, setLoadError] = useState('')
 
   const load = async () => {
-    const rows = await window.api.samples.list({ keyword, status: status || undefined })
-    setList(rows)
+    try {
+      const rows = await window.api.samples.list({ keyword, status: status || undefined })
+      setList(rows)
+      setLoadError('')
+    } catch (e) {
+      setLoadError((e as Error).message || '打样单列表没加载出来')
+    }
   }
 
   useEffect(() => {
@@ -137,7 +144,9 @@ export default function Samples() {
 
         <div className="card">
           <div className="card-body tight">
-            {list.length === 0 ? (
+            {loadError ? (
+              <LoadError what="打样单列表" message={loadError} onRetry={() => void load()} />
+            ) : list.length === 0 ? (
               <Empty
                 text={
                   keyword || status
@@ -470,17 +479,29 @@ function SampleModal({
     })
   }
 
+  // 双击会烧两个样品单号、建两张单：保存期间把按钮按住
+  const [busy, setBusy] = useState(false)
+
   const save = async () => {
+    if (busy) return
     if (!form.customerId) {
       toast('请先选择客户', 'error')
       return
     }
-    const clean = lines.filter((l) => l.styleNo.trim() && l.quantity > 0)
-    const cleanItems = clean.map(({ uid: _uid, ...rest }) => rest)
-    if (clean.length === 0) {
+    // 填了款号的行才算数，且数量必须 1 件以上——悄悄丢掉一行最坏：
+    // 用户以为样品费里含那两件，账上根本没有这一行
+    const filled = lines.filter((l) => l.styleNo.trim())
+    if (filled.length === 0) {
       toast('请至少填写一行样品明细', 'error')
       return
     }
+    const halfFilled = filled.filter((l) => !(Number(l.quantity) > 0))
+    if (halfFilled.length > 0) {
+      toast(`这几行填了款号但数量不是 1 件以上：${halfFilled.map((l) => l.styleNo).join('、')}。不做的行请点「删行」`, 'error')
+      return
+    }
+    const cleanItems = filled.map(({ uid: _uid, ...rest }) => rest)
+    setBusy(true)
     try {
       await window.api.samples.save({
         id: draft.id,
@@ -505,6 +526,8 @@ function SampleModal({
       await onSaved()
     } catch (e) {
       toast((e as Error).message, 'error')
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -523,7 +546,7 @@ function SampleModal({
           <Button  onClick={onClose}>
             取消
           </Button>
-          <Button variant="primary"  onClick={save}>
+          <Button variant="primary" disabled={busy} onClick={save}>
             保存打样单
           </Button>
         </>

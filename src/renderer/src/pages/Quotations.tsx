@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Modal, useToast, money, num, Empty, fmtDate, fmtDateTime, today, ActionMenu, QuotationStatusTag, Button, clientKey } from '../ui'
+import { Modal, useToast, money, num, Empty, fmtDate, fmtDateTime, today, ActionMenu, QuotationStatusTag, Button, clientKey, LoadError } from '../ui'
 import {
   CURRENCIES,
   INCOTERMS,
@@ -43,6 +43,8 @@ export default function Quotations() {
   const navigate = useNavigate()
   const toast = useToast()
   const [list, setList] = useState<any[]>([])
+  /** 读取失败不能装成「没有报价单」 */
+  const [loadError, setLoadError] = useState('')
   // 工作台点「报价」提醒带 ?kw=Q-0001 跳进来：先把这一张筛出来
   const [searchParams] = useSearchParams()
   const [keyword, setKeyword] = useState(searchParams.get('kw') ?? '')
@@ -56,11 +58,16 @@ export default function Quotations() {
   const [overrideReason, setOverrideReason] = useState('')
 
   const load = async () => {
-    const rows = await window.api.quotations.list({
-      keyword,
-      status: tab || undefined
-    })
-    setList(rows)
+    try {
+      const rows = await window.api.quotations.list({
+        keyword,
+        status: tab || undefined
+      })
+      setList(rows)
+      setLoadError('')
+    } catch (e) {
+      setLoadError((e as Error).message || '报价单列表没加载出来')
+    }
   }
 
   useEffect(() => {
@@ -166,7 +173,9 @@ export default function Quotations() {
             ))}
           </div>
           <div className="card-body tight">
-            {list.length === 0 ? (
+            {loadError ? (
+              <LoadError what="报价单列表" message={loadError} onRetry={() => void load()} />
+            ) : list.length === 0 ? (
               <Empty
                 text={
                   keyword || tab
@@ -938,7 +947,11 @@ function QuotationModal({
   const productOf = (l: LineRow): any =>
     products.find((p) => (l.productId ? p.id === l.productId : p.styleNo === l.styleNo))
 
+  // 按住第二次点击：存一次就烧一个报价单号，双击等于两张单、两个号
+  const [busy, setBusy] = useState(false)
+
   const save = async () => {
+    if (busy) return
     if (!form.customerId) {
       toast('请先选择客户', 'error')
       return
@@ -947,7 +960,19 @@ function QuotationModal({
       toast('请先按今天钉盘的汇率填写汇率', 'error')
       return
     }
-    const clean = lines.filter((l) => l.styleNo.trim() && l.quantity > 0)
+    // 填了款号的行才算数，数量还得是 1 件以上：
+    // 直接滤掉半填的行，等于用户以为报出去了，纸面上却没有那一行
+    const clean = lines.filter((l) => l.styleNo.trim())
+    if (clean.length === 0) {
+      toast('请至少填写一行报价明细（款号 + 数量 + 单价）', 'error')
+      return
+    }
+    const halfFilled = clean.filter((l) => !(Number(l.quantity) > 0))
+    if (halfFilled.length > 0) {
+      toast(`这几行填了款号但数量不是 1 件以上：${halfFilled.map((l) => l.styleNo).join('、')}`, 'error')
+      return
+    }
+    setBusy(true)
     try {
       const q = await window.api.quotations.save({
         id: draft.id,
@@ -979,6 +1004,8 @@ function QuotationModal({
       await onSaved(q.id)
     } catch (e) {
       toast((e as Error).message, 'error')
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -993,7 +1020,7 @@ function QuotationModal({
             <Button  onClick={onClose}>
               取消
             </Button>
-            <Button variant="primary"  onClick={save}>
+            <Button variant="primary" disabled={busy} onClick={save}>
               保存报价单
             </Button>
           </>

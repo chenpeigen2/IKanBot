@@ -13,7 +13,8 @@ import {
   ShipTag,
   Button,
   useDebounced,
-  useLoadGuard
+  useLoadGuard,
+  LoadError
 } from '../ui'
 import { isBillingStatus, shownRemaining } from '../../../shared/billing'
 import {
@@ -50,28 +51,36 @@ export default function Orders() {
   const [sort, setSort] = useState('created_desc')
   const [page, setPage] = useState(0)
   const [showCreate, setShowCreate] = useState(params.get('new') === '1')
+  /** 查询失败要说出来：空列表 + 一句「还没有订单」会把“读取失败”说成“今天没单” */
+  const [loadError, setLoadError] = useState('')
   /** 敲太快不重复打后端；后到的旧结果不许盖住新关键词 */
   const kw = useDebounced(keyword, 250)
   const begin = useLoadGuard()
 
   const load = async () => {
     const { isCurrent } = begin()
-    const pageData = await window.api.orders.list({
-      keyword: kw,
-      paymentStatus: statusTab || undefined,
-      shipStatus: shipStatus || undefined,
-      from: from || undefined,
-      to: to || undefined,
-      sort,
-      limit: PAGE_SIZE,
-      offset: page * PAGE_SIZE
-    })
-    if (!isCurrent()) return
-    setRows(pageData.rows)
-    setTotal(pageData.total)
-    setOwedBase(pageData.owedBaseTotal)
-    setGrandBase(pageData.grandBaseTotal)
-    if (pageData.rows[0]?.baseCurrency) setBaseCurrency(pageData.rows[0].baseCurrency)
+    try {
+      const pageData = await window.api.orders.list({
+        keyword: kw,
+        paymentStatus: statusTab || undefined,
+        shipStatus: shipStatus || undefined,
+        from: from || undefined,
+        to: to || undefined,
+        sort,
+        limit: PAGE_SIZE,
+        offset: page * PAGE_SIZE
+      })
+      if (!isCurrent()) return
+      setRows(pageData.rows)
+      setTotal(pageData.total)
+      setOwedBase(pageData.owedBaseTotal)
+      setGrandBase(pageData.grandBaseTotal)
+      if (pageData.rows[0]?.baseCurrency) setBaseCurrency(pageData.rows[0].baseCurrency)
+      setLoadError('')
+    } catch (e) {
+      if (!isCurrent()) return
+      setLoadError((e as Error).message || '订单列表没加载出来')
+    }
   }
   useEffect(() => {
     void load()
@@ -179,7 +188,9 @@ export default function Orders() {
             ))}
           </div>
           <div className="card-body tight">
-            {rows.length === 0 ? (
+            {loadError ? (
+              <LoadError what="订单列表" message={loadError} onRetry={() => void load()} />
+            ) : rows.length === 0 ? (
               <Empty
                 text={
                   hasFilter
@@ -460,7 +471,12 @@ function CreateOrderModal({
     [customers, form.customerId]
   )
 
+  // 建单要烧一个单号（计数器只往前走）：连点两次就是两张单、两个号，
+  // 第二张还是没人知道的空单——保存期间把按钮按住
+  const [busy, setBusy] = useState(false)
+
   const save = async () => {
+    if (busy) return
     if (!form.customerId) {
       toast('请先选择客户', 'error')
       return
@@ -469,6 +485,7 @@ function CreateOrderModal({
       toast('请先按今天钉盘的汇率填写汇率', 'error')
       return
     }
+    setBusy(true)
     try {
       const order = await window.api.orders.create({
         customerId: form.customerId,
@@ -490,6 +507,8 @@ function CreateOrderModal({
       onCreated(order.id)
     } catch (e) {
       toast((e as Error).message, 'error')
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -503,7 +522,7 @@ function CreateOrderModal({
           <Button  onClick={onClose}>
             取消
           </Button>
-          <Button variant="primary"  onClick={save}>
+          <Button variant="primary" disabled={busy} onClick={save}>
             创建并添加商品
           </Button>
         </>

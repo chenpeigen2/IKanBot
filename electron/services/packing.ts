@@ -4,6 +4,7 @@ import { getSettings } from './settings'
 import { logEvent } from './events'
 import { applyShipStatus } from './shipping'
 import { localDate, isLocalDate } from '../../src/shared/date'
+import { assertQuantity as assertQtyRule } from '../../src/shared/guards'
 import { SHIP_STATUS_LABEL, SHIP_STATUS_ORDER } from '../../src/shared/types'
 import type { BatchShipStatus, PackingList, PackingListLine } from '../../src/shared/types'
 
@@ -15,24 +16,11 @@ function isVoided(cur: Record<string, unknown> | null): boolean {
 }
 
 /**
- * 装箱件数的入口闸门：必须是有限正整数。
- * 库里一旦进来负数或半件，三件事同时坏：这一款的累计已装量被压低（超装反而放行）、
- * 整单状态和已出运件数跟着错、纸面箱单把负数件印给海关和客户。
- * UI 挡不住所有出口（IPC 是任何调用方都能打的），所以闸门写在这里。
+ * 装箱件数的入口闸门：规矩与订单/报价/打样明细共用同一条（实现在 src/shared/guards），
+ * 这里只补装箱特有的那句话——这一箱不发了应该删行，而不是填 0 或负数。
  */
 function assertQuantity(qty: unknown, label = '装箱数量'): void {
-  const n = Number(qty)
-  if (!Number.isFinite(n)) {
-    throw new Error(`${label}「${String(qty)}」不是数字，请填 1 以上的整数件数`)
-  }
-  if (!Number.isInteger(n)) {
-    throw new Error(`${label} ${n} 不是整件——服装按件装箱，半件在箱单和报关上都说不清`)
-  }
-  if (n <= 0) {
-    throw new Error(
-      `${label}必须是 1 件以上。这一箱不发了请直接删掉那一行（删到只剩一箱时请整张装箱单一起删），填 0 或负数会让这一款的已装量算错，超装也拦不住了`
-    )
-  }
+  assertQtyRule(qty, label, '这一箱不发了请直接删掉那一行（删到只剩一箱时请整张装箱单一起删）')
 }
 
 /** 重量：可以空着（纸面印 est./留白），给了就必须是非负的真实数字 */

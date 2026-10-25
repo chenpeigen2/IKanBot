@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { useToast, money, Empty, Button, Card } from '../ui'
+import { useCallback, useEffect, useState } from 'react'
+import { useToast, money, Empty, Button, Card, LoadError } from '../ui'
 import type { CustomerReceivable, ExportKind, MonthlyReportRow } from '../../../shared/types'
 
 /** 一行取整到分；合计只吃这些取整后的行值（口径：所见即所算，别让浮点在小数点后打架） */
@@ -13,9 +13,11 @@ export default function Reports() {
   const [owed, setOwed] = useState<CustomerReceivable[]>([])
   const [settings, setSettings] = useState<any>(null)
   const [loading, setLoading] = useState(true)
+  /** 报表算不出来时要说出来：一直停在「加载中…」等于让人对着空表做决定 */
+  const [loadError, setLoadError] = useState('')
 
-  useEffect(() => {
-    void (async () => {
+  const load = useCallback(async () => {
+    try {
       const [r, o, s] = await Promise.all([
         window.api.report.monthly(),
         window.api.report.receivables(),
@@ -24,9 +26,17 @@ export default function Reports() {
       setRows(r)
       setOwed(o)
       setSettings(s)
+      setLoadError('')
+    } catch (e) {
+      setLoadError((e as Error).message || '报表没算出来')
+    } finally {
       setLoading(false)
-    })()
+    }
   }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
 
   const cur = settings?.baseCurrency ?? 'CNY'
   // 合计 = 逐行取整后的和：表里 12 行各差半分钱时，卡片上的数才不会对不上
@@ -63,13 +73,31 @@ export default function Reports() {
   const exportBtn = (kind: ExportKind, label: string, toastText: string) => (
     <Button
       onClick={async () => {
-        const f = await window.api.exporter.csv(kind)
-        if (f) toast(toastText)
+        try {
+          const f = await window.api.exporter.csv(kind)
+          if (f) toast(toastText)
+        } catch (e) {
+          toast((e as Error).message || '导出没成功', 'error')
+        }
       }}
     >
       {label}
     </Button>
   )
+
+  // 数据没算出来就别摆一张全是 0 的表：宁可明说失败，也不让人拿空报表做决定
+  if (loadError) {
+    return (
+      <>
+        <div className="topbar">
+          <h1>报表</h1>
+        </div>
+        <div className="content">
+          <LoadError what="报表" message={loadError} onRetry={() => void load()} />
+        </div>
+      </>
+    )
+  }
 
   return (
     <>

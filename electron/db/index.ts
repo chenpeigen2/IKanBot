@@ -42,6 +42,39 @@ export function getDb(): Database {
   return db
 }
 
+/** transact 的嵌套深度：只用来给 SAVEPOINT 起不重名的标签 */
+let txDepth = 0
+
+/**
+ * 事务包装：里面的代码抛错就整体回滚，不会留下「主表改了、明细被删了没插回去」这种半截单。
+ *
+ * 支持嵌套（内层用 SAVEPOINT）：报价转订单已经包着一层事务，里面还要调建单/存报价，
+ * 直接再发 BEGIN 会被 sqlite 拒绝（cannot start a transaction within a transaction）。
+ * 是否「已经在事务里」以数据库自己的状态为准——旧代码里还有手写的 BEGIN，
+ * 只看自己的计数器会误判，然后在真事务里再 BEGIN 一次。
+ */
+export function transact<T>(fn: () => T): T {
+  const database = getDb()
+  const top = !database.inTransaction
+  const tag = `tx_${txDepth}`
+  database.exec(top ? 'BEGIN' : `SAVEPOINT ${tag}`)
+  txDepth++
+  try {
+    const result = fn()
+    txDepth--
+    database.exec(top ? 'COMMIT' : `RELEASE SAVEPOINT ${tag}`)
+    return result
+  } catch (e) {
+    txDepth--
+    if (top) database.exec('ROLLBACK')
+    else {
+      database.exec(`ROLLBACK TO SAVEPOINT ${tag}`)
+      database.exec(`RELEASE SAVEPOINT ${tag}`)
+    }
+    throw e
+  }
+}
+
 export function openDb(): Database {
   if (db) return db
   const file = join(dataDir(), 'ikanbot.db')

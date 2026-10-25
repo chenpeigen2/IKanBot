@@ -156,6 +156,9 @@ export function registerIpc(): void {
   handle('orders:updateItem', (orderId: number, itemId: number, patch: Partial<orders.OrderItemInput>) =>
     orders.updateOrderItem(orderId, itemId, patch)
   )
+  handle('orders:addItems', (orderId: number, items: orders.OrderItemInput[]) =>
+    orders.addOrderItems(orderId, items)
+  )
   handle('orders:removeItem', (orderId: number, itemId: number) => orders.removeOrderItem(orderId, itemId))
   handle('orders:replaceItems', (orderId: number, items: orders.OrderItemInput[]) =>
     orders.replaceOrderItems(orderId, items)

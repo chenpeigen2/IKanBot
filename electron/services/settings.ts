@@ -19,6 +19,7 @@ const DEFAULTS: AppSettings = {
   remindShipDays: 3,
   grossWeightFactor: 1.1,
   baseCurrency: 'CNY',
+  operator: '',
   lastBackupAt: null,
   lastBackupError: null
 }
@@ -108,6 +109,7 @@ function normalizeSettings(parsed: unknown): AppSettings {
     remindShipDays: dayOf(p.remindShipDays, DEFAULTS.remindShipDays, 0, 90),
     grossWeightFactor: factorOf(p.grossWeightFactor, DEFAULTS.grossWeightFactor),
     baseCurrency: isCurrency(p.baseCurrency) ? p.baseCurrency : DEFAULTS.baseCurrency,
+    operator: textOf(p.operator).trim().slice(0, 40),
     lastBackupAt: typeof p.lastBackupAt === 'string' ? p.lastBackupAt : null,
     lastBackupError: typeof p.lastBackupError === 'string' ? p.lastBackupError : null
   }
@@ -170,6 +172,7 @@ function validateSettings(input: unknown): AppSettings {
       website: ''
     },
     banks: [],
+    operator: current.operator,
     piValidDays: current.piValidDays,
     defaultDepositRatio: current.defaultDepositRatio,
     remindConfirmDays: current.remindConfirmDays,
@@ -187,6 +190,13 @@ function validateSettings(input: unknown): AppSettings {
     const v = textOf(company[key]).trim()
     if (v.length > limit) throw new Error(`${label}太长了（最多 ${limit} 个字），印在单据抬头上会排不下`)
     out.company[key] = v
+  }
+
+  // 操作员不吃「没传就清空」那一套：别的入口保存设置（备份服务、测试）不该顺手把签字人抹掉
+  if (raw.operator !== undefined) {
+    const operator = textOf(raw.operator).trim()
+    if (operator.length > 40) throw new Error('操作员名字太长了（最多 40 个字）')
+    out.operator = operator
   }
 
   const banksRaw = Array.isArray(raw.banks) ? raw.banks : []
