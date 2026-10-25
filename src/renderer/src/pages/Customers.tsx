@@ -646,6 +646,24 @@ export default function Customers() {
               </table>
             </div>
           )}
+
+          {/* 客户问「我还欠哪几张 PI」时不用再逐单手抄：对账单导出走订单台账同一份口径 */}
+          {detail.orders.length > 0 ? (
+            <div style={{ marginTop: 10 }}>
+              <Button
+                onClick={async () => {
+                  try {
+                    const f = await window.api.exporter.csv('orders', { customerId: detail.c.id })
+                    if (f) toast(`已导出 ${detail.c.company} 的订单对账单`)
+                  } catch (e) {
+                    toast((e as Error).message || '导出没成功', 'error')
+                  }
+                }}
+              >
+                导出对账单（Excel）
+              </Button>
+            </div>
+          ) : null}
         </Modal>
       ) : null}
     </>

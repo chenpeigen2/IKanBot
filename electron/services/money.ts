@@ -25,7 +25,7 @@
  *   而报表销售额记 0 —— 同一单两个毛利，差 50 USD，纯属漂亮的假数字。
  */
 import { getDb } from '../db'
-import { localMonthOf } from '../../src/shared/date'
+import { localMonthOf, localDateOf, localDate } from '../../src/shared/date'
 import { ciNoOf } from '../../src/shared/documents'
 import { NON_BILLING_STATUSES } from '../../src/shared/billing'
 import type { CustomerReceivable, PackingAmount, PackingAmountLine, QuotationCharge } from '../../src/shared/types'
@@ -660,6 +660,7 @@ export function receivedByMonth(): { month: string; amount: number }[] {
  */
 export function receivableByCustomer(): CustomerReceivable[] {
   const rows = listOrderMoney()
+  const today = localDate()
   const by = new Map<number, CustomerReceivable>()
   for (const r of rows) {
     const cur = by.get(r.customerId) ?? {
@@ -668,10 +669,20 @@ export function receivableByCustomer(): CustomerReceivable[] {
       orders: 0,
       goodsBase: 0,
       sampleBase: 0,
-      totalBase: 0
+      totalBase: 0,
+      oldestUnpaidDate: null,
+      oldestUnpaidDays: 0
     }
     // 「未结单数」只数还欠着钱的单：收齐的单挂在欠款榜上会让客户以为还有账没对清
-    if (r.receivableBase > 0.001) cur.orders += 1
+    if (r.receivableBase > 0.001) {
+      cur.orders += 1
+      // 账龄跟着最老那笔未收走：老板看不出欠了 3 天还是 3 个月，催款先后就只能靠人记
+      const created = localDateOf(r.createdAt)
+      if (created && (cur.oldestUnpaidDate == null || created < cur.oldestUnpaidDate)) {
+        cur.oldestUnpaidDate = created
+        cur.oldestUnpaidDays = Math.max(0, Math.floor((Date.parse(today) - Date.parse(created)) / 86400000))
+      }
+    }
     cur.goodsBase += r.receivableBase
     by.set(r.customerId, cur)
   }
@@ -696,7 +707,9 @@ export function receivableByCustomer(): CustomerReceivable[] {
       orders: 0,
       goodsBase: 0,
       sampleBase,
-      totalBase: sampleBase
+      totalBase: sampleBase,
+      oldestUnpaidDate: null,
+      oldestUnpaidDays: 0
     })
   }
   for (const v of by.values()) v.totalBase = v.goodsBase + v.sampleBase

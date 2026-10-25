@@ -7,7 +7,7 @@
 import { getDb, nextNo, transact } from '../db'
 import { mapQuotation, mapQuotationItem, mapCustomer } from '../db/mappers'
 import { getSettings } from './settings'
-import { createOrder, getOrder } from './orders'
+import { createOrder, getOrder, assertSkuListUnique } from './orders'
 import { logEvent } from './events'
 import { computeOrderMoney, costInOrderCurrency } from './money'
 import { likeAny } from './search'
@@ -317,6 +317,8 @@ function saveQuotationInner(input: QuotationInput): QuotationDetail {
     assertQuantity(it.quantity, `${who} 的数量`)
     assertUnitPrice(it.unitPrice, `${who} 的单价`)
   })
+  // 源头拦同款两行：转单时明细原样带过去，两行不同单价会把 CI 金额算乱
+  assertSkuListUnique(input.items, '报价单')
   const settings = getSettings()
   // 费用行与有效期是「编辑时没传 ≠ 要清空」的列：先按传了的算，
   // 走到更新分支时再用数据库原值兜住漏传（见下面的 keepCharges/keepValidUntil）
@@ -668,7 +670,8 @@ export function convertToOrder(
   if (!q) throw new Error('报价单不存在')
   if (q.convertedOrderId) {
     const exist = getOrder(q.convertedOrderId)
-    if (exist) return exist
+    // 上次转出的单还活着就复用；已经作废了要继续做生意，按新单重转（对齐打样转单口径）
+    if (exist && exist.paymentStatus !== 'void') return exist
   }
   // 汇率日期必须是真的：没有就不许转单，绝不拿转单当天冒充
   if (!q.exchangeRateDate) {
@@ -714,6 +717,9 @@ export function convertToOrder(
   const overrideNote = expired
     ? `报价已过期，经 ${approvedBy} 批准沿用（原因：${overrideReason}）`
     : ''
+
+  // 转单挡：存档里的同款两行不能原样带进订单（老数据；新存的报价单在源头已拦）
+  assertSkuListUnique(snap.items, `报价单 ${q.qNo} 第 ${targetRevision} 版存档`)
 
   return transact(() => {
     const order = createOrder({

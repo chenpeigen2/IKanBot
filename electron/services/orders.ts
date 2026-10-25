@@ -582,6 +582,11 @@ export function createOrder(input: OrderInput): OrderDetail {
   const db = getDb()
   const settings = getSettings()
   const ts = now()
+  // 建单与改单同一套汇率闸门：显式传了 0/负数/NaN 一律拦下——这种单会从待收、销售、毛利里静默消失。
+  // 没传不拦：草稿单默认 1，正是「汇率待修」提醒认的哨兵值
+  if (input.exchangeRate !== undefined && !(Number(input.exchangeRate) > 0)) {
+    throw new Error('汇率必须填大于 0 的数。0 或空值会让这张单从待收和毛利里消失，请按今天钉盘的汇率填。')
+  }
   const validUntil = input.validUntil ?? addDays(localDate(), settings.piValidDays)
   // 汇率锁定日期：默认记今天（本地日期）
   const rateDate = input.exchangeRateDate ?? localDate()
@@ -1130,8 +1135,32 @@ function assertSkuUnique(
   )
 }
 
-/** 已经装进未作废批次的款号不许再加一行：那批的 CI 金额按当时明细算，补一行会把纸面金额改掉 */
-function assertSkuNotPacked(orderId: number, sku: { styleNo: string; color: string; size: string }): void {
+/**
+ * 一批明细里同款同色同码只许出现一次：订单侧 insertOrderItem 逐行拦，
+ * 这里给打样/报价/转单这些「整批带入」的路径共用——源头不拦，脏明细就会从旁门流进订单。
+ */
+export function assertSkuListUnique(
+  items: { styleNo?: string | null; color?: string | null; size?: string | null }[],
+  where: string
+): void {
+  const seen = new Set<string>()
+  for (const it of items) {
+    const styleNo = String(it.styleNo ?? '').trim()
+    if (!styleNo) continue
+    const color = String(it.color ?? '').trim()
+    const size = String(it.size ?? '').trim()
+    const sku = `${styleNo}\u0000${color}\u0000${size}`
+    if (seen.has(sku)) {
+      const label = [styleNo, color, size].filter(Boolean).join(' / ')
+      throw new Error(
+        `${where}里款号 ${label} 出现了两行。同一款只能有一行：转成订单后两行不同单价会按数量加权，把 CI 金额算乱。请在${where}里把同款合并成一行（数量相加、单价用客户确认的那一个）。`
+      )
+    }
+    seen.add(sku)
+  }
+}
+
+/** 已经装进未作废批次的款号不许再加一行：那批的 CI 金额按当时明细算，补一行会把纸面金额改掉 */function assertSkuNotPacked(orderId: number, sku: { styleNo: string; color: string; size: string }): void {
   const packed = packedQty(orderId, sku)
   if (packed <= 0) return
   const label = [sku.styleNo || '未填款号', sku.color, sku.size].filter(Boolean).join(' / ')

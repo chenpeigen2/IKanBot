@@ -5870,6 +5870,139 @@ try {
 check('作废单再传照片被拦下', r21PhotoErr.includes('已作废'), r21PhotoErr)
 eq('作废单照片一张没多', orders.listOrderPhotos(r21Photo.id).length, 1)
 
+/* ---------------- R22：转单与建单入口守门 ---------------- */
+
+// ① 同款两行：源头（打样/报价保存）拦住，转单（老数据）挡住
+section('R22 同款两行守门：源头拦、转单挡')
+
+let r22SampleDupErr = ''
+try {
+  samples.saveSample({
+    customerId: c1.id,
+    currency: 'USD',
+    exchangeRate: 7,
+    exchangeRateDate: localDate(),
+    items: [
+      { styleNo: 'R22-DUP', color: 'Navy', size: 'L', quantity: 10, unitPrice: 5 },
+      { styleNo: 'R22-DUP', color: 'Navy', size: 'L', quantity: 5, unitPrice: 6 }
+    ]
+  })
+} catch (e) {
+  r22SampleDupErr = (e as Error).message
+}
+check('打样单保存同款两行被拦下', r22SampleDupErr.includes('两行'), r22SampleDupErr)
+
+let r22QuoteDupErr = ''
+try {
+  quotations.saveQuotation({
+    customerId: c1.id,
+    currency: 'USD',
+    exchangeRate: 7,
+    exchangeRateDate: localDate(),
+    incoterm: 'FOB',
+    paymentMethod: 'tt_deposit',
+    items: [
+      { styleNo: 'R22-QDUP', color: 'Red', size: 'M', quantity: 10, unitPrice: 8 },
+      { styleNo: 'R22-QDUP', color: 'Red', size: 'M', quantity: 4, unitPrice: 9 }
+    ]
+  })
+} catch (e) {
+  r22QuoteDupErr = (e as Error).message
+}
+check('报价单保存同款两行被拦下', r22QuoteDupErr.includes('两行'), r22QuoteDupErr)
+
+// 老数据直插两张同款行（规则上线前存的），转单时要挡住、不许把脏明细带进订单
+const r22Ts = new Date().toISOString()
+const r22LegacyIns = getDb().run(
+  `INSERT INTO sample_orders(sample_no, customer_id, sample_date, status, created_at, updated_at, fee_status, currency, exchange_rate, exchange_rate_date)
+   VALUES(?,?,?,?,?,?,?,?,?,?)`,
+  ['SMP-R22-LEGACY', c1.id, localDate(), 'received', r22Ts, r22Ts, 'unpaid', 'USD', 7, localDate()]
+)
+const r22LegacyId = Number(r22LegacyIns.lastInsertRowid)
+for (const qty of [10, 5]) {
+  getDb().run(
+    `INSERT INTO sample_order_items(sample_order_id, style_no, color, size, quantity, unit_price, goods_unit_price)
+     VALUES(?,?,?,?,?,?,?)`,
+    [r22LegacyId, 'R22-LEG', 'Red', 'L', qty, 5, 8]
+  )
+}
+let r22ConvertDupErr = ''
+try {
+  samples.convertSampleToOrder(r22LegacyId)
+} catch (e) {
+  r22ConvertDupErr = (e as Error).message
+}
+check('打样转单撞上同款两行被挡下（指回打样单改）', r22ConvertDupErr.includes('两行'), r22ConvertDupErr)
+eq('被挡的转单没有留下半张订单', orders.listOrders({ keyword: 'PI-' }).filter((o) => o.customerId === c1.id && o.note.includes('SMP-R22-LEGACY')).length, 0)
+
+// ② createOrder 汇率闸门：显式传 0/负数拦下，没传仍是草稿哨兵 1
+section('R22 建单汇率闸门：0 汇率进不了库')
+
+let r22RateErr = ''
+try {
+  orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 0, piNo: 'PI-R22-RATE0' })
+} catch (e) {
+  r22RateErr = (e as Error).message
+}
+check('建单传 0 汇率被拦下', r22RateErr.includes('大于 0'), r22RateErr)
+let r22RateNegErr = ''
+try {
+  orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: -7, piNo: 'PI-R22-RATENEG' })
+} catch (e) {
+  r22RateNegErr = (e as Error).message
+}
+check('建单传负汇率被拦下', r22RateNegErr.includes('大于 0'), r22RateNegErr)
+const r22DraftNoRate = orders.createOrder({ customerId: c1.id, currency: 'USD', piNo: 'PI-R22-NORATE' })
+eq('草稿不填汇率仍是哨兵值 1（汇率待修提醒认它）', orders.getOrder(r22DraftNoRate.id)!.exchangeRate, 1)
+
+// ③ 报价转单：转出的订单作废后可以按新单重转（对齐打样口径）
+section('R22 报价转单不复用作废单')
+
+const r22Q = quotations.saveQuotation({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: localDate(),
+  incoterm: 'FOB',
+  paymentMethod: 'tt_deposit',
+  items: [{ styleNo: 'R22-RECONV', color: 'Blue', size: 'XL', quantity: 20, unitPrice: 10 }]
+})
+const r22FirstOrder = quotations.convertToOrder(r22Q.id)
+orders.voidOrder(r22FirstOrder.id, 'R22 客户换抬头重做')
+const r22SecondOrder = quotations.convertToOrder(r22Q.id)
+check('转出订单作废后能按新单重转', r22SecondOrder.id !== r22FirstOrder.id)
+check('重转出的不是作废单', orders.getOrder(r22SecondOrder.id)!.paymentStatus !== 'void')
+eq('报价挂到了新单上', quotations.getQuotation(r22Q.id)!.convertedOrderId, r22SecondOrder.id)
+
+// ④ 应收账龄 + 客户对账单导出（收款对账动线的缩水版）
+section('R22 应收账龄与客户对账单')
+
+const r22C = customers.saveCustomer({
+  company: 'R22 Aging Trading Co',
+  contact: 'Lily',
+  email: 'lily@r22.com',
+  phone: '',
+  country: 'US',
+  address: '',
+  zipCode: '',
+  attn: '',
+  paymentPref: ''
+})
+const r22AgeOrder = orders.createOrder({ customerId: r22C.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R22-AGE' })
+await orders.addOrderItem(r22AgeOrder.id, { styleNo: 'R22-AGE', quantity: 10, unitPrice: 10 })
+
+const r22Owed = money.receivableByCustomer().find((v) => v.customerId === r22C.id)
+check('欠款榜带最老挂账日期', !!r22Owed && !!r22Owed.oldestUnpaidDate, JSON.stringify(r22Owed))
+check('挂账天数按下单日起算（新单 ≥ 0）', !!r22Owed && r22Owed.oldestUnpaidDays >= 0, String(r22Owed?.oldestUnpaidDays))
+
+const r22Csv = dashboard.exportCsv('orders', { customerId: r22C.id })
+const r22DataRows = r22Csv.split('\r\n').filter((l) => l.trim()).slice(1)
+check(
+  '客户对账单只导这一家的单（与订单列表同一份口径）',
+  r22DataRows.length === 1 && r22DataRows[0].includes('R22 Aging Trading Co'),
+  r22Csv.slice(0, 160)
+)
+
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
 console.log(`通过 ${passed} 项，失败 ${failed} 项`)

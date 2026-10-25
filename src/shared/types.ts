@@ -799,6 +799,8 @@ export interface OrderExportFilter {
   keyword?: string
   paymentStatus?: string
   shipStatus?: string
+  /** 客户对账单：只导这一家名下的单（与订单列表同一份 listWhere） */
+  customerId?: number
   from?: string
   to?: string
 }
@@ -965,4 +967,8 @@ export interface CustomerReceivable {
   sampleBase: number
   /** 合计敞口 */
   totalBase: number
+  /** 最老那笔未收货款的下单日（本地日期；只有打样费的客户为 null） */
+  oldestUnpaidDate: string | null
+  /** 最老未收货款挂账天数（从下单日起算） */
+  oldestUnpaidDays: number
 }

@@ -240,6 +240,7 @@ export default function Reports() {
                   <tr>
                     <th>客户</th>
                     <th className="num">未结单数</th>
+                    <th className="num">最老挂账</th>
                     <th className="num">货款待收</th>
                     <th className="num">打样费待收</th>
                     <th className="num">合计敞口</th>
@@ -250,6 +251,12 @@ export default function Reports() {
                     <tr key={o.customerId}>
                       <td>{o.customerName}</td>
                       <td className="num">{o.orders}</td>
+                      {/* 账龄：催款先催挂得久的；只有打样费的客户没有未结订单，摆「—」 */}
+                      <td className="num">
+                        {o.oldestUnpaidDate ? (
+                          o.oldestUnpaidDays >= 60 ? <span className="tag amber">{o.oldestUnpaidDays} 天</span> : `${o.oldestUnpaidDays} 天`
+                        ) : '—'}
+                      </td>
                       <td className="num">{money(o.goodsBase, cur)}</td>
                       <td className={`num ${o.sampleBase ? '' : 'na'}`}>
                         {o.sampleBase ? money(o.sampleBase, cur) : '—'}

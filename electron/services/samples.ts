@@ -11,7 +11,7 @@ import { mapCustomer } from '../db/mappers'
 import { localDate } from '../../src/shared/date'
 import { assertQuantity, assertUnitPrice } from '../../src/shared/guards'
 import { getSettings } from './settings'
-import { createOrder, getOrder } from './orders'
+import { createOrder, getOrder, assertSkuListUnique } from './orders'
 import { logEvent } from './events'
 import { costInOrderCurrency } from './money'
 import { likeAny } from './search'
@@ -243,6 +243,8 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
     // 免费样是真实业务，样品行的单价允许 0
     assertUnitPrice(it.unitPrice, `${who} 的单价`, true)
   })
+  // 源头拦同款两行：不拦的话转单时脏明细会原样流进订单，把 CI 金额算乱
+  if (itemsProvided) assertSkuListUnique(items, '打样单')
   // 漏传 items ≠ 清空：只改快递单号的编辑不能把样品行和样品费一起抹掉
   const storedFee = before
     ? Number(
@@ -470,6 +472,9 @@ export function convertSampleToOrder(
     const list = missingGoodsPrice.map((i) => i.styleNo || '(未填款号)').join('、')
     throw new Error(`这些款号还没填大货单价：${list}。打样单价只是打样费，不能当大货价；请在打样单里补上大货单价再转。`)
   }
+
+  // 转单挡：老数据里同款两行不能原样带进订单（不合并——合并会改客户确认过的价，让人回打样单自己改）
+  assertSkuListUnique(s.items, '打样单')
 
   const customerDefaults = db_customerDefaults(s.customerId)
 
