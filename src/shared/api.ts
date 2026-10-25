@@ -171,6 +171,8 @@ export interface IKanApi {
   }
   images: {
     pick(): Promise<string[]>
+    /** 批量上传中途失败：清掉当次已拷进图片目录、但没登记进库的孤儿文件 */
+    discard(names: string[]): Promise<void>
     importLogo(): Promise<string>
     url(fileName: string): Promise<string>
     readDataUrl(fileName: string): Promise<string>

@@ -75,6 +75,11 @@ export default function OrderDetail() {
   const [editPayment, setEditPayment] = useState(false)
   const [editShip, setEditShip] = useState(false)
   const [docVersions, setDocVersions] = useState<any[]>([])
+  /** 作废走自建弹窗：凭据清单 + 真勾选框。confirm() 里没有勾选框，
+      「凭据已核对」只能自动代勾，闸门就形同虚设 */
+  const [voidModal, setVoidModal] = useState(false)
+  const [voidChecked, setVoidChecked] = useState(false)
+  const [voiding, setVoiding] = useState(false)
   /** 读不出来就明说并给重试，不能永远停在「加载中…」 */
   const [loadError, setLoadError] = useState('')
 
@@ -102,6 +107,10 @@ export default function OrderDetail() {
   }
 
   useEffect(() => {
+    // 切单的瞬间先把上一张单清掉：从 /orders/5 跳 /orders/7，
+    // 短暂显示 5 号单的金额和状态，多单并行时容易瞄错
+    setOrder(null)
+    setLoadError('')
     void load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orderId])
@@ -137,24 +146,29 @@ export default function OrderDetail() {
       : undefined
 
   const openPi = async () => {
-    const images = await buildImages()
-    // 存进去会是第几版：先问存档；没存之前纸上印「待存为第 N 版」（N39，不占还不存在的版本号）
-    const rev = await window.api.docs.nextVersion(order.piNo, 'pi')
-    const render = (pending: boolean) => renderPi({ order, settings, images, rev, pending })
-    setPreview({
-      kind: 'pi',
-      html: render(true),
-      docNo: order.piNo,
-      // 存档金额唯一入口：含费用合计（与 PI 纸面 TOTAL 同一个数）
-      amount: orderDocAmount(order),
-      rev,
-      title: `PI ${order.piNo}`,
-      notice: bankNotice(),
-      render
-    })
+    try {
+      const images = await buildImages()
+      // 存进去会是第几版：先问存档；没存之前纸上印「待存为第 N 版」（N39，不占还不存在的版本号）
+      const rev = await window.api.docs.nextVersion(order.piNo, 'pi')
+      const render = (pending: boolean) => renderPi({ order, settings, images, rev, pending })
+      setPreview({
+        kind: 'pi',
+        html: render(true),
+        docNo: order.piNo,
+        // 存档金额唯一入口：含费用合计（与 PI 纸面 TOTAL 同一个数）
+        amount: orderDocAmount(order),
+        rev,
+        title: `PI ${order.piNo}`,
+        notice: bankNotice(),
+        render
+      })
+    } catch (e) {
+      toast((e as Error).message || '生成 PI 失败', 'error')
+    }
   }
 
   const openPl = async (plId: number) => {
+    try {
     const pl = order.packingLists.find((p: any) => p.id === plId)
     if (!pl) return
     const isVoid = !!pl.voidedAt
@@ -190,6 +204,9 @@ export default function OrderDetail() {
       title: isVoid ? `PL ${pl.plNo}（已作废 · 仅留档）` : `PL ${pl.plNo}`,
       render
     })
+    } catch (e) {
+      toast((e as Error).message || '生成装箱单预览失败', 'error')
+    }
   }
 
   const openCi = async (
@@ -341,33 +358,24 @@ export default function OrderDetail() {
   }
 
   /** 作废：记录全留，但不再进货值 / 待收 / 毛利；有单据存档/箱单时先核对凭据 */
+  const openVoid = () => {
+    setVoidChecked(false)
+    setVoidModal(true)
+  }
   const voidOrder = async () => {
     const liveDocs = docVersions.filter((d: any) => !d.voidedAt).length
     const livePls = (order.packingLists ?? []).filter((p: any) => !p.voidedAt).length
-    const credentials =
-      liveDocs > 0 || livePls > 0
-        ? `\n\n这张单还有 ${[liveDocs > 0 ? `${liveDocs} 版单据存档` : '', livePls > 0 ? `${livePls} 批箱单` : '']
-            .filter(Boolean)
-            .join(' 和 ')}——客户手里的 PI/CI 不会跟着消失，作废前请先核对这些凭据的处理。`
-        : ''
-    if (
-      !confirm(
-        `确认作废订单 ${order.orderNo}？\n\n` +
-          `含费用合计 ${money(order.grandTotal, order.currency)}，已收 ${money(
-            order.paidAmount,
-            order.currency
-          )}。\n` +
-          '作废后：收款记录、操作历史、单据存档全部保留，只是不再计入销售额、待收款和毛利。' +
-          credentials
-      )
-    )
-      return
+    const needsCheck = liveDocs > 0 || livePls > 0
+    setVoiding(true)
     try {
-      await window.api.orders.void(order.id, '手动作废', { confirmDocs: true })
+      await window.api.orders.void(order.id, '手动作废', { confirmDocs: needsCheck })
       toast('订单已作废，记录全部保留')
+      setVoidModal(false)
       await load()
     } catch (e) {
       toast((e as Error).message, 'error')
+    } finally {
+      setVoiding(false)
     }
   }
 
@@ -406,7 +414,7 @@ export default function OrderDetail() {
           label="⋯"
           items={[
             ...(order.paymentStatus !== 'void'
-              ? [{ text: '作废此单', onClick: () => void voidOrder() }]
+              ? [{ text: '作废此单', onClick: () => void openVoid() }]
               : []),
             { text: '删除订单', danger: true, onClick: () => void removeOrder() }
           ]}
@@ -793,6 +801,61 @@ export default function OrderDetail() {
           onClose={() => setShowCi(false)}
           onPreview={(charges, batchId, confirmOverlap) => void openCi(charges, batchId, confirmOverlap)}
         />
+      ) : null}
+
+      {voidModal ? (
+        (() => {
+          const liveDocs = docVersions.filter((d: any) => !d.voidedAt).length
+          const livePls = (order.packingLists ?? []).filter((p: any) => !p.voidedAt).length
+          const needsCheck = liveDocs > 0 || livePls > 0
+          return (
+            <Modal
+              title={`作废订单 ${order.orderNo}`}
+              onClose={() => setVoidModal(false)}
+              footer={
+                <>
+                  <Button onClick={() => setVoidModal(false)}>先不作废</Button>
+                  <Button
+                    variant="danger"
+                    disabled={voiding || (needsCheck && !voidChecked)}
+                    title={
+                      needsCheck && !voidChecked ? '先勾选「凭据已核对」才能作废' : undefined
+                    }
+                    onClick={() => void voidOrder()}
+                  >
+                    {voiding ? '作废中…' : '确认作废'}
+                  </Button>
+                </>
+              }
+            >
+              <p>
+                含费用合计 {money(order.grandTotal, order.currency)}，已收{' '}
+                {money(order.paidAmount, order.currency)}。
+              </p>
+              <p className="faint">
+                作废后：收款记录、操作历史、单据存档全部保留，只是不再计入销售额、待收款和毛利。
+              </p>
+              {needsCheck ? (
+                <div className="alert warn">
+                  <p>
+                    这张单还有 {[liveDocs > 0 ? `${liveDocs} 版单据存档` : '', livePls > 0 ? `${livePls} 批箱单` : '']
+                      .filter(Boolean)
+                      .join(' 和 ')}
+                    ——客户手里的 PI/CI 不会跟着消失，报关/收汇在途的钱会和系统脱节。
+                  </p>
+                  <label style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8, cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={voidChecked}
+                      onChange={(e) => setVoidChecked(e.target.checked)}
+                    />
+                    凭据已核对：已确认发出去的 PI/CI 如何处理（重开、退款或留作退款凭据）
+                  </label>
+                </div>
+              ) : null}
+            </Modal>
+          )
+        })()
       ) : null}
 
       {preview ? (
@@ -1803,6 +1866,32 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
       toast('请填写收款金额', 'error')
       return
     }
+    // 多打一位数立刻判「已结清」、待收蒸发——超额不硬拦（客户多付是真实场景），但必须有意确认
+    const outstanding = Number(order.remaining ?? 0)
+    if (outstanding >= 0 && amt > outstanding + 0.005) {
+      const over = amt - outstanding
+      if (
+        !confirm(
+          `本笔 ${money(amt, order.currency)} 超过当前待收 ${money(outstanding, order.currency)}（多 ${money(over, order.currency)}）。\n` +
+            '多收会让待收变成 0，超出的部分挂在「已多收」里，不算进待收。\n确认这笔钱真的是这么多吗？'
+        )
+      )
+        return
+    }
+    // 同单近 7 天同金额：常见于网络卡了以为没存上再点一次。提示一下，不硬拦
+    const dup = (order.payments ?? []).find((p: any) => {
+      if (Math.abs(Number(p.amount) - amt) >= 0.005) return false
+      const t1 = new Date(p.paidAt).getTime()
+      const t2 = new Date(form.paidAt).getTime()
+      return Number.isFinite(t1) && Number.isFinite(t2) && Math.abs(t1 - t2) <= 7 * 86400000
+    })
+    if (
+      dup &&
+      !confirm(
+        `近 7 天（${fmtDate(dup.paidAt)}）已有一笔相同金额的收款 ${money(dup.amount, order.currency)}。\n金额和日期都这么近，多半是重复提交。确认不是同一笔钱吗？`
+      )
+    )
+      return
     if (saving) return
     setSaving(true)
     try {
@@ -1966,6 +2055,12 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
         {order.paymentStatus === 'draft' ? (
           <div className="alert warn">
             这张单还是草稿：草稿不进现金流，登记了也不会出现在「本月到账」和月报里。请先把收款状态改成「已发出」或「已确认」。
+          </div>
+        ) : null}
+        {order.paymentStatus === 'void' ? (
+          <div className="alert warn">
+            这张单已作废：作废后客户真退回/补来的钱（例如取消单退回的定金）可以在这里登记，
+            会进「本月到账」和月报，但不会复活这张单、也不改变它的待收。<strong>备注必须写明来路</strong>，以后对银行流水要靠它。
           </div>
         ) : null}
         <div className="field-row-3">
@@ -3572,8 +3667,29 @@ function PhotosTab({ order, onChange }: { order: any; onChange: () => Promise<vo
     try {
       const files = await window.api.images.pick()
       if (files.length === 0) return
-      for (const f of files) await window.api.orders.addPhoto(order.id, f, kind, '')
-      toast(`已上传 ${files.length} 张`)
+      let ok = 0
+      const failed: string[] = []
+      for (const f of files) {
+        try {
+          await window.api.orders.addPhoto(order.id, f, kind, '')
+          ok++
+        } catch {
+          failed.push(f)
+        }
+      }
+      // 失败那几张已拷进图片目录但没登记进库，不清就永远背在备份里
+      if (failed.length) {
+        try {
+          await window.api.images.discard(failed)
+        } catch {
+          /* 清不掉不挡主流程 */
+        }
+      }
+      if (ok === 0) {
+        toast('上传照片失败', 'error')
+      } else {
+        toast(failed.length ? `已上传 ${ok} 张，${failed.length} 张失败，请重试` : `已上传 ${ok} 张`)
+      }
       await load()
       await onChange()
     } catch (e) {

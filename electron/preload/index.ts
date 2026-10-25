@@ -167,6 +167,7 @@ const api: IKanApi = {
   },
   images: {
     pick: () => call<string[]>('images:pick'),
+    discard: (names: string[]) => call<void>('images:discard', names),
     importLogo: () => call<string>('images:importLogo'),
     url: (fileName: string) => call<string>('images:url', fileName),
     readDataUrl: (fileName: string) => call<string>('images:readDataUrl', fileName),

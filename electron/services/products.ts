@@ -1,6 +1,6 @@
 import { existsSync, unlinkSync } from 'fs'
 import { join } from 'path'
-import { getDb, imagesDir } from '../db'
+import { getDb, imagesDir, transact } from '../db'
 import { mapProduct, mapProductImage } from '../db/mappers'
 import { likeAny } from './search'
 import type { Product, ProductImage } from '../../src/shared/types'
@@ -239,15 +239,10 @@ export function deleteProduct(id: number): DeleteProductResult {
   }
   // 没引用 = 真的录错了，连图片文件一起清掉，别让备份越滚越大
   const images = listProductImages(id)
-  db.run('BEGIN')
-  try {
+  transact(() => {
     for (const im of images) db.run('DELETE FROM product_images WHERE id = ?', [im.id])
     db.run('DELETE FROM products WHERE id = ?', [id])
-    db.run('COMMIT')
-  } catch (e) {
-    db.run('ROLLBACK')
-    throw e
-  }
+  })
   for (const im of images) {
     // 文件名是上传时唯一命名的，只有这一款在用；删不掉就当没看见，不挡主流程
     try {

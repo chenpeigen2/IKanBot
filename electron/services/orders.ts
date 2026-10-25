@@ -1,4 +1,6 @@
-import { getDb, nextNo, transact } from '../db'
+import { getDb, imagesDir, nextNo, transact } from '../db'
+import { existsSync, unlinkSync } from 'fs'
+import { basename, join } from 'path'
 import { mapOrder, mapOrderItem, mapPayment, mapPackingList, mapPackingListLine, mapEvent, mapSkuSummary, mapOrderPhoto, mapCustomer, mapSettlement } from '../db/mappers'
 import { getSettings } from './settings'
 import { computeOrderMoney, costInOrderCurrency, moneyForOrders, parseCharges } from './money'
@@ -1048,11 +1050,13 @@ export function updateOrderCharges(orderId: number, charges: QuotationCharge[]):
   assertChargeAmounts(charges)
   const clean = charges.filter((c) => c.label.trim())
   if (!sameCharges(parseCharges(before.charges), clean)) assertPricingEditable(orderId, '改费用行')
-  db.run('UPDATE orders SET charges=?, updated_at=? WHERE id=?', [JSON.stringify(clean), now(), orderId])
-  const parts = describeChargeChange(parseCharges(before.charges), clean)
-  logEvent(orderId, 'update', null, null, parts.length ? `修改费用：${parts.join('；')}` : '修改费用行')
-  // 费用变了，应收总额也变了，状态可能要重算
-  recomputePaymentStatus(orderId)
+  // 改费用、留痕、重算状态必须同生同死：中途失败留着「费用改了、应收没重算」的单
+  transact(() => {
+    db.run('UPDATE orders SET charges=?, updated_at=? WHERE id=?', [JSON.stringify(clean), now(), orderId])
+    const parts = describeChargeChange(parseCharges(before.charges), clean)
+    logEvent(orderId, 'update', null, null, parts.length ? `修改费用：${parts.join('；')}` : '修改费用行')
+    recomputePaymentStatus(orderId)
+  })
   return getOrder(orderId)!
 }
 
@@ -1442,15 +1446,28 @@ export function addPayment(
   p: { paidAt: string; amount: number; method?: string; bankRef?: string; note?: string }
 ): OrderDetail {
   const db = getDb()
-  assertOrderWritable(orderId, '登记收款')
-  // 草稿不进现金流（month_received / 月报 / 月度汇总都排除草稿），
-  // 在草稿上登记收款，这笔钱会从所有到账报表里消失——先把状态推到「已发出」再收钱
-  const st = db.get('SELECT order_no, payment_status FROM orders WHERE id = ?', [orderId]) as
+  // 作废单不再有「待收」，但钱真的到账时要能落账：
+  // 现金流口径（只排除草稿）本来就把作废单的到账算进月报——闸门拦死只会让银行流水与系统账脱节。
+  // 这里开正门：必须写明来路；这笔钱只进收款流水与月报，不复活订单、不动待收（recompute 对终态直接返回）。
+  // 失效单不走这条门：它还有「改回客户已确认」的活路，走正常收款流程。
+  const cur = db.get('SELECT order_no, payment_status FROM orders WHERE id = ?', [orderId]) as
     | { order_no?: string; payment_status?: string }
     | null
-  if (String(st?.payment_status ?? '') === 'draft') {
+  if (!cur) throw new Error('订单不存在')
+  const curStatus = String(cur.payment_status ?? '')
+  const isVoided = curStatus === 'void'
+  if (curStatus === 'void') {
+    if (!String(p.note ?? '').trim()) {
+      throw new Error(`订单 ${String(cur.order_no ?? '')} 已作废：作废单的回款必须写明来路（备注里写清楚，例如“取消单客户退回的定金”），操作历史要能对上银行流水。`)
+    }
+  } else {
+    assertOrderWritable(orderId, '登记收款')
+  }
+  // 草稿不进现金流（month_received / 月报 / 月度汇总都排除草稿），
+  // 在草稿上登记收款，这笔钱会从所有到账报表里消失——先把状态推到「已发出」再收钱
+  if (curStatus === 'draft') {
     throw new Error(
-      `订单 ${String(st?.order_no ?? '')} 还是草稿：草稿不进现金流，登记了也不会出现在「本月到账」和月报里。请先把收款状态改成「已发出」或「已确认」，再登记收款。`
+      `订单 ${String(cur.order_no ?? '')} 还是草稿：草稿不进现金流，登记了也不会出现在「本月到账」和月报里。请先把收款状态改成「已发出」或「已确认」，再登记收款。`
     )
   }
   const paidAt = String(p.paidAt ?? '').trim()
@@ -1485,7 +1502,7 @@ export function addPayment(
       'payment',
       null,
       null,
-      `收款 ${amount.toFixed(2)}（${paidAt}${p.bankRef ? `，流水号 ${p.bankRef}` : `，${p.method ?? 'T/T'}`}）` +
+      `${isVoided ? '作废单回款' : '收款'} ${amount.toFixed(2)}（${paidAt}${p.bankRef ? `，流水号 ${p.bankRef}` : `，${p.method ?? 'T/T'}`}）` +
         // 补录过去日期的到账也是按「录入时刻」的订单汇率钉快照：口径写进历史，月报对不上时查得到原因
         `；汇率按 ${rate} 钉快照`
     )
@@ -1497,14 +1514,34 @@ export function addPayment(
 export function deletePayment(orderId: number, paymentId: number, reason = ''): OrderDetail {
   const db = getDb()
   const row = db.get(
-    `SELECT p.paid_at, p.amount, p.bank_ref, o.currency
+    `SELECT p.paid_at, p.amount, p.bank_ref, p.created_at, o.currency
      FROM payments p JOIN orders o ON o.id = p.order_id
      WHERE p.id = ? AND p.order_id = ?`,
     [paymentId, orderId]
   ) as Record<string, unknown> | null
   if (!row) throw new Error('这条收款记录已经不存在了，刷新页面后再试。')
-  // 作废/失效单只能看：删收款会改写它的已收金额，等于把留档凭据又改活
-  assertOrderWritable(orderId, '删收款')
+  // 作废单只许更正「作废之后」登记的回款（录错了不删就成死账）；
+  // 作废前的流水是留档凭据，跟客户手里的 PI/CI 对着账，不许改写。原因必填（下方统一校验）。
+  const delStatus = String(
+    (db.get('SELECT payment_status FROM orders WHERE id = ?', [orderId]) as { payment_status?: string } | null)
+      ?.payment_status ?? ''
+  )
+  if (delStatus === 'void') {
+    const voidedAt = String(
+      (db.get(
+        "SELECT at FROM order_events WHERE order_id = ? AND kind = 'void' ORDER BY id DESC LIMIT 1",
+        [orderId]
+      ) as { at?: string } | null)?.at ?? ''
+    )
+    const created = String(row.created_at ?? '')
+    if (!voidedAt || !created || created <= voidedAt) {
+      throw new Error(
+        '订单已作废：作废前的收款是留档凭据（和客户手里的 PI/CI 对着账），不能再改写。只有作废后登记的回款才允许更正。'
+      )
+    }
+  } else {
+    assertOrderWritable(orderId, '删收款')
+  }
   // 这笔钱可能已经用于短款核销/坏账追回：直接删掉，核销台账里就留着一个指向不存在流水的 payment_id
   const usedBy = db.get(
     'SELECT kind, amount, at FROM order_settlements WHERE order_id = ? AND payment_id = ? ORDER BY id LIMIT 1',
@@ -1606,6 +1643,10 @@ export function addSettlement(orderId: number, input: SettlementInput): OrderDet
   if (!reason) throw new Error('核销 / 坏账要写原因（例如“银行扣费”“客户破产”），操作历史要留痕。')
   const at = String(input.at ?? '').trim() || localDate()
   if (!isLocalDate(at)) throw new Error('核销日期要填完整（例如 2026-10-24）。')
+  // 核销/追回和收款同一口径：钱不会在未来发生，填成未来会把月报和状态一起带偏
+  if (at > localDate()) {
+    throw new Error(`核销日期 ${at} 还没到。请填实际发生的日期，最晚是今天（${localDate()}）。`)
+  }
   const evidence = String(input.evidence ?? '').trim()
 
   const sums = settlementSums(orderId)
@@ -1625,6 +1666,11 @@ export function addSettlement(orderId: number, input: SettlementInput): OrderDet
     }
     const paidAt = String(input.paidAt ?? '').trim() || at
     if (!isLocalDate(paidAt)) throw new Error('追回款的到账日期要填完整（例如 2026-10-24）。')
+    if (paidAt > localDate()) {
+      throw new Error(
+        `追回款的到账日期 ${paidAt} 还没到。请填银行水单上的实际到账日，最晚是今天（${localDate()}）。`
+      )
+    }
     const rate = Number(order.exchangeRate ?? 1)
     transact(() => {
       db.run(
@@ -1946,6 +1992,17 @@ export function deleteOrderPhoto(orderId: number, photoId: number): void {
   > | null
   if (!row) return
   db.run('DELETE FROM order_photos WHERE id = ? AND order_id = ?', [photoId, orderId])
+  // 文件也一起清掉（文件名是上传时唯一命名的）：只删 DB 行会把 images 目录越滚越大，
+  // 备份还把这些孤儿一张不落地打包。删不掉不挡主流程，与商品图同口径。
+  const fileName = String(row.file_name ?? '')
+  if (fileName) {
+    try {
+      const p = join(imagesDir(), basename(fileName))
+      if (existsSync(p)) unlinkSync(p)
+    } catch {
+      /* 文件已被手工移走：记录已清，不挡主流程 */
+    }
+  }
   // 验货照是出货争议时的证据，删掉必须留痕：谁、什么时候、删的是哪一张
   logEvent(
     orderId,

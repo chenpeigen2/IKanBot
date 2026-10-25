@@ -5707,6 +5707,72 @@ check(
   orders.listEvents(r19Rate.id).some((e) => e.kind === 'payment' && e.note.includes('钉快照') && e.note.includes('汇率按 7'))
 )
 
+/* ---------------- R20：闸门做实与回款正门 ---------------- */
+
+// ① 作废单回款开正门：必须写明来路，只进收款流水与月报，不复活订单
+section('R20 作废单回款：登记走正门，备注写明来路，删错也能删')
+
+const r20Rec = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R20-REC' })
+await orders.addOrderItem(r20Rec.id, { styleNo: 'R20-REC', quantity: 10, unitPrice: 10 })
+orders.addPayment(r20Rec.id, { paidAt: addDays(localDate(), -2), amount: 20, note: '定金' })
+orders.voidOrder(r20Rec.id, 'R20 回款测试')
+
+let r20NoNoteErr = ''
+try {
+  orders.addPayment(r20Rec.id, { paidAt: localDate(), amount: 30 })
+} catch (e) {
+  r20NoNoteErr = (e as Error).message
+}
+check('作废单登记收款不写来路会被拦下', r20NoNoteErr.includes('写明来路'), r20NoNoteErr)
+
+orders.addPayment(r20Rec.id, { paidAt: localDate(), amount: 30, note: '取消单客户退回的定金' })
+check(
+  '作废单回款落账且历史写明「作废单回款」',
+  orders.listEvents(r20Rec.id).some((e) => e.kind === 'payment' && e.note.includes('作废单回款') && e.note.includes('30.00'))
+)
+check('作废单回款不复活订单（收款状态仍为 void）', orders.getOrder(r20Rec.id)!.paymentStatus === 'void')
+const r20RecAgain = orders.getOrder(r20Rec.id)!
+const r20PrePay = (r20RecAgain.payments ?? []).find((p) => Math.abs(p.amount - 20) < 0.001)
+let r20PreDelErr = ''
+try {
+  orders.deletePayment(r20Rec.id, r20PrePay!.id, '试试删作废前的钱')
+} catch (e) {
+  r20PreDelErr = (e as Error).message
+}
+check('作废前的流水仍是留档凭据，不许删', r20PreDelErr.includes('留档凭据'), r20PreDelErr)
+const r20Pay = (orders.getOrder(r20Rec.id)!.payments ?? []).find(
+  (p) => Math.abs(p.amount - 30) < 0.001 && p.note.includes('取消单客户退回的定金')
+)
+check('作废单回款进了收款流水（备注留着来路）', !!r20Pay)
+if (r20Pay) {
+  orders.deletePayment(r20Rec.id, r20Pay.id, '金额录错了')
+  check('作废单的回款删错也能删（不删就成死账）', !(orders.getOrder(r20Rec.id)!.payments ?? []).some((p) => p.id === r20Pay.id))
+}
+
+// ② 核销 / 追回日期与收款同一口径：不许填未来
+section('R20 核销与追回日期不许填未来')
+
+const r20Date = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R20-DATE' })
+await orders.addOrderItem(r20Date.id, { styleNo: 'R20-DATE', quantity: 10, unitPrice: 10 })
+const r20Future = addDays(localDate(), 7)
+
+let r20ShortErr = ''
+try {
+  orders.addSettlement(r20Date.id, { kind: 'shortage', amount: 5, at: r20Future, reason: '银行扣费' })
+} catch (e) {
+  r20ShortErr = (e as Error).message
+}
+check('核销日期填未来被拦', r20ShortErr.includes('还没到'), r20ShortErr)
+
+orders.addSettlement(r20Date.id, { kind: 'bad_debt', amount: 20, reason: '客户破产' })
+let r20RecoverErr = ''
+try {
+  orders.addSettlement(r20Date.id, { kind: 'recovery', amount: 10, paidAt: r20Future, reason: '追回部分欠款' })
+} catch (e) {
+  r20RecoverErr = (e as Error).message
+}
+check('追回款到账日期填未来被拦', r20RecoverErr.includes('还没到'), r20RecoverErr)
+
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
 console.log(`通过 ${passed} 项，失败 ${failed} 项`)

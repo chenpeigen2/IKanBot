@@ -191,12 +191,40 @@ export default function Products() {
       toast('请先保存商品，再上传图片', 'error')
       return
     }
-    const files = await window.api.images.pick()
-    for (const f of files) {
-      const isFirst = images.length === 0
-      await window.api.products.addImage(draft.id, f, isFirst)
+    let files: string[] = []
+    try {
+      files = await window.api.images.pick()
+    } catch (e) {
+      toast((e as Error).message || '打开文件选择器失败', 'error')
+      return
     }
-    setImages(await window.api.products.images(draft.id))
+    const isFirst = images.length === 0
+    let ok = 0
+    const failed: string[] = []
+    for (const f of files) {
+      try {
+        await window.api.products.addImage(draft.id, f, isFirst)
+        ok++
+      } catch {
+        failed.push(f)
+      }
+    }
+    // 中途失败的那几张已经拷进图片目录但没登记进库，不清就永远背在备份里
+    if (failed.length) {
+      try {
+        await window.api.images.discard(failed)
+      } catch {
+        /* 清不掉不挡主流程 */
+      }
+      toast(ok ? `已上传 ${ok} 张，${failed.length} 张失败，请重试` : '上传图片失败', ok ? undefined : 'error')
+    }
+    if (ok) {
+      try {
+        setImages(await window.api.products.images(draft.id))
+      } catch (e) {
+        toast((e as Error).message || '图片列表刷新失败', 'error')
+      }
+    }
   }
 
   const addTag = (which: 'sizes' | 'colors', value: string) => {
@@ -576,8 +604,12 @@ export default function Products() {
                       <button
                         onClick={async () => {
                           if (!draft?.id) return
-                          await window.api.products.setPrimary(draft.id, im.id)
-                          setImages(await window.api.products.images(draft.id))
+                          try {
+                            await window.api.products.setPrimary(draft.id, im.id)
+                            setImages(await window.api.products.images(draft.id))
+                          } catch (e) {
+                            toast((e as Error).message || '设主图失败', 'error')
+                          }
                         }}
                       >
                         设主图
@@ -585,8 +617,12 @@ export default function Products() {
                     ) : null}
                     <button
                       onClick={async () => {
-                        await window.api.products.delImage(im.id)
-                        if (draft?.id) setImages(await window.api.products.images(draft.id))
+                        try {
+                          await window.api.products.delImage(im.id)
+                          if (draft?.id) setImages(await window.api.products.images(draft.id))
+                        } catch (e) {
+                          toast((e as Error).message || '删除图片失败', 'error')
+                        }
                       }}
                     >
                       删除

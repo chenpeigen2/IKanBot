@@ -310,6 +310,20 @@ export function registerIpc(): void {
     if (!p) return ''
     return pathToFileURL(p).href
   })
+  handle('images:discard', (names: unknown): void => {
+    // 批量上传中途失败：当次已拷进图片目录、但没登记进库的文件必须清掉，
+    // 否则备份会把孤儿一张不落地打包，磁盘占用永久放大
+    for (const n of Array.isArray(names) ? names : []) {
+      if (typeof n !== 'string') continue
+      const p = safeImage(n)
+      if (!p) continue
+      try {
+        unlinkSync(p)
+      } catch {
+        /* 删不掉不挡主流程 */
+      }
+    }
+  })
   ipcMain.on('images:baseDir', (e) => {
     e.returnValue = imagesDir()
   })

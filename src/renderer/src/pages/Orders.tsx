@@ -324,12 +324,19 @@ export default function Orders() {
                                       o.paidAmount,
                                       o.currency
                                     )}。\n` +
-                                    '作废后：收款记录、操作历史、单据存档全部保留，只是不再计入销售额和待收款。'
+                                    '作废后：收款记录、操作历史、单据存档全部保留，只是不再计入销售额和待收款。\n' +
+                                    '有单据存档或箱单的单，系统会请你到详情页核对凭据后再作废。'
                                 )
                               )
                                 return
-                              await window.api.orders.void(o.id, '手动作废')
-                              toast('订单已作废，记录全部保留')
+                              try {
+                                await window.api.orders.void(o.id, '手动作废')
+                                toast('订单已作废，记录全部保留')
+                              } catch (err) {
+                                const msg = (err as Error).message || ''
+                                // 凭据闸门拦下的，引导去详情页核对；别的错原样说
+                                toast(/凭据|存档/.test(msg) ? '这张单有单据存档或箱单，请打开详情页核对凭据后再作废' : msg, 'error')
+                              }
                               await load()
                             }}
                           >
@@ -451,29 +458,43 @@ function CreateOrderModal({
 
   useEffect(() => {
     void (async () => {
-      const [cs, s, pt, lr] = await Promise.all([
-        window.api.customers.list(),
-        window.api.settings.get(),
-        window.api.orders.ports(),
-        window.api.orders.lastExchangeRateInfo()
-      ])
-      setCustomers(cs)
-      setSettings(s)
-      setPorts(pt)
-      setLastRate(lr)
-      setForm((f) => ({
-        ...f,
-        depositRatio: s.defaultDepositRatio ?? 0.3
-      }))
+      try {
+        const [cs, s, pt, lr] = await Promise.all([
+          window.api.customers.list(),
+          window.api.settings.get(),
+          window.api.orders.ports(),
+          window.api.orders.lastExchangeRateInfo()
+        ])
+        setCustomers(cs)
+        setSettings(s)
+        setPorts(pt)
+        setLastRate(lr)
+        setForm((f) => ({
+          ...f,
+          depositRatio: s.defaultDepositRatio ?? 0.3
+        }))
+      } catch (e) {
+        // 建单弹窗打开却拉不到客户/条款：空下拉不说原因，跟单员只会以为没有客户
+        toast(`建单需要的数据没加载出来：${(e as Error).message || '未知错误'}`, 'error')
+      }
     })()
   }, [])
 
   /** 选客户后：先带出客户档案里的默认条款，再补上这个客户上一次的条款 */
+  const beginTerms = useLoadGuard()
   const onCustomerChange = async (id: number) => {
     setForm((f) => ({ ...f, customerId: id }))
     if (!id) return
     const cust = customers.find((c) => c.id === id)
-    const terms = await window.api.orders.lastTerms(id)
+    // 快速 A→B 切换时 A 的响应可能后到：币种/术语/定金是凭据级字段，带错客户建出的单靠肉眼发现不了
+    const { isCurrent } = beginTerms()
+    let terms: any = null
+    try {
+      terms = await window.api.orders.lastTerms(id)
+    } catch {
+      terms = null
+    }
+    if (!isCurrent()) return
     setForm((f) => ({
       ...f,
       currency: terms?.currency ?? f.currency,
