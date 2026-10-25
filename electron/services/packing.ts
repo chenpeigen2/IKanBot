@@ -380,6 +380,9 @@ export function voidPackingList(orderId: number, plId: number, reason = ''): Pac
       `装箱单 ${String(cur.pl_no)} 已经出过 CI（第 ${ciVer} 版存档），不能作废：发票已经按这一批发给客户了，作废会让箱单、发票和订单三边的金额对不上。先作废那版 CI 存档（写明原因），这一批才能作废。`
     )
   }
+  if (!String(reason ?? '').trim()) {
+    throw new Error('作废批次必须写明原因（比如「订舱取消」「整批发错」）：这是发给客户的凭据，不留原因以后对不上账。')
+  }
   transact(() => {
     db.run('UPDATE packing_lists SET voided_at = ? WHERE id = ? AND order_id = ?', [now(), plId, orderId])
     applyShipStatus(orderId)
@@ -395,7 +398,7 @@ export function voidPackingList(orderId: number, plId: number, reason = ''): Pac
 }
 
 /** 撤销作废：点错了，或者这一批后来照常发了 */
-export function unvoidPackingList(orderId: number, plId: number): PackingList[] {
+export function unvoidPackingList(orderId: number, plId: number, reason = ''): PackingList[] {
   const db = getDb()
   const cur = db.get(
     'SELECT pl_no, voided_at FROM packing_lists WHERE id = ? AND order_id = ?',
@@ -404,10 +407,13 @@ export function unvoidPackingList(orderId: number, plId: number): PackingList[] 
   if (!cur) throw new Error('装箱单不存在')
   assertOrderWritable(orderId, '撤销作废装箱单')
   if (!isVoided(cur)) return listPackingLists(orderId)
+  if (!String(reason ?? '').trim()) {
+    throw new Error('撤销作废也要写明原因：作废记录是留档凭据，为什么翻案得能查到。')
+  }
   transact(() => {
     db.run('UPDATE packing_lists SET voided_at = NULL WHERE id = ? AND order_id = ?', [plId, orderId])
     applyShipStatus(orderId)
-    logEvent(orderId, 'pl_unvoid', null, null, `撤销作废装箱单 ${String(cur.pl_no)}（重新参与状态与件数汇总）`)
+    logEvent(orderId, 'pl_unvoid', null, null, `撤销作废装箱单 ${String(cur.pl_no)}：${reason}（重新参与状态与件数汇总）`)
   })
   return listPackingLists(orderId)
 }

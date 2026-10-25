@@ -120,6 +120,18 @@ export default function EditOrderModal({
       )
       if (!ok) return
     }
+    // 换客户 = 换这张单的主人：PI 重出后客户手里会出现不同抬头的两张纸。
+    // 非草稿的单已具备凭据属性，换主必须有意确认
+    if (form.customerId !== order.customerId && order.paymentStatus !== 'draft') {
+      const from = customers.find((c) => c.id === order.customerId)?.company || '原客户'
+      const to = customers.find((c) => c.id === form.customerId)?.company || '新客户'
+      const ok = confirm(
+        `确认把这张订单从「${from}」换到「${to}」名下吗？\n\n` +
+          'PI 上的买方/收货抬头会重钉成新客户；客户手里已发出的单据不会跟着变，重出后就是两张不同抬头的 PI。\n' +
+          '这次换主会写进操作历史。'
+      )
+      if (!ok) return
+    }
     setBusy(true)
     try {
       await window.api.orders.update(order.id, {

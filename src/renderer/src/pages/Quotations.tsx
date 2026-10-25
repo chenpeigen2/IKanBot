@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Modal, useToast, money, num, Empty, fmtDate, fmtDateTime, today, ActionMenu, QuotationStatusTag, Button, clientKey, LoadError } from '../ui'
+import { Modal, useToast, money, num, Empty, fmtDate, fmtDateTime, today, ActionMenu, QuotationStatusTag, Button, clientKey, LoadError, useDebounced, useLoadGuard } from '../ui'
 import {
   CURRENCIES,
   INCOTERMS,
@@ -56,16 +56,22 @@ export default function Quotations() {
   const [convertRevision, setConvertRevision] = useState<number | null>(null)
   const [overrideBy, setOverrideBy] = useState('')
   const [overrideReason, setOverrideReason] = useState('')
+  // 敲太快时两个 list 请求在途，先发的旧结果不许盖住新关键词
+  const kw = useDebounced(keyword, 250)
+  const begin = useLoadGuard()
 
   const load = async () => {
+    const { isCurrent } = begin()
     try {
       const rows = await window.api.quotations.list({
-        keyword,
+        keyword: kw,
         status: tab || undefined
       })
+      if (!isCurrent()) return
       setList(rows)
       setLoadError('')
     } catch (e) {
+      if (!isCurrent()) return
       setLoadError((e as Error).message || '报价单列表没加载出来')
     }
   }
@@ -73,7 +79,7 @@ export default function Quotations() {
   useEffect(() => {
     void load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keyword, tab])
+  }, [kw, tab])
 
   const remove = async (q: any) => {
     if (!confirm(`确认删除报价单 ${q.qNo}？`)) return
@@ -855,19 +861,17 @@ function QuotationModal({
 
   useEffect(() => {
     void (async () => {
-      const [cs, s, ps, pt, lr] = await Promise.all([
+      const [cs, s, ps, pt] = await Promise.all([
         // 编辑老报价时，即使客户后来停用了，下拉里也得还有他
         window.api.customers.list('', true),
         window.api.settings.get(),
         window.api.products.list(''),
-        window.api.orders.ports(),
-        window.api.orders.lastExchangeRateInfo()
+        window.api.orders.ports()
       ])
       setCustomers(cs)
       setSettings(s)
       setProducts(ps)
       setPorts(pt)
-      setLastRate(lr)
       if (!isEdit) {
         setForm((f) => ({
           ...f,
@@ -878,6 +882,20 @@ function QuotationModal({
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // 汇率参考值按币种取：USD 的 7.1 不能抄到 EUR 报价上，换币种就重新查同币种的上一次
+  useEffect(() => {
+    let alive = true
+    window.api.orders
+      .lastExchangeRateInfo(form.currency)
+      .then((lr) => {
+        if (alive) setLastRate(lr)
+      })
+      .catch(() => undefined)
+    return () => {
+      alive = false
+    }
+  }, [form.currency])
 
   /** 这个客户的历史成交价（报价前看一眼上次卖了多少，别再凭感觉报） */
   const [lastPrices, setLastPrices] = useState<any[]>([])

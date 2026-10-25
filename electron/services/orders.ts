@@ -885,6 +885,18 @@ function describeOrderChange(before: Record<string, unknown>, input: OrderInput)
   cmp('PI号', 'piNo', 'pi_no')
   cmp('客户PO', 'customerPo', 'customer_po')
   cmp('工厂', 'factory', 'factory')
+  // 「这单是谁的」是凭据级字段：换客户会重钉 PI 上的买方/收货抬头，
+  // 客户手里两张不同抬头的 PI 说不清的时候，历史里要答得出什么时候换的、从谁换给谁
+  if (input.customerId !== undefined && Number(before.customer_id) !== Number(input.customerId)) {
+    const nameOf = (cid: unknown): string => {
+      if (cid == null) return '空'
+      const row = getDb().get('SELECT company FROM customers WHERE id = ?', [Number(cid)]) as
+        | { company?: string }
+        | null
+      return row?.company ?? `客户#${String(cid)}`
+    }
+    parts.push(`客户 ${nameOf(before.customer_id)} → ${nameOf(input.customerId)}`)
+  }
   cmp('船名航次', 'vessel', 'vessel')
   cmp('封条号', 'sealNo', 'seal_no')
   cmp('备注', 'note', 'note')
@@ -1863,6 +1875,13 @@ export function setPaymentStatus(orderId: number, next: PaymentStatus, note = ''
   if (cur.payment_status === 'void' && next !== 'void') {
     throw new Error('这张单已作废，不能改回收款状态：作废是留档终态，要接着做生意请按新单重开。')
   }
+  // 手工下拉不许直接改成「已作废」：那会绕过作废弹窗的凭据核对、作废留痕和打样抵扣回退。
+  // 作废只能走「⋯ → 作废此单」，在凭据清单前勾了「凭据已核对」再作废。
+  if (next === 'void') {
+    throw new Error(
+      '收款状态下拉不能直接改成「已作废」：作废要先核对客户手里的 PI/CI 凭据。请到「⋯」菜单里走「作废此单」。'
+    )
+  }
   transact(() => {
     db.run('UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?', [next, now(), orderId])
     logEvent(orderId, 'payment_status', cur.payment_status, next, note)
@@ -1925,11 +1944,19 @@ export function lastExchangeRate(): number | null {
   return Number(row.exchange_rate)
 }
 
-/** 最近一次用的汇率 + 当时的锁定日期（参考值，不自动填） */
-export function lastExchangeRateInfo(): { rate: number; date: string } | null {
-  const row = getDb().get(
-    `SELECT exchange_rate, exchange_rate_date FROM orders ORDER BY updated_at DESC, id DESC LIMIT 1`
-  ) as { exchange_rate?: number; exchange_rate_date?: string | null } | null
+/**
+ * 最近一次用的汇率 + 当时的锁定日期（参考值，不自动填）。
+ * 按币种过滤：USD 的 7.1 抄到 EUR 单上是事故，参考值必须同币种才算数。
+ */
+export function lastExchangeRateInfo(currency?: string): { rate: number; date: string } | null {
+  const row = currency
+    ? (getDb().get(
+        `SELECT exchange_rate, exchange_rate_date FROM orders WHERE currency = ? ORDER BY updated_at DESC, id DESC LIMIT 1`,
+        [currency]
+      ) as { exchange_rate?: number; exchange_rate_date?: string | null } | null)
+    : (getDb().get(
+        `SELECT exchange_rate, exchange_rate_date FROM orders ORDER BY updated_at DESC, id DESC LIMIT 1`
+      ) as { exchange_rate?: number; exchange_rate_date?: string | null } | null)
   if (!row || row.exchange_rate == null) return null
   return {
     rate: Number(row.exchange_rate),
@@ -1972,6 +1999,8 @@ export function addOrderPhoto(
   note = ''
 ): OrderPhoto {
   const db = getDb()
+  // 照片挂在订单名下：作废/失效单已经不进货值和毛利，再往上面挂验货照会让留档看起来「这单还在走」
+  assertOrderWritable(orderId, '上传订单照片')
   const res = db.run(
     'INSERT INTO order_photos(order_id, file_name, kind, note, created_at) VALUES(?,?,?,?,?)',
     [orderId, fileName, kind, note, now()]

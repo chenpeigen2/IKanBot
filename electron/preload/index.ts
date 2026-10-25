@@ -81,7 +81,8 @@ const api: IKanApi = {
     ports: () => call<{ loading: string[]; destination: string[] }>('orders:ports'),
     lastTerms: (customerId: number) => call<any>('orders:lastTerms', customerId),
     lastExchangeRate: () => call<number | null>('orders:lastExchangeRate'),
-    lastExchangeRateInfo: () => call<{ rate: number; date: string } | null>('orders:lastExchangeRateInfo'),
+    lastExchangeRateInfo: (currency?: string) =>
+      call<{ rate: number; date: string } | null>('orders:lastExchangeRateInfo', currency),
     photos: (orderId: number) => call<any[]>('orders:photos', orderId),
     addPhoto: (orderId: number, fileName: string, kind?: string, note?: string) =>
       call<any>('orders:addPhoto', orderId, fileName, kind, note),
@@ -148,7 +149,7 @@ const api: IKanApi = {
       call<any[]>('pl:deleteLine', orderId, plId, lineId),
     /** 作废留档：订舱取消、整批发错时不删记录，只是不再参与汇总 */
     void: (orderId: number, plId: number, reason?: string) => call<any[]>('pl:void', orderId, plId, reason),
-    unvoid: (orderId: number, plId: number) => call<any[]>('pl:unvoid', orderId, plId),
+    unvoid: (orderId: number, plId: number, reason?: string) => call<any[]>('pl:unvoid', orderId, plId, reason),
     /** 每批的纸面金额（本批货值 + 分摊费用），箱单存档与批次列表都用它 */
     amounts: (orderId: number) => call<PackingAmount[]>('pl:amounts', orderId)
   },

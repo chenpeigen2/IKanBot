@@ -78,8 +78,8 @@ export interface IKanApi {
     lastTerms(customerId: number): Promise<any>
     /** 最近一次填过的汇率 */
     lastExchangeRate(): Promise<number | null>
-    /** 最近一次用的汇率 + 当时的锁定日期（只作参考，不自动填） */
-    lastExchangeRateInfo(): Promise<{ rate: number; date: string } | null>
+    /** 最近一次用的汇率 + 当时的锁定日期（只作参考，不自动填）；传币种则只看同币种的单 */
+    lastExchangeRateInfo(currency?: string): Promise<{ rate: number; date: string } | null>
     /** 订单照片（验货照 / 柜照） */
     photos(orderId: number): Promise<any[]>
     addPhoto(orderId: number, fileName: string, kind?: string, note?: string): Promise<any>
@@ -151,7 +151,7 @@ export interface IKanApi {
     deleteLine(orderId: number, plId: number, lineId: number): Promise<any[]>
     /** 作废留档 / 撤销作废：作废的批次不参与状态、件数和本批金额 */
     void(orderId: number, plId: number, reason?: string): Promise<any[]>
-    unvoid(orderId: number, plId: number): Promise<any[]>
+    unvoid(orderId: number, plId: number, reason?: string): Promise<any[]>
     /** 每个批次的纸面金额（本批货值 + 分摊费用） */
     amounts(orderId: number): Promise<PackingAmount[]>
   }

@@ -459,16 +459,14 @@ function CreateOrderModal({
   useEffect(() => {
     void (async () => {
       try {
-        const [cs, s, pt, lr] = await Promise.all([
+        const [cs, s, pt] = await Promise.all([
           window.api.customers.list(),
           window.api.settings.get(),
-          window.api.orders.ports(),
-          window.api.orders.lastExchangeRateInfo()
+          window.api.orders.ports()
         ])
         setCustomers(cs)
         setSettings(s)
         setPorts(pt)
-        setLastRate(lr)
         setForm((f) => ({
           ...f,
           depositRatio: s.defaultDepositRatio ?? 0.3
@@ -479,6 +477,20 @@ function CreateOrderModal({
       }
     })()
   }, [])
+
+  // 汇率参考值按币种取：USD 的 7.1 不能抄到 EUR 单上，换币种就重新查同币种的上一次
+  useEffect(() => {
+    let alive = true
+    window.api.orders
+      .lastExchangeRateInfo(form.currency)
+      .then((lr) => {
+        if (alive) setLastRate(lr)
+      })
+      .catch(() => undefined)
+    return () => {
+      alive = false
+    }
+  }, [form.currency])
 
   /** 选客户后：先带出客户档案里的默认条款，再补上这个客户上一次的条款 */
   const beginTerms = useLoadGuard()

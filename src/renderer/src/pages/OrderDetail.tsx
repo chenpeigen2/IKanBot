@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   Modal, useToast, money, num, fmtDate, fmtDateTime, Empty, Menu,
-  Button, PaymentTag, ShipTag, clientKey, LoadError, PromptModal
+  Button, PaymentTag, ShipTag, clientKey, LoadError, PromptModal, useLoadGuard
 } from '../ui'
 import {
   PAYMENT_METHOD_LABEL,
@@ -83,7 +83,11 @@ export default function OrderDetail() {
   /** 读不出来就明说并给重试，不能永远停在「加载中…」 */
   const [loadError, setLoadError] = useState('')
 
+  // 4 个 IPC 并发在途时快速切单，先发的旧单响应可能后到——
+  // 不设栅栏会把 5 号单的金额/收款整套写进 7 号页面（金额串单，比列表串结果疼得多）
+  const beginLoad = useLoadGuard()
   const load = async () => {
+    const { isCurrent } = beginLoad()
     try {
       const [o, s, e, dv] = await Promise.all([
         window.api.orders.get(orderId),
@@ -91,6 +95,7 @@ export default function OrderDetail() {
         window.api.orders.events(orderId),
         window.api.docs.list(orderId)
       ])
+      if (!isCurrent()) return
       if (!o) {
         toast('订单不存在', 'error')
         navigate('/orders')
@@ -102,6 +107,7 @@ export default function OrderDetail() {
       setDocVersions(dv)
       setLoadError('')
     } catch (e) {
+      if (!isCurrent()) return
       setLoadError((e as Error).message || '这张订单没读出来')
     }
   }
@@ -661,15 +667,21 @@ export default function OrderDetail() {
                     value={order.paymentStatus}
                     autoFocus
                     onChange={async (e) => {
-                      await window.api.orders.setPaymentStatus(
-                        orderId,
-                        e.target.value as PaymentStatus
-                      )
-                      setEditPayment(false)
-                      await load()
+                      const next = e.target.value as PaymentStatus
+                      if (next === 'expired' && order.paymentStatus !== 'expired') {
+                        if (!confirm('改成「已失效」后这单会被冻结：不能再收款、改明细、装箱或核销，直到改回「客户已确认」。确定吗？')) return
+                      }
+                      try {
+                        await window.api.orders.setPaymentStatus(orderId, next)
+                        setEditPayment(false)
+                        await load()
+                      } catch (err) {
+                        toast((err as Error).message, 'error')
+                      }
                     }}
                   >
-                    {PAYMENT_STATUS_ORDER.map((s) => (
+                    {/* 作废只能走「⋯ → 作废此单」的凭据核对弹窗，下拉里不给这个旁路 */}
+                    {PAYMENT_STATUS_ORDER.filter((s) => s !== 'void').map((s) => (
                       <option key={s} value={s}>
                         {PAYMENT_STATUS_LABEL[s]}
                       </option>
@@ -708,9 +720,13 @@ export default function OrderDetail() {
                     value={order.shipStatus}
                     autoFocus
                     onChange={async (e) => {
-                      await window.api.orders.setShipStatus(orderId, e.target.value as ShipStatus)
-                      setEditShip(false)
-                      await load()
+                      try {
+                        await window.api.orders.setShipStatus(orderId, e.target.value as ShipStatus)
+                        setEditShip(false)
+                        await load()
+                      } catch (err) {
+                        toast((err as Error).message, 'error')
+                      }
                     }}
                   >
                     {SHIP_STATUS_ORDER.map((s) => (
@@ -1829,6 +1845,9 @@ function AddItemsModal({
 
 /* ================= 收款 ================= */
 
+/** 收款渠道固定枚举（新登记只许从这选；历史流水里的自由文本原样展示不动） */
+const PAYMENT_CHANNEL_OPTIONS = ['T/T', 'L/C', 'PayPal', '西联', '其他']
+
 function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<void> }) {
   const toast = useToast()
   const [form, setForm] = useState({
@@ -2084,7 +2103,14 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
           </div>
           <div className="field">
             <label>方式</label>
-            <input value={form.method} onChange={(e) => setForm({ ...form, method: e.target.value })} />
+            {/* 收款方式收成下拉：自由填写会攒出「TT」「电汇」「T/T定金」一堆同义写法，对账没法筛 */}
+            <select value={form.method} onChange={(e) => setForm({ ...form, method: e.target.value })}>
+              {PAYMENT_CHANNEL_OPTIONS.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
           </div>
         </div>
         <div className="field-row">
@@ -2492,6 +2518,8 @@ function PackingTab({
   const [showCreate, setShowCreate] = useState(false)
   const [editPl, setEditPl] = useState<any | null>(null)
   const [addBoxPl, setAddBoxPl] = useState<any | null>(null)
+  // 作废/撤销都要写原因：这是发给客户的凭据，翻案不留原因以后对不上账
+  const [batchPrompt, setBatchPrompt] = useState<{ mode: 'void' | 'unvoid'; pl: any } | null>(null)
 
   // 每批的纸面金额：本批货值 + 按货值摊到的费用，由 money.ts 算一份。
   // 分批出运时箱单/存档上不能再挂整单的数——三批各存一次「12000」，看的人以为卖了 36000。
@@ -2509,31 +2537,21 @@ function PackingTab({
     }
   }, [order.id, order.packingLists])
 
-  const voidBatch = async (pl: any) => {
-    if (
-      !confirm(
-        `作废装箱单 ${pl.plNo}？\n这一批不再参与出货状态、件数和本批金额；记录、箱明细和已经存好的 PDF 一条不删（发到客户手里的单据必须还查得到）。`
-      )
-    )
-      return
+  const doBatchPrompt = async (mode: 'void' | 'unvoid', pl: any, reason: string): Promise<boolean> => {
     try {
-      await window.api.pl.void(order.id, pl.id)
-      toast(`${pl.plNo} 已作废留档`)
+      if (mode === 'void') {
+        await window.api.pl.void(order.id, pl.id, reason)
+        toast(`${pl.plNo} 已作废留档`)
+      } else {
+        await window.api.pl.unvoid(order.id, pl.id, reason)
+        toast(`${pl.plNo} 已恢复`)
+      }
+      await onChange()
+      return true
     } catch (e) {
       toast((e as Error).message, 'error')
+      return false
     }
-    await onChange()
-  }
-
-  const unvoidBatch = async (pl: any) => {
-    if (!confirm(`撤销作废 ${pl.plNo}？这一批重新参与出货状态、件数和本批金额。`)) return
-    try {
-      await window.api.pl.unvoid(order.id, pl.id)
-      toast(`${pl.plNo} 已恢复`)
-    } catch (e) {
-      toast((e as Error).message, 'error')
-    }
-    await onChange()
   }
 
   // 已出运批次的箱明细是锁住的：报错要弹出来，输入框跟着回退到库里的值
@@ -2595,7 +2613,7 @@ function PackingTab({
               {pl.voidedAt ? <span className="tag red">已作废 · 仅留档</span> : null}
               <div className="spacer" />
               {pl.voidedAt ? (
-                <Button size="sm"  onClick={() => unvoidBatch(pl)}>
+                <Button size="sm"  onClick={() => setBatchPrompt({ mode: 'unvoid', pl })}>
                   撤销作废
                 </Button>
               ) : (
@@ -2603,7 +2621,7 @@ function PackingTab({
                   <Button size="sm"  onClick={() => setAddBoxPl(pl)}>
                     + 加一箱
                   </Button>
-                  <Button size="sm"  onClick={() => voidBatch(pl)}>
+                  <Button size="sm"  onClick={() => setBatchPrompt({ mode: 'void', pl })}>
                     作废
                   </Button>
                 </>
@@ -2821,6 +2839,33 @@ function PackingTab({
             setEditPl(null)
             await onChange()
           }}
+        />
+      ) : null}
+
+      {batchPrompt ? (
+        <PromptModal
+          title={batchPrompt.mode === 'void' ? `作废批次 ${batchPrompt.pl.plNo}` : `撤销作废 ${batchPrompt.pl.plNo}`}
+          label={
+            batchPrompt.mode === 'void' ? (
+              <>为什么作废这一批？（必填，写进操作历史）<br />
+              <span className="muted">这一批不再参与出货状态、件数和本批金额；记录、箱明细和已存 PDF 一条不删。</span></>
+            ) : (
+              <>为什么撤销作废？（必填，写进操作历史）<br />
+              <span className="muted">这一批重新参与出货状态、件数和本批金额。</span></>
+            )
+          }
+          okText={batchPrompt.mode === 'void' ? '作废批次' : '撤销作废'}
+          multiline
+          onOk={async (reason) => {
+            if (!reason.trim()) {
+              toast('原因必须写一句：这是发给客户的凭据，不留原因以后对不上账。', 'error')
+              return false
+            }
+            const ok = await doBatchPrompt(batchPrompt.mode, batchPrompt.pl, reason.trim())
+            if (ok) setBatchPrompt(null)
+            return false
+          }}
+          onClose={() => setBatchPrompt(null)}
         />
       ) : null}
     </>

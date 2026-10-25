@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Modal, useToast, money, moneyOrDash, num, Empty, fmtDate, today, ActionMenu, SampleStatusTag, Button, SampleFeeTag, clientKey, LoadError } from '../ui'
+import { Modal, useToast, money, moneyOrDash, num, Empty, fmtDate, today, ActionMenu, SampleStatusTag, Button, SampleFeeTag, clientKey, LoadError, useDebounced, useLoadGuard } from '../ui'
 import {
   SAMPLE_STATUS_LABEL,
   SAMPLE_STATUS_ORDER,
@@ -48,13 +48,19 @@ export default function Samples() {
   const [convPi, setConvPi] = useState<'' | 'draft' | 'sent'>('')
   /** 读取失败不能装成「没有打样单」 */
   const [loadError, setLoadError] = useState('')
+  // 敲太快时两个 list 请求在途，先发的旧结果不许盖住新关键词
+  const kw = useDebounced(keyword, 250)
+  const begin = useLoadGuard()
 
   const load = async () => {
+    const { isCurrent } = begin()
     try {
-      const rows = await window.api.samples.list({ keyword, status: status || undefined })
+      const rows = await window.api.samples.list({ keyword: kw, status: status || undefined })
+      if (!isCurrent()) return
       setList(rows)
       setLoadError('')
     } catch (e) {
+      if (!isCurrent()) return
       setLoadError((e as Error).message || '打样单列表没加载出来')
     }
   }
@@ -62,7 +68,7 @@ export default function Samples() {
   useEffect(() => {
     void load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keyword, status])
+  }, [kw, status])
 
   useEffect(() => {
     void window.api.settings.get().then((s) => setBaseCurrency(s?.baseCurrency ?? 'CNY'))

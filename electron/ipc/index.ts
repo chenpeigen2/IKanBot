@@ -201,7 +201,7 @@ export function registerIpc(): void {
   handle('orders:ports', () => orders.listPorts())
   handle('orders:lastTerms', (customerId: number) => orders.lastOrderTerms(customerId))
   handle('orders:lastExchangeRate', () => orders.lastExchangeRate())
-  handle('orders:lastExchangeRateInfo', () => orders.lastExchangeRateInfo())
+  handle('orders:lastExchangeRateInfo', (currency?: string) => orders.lastExchangeRateInfo(currency))
   handle('orders:photos', (orderId: number) => orders.listOrderPhotos(orderId))
   handle('orders:addPhoto', (orderId: number, fileName: string, kind?: string, note?: string) =>
     orders.addOrderPhoto(orderId, fileName, (kind as 'inspection' | 'container' | 'other') ?? 'inspection', note)
@@ -244,7 +244,9 @@ export function registerIpc(): void {
   handle('pl:void', (orderId: number, plId: number, reason?: string) =>
     packing.voidPackingList(orderId, plId, reason ?? '')
   )
-  handle('pl:unvoid', (orderId: number, plId: number) => packing.unvoidPackingList(orderId, plId))
+  handle('pl:unvoid', (orderId: number, plId: number, reason?: string) =>
+    packing.unvoidPackingList(orderId, plId, reason ?? '')
+  )
   // 本批金额：唯一实现在 money.ts，纸面箱单/存档/批次列表都从这一个数取
   handle('pl:amounts', (orderId: number) => money.packingAmounts(orderId))
 

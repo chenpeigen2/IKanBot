@@ -3589,14 +3589,14 @@ packing.deletePackingList(r8g.id, r8C.id)
 const r8UnvoidEv0 = r8EvCount('pl_unvoid')
 packing.unvoidPackingList(r8g.id, r8A.id)
 eq('撤销一张没作废的批次是无操作，不刷历史', r8EvCount('pl_unvoid'), r8UnvoidEv0)
-packing.unvoidPackingList(r8g.id, r8B.id)
+packing.unvoidPackingList(r8g.id, r8B.id, '客户恢复下单')
 eq('撤销作废后重新参与汇总', shipmentSummary(r8g.id).packedQuantity, 100)
 eq('撤销作废记了一笔历史', r8EvCount('pl_unvoid') - r8UnvoidEv0, 1)
 check('重复作废会被拦下', (() => {
-  packing.voidPackingList(r8g.id, r8B.id)
-  return r8err(() => packing.voidPackingList(r8g.id, r8B.id)).includes('已经是作废状态')
+  packing.voidPackingList(r8g.id, r8B.id, '再试一次作废')
+  return r8err(() => packing.voidPackingList(r8g.id, r8B.id, '重复')).includes('已经是作废状态')
 })())
-packing.unvoidPackingList(r8g.id, r8B.id)
+packing.unvoidPackingList(r8g.id, r8B.id, '回归复核')
 
 section('R8 手工状态只能用这一份枚举')
 const r8Manual = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7 })
@@ -4797,7 +4797,7 @@ check('整单 CI 两批的款都在', ciWhole.includes('R14-A') && ciWhole.inclu
 section('R14 批次金额：作废批次不算金额，撤销作废后回来')
 packing.voidPackingList(r14.id, r14PlB.id, '订舱取消')
 eq('作废的那批不再出金额', money.packingAmounts(r14.id).map((a) => a.plId), [r14PlA.id])
-packing.unvoidPackingList(r14.id, r14PlB.id)
+packing.unvoidPackingList(r14.id, r14PlB.id, '订舱恢复了')
 eq('撤销作废后两批都在', money.packingAmounts(r14.id).length, 2)
 
 section('R14 批次金额：老数据里对不上款号的箱不出单价，也不编数')
@@ -5772,6 +5772,103 @@ try {
   r20RecoverErr = (e as Error).message
 }
 check('追回款到账日期填未来被拦', r20RecoverErr.includes('还没到'), r20RecoverErr)
+
+/* ---------------- R21：侧门守门与串单竞态 ---------------- */
+
+// ① 收款状态下拉不许直接跳「已作废」：作废必须走凭据核对的正门
+section('R21 作废侧门封死：下拉改 void 被拦，指路「作废此单」')
+
+const r21Gate = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R21-GATE' })
+await orders.addOrderItem(r21Gate.id, { styleNo: 'R21-GATE', quantity: 10, unitPrice: 10 })
+
+let r21VoidErr = ''
+try {
+  orders.setPaymentStatus(r21Gate.id, 'void')
+} catch (e) {
+  r21VoidErr = (e as Error).message
+}
+check('收款状态下拉直接改成「已作废」被拦下', r21VoidErr.includes('作废此单'), r21VoidErr)
+check('被拦的单还在（不是先改成 void 再报错）', orders.getOrder(r21Gate.id)!.paymentStatus !== 'void')
+// 正门仍通：作废弹窗走的 voidOrder 不受影响
+orders.voidOrder(r21Gate.id, 'R21 正门回归')
+check('正门作废不受影响', orders.getOrder(r21Gate.id)!.paymentStatus === 'void')
+
+// ② 批次作废/撤销原因必填（后端在状态检查之后拦，留档凭据不许匿名著墨）
+section('R21 批次作废/撤销：原因必填，历史里查得到为什么')
+
+const r21PlOrder = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R21-PL' })
+await orders.addOrderItem(r21PlOrder.id, { styleNo: 'R21-PL', color: 'Navy', size: 'L', quantity: 50, unitPrice: 10 })
+const r21Pl = packing.createPackingList({
+  orderId: r21PlOrder.id,
+  containerNo: 'CONT-R21',
+  lines: [{ boxNo: 'NO.1', styleNo: 'R21-PL', color: 'Navy', size: 'L', quantity: 50 }]
+})[0]
+
+let r21VoidNoReasonErr = ''
+try {
+  packing.voidPackingList(r21PlOrder.id, r21Pl.id)
+} catch (e) {
+  r21VoidNoReasonErr = (e as Error).message
+}
+check('批次作废不写原因被拦下', r21VoidNoReasonErr.includes('原因'), r21VoidNoReasonErr)
+
+packing.voidPackingList(r21PlOrder.id, r21Pl.id, '订舱被货代取消')
+const r21VoidEvt = orders.listEvents(r21PlOrder.id).filter((e) => e.kind === 'pl_void').pop()
+check('作废原因进了操作历史', !!r21VoidEvt && r21VoidEvt.note.includes('订舱被货代取消'), r21VoidEvt?.note ?? '没有 pl_void 事件')
+
+let r21UnvoidNoReasonErr = ''
+try {
+  packing.unvoidPackingList(r21PlOrder.id, r21Pl.id)
+} catch (e) {
+  r21UnvoidNoReasonErr = (e as Error).message
+}
+check('撤销作废不写原因也被拦下', r21UnvoidNoReasonErr.includes('原因'), r21UnvoidNoReasonErr)
+
+packing.unvoidPackingList(r21PlOrder.id, r21Pl.id, '货代恢复订舱')
+check('写了原因的撤销作废放行', packing.listPackingLists(r21PlOrder.id).find((p) => p.id === r21Pl.id)!.voidedAt == null)
+const r21UnvoidEvt = orders.listEvents(r21PlOrder.id).filter((e) => e.kind === 'pl_unvoid').pop()
+check('撤销原因也进了操作历史', !!r21UnvoidEvt && r21UnvoidEvt.note.includes('货代恢复订舱'), r21UnvoidEvt?.note ?? '没有 pl_unvoid 事件')
+
+// ③ 换客户留痕：操作历史写明「客户 A → B」，改单弹窗另有确认弹窗兜底
+section('R21 换主留痕：历史写明客户从谁换成谁')
+
+const r21Swap = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R21-SWAP' })
+await orders.addOrderItem(r21Swap.id, { styleNo: 'R21-SWAP', quantity: 5, unitPrice: 10 })
+orders.updateOrder(r21Swap.id, { customerId: c2.id })
+const r21SwapEvt = orders.listEvents(r21Swap.id).find((e) => e.note.includes('客户'))
+check(
+  '换客户在历史里写明「客户 A → B」',
+  !!r21SwapEvt && r21SwapEvt.note.includes('客户') && r21SwapEvt.note.includes('→'),
+  r21SwapEvt?.note ?? '没有客户相关历史'
+)
+eq('客户真的换过去了', orders.getOrder(r21Swap.id)!.customerId, c2.id)
+
+// ④ 汇率参考值按币种过滤：USD 的 7.1 不能抄到 EUR 单上
+section('R21 汇率参考值同币种：参考的就是同币种那一张')
+
+const r21Eur = orders.createOrder({ customerId: c1.id, currency: 'EUR', exchangeRate: 7.8, paymentStatus: 'confirmed', piNo: 'PI-R21-EUR' })
+await orders.addOrderItem(r21Eur.id, { styleNo: 'R21-EUR', quantity: 5, unitPrice: 10 })
+const r21UsdInfo = orders.lastExchangeRateInfo('USD')
+const r21EurInfo = orders.lastExchangeRateInfo('EUR')
+check('EUR 参考值取的是 EUR 那张单的汇率', !!r21EurInfo && Math.abs(r21EurInfo.rate - 7.8) < 0.0001, JSON.stringify(r21EurInfo))
+check('USD 参考值不再是刚建的 EUR 单', !r21UsdInfo || Math.abs(r21UsdInfo.rate - 7.8) > 0.0001, JSON.stringify(r21UsdInfo))
+
+// ⑤ 作废/失效单不许再挂照片
+section('R21 作废单冻结照片：留档不再「还在走」')
+
+const r21Photo = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R21-PHOTO' })
+await orders.addOrderItem(r21Photo.id, { styleNo: 'R21-PHOTO', quantity: 5, unitPrice: 10 })
+orders.addOrderPhoto(r21Photo.id, 'r21-normal.jpg', 'inspection', '正常单传照放行')
+eq('正常单传照放行', orders.listOrderPhotos(r21Photo.id).length, 1)
+orders.voidOrder(r21Photo.id, 'R21 照片冻结测试')
+let r21PhotoErr = ''
+try {
+  orders.addOrderPhoto(r21Photo.id, 'r21-void.jpg', 'inspection', '作废后再传')
+} catch (e) {
+  r21PhotoErr = (e as Error).message
+}
+check('作废单再传照片被拦下', r21PhotoErr.includes('已作废'), r21PhotoErr)
+eq('作废单照片一张没多', orders.listOrderPhotos(r21Photo.id).length, 1)
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
