@@ -614,14 +614,31 @@ export function reminders(): Reminder[] {
   }
 
   for (const q of db.all(
-    `SELECT q.q_no, q.created_at, q.sent_at, q.valid_until, q.status, c.company AS customer_name
+    `SELECT q.q_no, q.created_at, q.updated_at, q.sent_at, q.valid_until, q.status, c.company AS customer_name
      FROM quotations q JOIN customers c ON c.id = q.customer_id
-     WHERE q.status = 'sent' AND q.converted_order_id IS NULL`
+     WHERE q.status IN ('sent', 'confirmed') AND q.converted_order_id IS NULL`
   ) as Record<string, unknown>[]) {
     const qNo = String(q.q_no)
     const who = String(q.customer_name)
+    if (String(q.status) === 'confirmed') {
+      // 客户已经点头却没人转订单，是最容易被忘掉的一笔生意：报价会过期，汇率也天天在动
+      const days = daysFrom(String(q.updated_at ?? '') || String(q.sent_at ?? '') || String(q.created_at ?? ''))
+      if (days !== null && days >= s.remindConfirmDays) {
+        add(
+          {
+            orderId: 0,
+            orderNo: qNo,
+            customerName: who,
+            kind: 'quote',
+            message: `报价 ${qNo} 客户 ${days} 天前已确认，还没转订单——拖下去汇率和交期都会变`,
+            days
+          },
+          'quote-confirmed'
+        )
+      }
+    }
     const days = daysFrom(String(q.sent_at ?? '') || String(q.created_at ?? ''))
-    if (days !== null && days >= s.remindConfirmDays) {
+    if (String(q.status) === 'sent' && days !== null && days >= s.remindConfirmDays) {
       add(
         {
           orderId: 0,
@@ -879,8 +896,11 @@ export function exportCsv(kind: ExportKind, filter?: OrderExportFilter): string 
   switch (kind) {
     case 'orders':
     case 'orders_all':
+      // 有筛选时「所见即所得」：停在「已作废 / 草稿 / 已失效」页签导出的必须是屏幕上的行，
+      // 不能因为台账口径把行集先剔光、最后只导出一个表头。无筛选时仍是台账口径，
+      // 与报表页 SUM 出来的数对得上。
       return ordersCsv(
-        kind === 'orders_all' ? listOrderMoney({ includeVoided: true }) : listOrderMoney(),
+        kind === 'orders_all' || filter ? listOrderMoney({ includeVoided: true }) : listOrderMoney(),
         base,
         kind === 'orders' ? filter : undefined
       )

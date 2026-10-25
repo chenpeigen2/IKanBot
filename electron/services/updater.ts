@@ -51,6 +51,8 @@ export function isUpdaterAvailable(): boolean {
 
 let mainWindow: BrowserWindow | null = null
 let downloadedUpdate = false
+/** 事件监听只挂一次：mac 关窗后重建窗口会再调 initUpdater，重复 on 会让状态推送越来越多次 */
+let listenersWired = false
 
 /**
  * 更新状态的唯一真源。
@@ -110,6 +112,9 @@ export function initUpdater(win: BrowserWindow): void {
     if (!mainWindow || mainWindow.isDestroyed()) return
     mainWindow.webContents.send('updater:event', state)
   }
+
+  if (listenersWired) return
+  listenersWired = true
 
   autoUpdater.on('checking-for-update', () => {
     // 重新检查就把上一轮的结论清空，不然界面上还挂着上次的「发现新版本 vNNN」

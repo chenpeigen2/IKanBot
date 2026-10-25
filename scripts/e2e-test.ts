@@ -33,6 +33,7 @@ import {
 import { localDate, localMonthOf } from '../src/shared/date'
 import { isBillingStatus, shownRemaining } from '../src/shared/billing'
 import { likeContains } from '../electron/services/search'
+import { INCOTERMS } from '../src/shared/types'
 
 let passed = 0
 let failed = 0
@@ -206,7 +207,7 @@ eq('手填净重保留', pls[0].lines[1].netWeight, 18)
 const pls2 = packing.createPackingList({
   orderId: order.id,
   containerNo: 'MSKU7654321',
-  lines: [{ boxNo: 'NO.1', styleNo: 'A002', productName: '涤纶 Polo 衫', color: 'Navy', size: 'M', quantity: 80, netWeight: 10 }]
+  lines: [{ boxNo: 'NO.3', styleNo: 'A002', productName: '涤纶 Polo 衫', color: 'Navy', size: 'M', quantity: 80, netWeight: 10 }]
 })
 eq('一单可多张 PL', pls2.length, 2)
 
@@ -2031,7 +2032,7 @@ check('第二批要装 70 件（只剩 60）会被拦下，并说清超了几件
 
 packing.createPackingList({
   orderId: batchOrder.id,
-  lines: [{ boxNo: 'NO.1', styleNo: 'BATCH-1', color: 'Black', size: 'M', quantity: 60 }]
+  lines: [{ boxNo: 'NO.2', styleNo: 'BATCH-1', color: 'Black', size: 'M', quantity: 60 }]
 })
 eq('第二批装剩下的 60 件放行', packing.listPackingLists(batchOrder.id).length, 2)
 eq('全部装完：未装箱数量归 0', orders.summarizeSkus(batchOrder.id)[0].remainingQuantity, 0)
@@ -2128,7 +2129,7 @@ check('「部分出运」是汇总出来的，批次上不能手选', derivedPic
 const shipPls2 = packing.createPackingList({
   orderId: shipOrder.id,
   containerNo: 'CONT-B',
-  lines: [{ boxNo: 'NO.1', styleNo: 'SHIP-1', color: 'Navy', size: 'L', quantity: 60 }]
+  lines: [{ boxNo: 'NO.2', styleNo: 'SHIP-1', color: 'Navy', size: 'L', quantity: 60 }]
 })
 const shipPlB = shipPls2[1]
 const sumC = shipmentSummary(shipOrder.id)
@@ -2289,7 +2290,7 @@ getDb().run(
 orders.setShipStatus(mixedOrder.id, 'delivered')
 packing.createPackingList({
   orderId: mixedOrder.id,
-  lines: [{ boxNo: 'NO.1', styleNo: 'MIX-1', color: 'Black', size: 'M', quantity: 30 }]
+  lines: [{ boxNo: 'NO.2', styleNo: 'MIX-1', color: 'Black', size: 'M', quantity: 30 }]
 })
 eq('混有老批次时不推导', shipmentSummary(mixedOrder.id).derivedStatus, null)
 eq('加新批次不会把手工「已签收」拉回来', orders.getOrder(mixedOrder.id)!.shipStatus, 'delivered')
@@ -3518,7 +3519,7 @@ const r8B = packing
   .createPackingList({
     orderId: r8g.id,
     containerNo: 'CONT-R8-B',
-    lines: [{ boxNo: 'NO.1', styleNo: 'R8G', color: 'Sky', size: 'L', quantity: 30 }]
+    lines: [{ boxNo: 'NO.3', styleNo: 'R8G', color: 'Sky', size: 'L', quantity: 30 }]
   })
   .find((p) => p.containerNo === 'CONT-R8-B')!
 eq('两批加起来装够 100 件', shipmentSummary(r8g.id).packedQuantity, 100)
@@ -3546,7 +3547,7 @@ check(
     packing.createPackingList({
       orderId: r8g.id,
       containerNo: 'CONT-R8-C',
-      lines: [{ boxNo: 'NO.1', styleNo: 'R8G', color: 'Sky', size: 'L', quantity: 30 }]
+      lines: [{ boxNo: 'NO.4', styleNo: 'R8G', color: 'Sky', size: 'L', quantity: 30 }]
     })
     return true
   })()
@@ -3597,12 +3598,17 @@ for (const [sn, col, sz] of [
     unitCost: 0.5
   })
 }
-for (const [sn, col, sz] of [
-  ['R8A', 'Red', 'S'],
-  ['R8B', 'Blue', 'M'],
-  ['R8C', 'Green', 'L']
-] as const) {
-  packing.createPackingList({ orderId: r8a.id, lines: [{ boxNo: 'NO.1', styleNo: sn, color: col, size: sz, quantity: 100 }] })
+for (const [i, [sn, col, sz]] of (
+  [
+    ['R8A', 'Red', 'S'],
+    ['R8B', 'Blue', 'M'],
+    ['R8C', 'Green', 'L']
+  ] as const
+).entries()) {
+  packing.createPackingList({
+    orderId: r8a.id,
+    lines: [{ boxNo: `NO.${i + 1}`, styleNo: sn, color: col, size: sz, quantity: 100 }]
+  })
 }
 const r8Amt = money.packingAmounts(r8a.id)
 eq('每个批次各算自己那一份钱（运费按货值比例摊）', r8Amt.map((a) => a.total), [133.33, 133.33, 133.34])
@@ -4435,6 +4441,176 @@ section('R12 守门：收款状态白名单 / 箱号查重')
   check('把箱号改成同批已有的号也被拒', dupEdit.includes('已经用过'), dupEdit)
   eq('被拒的改箱号没有落库', packing.listPackingLists(o.id)[0].lines.find((l) => l.id === second.id)!.boxNo, 'B2')
 }
+
+/* ============================================================
+ * 第 13 轮：口径与守门（R13）
+ * ============================================================ */
+section('R13 导出口径：页面筛出几张，Excel 就是几张')
+const cR13 = customers.saveCustomer({ company: 'R13 Export Co', contact: 'Export Desk', country: 'Germany' })
+const r13Ledger = orders.createOrder({
+  customerId: cR13.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(r13Ledger.id, { styleNo: 'R13-OK', productName: '正常单', quantity: 10, unitPrice: 10 })
+const r13Draft = orders.createOrder({ customerId: cR13.id, currency: 'USD', exchangeRate: 7 })
+await orders.addOrderItem(r13Draft.id, { styleNo: 'R13-DRAFT', productName: '草稿', quantity: 10, unitPrice: 10 })
+const r13Void = orders.createOrder({ customerId: cR13.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r13Void.id, { styleNo: 'R13-VOID', productName: '作废', quantity: 10, unitPrice: 10 })
+orders.voidOrder(r13Void.id, '客户取消')
+const r13Expired = orders.createOrder({ customerId: cR13.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r13Expired.id, { styleNo: 'R13-EXP', productName: '失效', quantity: 10, unitPrice: 10 })
+orders.setPaymentStatus(r13Expired.id, 'expired')
+
+const csvLedger = dashboard.exportCsv('orders')
+check('默认台账含正常单', csvLedger.includes(r13Ledger.orderNo))
+check(
+  '默认台账不含草稿 / 作废 / 失效（SUM 出来才是销售额）',
+  ![r13Draft.orderNo, r13Void.orderNo, r13Expired.orderNo].some((no) => csvLedger.includes(no)),
+  [r13Draft.orderNo, r13Void.orderNo, r13Expired.orderNo].join(',')
+)
+const csvAll = dashboard.exportCsv('orders_all')
+check(
+  '全量底稿四张都在（复盘查得到）',
+  [r13Ledger.orderNo, r13Draft.orderNo, r13Void.orderNo, r13Expired.orderNo].every((no) => csvAll.includes(no))
+)
+const csvVoid = dashboard.exportCsv('orders', { paymentStatus: 'void' })
+check('停在「已作废」页签导出，作废单在表里', csvVoid.includes(r13Void.orderNo))
+check('按作废筛选时不会混进正常单或草稿', !csvVoid.includes(r13Ledger.orderNo) && !csvVoid.includes(r13Draft.orderNo))
+const csvDraft = dashboard.exportCsv('orders', { paymentStatus: 'draft' })
+check('停在「草稿」页签导出，草稿在表里且只有草稿', csvDraft.includes(r13Draft.orderNo) && !csvDraft.includes(r13Ledger.orderNo))
+
+section('R13 收款状态：发出 PI 后按真收到的钱走，不被 sent 卡住')
+const r13Pay = orders.createOrder({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'sent',
+  depositRatio: 0
+})
+await orders.addOrderItem(r13Pay.id, { styleNo: 'R13-PAY', productName: '收款流转', quantity: 10, unitPrice: 100 })
+eq('PI 已发、还没收钱 → 仍是已发出', orders.getOrder(r13Pay.id)!.paymentStatus, 'sent')
+orders.addPayment(r13Pay.id, { paidAt: localDate(), amount: 400, method: 'T/T', bankRef: 'R13-P1' })
+eq('收到 400 / 1000 → 部分收款（不再停在已发出）', orders.getOrder(r13Pay.id)!.paymentStatus, 'partial')
+orders.addPayment(r13Pay.id, { paidAt: localDate(), amount: 600, method: 'T/T', bankRef: 'R13-P2' })
+eq('收齐 → 已结清', orders.getOrder(r13Pay.id)!.paymentStatus, 'settled')
+
+section('R13 写入守门：作废/失效的单不能再往里加东西')
+const r13Void2 = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r13Void2.id, { styleNo: 'R13-GUARD', productName: '守门', quantity: 10, unitPrice: 10 })
+orders.voidOrder(r13Void2.id, '客户不做了')
+check(
+  '作废单不能再加明细',
+  r8err(() => orders.addOrderItems(r13Void2.id, [{ styleNo: 'X', quantity: 1, unitPrice: 1 }])).includes('已作废')
+)
+check(
+  '作废单不能再登记收款',
+  r8err(() => orders.addPayment(r13Void2.id, { paidAt: localDate(), amount: 10 })).includes('已作废')
+)
+check(
+  '作废单不能再装箱',
+  r8err(() =>
+    packing.createPackingList({ orderId: r13Void2.id, lines: [{ boxNo: 'V1', styleNo: 'R13-GUARD', quantity: 1 }] })
+  ).includes('已作废')
+)
+
+const r13Exp = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r13Exp.id, { styleNo: 'R13-EXP2', productName: '失效守门', quantity: 10, unitPrice: 10 })
+orders.setPaymentStatus(r13Exp.id, 'expired')
+check(
+  '失效单不能再登记收款（钱进来了得先把状态改回来）',
+  r8err(() => orders.addPayment(r13Exp.id, { paidAt: localDate(), amount: 10 })).includes('已失效')
+)
+orders.setPaymentStatus(r13Exp.id, 'confirmed')
+const r13ExpPaid = orders.addPayment(r13Exp.id, { paidAt: localDate(), amount: 10, method: 'T/T', bankRef: 'R13-EXP-P' })
+eq('状态改回来后可以继续收款', r13ExpPaid.paymentStatus, 'partial')
+
+section('R13 箱号跨批次连续：作废的号也不能重发')
+const r13Box = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r13Box.id, { styleNo: 'R13-BOX', productName: '箱号', quantity: 100, unitPrice: 1 })
+const r13BoxA = packing.createPackingList({
+  orderId: r13Box.id,
+  containerNo: 'R13-A',
+  lines: [{ boxNo: 'B-1', styleNo: 'R13-BOX', quantity: 40 }]
+})[0]
+const r13DupBoxErr = r8err(() =>
+  packing.createPackingList({ orderId: r13Box.id, lines: [{ boxNo: 'B-1', styleNo: 'R13-BOX', quantity: 20 }] })
+)
+check('下一批重复用 B-1 被拦下，并说明箱号跨批次连续', r13DupBoxErr.includes('已经用过') && r13DupBoxErr.includes('箱号跨批次连续'), r13DupBoxErr)
+const r13BoxB = packing
+  .createPackingList({ orderId: r13Box.id, containerNo: 'R13-B', lines: [{ boxNo: 'B-2', styleNo: 'R13-BOX', quantity: 20 }] })
+  .find((p) => p.containerNo === 'R13-B')
+check('换成没发过的 B-2 放行', !!r13BoxB)
+packing.voidPackingList(r13Box.id, r13BoxB!.id, '订舱取消')
+const r13VoidBoxErr = r8err(() =>
+  packing.createPackingList({ orderId: r13Box.id, lines: [{ boxNo: 'B-2', styleNo: 'R13-BOX', quantity: 10 }] })
+)
+check('作废批次的箱号仍占号，不能再发一次', r13VoidBoxErr.includes('作废批次也占号'), r13VoidBoxErr)
+check(
+  '往后接 B-3 放行',
+  (() => {
+    packing.createPackingList({ orderId: r13Box.id, containerNo: 'R13-C', lines: [{ boxNo: 'B-3', styleNo: 'R13-BOX', quantity: 10 }] })
+    return packing.listPackingLists(r13Box.id).some((p) => p.containerNo === 'R13-C')
+  })()
+)
+check('同一批 A 的 B-1 还能改箱明细（不误伤自己）', packing.updatePackingListLine(r13Box.id, r13BoxA.id, r13BoxA.lines[0].id, { quantity: 40 }).length > 0)
+
+section('R13 贸易术语：八种都能落库、都能印在 PI 上')
+for (const term of INCOTERMS) {
+  const o = orders.createOrder({
+    customerId: c1.id,
+    currency: 'USD',
+    exchangeRate: 7,
+    incoterm: term,
+    portOfLoading: 'Shanghai',
+    portOfDestination: 'Hamburg'
+  })
+  eq(`贸易术语 ${term} 存住了`, o.incoterm, term)
+  check(
+    `PI 印出 ${term} 和港口`,
+    renderPi({ order: o, settings: getSettings(), images: {} }).includes(`${term} — Shanghai → Hamburg`),
+    term
+  )
+}
+
+section('R13 打样重新转单：上次转出的单作废了，还能按新单再转')
+const smpR13 = samples.saveSample({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: '2026-10-21',
+  items: [{ styleNo: 'R13-SMP', productName: '重转', quantity: 2, unitPrice: 15, goodsUnitPrice: 8 }]
+})
+const r13SampleOrder1 = samples.convertSampleToOrder(smpR13.id)
+orders.voidOrder(r13SampleOrder1.id, '客户改规格')
+eq(
+  '打样列表能看出上次转出的单已作废',
+  samples.listSamples().find((s) => s.id === smpR13.id)!.convertedOrderStatus,
+  'void'
+)
+const r13SampleOrder2 = samples.convertSampleToOrder(smpR13.id)
+check('作废后重新转单会生成一张新单，而不是复用作废单', r13SampleOrder2.id !== r13SampleOrder1.id)
+eq('打样单改成记新单', samples.getSample(smpR13.id)!.convertedOrderId, r13SampleOrder2.id)
+eq('新单还活着时再转仍复用同一张', samples.convertSampleToOrder(smpR13.id).id, r13SampleOrder2.id)
+
+section('R13 报价已确认却没人转单：催的是「拖下去汇率和交期都会变」')
+const qR13 = quotations.saveQuotation({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  status: 'confirmed',
+  items: [{ styleNo: 'R13-Q', quantity: 10, unitPrice: 5 }]
+})
+getDb().run('UPDATE quotations SET updated_at = ? WHERE id = ?', [dAgoIso(20), qR13.id])
+const remR13 = dashboard.reminders()
+check(
+  '已确认 20 天没转单 → 工作台催转订单',
+  remR13.some(
+    (r) => r.kind === 'quote' && r.orderNo === qR13.qNo && r.message.includes('已确认') && r.message.includes('汇率和交期')
+  ),
+  JSON.stringify(remR13.filter((r) => r.orderNo === qR13.qNo).map((r) => r.message))
+)
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

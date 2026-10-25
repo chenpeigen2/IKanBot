@@ -37,6 +37,24 @@ function now(): string {
   return new Date().toISOString()
 }
 
+/**
+ * 作废 / 失效的单是留档凭据：还能看、还能重印，但不能再往上加明细、装箱或收钱。
+ * 以前只有界面把入口藏了，主进程照收不误——一次调用就能把箱单和台账改得对不上。
+ */
+export function assertOrderWritable(orderId: number, action: string): void {
+  const o = getDb().get('SELECT order_no, payment_status FROM orders WHERE id = ?', [orderId]) as
+    | { order_no?: string; payment_status?: string }
+    | null
+  if (!o) throw new Error('订单不存在')
+  const no = String(o.order_no ?? '')
+  const status = String(o.payment_status ?? '')
+  if (status === 'void') {
+    throw new Error(`订单 ${no} 已作废，不能再${action}：作废单只是留档，要接着做生意请按新单重开。`)
+  }
+  if (status === 'expired') {
+    throw new Error(`订单 ${no} 已失效，不能再${action}：先把收款状态改回「客户已确认」，再继续。`)
+  }
+}
 
 export interface OrderInput {
   id?: number
@@ -865,6 +883,7 @@ export function updateOrderCharges(orderId: number, charges: QuotationCharge[]):
   const db = getDb()
   const before = db.get('SELECT charges FROM orders WHERE id = ?', [orderId]) as Record<string, unknown> | null
   if (!before) throw new Error('订单不存在')
+  assertOrderWritable(orderId, '改费用行')
   const clean = charges.filter((c) => c.label.trim())
   db.run('UPDATE orders SET charges=?, updated_at=? WHERE id=?', [JSON.stringify(clean), now(), orderId])
   const parts = describeChargeChange(parseCharges(before.charges), clean)
@@ -943,6 +962,7 @@ export function addOrderItem(orderId: number, item: OrderItemInput): OrderDetail
  */
 export function addOrderItems(orderId: number, items: OrderItemInput[]): OrderDetail {
   const db = getDb()
+  assertOrderWritable(orderId, '加明细')
   transact(() => {
     for (const item of items) insertOrderItem(orderId, item)
     db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
@@ -985,6 +1005,7 @@ export function updateOrderItem(
   patch: Partial<OrderItemInput>
 ): OrderDetail {
   const db = getDb()
+  assertOrderWritable(orderId, '改明细')
   const cur = db.get('SELECT * FROM order_items WHERE id = ? AND order_id = ?', [itemId, orderId]) as
     | Record<string, unknown>
     | null
@@ -1077,6 +1098,7 @@ function describeItemChange(cur: Record<string, unknown>, patch: Partial<OrderIt
 
 export function removeOrderItem(orderId: number, itemId: number): OrderDetail {
   const db = getDb()
+  assertOrderWritable(orderId, '删明细')
   // 删行也要留痕：客户要过 50 件后来取消了，这件事系统必须记得
   const cur = db.get('SELECT * FROM order_items WHERE id = ? AND order_id = ?', [itemId, orderId]) as
     | Record<string, unknown>
@@ -1113,6 +1135,7 @@ export function removeOrderItem(orderId: number, itemId: number): OrderDetail {
 /** 批量替换订单行（从商品库选款生成 SKU 矩阵时用） */
 export function replaceOrderItems(orderId: number, items: OrderItemInput[]): OrderDetail {
   const db = getDb()
+  assertOrderWritable(orderId, '整体替换明细')
   const packed = Number(
     (
       db.get(
@@ -1200,6 +1223,7 @@ export function addPayment(
   p: { paidAt: string; amount: number; method?: string; bankRef?: string; note?: string }
 ): OrderDetail {
   const db = getDb()
+  assertOrderWritable(orderId, '登记收款')
   const paidAt = String(p.paidAt ?? '').trim()
   // 空日期会让这笔钱从「本月收款」和月报里消失，只剩订单上的已收能看见
   if (!isLocalDate(paidAt)) {
@@ -1467,45 +1491,37 @@ export function reverseSettlement(orderId: number, settlementId: number, reason 
  *  - 收款 > 0 → 部分收款
  *  - 一分没收 → 客户已确认
  *
+ * 金额一律取 moneyForOrders（应收口径的唯一真源），不再在这里另写一份 SUM：
+ * 两套公式迟早会因为费用/核销改动而打架，首页待收和状态标签就会各说各话。
+ *
  * 关键：加单 / 减单 / 改数量 / 改单价 / 删行都会重算，
  * 所以「已收款」可以退回「部分收款」，「部分收款」也能升到「已结清」。
- * 人工设定的 draft / sent / confirmed / expired / void 保持不变。
+ * 人工设定的 draft / expired / void 保持不变；sent 只在真收到钱后往上走，
+ * 否则客户已付定金，工作台还会天天催「客户还没确认」。
  */
 export function recomputePaymentStatus(orderId: number): PaymentStatus {
   const db = getDb()
   const order = db.get('SELECT * FROM orders WHERE id = ?', [orderId]) as Record<string, unknown> | null
   if (!order) throw new Error('订单不存在')
   const status = String(order.payment_status) as PaymentStatus
-  // 草稿 / 已发送 / 已失效 / 已作废 不参与自动流转
-  if (status === 'draft' || status === 'sent' || status === 'expired' || status === 'void') return status
+  // 草稿 / 已失效 / 已作废 不参与自动流转
+  if (status === 'draft' || status === 'expired' || status === 'void') return status
 
-  const goods = Number(
-    (
-      db.get('SELECT COALESCE(SUM(quantity * unit_price), 0) AS t FROM order_items WHERE order_id = ?', [
-        orderId
-      ]) as { t: number }
-    ).t
-  )
-  // 费用行（运费/保险）是正式金额：应收总额 = 货值 + 费用，流转要按这个算
-  const chargesTotal = parseCharges(order.charges).reduce((s, c) => s + (Number(c.amount) || 0), 0)
-  const total = goods + chargesTotal
-  const paid = Number(
-    (
-      db.get('SELECT COALESCE(SUM(amount), 0) AS p FROM payments WHERE order_id = ?', [orderId]) as { p: number }
-    ).p
-  )
-  // 核销过的钱不用再收：短款 + 坏账算「结清」，撤销记负数自然退回；
-  // 追回款已经进了 paid，只能冲减坏账本身，不能重复抵扣
-  const sums = settlementSums(orderId)
-  const writtenOff = sums.shortage + sums.badDebt - Math.min(sums.recovered, Math.max(0, sums.badDebt))
-  const deposit = total * Number(order.deposit_ratio)
+  const money = moneyForOrders([
+    { id: orderId, charges: order.charges, depositRatio: Number(order.deposit_ratio ?? 0) }
+  ]).get(orderId)!
+  const total = money.grandTotal
+  const paid = money.paidAmount
+  // 核销过的钱不用再收：短款 + 坏账算「结清」，撤销记负数自然退回
+  const writtenOff = money.netWrittenOff
+  const deposit = money.depositAmount
 
   // 注意：这里算出来的是「下一个状态」，跟当前状态无关，所以能往上走也能往下退
   let next: PaymentStatus = status
   if (total > 0 && paid + writtenOff >= total - 0.001) next = 'settled'
   else if (deposit > 0 && paid >= deposit - 0.001) next = 'paid'
   else if (paid > 0) next = 'partial'
-  else next = 'confirmed'
+  else next = status === 'sent' ? 'sent' : 'confirmed'
 
   if (next !== status) {
     db.run('UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?', [next, now(), orderId])

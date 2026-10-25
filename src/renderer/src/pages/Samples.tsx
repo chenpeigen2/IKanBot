@@ -234,13 +234,27 @@ export default function Samples() {
                         </td>
                         <td className="cell-actions">
                           {s.convertedOrderId ? (
-                            <button
-                              className="link"
-                              onClick={() => navigate(`/orders/${s.convertedOrderId}`)}
-                              title="已转成订单，点这里看订单"
-                            >
-                              看订单
-                            </button>
+                            <>
+                              <button
+                                className="link"
+                                onClick={() => navigate(`/orders/${s.convertedOrderId}`)}
+                                title="已转成订单，点这里看订单"
+                              >
+                                看订单
+                              </button>
+                              {s.convertedOrderStatus === 'void' ? (
+                                <button
+                                  className="link"
+                                  onClick={() => {
+                                    setConvPi('')
+                                    setConverting(s)
+                                  }}
+                                  title="上次转出的订单已作废：可以按新单重转，旧单仍留档"
+                                >
+                                  重新转单
+                                </button>
+                              ) : null}
+                            </>
                           ) : (
                             <button
                               className="link"

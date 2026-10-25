@@ -91,6 +91,8 @@ function mapSample(r: Record<string, unknown>): SampleOrder {
     exchangeRate: Number(r.exchange_rate ?? 0),
     exchangeRateDate: String(r.exchange_rate_date ?? ''),
     convertedOrderId: r.converted_order_id == null ? null : Number(r.converted_order_id),
+    convertedOrderStatus:
+      r.converted_order_status == null ? null : (String(r.converted_order_status) as SampleOrder['convertedOrderStatus']),
     createdAt: String(r.created_at ?? ''),
     updatedAt: String(r.updated_at ?? '')
   }
@@ -196,7 +198,9 @@ export function listSamples(filter: { keyword?: string; customerId?: number; sta
     params.push(filter.status)
   }
   const rows = db.all(
-    `SELECT s.* FROM sample_orders s JOIN customers c ON c.id = s.customer_id
+    `SELECT s.*, o.payment_status AS converted_order_status
+     FROM sample_orders s JOIN customers c ON c.id = s.customer_id
+     LEFT JOIN orders o ON o.id = s.converted_order_id
      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
      ORDER BY s.created_at DESC, s.id DESC`,
     params
@@ -418,7 +422,8 @@ export function convertSampleToOrder(
   if (s.status === 'cancelled') throw new Error('这张打样单已取消，不能再转订单（要转请先把状态改回来）')
   if (s.convertedOrderId) {
     const exist = getOrder(s.convertedOrderId)
-    if (exist) return exist
+    // 上次转出的单还活着就复用；已经作废了要继续做生意，只能按新单重转
+    if (exist && exist.paymentStatus !== 'void') return exist
   }
   const settings = getSettings()
   const currency = (s.currency || 'USD') as 'USD'

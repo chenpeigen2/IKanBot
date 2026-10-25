@@ -2,7 +2,7 @@ import { existsSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkS
 import { join, resolve, sep } from 'path'
 import { app, dialog } from 'electron'
 import { Database } from 'node-sqlite3-wasm'
-import { dataDir, imagesDir, backupsDir, docsDir, closeDb } from '../db'
+import { dataDir, imagesDir, backupsDir, docsDir, closeDb, openDb } from '../db'
 import { LATEST_DB_VERSION } from '../db/schema'
 import { createZip, collectDir, readZip, verifyZip, type ZipEntry } from './zip'
 import { markBackupFail, markBackupOk } from './settings'
@@ -336,14 +336,28 @@ export async function restoreBackup(rawPath: string): Promise<{ restarted: boole
   }
 
   const stamp = `${Date.now()}`
+  const dbTemp = `${dbFile}.restoring`
   try {
-    const dbTemp = `${dbFile}.restoring`
     writeFileSync(dbTemp, dbEntry.data)
-    renameSync(dbTemp, dbFile)
+    // 图片和存档先换，库最后换：两个附件目录铺坏了还能用旧库继续干活；
+    // 反过来（库先换）中途失败就是「新库配旧图片」，业务数字和凭据来自两个时间点。
     replaceDir(imagesDir(), 'images', entries, stamp)
     replaceDir(docsDir(), 'docs', entries, stamp)
+    renameSync(dbTemp, dbFile)
   } catch (e) {
-    throw new Error(`恢复中途失败：${(e as Error).message}。当前数据已尽量退回原样，请重启程序确认。`)
+    try {
+      rmSync(dbTemp, { force: true })
+    } catch {
+      /* 临时文件删不掉不影响原库 */
+    }
+    // closeDb 之后 getDb 会抛「尚未初始化」；库里还没被换掉，重新挂上原库，
+    // 让程序还能继续用，而不是把用户留在一个打不开任何页面的壳里。
+    try {
+      openDb()
+    } catch {
+      /* 原库也打不开就只能交给上层重启 */
+    }
+    throw new Error(`恢复中途失败：${(e as Error).message}。数据库没有被替换，原来的数据还能继续用；请检查磁盘空间后重试。`)
   }
 
   // 数据已经换干净了，但内存里的库句柄、设置缓存全是旧的——只能重开一次

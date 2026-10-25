@@ -1049,6 +1049,11 @@ function QuotationModal({
                 .join(' · ')}
             </div>
           ) : null}
+          {lastPrices.some((r) => r.lastCurrency !== form.currency) ? (
+            <div className="alert warn" style={{ marginTop: 6 }}>
+              上面有按其他币种成交的价，别直接照抄：先按今天的汇率折成 {form.currency} 再报价。
+            </div>
+          ) : null}
         </div>
 
         <div className="field-row-3">

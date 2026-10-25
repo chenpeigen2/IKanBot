@@ -92,9 +92,9 @@ export type Currency = 'USD' | 'CNY' | 'EUR' | 'GBP' | 'HKD'
 
 export const CURRENCIES: Currency[] = ['USD', 'CNY', 'EUR', 'GBP', 'HKD']
 
-export type Incoterm = 'EXW' | 'FOB' | 'CIF' | 'DDP'
+export type Incoterm = 'EXW' | 'FCA' | 'FOB' | 'CFR' | 'CIF' | 'CPT' | 'DAP' | 'DDP'
 
-export const INCOTERMS: Incoterm[] = ['EXW', 'FOB', 'CIF', 'DDP']
+export const INCOTERMS: Incoterm[] = ['EXW', 'FCA', 'FOB', 'CFR', 'CIF', 'CPT', 'DAP', 'DDP']
 
 export type PaymentMethod =
   | 'tt_deposit' // T/T 定金
@@ -858,6 +858,8 @@ export interface SampleOrder {
   exchangeRateDate: string
   /** 转成的订单 id（N24，转过就删不得） */
   convertedOrderId: number | null
+  /** 转出的订单当前状态：已作废时允许按新单重转（列表里要给出入口） */
+  convertedOrderStatus: PaymentStatus | null
   createdAt: string
   updatedAt: string
 }

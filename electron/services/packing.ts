@@ -1,8 +1,9 @@
-import { getDb, nextNo } from '../db'
+import { getDb, nextNo, transact } from '../db'
 import { mapPackingList, mapPackingListLine } from '../db/mappers'
 import { getSettings } from './settings'
 import { logEvent } from './events'
 import { applyShipStatus } from './shipping'
+import { assertOrderWritable } from './orders'
 import { localDate, isLocalDate } from '../../src/shared/date'
 import { assertQuantity as assertQtyRule } from '../../src/shared/guards'
 import { SHIP_STATUS_LABEL, SHIP_STATUS_ORDER } from '../../src/shared/types'
@@ -145,20 +146,31 @@ function assertBatchLinesEditable(orderId: number, plId: number): number {
 }
 
 /**
- * 同一张装箱单里箱号不能重。
- * 箱号重复时纸面按去重算箱数，体积和毛重却逐行累加——
- * 一张单上「1 箱」配着两箱的 CBM，订舱和提单件数当场对不上。
+ * 箱号在同一张订单里全局唯一，不是「同一批不重」。
+ * 箱号是提单和报关单上的箱号（箱号跨批次连续），第二批又从 NO.1 开始，
+ * 客户按箱号点货、货代按箱号订舱时两边对不上。作废批次的号也占着——纸已经发出去过。
  */
 function assertBoxNoFree(plId: number, boxNo: string | undefined, exceptLineId?: number): void {
   const no = String(boxNo ?? '').trim()
   if (!no) return
-  const hit = getDb().get('SELECT id FROM packing_list_lines WHERE packing_list_id = ? AND box_no = ? AND id != ?', [
-    plId,
-    no,
-    exceptLineId ?? -1
-  ])
+  const pl = getDb().get('SELECT order_id FROM packing_lists WHERE id = ?', [plId]) as { order_id?: number } | null
+  if (!pl) return
+  assertBoxNoFreeInOrder(Number(pl.order_id), no, exceptLineId)
+}
+
+function assertBoxNoFreeInOrder(orderId: number, boxNo: string, exceptLineId?: number): void {
+  const no = boxNo.trim()
+  if (!no) return
+  const hit = getDb().get(
+    `SELECT l.id FROM packing_list_lines l
+     JOIN packing_lists p ON p.id = l.packing_list_id
+     WHERE p.order_id = ? AND l.box_no = ? AND l.id != ?`,
+    [orderId, no, exceptLineId ?? -1]
+  )
   if (hit) {
-    throw new Error(`箱号「${no}」在这张装箱单里已经用过了：一箱只能占一行，重复箱号会让箱数和体积对不上`)
+    throw new Error(
+      `箱号「${no}」在这张订单里已经用过了：箱号跨批次连续（作废批次也占号），重复会让提单和报关单的箱数对不上。请换一个没发过的箱号。`
+    )
   }
 }
 
@@ -200,6 +212,7 @@ export function listPackingLists(orderId: number): PackingList[] {
 
 export function createPackingList(input: PackingListInput): PackingList[] {
   const db = getDb()
+  assertOrderWritable(input.orderId, '装箱')
   if (input.lines.length === 0) throw new Error('装箱单至少要有一箱，先生成箱明细再保存')
   // 同一 SKU 可能拆成好几箱，先按 SKU 合计再校验，免得逐行放行、加起来超了
   const bySku = new Map<string, { sku: { styleNo?: string; color?: string; size?: string }; qty: number }>()
@@ -222,10 +235,11 @@ export function createPackingList(input: PackingListInput): PackingList[] {
     bySku.set(key, cur)
   }
   for (const v of bySku.values()) assertNotOverPacked(input.orderId, v.sku, v.qty)
+  // 跨批次查号放在超装校验之后：用户先看到「数量超了」这个更直接的问题
+  for (const no of seenBoxNo) assertBoxNoFreeInOrder(input.orderId, no)
 
   const plNo = nextNo('PL')
-  db.exec('BEGIN')
-  try {
+  transact(() => {
     const res = db.run(
       `INSERT INTO packing_lists(order_id, pl_no, container_no, note, created_at, ship_status)
        VALUES(?,?,?,?,?,'packed')`,
@@ -260,12 +274,9 @@ export function createPackingList(input: PackingListInput): PackingList[] {
     }
     // 新批次一落地就要回算订单状态（装箱单 = 已包装，或者还没装够 = 备货中）
     applyShipStatus(input.orderId)
-    db.exec('COMMIT')
+    // 留痕和批次在同一个事务里：提交成功但留痕失败，单据和历史就对不上了
     logEvent(input.orderId, 'pl_create', null, null, `生成装箱单 ${plNo}（${input.lines.length} 箱）`)
-  } catch (e) {
-    db.exec('ROLLBACK')
-    throw e
-  }
+  })
   return listPackingLists(input.orderId)
 }
 
@@ -276,6 +287,7 @@ export function deletePackingList(orderId: number, plId: number): PackingList[] 
     [plId, orderId]
   ) as Record<string, unknown> | null
   if (!cur) return listPackingLists(orderId)
+  assertOrderWritable(orderId, '删装箱单')
   if (isVoided(cur)) {
     throw new Error(
       `装箱单 ${String(cur.pl_no)} 已经作废留档了，就让它留着——纸面发过客户的单据，系统里得查得到。`
@@ -287,16 +299,11 @@ export function deletePackingList(orderId: number, plId: number): PackingList[] 
       `装箱单 ${String(cur.pl_no)} 当前状态是「${SHIP_STATUS_LABEL[status]}」，不能删除——出运记录是对客户的凭据，必须留档。如果确实填错了，先把批次状态改回「已包装」再删，改动会留在操作历史里。`
     )
   }
-  db.exec('BEGIN')
-  try {
+  transact(() => {
     db.run('DELETE FROM packing_lists WHERE id = ? AND order_id = ?', [plId, orderId])
     applyShipStatus(orderId)
-    db.exec('COMMIT')
-  } catch (e) {
-    db.exec('ROLLBACK')
-    throw e
-  }
-  logEvent(orderId, 'pl_delete', null, null, `删除装箱单 ${String(cur.pl_no)}`)
+    logEvent(orderId, 'pl_delete', null, null, `删除装箱单 ${String(cur.pl_no)}`)
+  })
   return listPackingLists(orderId)
 }
 
@@ -314,15 +321,17 @@ export function voidPackingList(orderId: number, plId: number, reason = ''): Pac
   ) as Record<string, unknown> | null
   if (!cur) throw new Error('装箱单不存在')
   if (isVoided(cur)) throw new Error(`装箱单 ${String(cur.pl_no)} 已经是作废状态，不用重复作废`)
-  db.run('UPDATE packing_lists SET voided_at = ? WHERE id = ? AND order_id = ?', [now(), plId, orderId])
-  applyShipStatus(orderId)
-  logEvent(
-    orderId,
-    'pl_void',
-    null,
-    null,
-    `作废装箱单 ${String(cur.pl_no)}${reason ? `：${reason}` : ''}（记录与存档保留，不再参与汇总）`
-  )
+  transact(() => {
+    db.run('UPDATE packing_lists SET voided_at = ? WHERE id = ? AND order_id = ?', [now(), plId, orderId])
+    applyShipStatus(orderId)
+    logEvent(
+      orderId,
+      'pl_void',
+      null,
+      null,
+      `作废装箱单 ${String(cur.pl_no)}${reason ? `：${reason}` : ''}（记录与存档保留，不再参与汇总）`
+    )
+  })
   return listPackingLists(orderId)
 }
 
@@ -335,9 +344,11 @@ export function unvoidPackingList(orderId: number, plId: number): PackingList[] 
   ) as Record<string, unknown> | null
   if (!cur) throw new Error('装箱单不存在')
   if (!isVoided(cur)) return listPackingLists(orderId)
-  db.run('UPDATE packing_lists SET voided_at = NULL WHERE id = ? AND order_id = ?', [plId, orderId])
-  applyShipStatus(orderId)
-  logEvent(orderId, 'pl_unvoid', null, null, `撤销作废装箱单 ${String(cur.pl_no)}（重新参与状态与件数汇总）`)
+  transact(() => {
+    db.run('UPDATE packing_lists SET voided_at = NULL WHERE id = ? AND order_id = ?', [plId, orderId])
+    applyShipStatus(orderId)
+    logEvent(orderId, 'pl_unvoid', null, null, `撤销作废装箱单 ${String(cur.pl_no)}（重新参与状态与件数汇总）`)
+  })
   return listPackingLists(orderId)
 }
 
@@ -382,6 +393,7 @@ export function updatePackingListInfo(
   if (isVoided(cur)) {
     throw new Error(`装箱单 ${String(cur.pl_no)} 已作废，不能改批次信息。要接着用请先「撤销作废」。`)
   }
+  assertOrderWritable(orderId, '改装箱单')
   if (patch.shipStatus !== undefined && !SHIP_STATUS_ORDER.includes(patch.shipStatus)) {
     throw new Error('这个出货状态不能手工选，请选择「未备货 / 备货中 / 已包装 / 已出运 / 已清关 / 已签收」')
   }
@@ -427,8 +439,7 @@ export function updatePackingListInfo(
   }
 
   const pick = (v: string | null | undefined, old: unknown) => (v === undefined ? String(old ?? '') : (v ?? ''))
-  db.exec('BEGIN')
-  try {
+  transact(() => {
     db.run(
       `UPDATE packing_lists
        SET container_no = ?, vessel = ?, etd_date = ?, atd_date = ?, eta_date = ?,
@@ -453,38 +464,34 @@ export function updatePackingListInfo(
       ]
     )
     applyShipStatus(orderId)
-    db.exec('COMMIT')
-  } catch (e) {
-    db.exec('ROLLBACK')
-    throw e
-  }
-
-  const parts: string[] = []
-  const cmp = (label: string, next: string | number | null | undefined, old: unknown) => {
-    if (next === undefined) return
-    if (String(next ?? '') !== String(old ?? '')) parts.push(`${label} ${old ? String(old) : '空'} → ${next || '空'}`)
-  }
-  cmp('柜号', patch.containerNo, cur.container_no)
-  cmp('船名航次', patch.vessel, cur.vessel)
-  cmp('ETD', patch.etdDate, cur.etd_date)
-  cmp('实际开船', patch.atdDate, cur.atd_date)
-  cmp('ETA', patch.etaDate, cur.eta_date)
-  cmp('封条号', patch.sealNo, cur.seal_no)
-  cmp('提单号', patch.blNo, cur.bl_no)
-  cmp('单据日期', patch.docDate, cur.doc_date)
-  cmp('实收数量', patch.receivedQty, cur.received_qty)
-  // 签收日期只在状态是已签收时才谈得上
-  if (nextStatus === 'delivered') cmp('签收日期', patch.deliveredDate, cur.delivered_at)
-  if (nextStatus !== curStatus) {
-    parts.push(`状态 ${curStatus ? SHIP_STATUS_LABEL[curStatus] : '未设置'} → ${nextStatus ? SHIP_STATUS_LABEL[nextStatus] : '未设置'}`)
-  }
-  logEvent(
-    orderId,
-    'pl_update',
-    curStatus,
-    nextStatus,
-    parts.length > 0 ? `修改批次 ${String(cur.pl_no)}：${parts.join('；')}` : `修改批次 ${String(cur.pl_no)}`
-  )
+    // 留痕入事务：改成功了历史却没记上，等于把「谁改的」这条证据弄丢了
+    const parts: string[] = []
+    const cmp = (label: string, next: string | number | null | undefined, old: unknown) => {
+      if (next === undefined) return
+      if (String(next ?? '') !== String(old ?? '')) parts.push(`${label} ${old ? String(old) : '空'} → ${next || '空'}`)
+    }
+    cmp('柜号', patch.containerNo, cur.container_no)
+    cmp('船名航次', patch.vessel, cur.vessel)
+    cmp('ETD', patch.etdDate, cur.etd_date)
+    cmp('实际开船', patch.atdDate, cur.atd_date)
+    cmp('ETA', patch.etaDate, cur.eta_date)
+    cmp('封条号', patch.sealNo, cur.seal_no)
+    cmp('提单号', patch.blNo, cur.bl_no)
+    cmp('单据日期', patch.docDate, cur.doc_date)
+    cmp('实收数量', patch.receivedQty, cur.received_qty)
+    // 签收日期只在状态是已签收时才谈得上
+    if (nextStatus === 'delivered') cmp('签收日期', patch.deliveredDate, cur.delivered_at)
+    if (nextStatus !== curStatus) {
+      parts.push(`状态 ${curStatus ? SHIP_STATUS_LABEL[curStatus] : '未设置'} → ${nextStatus ? SHIP_STATUS_LABEL[nextStatus] : '未设置'}`)
+    }
+    logEvent(
+      orderId,
+      'pl_update',
+      curStatus,
+      nextStatus,
+      parts.length > 0 ? `修改批次 ${String(cur.pl_no)}：${parts.join('；')}` : `修改批次 ${String(cur.pl_no)}`
+    )
+  })
   return listPackingLists(orderId)
 }
 
@@ -496,6 +503,7 @@ export function updatePackingListLine(
 ): PackingList[] {
   const db = getDb()
   assertBatchLinesEditable(orderId, plId)
+  assertOrderWritable(orderId, '改装箱明细')
   const cur = db.get('SELECT * FROM packing_list_lines WHERE id = ? AND packing_list_id = ?', [lineId, plId]) as
     | Record<string, unknown>
     | null
@@ -545,8 +553,7 @@ export function updatePackingListLine(
       : patch.netWeight !== undefined
         ? estFlag(gross, false)
         : (cur.gross_est as number | null)
-  db.exec('BEGIN')
-  try {
+  transact(() => {
     db.run(
       `UPDATE packing_list_lines SET box_no=?, style_no=?, product_name=?, color=?, size=?, quantity=?,
         net_weight=?, gross_weight=?, gross_est=?, box_length=?, box_width=?, box_height=?
@@ -569,16 +576,12 @@ export function updatePackingListLine(
       ]
     )
     applyShipStatus(orderId)
-    db.exec('COMMIT')
-  } catch (e) {
-    db.exec('ROLLBACK')
-    throw e
-  }
-  // 箱数/净重被改过也要留痕（报关单跟箱单一对不上的时候要拿凭据）
-  const changes = describePlLineChange(cur, scale !== 1 ? { ...patch, netWeight: net, grossWeight: gross } : patch)
-  if (changes) {
-    logEvent(orderId, 'pl_line_update', null, null, `修改装箱明细 ${cur.style_no} ${cur.color}/${cur.size}：${changes}`)
-  }
+    // 箱数/净重被改过也要留痕（报关单跟箱单一对不上的时候要拿凭据）
+    const changes = describePlLineChange(cur, scale !== 1 ? { ...patch, netWeight: net, grossWeight: gross } : patch)
+    if (changes) {
+      logEvent(orderId, 'pl_line_update', null, null, `修改装箱明细 ${cur.style_no} ${cur.color}/${cur.size}：${changes}`)
+    }
+  })
   return listPackingLists(orderId)
 }
 
@@ -606,6 +609,7 @@ export function addPackingListLine(
 ): PackingList[] {
   const db = getDb()
   assertBatchLinesEditable(orderId, plId)
+  assertOrderWritable(orderId, '加装箱明细')
   assertStyleNo(line.styleNo)
   assertQuantity(line.quantity)
   assertBoxNoFree(plId, line.boxNo)
@@ -621,8 +625,7 @@ export function addPackingListLine(
   const unitNet = twin && twinQty > 0 && twin.net_weight != null ? Number(twin.net_weight) / twinQty : null
   const net = unitNet == null ? null : Number((unitNet * Number(line.quantity)).toFixed(2))
   const gross = net == null ? null : Number((net * getSettings().grossWeightFactor).toFixed(2))
-  db.exec('BEGIN')
-  try {
+  transact(() => {
     db.run(
       `INSERT INTO packing_list_lines(packing_list_id, box_no, style_no, product_name, color, size, quantity,
         net_weight, gross_weight, gross_est, box_length, box_width, box_height)
@@ -644,47 +647,39 @@ export function addPackingListLine(
       ]
     )
     applyShipStatus(orderId)
-    db.exec('COMMIT')
-  } catch (e) {
-    db.exec('ROLLBACK')
-    throw e
-  }
-  logEvent(
-    orderId,
-    'pl_line_add',
-    null,
-    null,
-    `添加装箱明细 ${line.styleNo ?? ''} ${line.color ?? ''}/${line.size ?? ''} × ${line.quantity}`
-  )
+    logEvent(
+      orderId,
+      'pl_line_add',
+      null,
+      null,
+      `添加装箱明细 ${line.styleNo ?? ''} ${line.color ?? ''}/${line.size ?? ''} × ${line.quantity}`
+    )
+  })
   return listPackingLists(orderId)
 }
 
 export function deletePackingListLine(orderId: number, plId: number, lineId: number): PackingList[] {
   const db = getDb()
   const lineCount = assertBatchLinesEditable(orderId, plId)
+  assertOrderWritable(orderId, '删装箱明细')
   if (lineCount <= 1) {
     throw new Error('一箱都没有的装箱单留不住。如果整批作废，请直接删除这张装箱单。')
   }
   const cur = db.get('SELECT * FROM packing_list_lines WHERE id = ? AND packing_list_id = ?', [lineId, plId]) as
     | Record<string, unknown>
     | null
-  db.exec('BEGIN')
-  try {
+  transact(() => {
     db.run('DELETE FROM packing_list_lines WHERE id = ? AND packing_list_id = ?', [lineId, plId])
     applyShipStatus(orderId)
-    db.exec('COMMIT')
-  } catch (e) {
-    db.exec('ROLLBACK')
-    throw e
-  }
-  if (cur) {
-    logEvent(
-      orderId,
-      'pl_line_remove',
-      null,
-      null,
-      `删除装箱明细 ${cur.style_no} ${cur.color}/${cur.size} × ${cur.quantity}`
-    )
-  }
+    if (cur) {
+      logEvent(
+        orderId,
+        'pl_line_remove',
+        null,
+        null,
+        `删除装箱明细 ${cur.style_no} ${cur.color}/${cur.size} × ${cur.quantity}`
+      )
+    }
+  })
   return listPackingLists(orderId)
 }
