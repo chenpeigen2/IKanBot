@@ -467,13 +467,14 @@ export function packingAmounts(orderId: number): PackingAmount[] {
   const orderRow = db.get('SELECT pi_no, charges FROM orders WHERE id = ?', [orderId]) as
     | { pi_no?: string; charges?: unknown }
     | null
-  // 每个批次最新一版 CI 的纸面总额（按批次号精确匹配；老版整单 CI 不参与）
+  // 每个批次最新一版 CI 的纸面总额（按批次号精确匹配；老版整单 CI 不参与）。
+  // 作废的版本不算：作废就是摘掉「纸面依据」资格，金额回到按当前数据重算
   const archivedCi = new Map<string, number>()
   const piNo = String(orderRow?.pi_no ?? '').trim()
   if (piNo) {
     const ciRows = db.all(
       `SELECT doc_no, version, amount FROM doc_versions
-       WHERE order_id = ? AND kind = 'ci' ORDER BY version`,
+       WHERE order_id = ? AND kind = 'ci' AND voided_at IS NULL ORDER BY version`,
       [orderId]
     ) as { doc_no?: string; version?: number; amount?: number }[]
     for (const r of ciRows) archivedCi.set(String(r.doc_no ?? ''), Number(r.amount ?? 0))
@@ -636,7 +637,7 @@ export function receivedByMonth(): { month: string; amount: number }[] {
   const db = getDb()
   const cash = notInStatuses('o.payment_status', CASHFLOW_EXCLUDED_STATUSES)
   const rows = db.all(
-    `SELECT p.paid_at AS paid_at, p.amount * o.exchange_rate AS amount_base
+    `SELECT p.paid_at AS paid_at, p.amount * COALESCE(p.exchange_rate, o.exchange_rate) AS amount_base
      FROM payments p JOIN orders o ON o.id = p.order_id
      WHERE ${cash.sql}`,
     cash.params

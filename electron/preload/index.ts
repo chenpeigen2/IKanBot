@@ -115,9 +115,11 @@ const api: IKanApi = {
       quotationId?: number | null
       amount?: number
       expectedVersion?: number
+      confirmOverlap?: boolean
     }) => call<{ path: string; filePath: string; version: number }>('docs:save', payload),
     list: (orderId: number) => call<any[]>('docs:list', orderId),
     listQuotation: (quotationId: number) => call<any[]>('docs:listQuotation', quotationId),
+    void: (versionId: number, reason: string) => call<any[]>('docs:void', versionId, reason),
     nextVersion: (docNo: string, kind: string) => call<number>('docs:nextVersion', docNo, kind),
     reveal: (filePath?: string) => call<string>('docs:reveal', filePath),
     openFile: (filePath: string) => call<string>('docs:openFile', filePath)

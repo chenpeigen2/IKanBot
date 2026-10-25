@@ -2,7 +2,7 @@ import { existsSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkS
 import { join, resolve, sep } from 'path'
 import { app, dialog } from 'electron'
 import { Database } from 'node-sqlite3-wasm'
-import { dataDir, imagesDir, backupsDir, docsDir, closeDb, openDb } from '../db'
+import { dataDir, imagesDir, backupsDir, docsDir, closeDb, openDb, getDb } from '../db'
 import { LATEST_DB_VERSION } from '../db/schema'
 import { createZip, collectDir, readZip, verifyZip, type ZipEntry } from './zip'
 import { markBackupFail, markBackupOk } from './settings'
@@ -49,11 +49,37 @@ export function collectBackupEntries(): ZipEntry[] {
   const entries: ZipEntry[] = []
   const dbFile = join(dataDir(), 'ikanbot.db')
   if (existsSync(dbFile)) {
-    entries.push({ name: 'ikanbot.db', data: readFileSync(dbFile) })
+    entries.push({ name: 'ikanbot.db', data: snapshotDb(dbFile) })
   }
   entries.push(...collectDir(imagesDir(), 'images'))
   entries.push(...collectDir(docsDir(), 'docs'))
   return entries
+}
+
+/**
+ * 数据库快照：VACUUM INTO 导出一份事务一致的副本再读进内存。
+ * 直接 readFileSync(db 文件) 拷的是「任意一瞬间」的字节——外部进程（网盘/DB 工具）
+ * 正在写时备出半截库，zip 能通过完整性校验，坏要等到恢复那天才暴露。
+ * VACUUM INTO 失败（老 SQLite 不支持等）就退回直拷，主进程单线程下自己的事务不会拷半截。
+ */
+function snapshotDb(dbFile: string): Buffer {
+  const snap = `${dbFile}.backup-snapshot`
+  try {
+    if (existsSync(snap)) unlinkSync(snap)
+    // 路径拼进 SQL 字面量：数据目录在用户名带单引号的机器上也不能炸
+    const literal = `'${dbFile.replace(/'/g, "''")}'`
+    getDb().exec(`VACUUM INTO ${literal}`)
+    const data = readFileSync(snap)
+    return data
+  } catch {
+    return readFileSync(dbFile)
+  } finally {
+    try {
+      if (existsSync(snap)) unlinkSync(snap)
+    } catch {
+      /* 临时快照删不掉不影响打包 */
+    }
+  }
 }
 
 /** 保留最近 N 份备份 */

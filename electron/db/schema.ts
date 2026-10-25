@@ -496,6 +496,28 @@ ALTER TABLE sample_orders ADD COLUMN offset_amount REAL NOT NULL DEFAULT 0;
 -- 老数据留空，读取时回退到 sent_at / created_at，不猜一个没发生过的日期。
 ALTER TABLE quotations ADD COLUMN confirmed_at TEXT;
 `
+  },
+  {
+    version: 18,
+    name: 'doc_version_void',
+    sql: `
+-- 单据存档的作废通道：CI 金额敲错一位、箱数装错一批时，旧规则里这张存档
+-- 会把箱明细、批次、单价全部钉死，唯一出口是作废整单重开——收款和打样抵扣跟着断链。
+-- 存档记录和 PDF 一条不动（纸发出去过就是事实），只是作废后不再被当作
+-- 「纸面金额的依据」：批次解锁、金额重算、允许重出正确的一版。原因必填，谁废的为什么。
+ALTER TABLE doc_versions ADD COLUMN voided_at TEXT;
+ALTER TABLE doc_versions ADD COLUMN void_reason TEXT;
+`
+  },
+  {
+    version: 19,
+    name: 'payment_exchange_rate',
+    sql: `
+-- 收款当天的汇率快照：已收款但还没出单据时改订单汇率，
+-- receivedByMonth 按当前订单汇率回算历史到账，已经导出的月报会整体漂移，
+-- 和银行流水对不上。落款当时的汇率后，老收款回退订单汇率（残留漂移可接受）。
+ALTER TABLE payments ADD COLUMN exchange_rate REAL;
+`
   }
 ]
 

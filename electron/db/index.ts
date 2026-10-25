@@ -57,21 +57,24 @@ export function transact<T>(fn: () => T): T {
   const database = getDb()
   const top = !database.inTransaction
   const tag = `tx_${txDepth}`
-  database.exec(top ? 'BEGIN' : `SAVEPOINT ${tag}`)
   txDepth++
   try {
+    database.exec(top ? 'BEGIN' : `SAVEPOINT ${tag}`)
     const result = fn()
-    txDepth--
     database.exec(top ? 'COMMIT' : `RELEASE SAVEPOINT ${tag}`)
     return result
   } catch (e) {
-    txDepth--
-    if (top) database.exec('ROLLBACK')
-    else {
+    // COMMIT 本身也可能抛错（磁盘满等）：深度只在这里和 finally 里各走一条路，
+    // 旧写法「成功路径先减、catch 再减」会在 COMMIT 抛错时双递减，SAVEPOINT 标签错乱
+    if (top) {
+      if (database.inTransaction) database.exec('ROLLBACK')
+    } else {
       database.exec(`ROLLBACK TO SAVEPOINT ${tag}`)
       database.exec(`RELEASE SAVEPOINT ${tag}`)
     }
     throw e
+  } finally {
+    txDepth--
   }
 }
 
@@ -81,6 +84,9 @@ export function openDb(): Database {
   clearStaleLock(file)
   db = new Database(file)
   db.exec('PRAGMA foreign_keys = ON;')
+  // 单实例锁挡住了第二个 IKanBot，但挡不住网盘同步/DB 工具偶尔握住文件：
+  // 没有 busy_timeout 时任何写会直接抛裸英文 database is locked，用户只看到一串报错
+  db.exec('PRAGMA busy_timeout = 5000;')
   migrate(db)
   return db
 }

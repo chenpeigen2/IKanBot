@@ -229,6 +229,7 @@ export function mapPayment(r: Row): Payment {
     method: str(r.method),
     bankRef: str(r.bank_ref),
     note: str(r.note),
+    exchangeRate: r.exchange_rate == null ? null : num(r.exchange_rate),
     createdAt: str(r.created_at)
   }
 }

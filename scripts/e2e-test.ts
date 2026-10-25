@@ -1633,7 +1633,7 @@ for (const rr of repAll) {
   for (const o of ordersForCash) {
     if (o.paymentStatus === 'draft') continue
     for (const p of orders.getOrder(o.id)?.payments ?? []) {
-      if (p.paidAt.slice(0, 7) === rr.month) recSum += p.amount * o.exchangeRate
+      if (p.paidAt.slice(0, 7) === rr.month) recSum += p.amount * (p.exchangeRate ?? o.exchangeRate)
     }
   }
   check(
@@ -1651,7 +1651,7 @@ eq('客户页未收 = Σ(该客户各单待收×汇率) + 该客户打样未收'
 let recSumAll = 0
 for (const o of ordersForCash) {
   if (o.paymentStatus === 'draft') continue
-  for (const p of orders.getOrder(o.id)?.payments ?? []) recSumAll += p.amount * o.exchangeRate
+  for (const p of orders.getOrder(o.id)?.payments ?? []) recSumAll += p.amount * (p.exchangeRate ?? o.exchangeRate)
 }
 const recReportAll = repAll.reduce((s, r) => s + r.received, 0)
 check('报表累计收款 = Σ(各单每笔收款×汇率)', Math.abs(recReportAll - recSumAll) < 0.01, `报表 ${recReportAll} / 逐笔合计 ${recSumAll}`)
@@ -5449,6 +5449,149 @@ const r17DupBItem = r17DupB.items.find((i) => i.styleNo === 'R17-DUP-B')!
 const r17DupSwapErr = r8err(() => orders.updateOrderItem(r17Dup.id, r17DupBItem.id, { styleNo: 'R17-DUP' }))
 check('把另一行改成已有款号也被拦下', r17DupSwapErr.includes('已经有明细'), r17DupSwapErr)
 eq('被拦后明细仍是两行，没有多出重复款', orders.getOrder(r17Dup.id)!.items.length, 2)
+
+/* ============================================================
+ * 第 18 轮：单据修订与凭据安全（R18）
+ * ============================================================ */
+
+section('R18 存档作废：CI 金额敲错作废重出，不再被迫作废整单')
+
+const r18Order = orders.createOrder({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R18-VOID'
+})
+await orders.addOrderItem(r18Order.id, { styleNo: 'R18-V', productName: '作废重出', quantity: 100, unitPrice: 10 })
+orders.updateOrderCharges(r18Order.id, [{ label: '运费 Freight', amount: 100 }])
+const r18Pl = packing.createPackingList({
+  orderId: r18Order.id,
+  lines: [{ boxNo: 'R18-1', styleNo: 'R18-V', quantity: 50 }]
+})[0]
+const r18Saved = docs.saveDocFile({
+  pdf: Buffer.from('%PDF-1.4 r18 void'),
+  docNo: ciNoOf('PI-R18-VOID', r18Pl.plNo),
+  kind: 'ci',
+  orderId: r18Order.id,
+  amount: 60 // 敲错一位：正确是 600
+})
+eq('存档按第 1 版记账', r18Saved.version, 1)
+const r18Ver = docs.listDocVersions(r18Order.id).find((d) => d.docNo === ciNoOf('PI-R18-VOID', r18Pl.plNo))!
+check('存档记录在且未作废', r18Ver != null && r18Ver.voidedAt == null)
+const r18Line = packing.listPackingLists(r18Order.id).find((p) => p.id === r18Pl.id)!.lines[0]
+check(
+  '存档后箱明细锁住',
+  r8err(() => packing.updatePackingListLine(r18Order.id, r18Pl.id, r18Line.id, { quantity: 60 })).includes(
+    '已经出过 CI'
+  )
+)
+check('不写原因作不了废', r8err(() => docs.voidDocVersion(r18Ver.id, '   ')).includes('原因'))
+const r18List = docs.voidDocVersion(r18Ver.id, 'CI 金额敲错一位：60 应为 600')
+eq('作废后存档记录还在（不删事实）', r18List.length, 1)
+check('作废版带时间与原因', r18List[0].voidedAt != null && r18List[0].voidReason!.includes('敲错'))
+check('作废后 PDF 文件也还在', fs.existsSync(join(dataDir(), r18List[0].filePath)))
+eq('作废后批次金额恢复按当前数据算（500 货值 + 50 分摊费用）', money.packingAmounts(r18Order.id).find((b) => b.plId === r18Pl.id)!.total, 550)
+check('作废后箱明细可以改了', packing.updatePackingListLine(r18Order.id, r18Pl.id, r18Line.id, { quantity: 60 }).length > 0)
+eq('改完箱数金额跟着走（600 货值 + 60 分摊费用）', money.packingAmounts(r18Order.id).find((b) => b.plId === r18Pl.id)!.total, 660)
+const r18Saved2 = docs.saveDocFile({
+  pdf: Buffer.from('%PDF-1.4 r18 void v2'),
+  docNo: ciNoOf('PI-R18-VOID', r18Pl.plNo),
+  kind: 'ci',
+  orderId: r18Order.id,
+  amount: 660
+})
+eq('可以重出正确的一版（第 2 版）', r18Saved2.version, 2)
+check('不能重复作废同一版', r8err(() => docs.voidDocVersion(r18Ver.id, '再废一次')).includes('作废状态'))
+check('作废留痕进了操作历史', orders.listEvents(r18Order.id).some((e) => e.kind === 'doc_void'))
+
+section('R18 整单/批次 CI 重叠：不硬挡，但要人确认')
+
+check(
+  '批次 CI 还在时出整单 CI 会被拦下确认',
+  r8err(() => docs.assertCiNoOverlap(r18Order.id, ciNoOf('PI-R18-VOID'))).includes('重叠')
+)
+eq('确认重叠后放行，重叠额 = 已存档批次金额', docs.assertCiNoOverlap(r18Order.id, ciNoOf('PI-R18-VOID'), true), 660)
+const r18Whole = orders.createOrder({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R18-WHOLE'
+})
+await orders.addOrderItem(r18Whole.id, { styleNo: 'R18-W', quantity: 10, unitPrice: 10 })
+docs.saveDocFile({
+  pdf: Buffer.from('%PDF-1.4 r18 whole'),
+  docNo: ciNoOf('PI-R18-WHOLE'),
+  kind: 'ci',
+  orderId: r18Whole.id,
+  amount: 100
+})
+check(
+  '先整单后补批次同样要确认',
+  r8err(() => docs.assertCiNoOverlap(r18Whole.id, ciNoOf('PI-R18-WHOLE', 'X1'))).includes('重叠')
+)
+const r18WholeVer = docs.listDocVersions(r18Whole.id)[0]
+docs.voidDocVersion(r18WholeVer.id, '改按批次开票')
+eq('作废整单 CI 后批次可以开票，不再重叠', docs.assertCiNoOverlap(r18Whole.id, ciNoOf('PI-R18-WHOLE', 'X1')), 0)
+
+section('R18 订单作废：打样抵扣回退为未收，不再悬空')
+
+const r18OffCust = customers.saveCustomer({ company: 'R18-OFFSET-BACK' })
+const r18OffSample = samples.saveSample({
+  customerId: r18OffCust.id,
+  expressFee: 5,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: '2026-10-21',
+  items: [{ styleNo: 'R18-S1', productName: '抵扣回退', color: 'Grey', size: 'M', quantity: 1, unitPrice: 10, goodsUnitPrice: 10 }]
+})
+const r18OffOrder = samples.convertSampleToOrder(r18OffSample.id, { offsetSampleFee: true, paymentStatus: 'confirmed' })
+eq('转单后打样单挂「下单抵扣」', samples.getSample(r18OffSample.id)!.feeStatus, 'offset')
+orders.voidOrder(r18OffOrder.id, 'R18 客户取消，整单作废')
+eq('订单作废后抵扣回退为未收', samples.getSample(r18OffSample.id)!.feeStatus, 'unpaid')
+check('回退在费用备注里留了痕', samples.getSample(r18OffSample.id)!.feeNote.includes('已作废'))
+check('打样费重新进客户应收', money.sampleReceivable(r18OffCust.id) > 0)
+check('订单操作历史记了抵扣回退', orders.listEvents(r18OffOrder.id).some((e) => e.kind === 'sample_offset_back'))
+
+section('R18 汇率快照：到账那天钉住，改订单汇率月报不漂移')
+
+const r18Rate = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r18Rate.id, { styleNo: 'R18-RATE', quantity: 10, unitPrice: 10 })
+const r18Month = localDate().slice(0, 7)
+const r18MonthOf = () => money.receivedByMonth().find((m) => m.month === r18Month)?.amount ?? 0
+const r18Before = r18MonthOf()
+orders.addPayment(r18Rate.id, { paidAt: localDate(), amount: 50, method: 'T/T', bankRef: 'R18-RATE-P' })
+eq('到账按当天汇率 7 进本月（50×7=350）', r18MonthOf() - r18Before, 350)
+eq(
+  '收款落了汇率快照',
+  Number((getDb().get('SELECT exchange_rate AS r FROM payments WHERE order_id = ?', [r18Rate.id]) as { r?: number })!.r),
+  7
+)
+// 只登记了收款、还没出单据：汇率允许修正（R15 口径），但历史月报不能跟着漂
+orders.updateOrder(r18Rate.id, { customerId: c1.id, exchangeRate: 7.5 })
+eq('改订单汇率后历史到账仍按快照算（350 不漂成 375）', r18MonthOf() - r18Before, 350)
+// 老收款没有快照列值：回退订单汇率（残留漂移可接受，口径写死在 SQL 里）
+getDb().run('UPDATE payments SET exchange_rate = NULL WHERE order_id = ?', [r18Rate.id])
+eq('老收款没有快照时回退订单汇率（50×7.5=375）', r18MonthOf() - r18Before, 375)
+
+section('R18 建单失败不烧号')
+
+const r18CounterName = `SO${localDate().replace(/-/g, '')}`
+const r18CounterBefore = Number(
+  (getDb().get('SELECT value AS v FROM counters WHERE name = ?', [r18CounterName]) as { v?: number } | null)!.v
+)
+const r18BurnErr = r8err(() =>
+  orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, piNo: 'PI-R16-FREEZE' })
+)
+check('撞号的建单被拦下', r18BurnErr.includes('PI'), r18BurnErr)
+eq(
+  '失败的建单不再烧掉 SO 号',
+  Number(
+    (getDb().get('SELECT value AS v FROM counters WHERE name = ?', [r18CounterName]) as { v?: number } | null)!.v
+  ),
+  r18CounterBefore
+)
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

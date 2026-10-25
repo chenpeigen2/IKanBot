@@ -548,6 +548,8 @@ export interface Payment {
   method: string
   bankRef: string
   note: string
+  /** 到账当天的汇率快照；老数据为空，回退订单汇率 */
+  exchangeRate: number | null
   createdAt: string
 }
 

@@ -715,8 +715,7 @@ export function convertToOrder(
     ? `报价已过期，经 ${approvedBy} 批准沿用（原因：${overrideReason}）`
     : ''
 
-  db.exec('BEGIN')
-  try {
+  return transact(() => {
     const order = createOrder({
       customerId: snap.customerId,
       currency: snap.currency,
@@ -816,10 +815,6 @@ export function convertToOrder(
       now(),
       id
     ])
-    db.exec('COMMIT')
     return saved
-  } catch (e) {
-    db.exec('ROLLBACK')
-    throw e
-  }
+  })
 }

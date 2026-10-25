@@ -41,6 +41,8 @@ type PreviewState = {
   amount: number
   /** 作废批次的留档预览：纸还能查，但不能再存成新版本（存档是发客户的凭据） */
   voided?: boolean
+  /** 整单/批次 CI 重叠：用户已在开票弹窗里看着重叠金额勾过确认 */
+  confirmOverlap?: boolean
   /** 纸面缺项提醒（如本币种没配银行账户）：显示在预览上方，不属于纸面 */
   notice?: string
   /** 预览时算出的下一版版次；存档时用它核对，纸面和库里必须同号 */
@@ -190,7 +192,11 @@ export default function OrderDetail() {
     })
   }
 
-  const openCi = async (charges: { label: string; amount: number }[], batchId?: number) => {
+  const openCi = async (
+    charges: { label: string; amount: number }[],
+    batchId?: number,
+    confirmOverlap = false
+  ) => {
     try {
       const images = await buildImages()
       let docNo = ciNoOf(order.piNo)
@@ -243,6 +249,7 @@ export default function OrderDetail() {
         amount,
         rev,
         title,
+        confirmOverlap,
         notice: bankNotice(),
         render
       })
@@ -267,7 +274,8 @@ export default function OrderDetail() {
         kind: preview.kind,
         orderId: order.id,
         amount: preview.amount,
-        expectedVersion: preview.rev
+        expectedVersion: preview.rev,
+        confirmOverlap: preview.confirmOverlap === true
       })
       setPreview({ ...preview, html: savedHtml, rev: r.version })
       await load()
@@ -298,7 +306,8 @@ export default function OrderDetail() {
         kind: preview.kind,
         orderId: order.id,
         amount: preview.amount,
-        expectedVersion: preview.rev
+        expectedVersion: preview.rev,
+        confirmOverlap: preview.confirmOverlap === true
       })
       toast(`已存档到系统：${r.path}（第 ${r.version} 版）`)
       // 存完屏幕上的纸也换成正式版本号，跟存档表一个号（N39）
@@ -739,7 +748,7 @@ export default function OrderDetail() {
             {tab === 'packing' ? (
               <PackingTab order={order} onChange={load} onPreview={openPl} grossFactor={Number(settings?.grossWeightFactor ?? 1.1)} />
             ) : null}
-            {tab === 'timeline' ? <TimelineTab events={events} docVersions={docVersions} /> : null}
+            {tab === 'timeline' ? <TimelineTab events={events} docVersions={docVersions} onChanged={load} /> : null}
             {tab === 'photos' ? <PhotosTab order={order} onChange={load} /> : null}
           </div>
         </div>
@@ -773,7 +782,7 @@ export default function OrderDetail() {
           order={order}
           docVersions={docVersions}
           onClose={() => setShowCi(false)}
-          onPreview={(charges, batchId) => void openCi(charges, batchId)}
+          onPreview={(charges, batchId, confirmOverlap) => void openCi(charges, batchId, confirmOverlap)}
         />
       ) : null}
 
@@ -942,7 +951,7 @@ function CiModal({
   order: any
   docVersions: any[]
   onClose: () => void
-  onPreview: (charges: { label: string; amount: number }[], batchId?: number) => void
+  onPreview: (charges: { label: string; amount: number }[], batchId?: number, confirmOverlap?: boolean) => void
 }) {
   // 费用行默认按订单上的一行行带出来：CI 与 PI 必须是同一套数字
   const [charges, setCharges] = useState<{ uid: string; label: string; amount: number }[]>(
@@ -953,6 +962,8 @@ function CiModal({
   const [amounts, setAmounts] = useState<PackingAmount[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
+  // 整单/批次 CI 重叠确认：不硬挡（先整单后补批次是合法顺序），但必须看着重叠金额亲手勾
+  const [confirmOverlap, setConfirmOverlap] = useState(false)
 
   useEffect(() => {
     let alive = true
@@ -976,6 +987,13 @@ function CiModal({
   const selPl = batchId == null ? null : (livePls.find((p: any) => p.id === batchId) ?? null)
   const sel = batchId == null ? null : (amounts.find((a) => a.plId === batchId) ?? null)
 
+  // 重叠闸门：整单 CI 与批次 CI 的金额都出自同一张 PI，同时有效就是两张对不上的发票
+  const baseCi = ciNoOf(order.piNo)
+  const liveBatchCi = docVersions.filter((d: any) => d.kind === 'ci' && !d.voidedAt && d.docNo !== baseCi)
+  const liveWholeCi = docVersions.some((d: any) => d.kind === 'ci' && !d.voidedAt && d.docNo === baseCi)
+  const overlapAmount = liveBatchCi.reduce((s: number, d: any) => s + (Number(d.amount) || 0), 0)
+  const overlap = batchId == null ? liveBatchCi.length > 0 : liveWholeCi
+
   // 挡住的理由要说人话：没单价也照出，报关行会按 0 申报，事后补税比退单贵
   const blocked: string[] = []
   if (batchId != null) {
@@ -987,6 +1005,13 @@ function CiModal({
       blocked.push(
         `箱单上的款号在订单里找不到：${sel.unknownSkus.join('、')}。没有单价不能出 CI，请先补齐订单明细或修正箱单款号。`
       )
+  }
+  if (overlap && !confirmOverlap) {
+    blocked.push(
+      batchId == null
+        ? `已存档的批次 CI 合计 ${overlapAmount.toFixed(2)}，整单 CI 会和它们重叠——勾选下方确认才能继续`
+        : `这张单已存档整单 CI，再按批次开票金额会重叠——勾选下方确认才能继续`
+    )
   }
 
   const docNo = ciNoOf(order.piNo, selPl?.plNo)
@@ -1011,7 +1036,7 @@ function CiModal({
           <Button
             variant="primary"
             disabled={blocked.length > 0}
-            onClick={() => onPreview(clean, sel?.plId)}
+            onClick={() => onPreview(clean, sel?.plId, overlap && confirmOverlap)}
           >
             生成 CI 预览
           </Button>
@@ -1028,7 +1053,10 @@ function CiModal({
         <label>开票范围</label>
         <select
           value={batchId == null ? '' : String(batchId)}
-          onChange={(e) => setBatchId(e.target.value ? Number(e.target.value) : null)}
+          onChange={(e) => {
+            setBatchId(e.target.value ? Number(e.target.value) : null)
+            setConfirmOverlap(false)
+          }}
         >
           <option value="">整单（按 PI 合计开一张）</option>
           {livePls.map((p: any) => {
@@ -1042,6 +1070,21 @@ function CiModal({
           })}
         </select>
       </div>
+      {overlap ? (
+        <label className="field" style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={confirmOverlap}
+            onChange={(e) => setConfirmOverlap(e.target.checked)}
+            style={{ marginTop: 4 }}
+          />
+          <span>
+            {batchId == null
+              ? `订单已按批次出过 CI（合计 ${overlapAmount.toFixed(2)}）。再按整单开一张，客户手里会有两张金额重叠的发票，报关和收汇可能重复申报。我确认要出这张重叠的 CI。`
+              : `订单已按整单出过 CI。再按批次开一张，两张发票金额重叠，报关和收汇可能重复申报。我确认要出这张重叠的 CI。`}
+          </span>
+        </label>
+      ) : null}
       {livePls.length === 0 ? (
         <div className="hint">这张单还没有未作废的装箱批次，只能按整单开票。</div>
       ) : null}
@@ -2790,6 +2833,29 @@ function EditBatchModal({
 
   const save = async () => {
     try {
+      // CI 印的就是柜号/船名/ETD/封条/提单号：已出 CI 的批次改这些字段，
+      // 发出去的纸不会跟着变——先让人知道两边会分叉，再决定存不存
+      const ciDocNo = ciNoOf(order.piNo, pl.plNo)
+      const liveCi = (await window.api.docs.list(order.id)).filter(
+        (d: any) => d.kind === 'ci' && d.docNo === ciDocNo && !d.voidedAt
+      )
+      if (liveCi.length > 0) {
+        const paper: [string, unknown, string][] = [
+          ['柜号', pl.containerNo, form.containerNo],
+          ['船名航次', pl.vessel, form.vessel],
+          ['ETD', pl.etdDate ?? '', form.etdDate],
+          ['封条号', pl.sealNo, form.sealNo],
+          ['提单号', pl.blNo, form.blNo]
+        ]
+        const changed = paper.filter(([, a, b]) => String(a ?? '') !== String(b ?? '')).map(([l]) => l)
+        if (
+          changed.length > 0 &&
+          !confirm(
+            `这一批已出 CI（第 ${Math.max(...liveCi.map((d: any) => Number(d.version)))} 版存档），${changed.join('、')}都印在发给客户的发票上。\n保存后系统里的数据会变，但已发出的纸面不会跟着改——请核对后重出正确的一版存档。\n仍要保存吗？`
+          )
+        )
+          return
+      }
       await window.api.pl.updateInfo(order.id, pl.id, {
         containerNo: form.containerNo,
         vessel: form.vessel,
@@ -3285,7 +3351,9 @@ const EVENT_KIND_LABEL: Record<string, string> = {
   pl_line_update: '修改箱明细',
   pl_unvoid: '撤销作废批次',
   settlement: '核销',
-  settlement_reverse: '撤销核销'
+  settlement_reverse: '撤销核销',
+  doc_void: '作废单据存档',
+  sample_offset_back: '打样抵扣回退'
 }
 
 /** 状态值按事件类型翻译：收款事件印中文收款状态，出货事件印中文出货状态 */
@@ -3295,8 +3363,34 @@ function statusText(kind: string, v: string | null): string {
   return (table as Record<string, string>)[v] ?? v
 }
 
-function TimelineTab({ events, docVersions }: { events: any[]; docVersions: any[] }) {
+function TimelineTab({
+  events,
+  docVersions,
+  onChanged
+}: {
+  events: any[]
+  docVersions: any[]
+  onChanged: () => Promise<void>
+}) {
   const toast = useToast()
+
+  /** 作废一版存档：批次与金额恢复按当前数据计算，可重出正确的一版；原因必填 */
+  const voidDoc = async (d: any) => {
+    const reason = window.prompt(
+      `作废存档 ${d.docNo} 第 ${d.version} 版（金额 ${Number(d.amount).toFixed(2)}）。\n` +
+        `作废后这一版不再被当作纸面金额的依据，批次与金额恢复按当前数据计算，可以重出正确的一版；记录和 PDF 会留着。\n` +
+        `请写明作废原因（必填）：`
+    )
+    if (!reason || !reason.trim()) return
+    try {
+      await window.api.docs.void(d.id, reason.trim())
+      toast(`已作废 ${d.docNo} 第 ${d.version} 版存档`)
+      await onChanged()
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
+  }
+
   return (
     <div className="card-body">
       {docVersions.length ? (
@@ -3315,14 +3409,26 @@ function TimelineTab({ events, docVersions }: { events: any[]; docVersions: any[
               </thead>
               <tbody>
                 {docVersions.map((d) => (
-                  <tr key={d.id}>
-                    <td className="mono">{d.docNo}</td>
+                  <tr key={d.id} style={d.voidedAt ? { opacity: 0.55 } : undefined}>
+                    <td className="mono">
+                      {d.docNo}
+                      {d.voidedAt ? (
+                        <span className="tag red" style={{ marginLeft: 6 }}>
+                          已作废
+                        </span>
+                      ) : null}
+                      {d.voidedAt ? (
+                        <div className="faint" style={{ fontSize: 12 }}>
+                          原因：{d.voidReason || '未填写'}
+                        </div>
+                      ) : null}
+                    </td>
                     <td>第 {d.version} 版</td>
                     <td className="num">{d.amount.toFixed(2)}</td>
                     <td className="faint nowrap">{fmtDateTime(d.createdAt)}</td>
                     <td className="right nowrap">
                       <Button variant="ghost" size="sm"
-                        
+
                         onClick={async () => {
                           // N34：每一版直接打开看，不用去文件夹里认文件名
                           try {
@@ -3335,7 +3441,7 @@ function TimelineTab({ events, docVersions }: { events: any[]; docVersions: any[
                         打开
                       </Button>
                       <Button variant="ghost" size="sm"
-                        
+
                         onClick={async () => {
                           // 打开这一版所在的文件夹（不是整个 docs 根目录）
                           try {
@@ -3347,6 +3453,11 @@ function TimelineTab({ events, docVersions }: { events: any[]; docVersions: any[
                       >
                         所在文件夹
                       </Button>
+                      {d.voidedAt ? null : (
+                        <Button variant="ghost" size="sm" onClick={() => void voidDoc(d)}>
+                          作废
+                        </Button>
+                      )}
                     </td>
                   </tr>
                 ))}

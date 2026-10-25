@@ -488,8 +488,8 @@ export function convertSampleToOrder(
   const db = getDb()
   // 转单要一次做完：订单头 + 明细 + 打样单标记。中途失败就整单回滚，
   // 不留下「有订单头没明细」或「打样单标了已转、订单却是空的」半截数据
-  db.exec('BEGIN')
-  try {
+  // （createOrder 自己也开事务，这里嵌套 SAVEPOINT，回滚时两层一起退）
+  return transact(() => {
     const order = createOrder({
       customerId: s.customerId,
       currency,
@@ -562,14 +562,9 @@ export function convertSampleToOrder(
         offsetTotal > 0 ? `样品费及快递费 ${offsetTotal.toFixed(2)} 抵扣` : '样品费未抵扣'
       }`
     )
-    db.exec('COMMIT')
     return getOrder(order.id)!
-  } catch (e) {
-    db.exec('ROLLBACK')
-    throw e
-  }
+  })
 }
-
 /** 客户档案里的默认条款（打样转订单时用） */
 function db_customerDefaults(customerId: number): {
   incoterm: string

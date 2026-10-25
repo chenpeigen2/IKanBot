@@ -125,11 +125,15 @@ export interface IKanApi {
       amount?: number
       /** 纸面印的版次；与系统下一版不一致会被拒绝，防止纸面/存档错位 */
       expectedVersion?: number
+      /** 整单/批次 CI 重叠时，用户已在弹窗里看着重叠金额勾过确认 */
+      confirmOverlap?: boolean
     }): Promise<{ path: string; filePath: string; version: number }>
     /** 订单的单据存档列表 */
     list(orderId: number): Promise<any[]>
     /** 报价单的单据存档列表 */
     listQuotation(quotationId: number): Promise<any[]>
+    /** 作废一版存档（单据修订）：记录与 PDF 留着，批次与金额恢复按当前数据计算 */
+    void(versionId: number, reason: string): Promise<any[]>
     /** 下一版是第几版（打印前先问一句，纸面上要印版本号） */
     nextVersion(docNo: string, kind: 'pi' | 'pl' | 'ci' | 'quotation'): Promise<number>
     /** 打开这一版文件所在的文件夹（N34）；不传路径则打开存档根目录 */

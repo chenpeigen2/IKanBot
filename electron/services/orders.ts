@@ -64,13 +64,13 @@ export function assertOrderWritable(orderId: number, action: string): void {
  */
 function assertPricingEditable(orderId: number, action: string): void {
   const row = getDb().get(
-    "SELECT MAX(version) AS v FROM doc_versions WHERE order_id = ? AND kind = 'ci'",
+    "SELECT MAX(version) AS v FROM doc_versions WHERE order_id = ? AND kind = 'ci' AND voided_at IS NULL",
     [orderId]
   ) as { v?: number | null } | null
   const ver = Number(row?.v ?? 0)
   if (ver > 0) {
     throw new Error(
-      `这张单已经出过 CI（第 ${ver} 版存档），不能再${action}：批次金额是按当前单价和费用行算的，改了会和已经发出去的 CI 对不上。确实要改，请作废这张单后按新单重开。`
+      `这张单已经出过 CI（第 ${ver} 版存档），不能再${action}：批次金额是按当前单价和费用行算的，改了会和已经发出去的 CI 对不上。确实改错了价，先作废那一版 CI 存档（写明原因），改完重出正确的一版。`
     )
   }
 }
@@ -580,8 +580,6 @@ export function createOrder(input: OrderInput): OrderDetail {
   const db = getDb()
   const settings = getSettings()
   const ts = now()
-  const orderNo = nextNo('SO')
-  const piNo = input.piNo?.trim() || nextNo('PI')
   const validUntil = input.validUntil ?? addDays(localDate(), settings.piValidDays)
   // 汇率锁定日期：默认记今天（本地日期）
   const rateDate = input.exchangeRateDate ?? localDate()
@@ -591,9 +589,11 @@ export function createOrder(input: OrderInput): OrderDetail {
   const chargesJson = JSON.stringify((input.charges ?? []).filter((c) => c.label.trim()))
   const parties = partiesForOrder(input.customerId, input)
 
-  // 查重、建单、留痕放进同一个事务：要么这张单连同它的「建单」历史一起成立，
-  // 要么一行都不留——不能出现一张查不到来历的空单
+  // 烧号也放进事务：以前在事务外取号，保存失败（撞号、校验不过、转单回滚）时
+  // 单没建成、号已烧掉，SO/PI 是客户对账凭据，凭空跳号对不上水单
   const orderId = transact(() => {
+    const orderNo = nextNo('SO')
+    const piNo = input.piNo?.trim() || nextNo('PI')
     // 单号是凭据：手工指定的 PI 号不能跟别的订单撞号（与打样单号同一条规矩，N-3）。
     // 查重放在事务里，查完到写入之间没有别人能插一张同号的单进来。
     if (input.piNo?.trim() && piNoTaken(input.piNo.trim())) throw piDupErr(piNo)
@@ -923,8 +923,36 @@ export function voidOrder(id: number, reason = ''): OrderDetail {
     | null
   if (!cur) throw new Error('订单不存在')
   if (cur.payment_status === 'void') return getOrder(id)!
-  db.run('UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?', ['void', now(), id])
-  logEvent(id, 'void', cur.payment_status, 'void', `作废订单 ${cur.order_no}${reason ? '：' + reason : ''}`)
+  transact(() => {
+    db.run('UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?', ['void', now(), id])
+    // 下单抵扣的样品费不能跟着凭空消失：订单作废退出应收口径，
+    // 打样单还挂着「已抵扣」的话，客户实际欠的样品费会从欠款榜、工作台同时蒸发。
+    // 回退成未收（抵扣历史留在备注里），打样费回到该在的地方
+    const offsetSamples = db.all(
+      `SELECT id, sample_no, fee_note FROM sample_orders
+       WHERE converted_order_id = ? AND fee_status = 'offset'`,
+      [id]
+    ) as Record<string, unknown>[]
+    for (const s of offsetSamples) {
+      db.run(
+        `UPDATE sample_orders SET fee_status = 'unpaid',
+          fee_note = ?, updated_at = ? WHERE id = ?`,
+        [
+          `${String(s.fee_note ?? '')}；订单 ${cur.order_no} 已作废，抵扣回退为未收`,
+          now(),
+          Number(s.id)
+        ]
+      )
+      logEvent(
+        id,
+        'sample_offset_back',
+        null,
+        null,
+        `打样单 ${String(s.sample_no ?? '')} 的样品费抵扣随订单作废回退为未收`
+      )
+    }
+    logEvent(id, 'void', cur.payment_status, 'void', `作废订单 ${cur.order_no}${reason ? '：' + reason : ''}`)
+  })
   return getOrder(id)!
 }
 
@@ -1412,11 +1440,17 @@ export function addPayment(
   if (!Number.isFinite(amount) || amount <= 0) {
     throw new Error('收款金额必须是大于 0 的数。')
   }
-  db.exec('BEGIN')
-  try {
+  // 汇率快照：这笔到账按「落款那天订单上的汇率」折算进月报，
+  // 以后订单汇率再改（出单据前的窗口期是允许的），历史到账不许跟着漂
+  const rate = Number(
+    (db.get('SELECT exchange_rate FROM orders WHERE id = ?', [orderId]) as { exchange_rate?: number } | null)
+      ?.exchange_rate ?? 1
+  )
+  transact(() => {
     db.run(
-      `INSERT INTO payments(order_id, paid_at, amount, method, bank_ref, note, created_at) VALUES(?,?,?,?,?,?,?)`,
-      [orderId, paidAt, amount, p.method ?? 'T/T', p.bankRef ?? '', p.note ?? '', now()]
+      `INSERT INTO payments(order_id, paid_at, amount, method, bank_ref, note, exchange_rate, created_at)
+       VALUES(?,?,?,?,?,?,?,?)`,
+      [orderId, paidAt, amount, p.method ?? 'T/T', p.bankRef ?? '', p.note ?? '', rate, now()]
     )
     logEvent(
       orderId,
@@ -1426,11 +1460,7 @@ export function addPayment(
       `收款 ${amount.toFixed(2)}（${paidAt}${p.bankRef ? `，流水号 ${p.bankRef}` : `，${p.method ?? 'T/T'}`}）`
     )
     recomputePaymentStatus(orderId)
-    db.exec('COMMIT')
-  } catch (e) {
-    db.exec('ROLLBACK')
-    throw e
-  }
+  })
   return getOrder(orderId)!
 }
 
@@ -1467,8 +1497,7 @@ export function deletePayment(orderId: number, paymentId: number, reason = ''): 
   const currency = String(row.currency ?? '')
   const bankRef = String(row.bank_ref ?? '')
   const paidAt = String(row.paid_at ?? '')
-  db.exec('BEGIN')
-  try {
+  transact(() => {
     db.run('DELETE FROM payments WHERE id = ? AND order_id = ?', [paymentId, orderId])
     logEvent(
       orderId,
@@ -1478,11 +1507,7 @@ export function deletePayment(orderId: number, paymentId: number, reason = ''): 
       `删除收款 ${currency} ${amount.toFixed(2)}（${paidAt}${bankRef ? `，流水号 ${bankRef}` : ''}）原因：${why}`
     )
     recomputePaymentStatus(orderId)
-    db.exec('COMMIT')
-  } catch (e) {
-    db.exec('ROLLBACK')
-    throw e
-  }
+  })
   return getOrder(orderId)!
 }
 
@@ -1570,11 +1595,12 @@ export function addSettlement(orderId: number, input: SettlementInput): OrderDet
     }
     const paidAt = String(input.paidAt ?? '').trim() || at
     if (!isLocalDate(paidAt)) throw new Error('追回款的到账日期要填完整（例如 2026-10-24）。')
-    db.exec('BEGIN')
-    try {
+    const rate = Number(order.exchangeRate ?? 1)
+    transact(() => {
       db.run(
-        `INSERT INTO payments(order_id, paid_at, amount, method, bank_ref, note, created_at) VALUES(?,?,?,?,?,?,?)`,
-        [orderId, paidAt, amount, input.method ?? 'T/T', input.bankRef ?? '', `坏账追回：${reason}`, now()]
+        `INSERT INTO payments(order_id, paid_at, amount, method, bank_ref, note, exchange_rate, created_at)
+         VALUES(?,?,?,?,?,?,?,?)`,
+        [orderId, paidAt, amount, input.method ?? 'T/T', input.bankRef ?? '', `坏账追回：${reason}`, rate, now()]
       )
       const payId = Number(
         (db.get('SELECT last_insert_rowid() AS id') as { id?: number } | null)?.id ?? 0
@@ -1592,11 +1618,7 @@ export function addSettlement(orderId: number, input: SettlementInput): OrderDet
         `坏账追回 ${currency} ${amount.toFixed(2)}（${paidAt}${input.bankRef ? `，流水号 ${input.bankRef}` : ''}）原因：${reason}`
       )
       recomputePaymentStatus(orderId)
-      db.exec('COMMIT')
-    } catch (e) {
-      db.exec('ROLLBACK')
-      throw e
-    }
+    })
     return getOrder(orderId)!
   }
 
@@ -1613,8 +1635,7 @@ export function addSettlement(orderId: number, input: SettlementInput): OrderDet
     )
   }
   const label = kind === 'shortage' ? '短款核销' : '坏账'
-  db.exec('BEGIN')
-  try {
+  transact(() => {
     db.run(
       `INSERT INTO order_settlements(order_id, kind, amount, reason, evidence, reverses_id, payment_id, at, created_at)
        VALUES(?,?,?,?,?,?,?,?,?)`,
@@ -1628,11 +1649,7 @@ export function addSettlement(orderId: number, input: SettlementInput): OrderDet
       `${label} ${currency} ${amount.toFixed(2)}（${at}）原因：${reason}${evidence ? `；证据：${evidence}` : ''}`
     )
     recomputePaymentStatus(orderId)
-    db.exec('COMMIT')
-  } catch (e) {
-    db.exec('ROLLBACK')
-    throw e
-  }
+  })
   return getOrder(orderId)!
 }
 
@@ -1657,8 +1674,7 @@ export function reverseSettlement(orderId: number, settlementId: number, reason 
   const why = String(reason ?? '').trim()
   if (!why) throw new Error('撤销核销要写原因，操作历史要留痕。')
   const label = SETTLEMENT_KIND_LABEL[kind] ?? kind
-  db.exec('BEGIN')
-  try {
+  transact(() => {
     db.run(
       `INSERT INTO order_settlements(order_id, kind, amount, reason, evidence, reverses_id, payment_id, at, created_at)
        VALUES(?,?,?,?,?,?,?,?,?)`,
@@ -1672,11 +1688,7 @@ export function reverseSettlement(orderId: number, settlementId: number, reason 
       `撤销${label} ${amount.toFixed(2)} 原因：${why}`
     )
     recomputePaymentStatus(orderId)
-    db.exec('COMMIT')
-  } catch (e) {
-    db.exec('ROLLBACK')
-    throw e
-  }
+  })
   return getOrder(orderId)!
 }
 

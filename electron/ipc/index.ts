@@ -371,7 +371,12 @@ export function registerIpc(): void {
     amount?: number
     /** 纸面上印的版次；与系统实际下一版不一致时拒绝，避免纸面与存档错位 */
     expectedVersion?: number
+    /** 整单/批次 CI 重叠时，用户已在弹窗里看着重叠金额勾过确认 */
+    confirmOverlap?: boolean
   }) => {
+    if (payload.kind === 'ci' && payload.orderId != null) {
+      docsSvc.assertCiNoOverlap(Number(payload.orderId), payload.docNo, payload.confirmOverlap === true)
+    }
     const pdf = await htmlToPdf(payload.html, payload.docNo)
     const saved = docsSvc.saveDocFile({
       pdf,
@@ -386,6 +391,7 @@ export function registerIpc(): void {
   })
   handle('docs:list', (orderId: number) => docsSvc.listDocVersions(orderId))
   handle('docs:listQuotation', (quotationId: number) => docsSvc.listQuotationDocVersions(quotationId))
+  handle('docs:void', (versionId: number, reason?: string) => docsSvc.voidDocVersion(versionId, reason ?? ''))
   handle('docs:nextVersion', (docNo: string, kind: string) => docsSvc.nextVersion(docNo, kind))
   handle('docs:reveal', async (filePath?: string) => {
     // N34：点「打开目录」要打开**这一版文件**所在的文件夹，而不是整个 docs 根目录

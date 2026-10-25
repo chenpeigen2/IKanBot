@@ -4,8 +4,9 @@
  */
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'fs'
 import { isAbsolute, join, relative, resolve, sep } from 'path'
-import { dataDir, docsDir, getDb } from '../db'
+import { dataDir, docsDir, getDb, transact } from '../db'
 import { logEvent } from './events'
+import { ciNoOf } from '../../src/shared/documents'
 import type { DocKind } from '../../src/shared/types'
 
 export interface DocVersion {
@@ -18,6 +19,9 @@ export interface DocVersion {
   amount: number
   filePath: string
   createdAt: string
+  /** 作废时间：null = 这版仍是有效凭据。作废只摘「纸面依据」资格，记录与 PDF 一条不动 */
+  voidedAt: string | null
+  voidReason: string | null
 }
 
 const DOC_KINDS: DocKind[] = ['pi', 'pl', 'ci', 'quotation']
@@ -65,34 +69,65 @@ export function recordDocVersion(input: {
   filePath: string
 }): DocVersion {
   const db = getDb()
-  const res = db.run(
-    `INSERT INTO doc_versions(order_id, quotation_id, doc_no, kind, version, amount, file_path, created_at)
-     VALUES(?,?,?,?,?,?,?,?)`,
-    [
-      input.orderId ?? null,
-      input.quotationId ?? null,
-      input.docNo,
-      input.kind,
-      input.version,
-      input.amount ?? 0,
-      input.filePath,
-      now()
-    ]
-  )
-  if (input.orderId) {
-    logEvent(
-      input.orderId,
-      'doc_export',
-      null,
-      null,
-      `出单据 ${input.docNo} 第 ${input.version} 版（金额 ${(input.amount ?? 0).toFixed(2)}）`
+  // 存档记录和「出单据」留痕在同一个事务里：提交成功但事件没写上，
+  // 操作历史就丢了「这一版是什么时候出的」这条凭据
+  const id = transact(() => {
+    const res = db.run(
+      `INSERT INTO doc_versions(order_id, quotation_id, doc_no, kind, version, amount, file_path, created_at)
+       VALUES(?,?,?,?,?,?,?,?)`,
+      [
+        input.orderId ?? null,
+        input.quotationId ?? null,
+        input.docNo,
+        input.kind,
+        input.version,
+        input.amount ?? 0,
+        input.filePath,
+        now()
+      ]
     )
-  }
-  const row = db.get('SELECT * FROM doc_versions WHERE id = ?', [Number(res.lastInsertRowid)]) as Record<
-    string,
-    unknown
-  >
+    if (input.orderId) {
+      logEvent(
+        input.orderId,
+        'doc_export',
+        null,
+        null,
+        `出单据 ${input.docNo} 第 ${input.version} 版（金额 ${(input.amount ?? 0).toFixed(2)}）`
+      )
+    }
+    return Number(res.lastInsertRowid)
+  })
+  const row = db.get('SELECT * FROM doc_versions WHERE id = ?', [id]) as Record<string, unknown>
   return mapDocVersion(row)
+}
+
+/**
+ * 作废一版存档（单据修订）：CI 金额敲错、箱数装错时，旧规则里这张存档
+ * 会把批次、箱明细、单价全部钉死，唯一出口是作废整单重开。
+ * 作废只摘掉「纸面金额依据」的资格：记录和 PDF 留着（纸发出去过就是事实），
+ * 批次解锁、金额按当前数据重算，允许重出正确的一版。原因必填。
+ */
+export function voidDocVersion(versionId: number, reason = ''): DocVersion[] {
+  const db = getDb()
+  const why = String(reason ?? '').trim()
+  if (!why) throw new Error('作废存档要写原因（例如“金额敲错一位”“箱数装错”），操作历史要留痕。')
+  const row = db.get('SELECT * FROM doc_versions WHERE id = ?', [versionId]) as Record<string, unknown> | null
+  if (!row) throw new Error('这一版存档已经不存在了，刷新页面后再试。')
+  const v = mapDocVersion(row)
+  if (v.voidedAt) throw new Error(`存档 ${v.docNo} 第 ${v.version} 版已经是作废状态，不用重复作废。`)
+  transact(() => {
+    db.run('UPDATE doc_versions SET voided_at = ?, void_reason = ? WHERE id = ?', [now(), why, versionId])
+    if (v.orderId != null) {
+      logEvent(
+        v.orderId,
+        'doc_void',
+        null,
+        null,
+        `作废存档 ${v.docNo} 第 ${v.version} 版（金额 ${v.amount.toFixed(2)}）：${why}。批次与金额恢复按当前数据计算，可重出正确的一版。`
+      )
+    }
+  })
+  return v.orderId != null ? listDocVersions(v.orderId) : listQuotationDocVersions(v.quotationId ?? 0)
 }
 
 /**
@@ -132,9 +167,21 @@ export function saveDocFile(input: {
     writeFileSync(absolutePath, input.pdf, { flag: 'wx' })
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'EEXIST') {
-      throw new Error(`存档文件 ${fileName} 已经存在，不能覆盖。请刷新后重新生成这一版。`)
+      // 文件在、库里没记录 = 上次存档在「落盘成功、记账之前」崩溃留下的孤儿：
+      // 不覆盖它，每次存档都会永远撞 EEXIST，凭据链被一个孤儿文件锁死
+      const orphan = !getDb().get('SELECT 1 FROM doc_versions WHERE doc_no = ? AND kind = ? AND version = ?', [
+        docNo,
+        kind,
+        version
+      ])
+      if (orphan) {
+        writeFileSync(absolutePath, input.pdf)
+      } else {
+        throw new Error(`存档文件 ${fileName} 已经存在，不能覆盖。请刷新后重新生成这一版。`)
+      }
+    } else {
+      throw e
     }
-    throw e
   }
 
   try {
@@ -207,6 +254,40 @@ function mapDocVersion(r: Record<string, unknown>): DocVersion {
     version: Number(r.version),
     amount: Number(r.amount),
     filePath: String(r.file_path),
-    createdAt: String(r.created_at)
+    createdAt: String(r.created_at),
+    voidedAt: r.voided_at == null ? null : String(r.voided_at),
+    voidReason: r.void_reason == null ? null : String(r.void_reason)
   }
+}
+
+/**
+ * 整单 CI 与批次 CI 重叠闸门：整单按 PI 合计开一张，批次按本批货值开一张，
+ * 两张同时有效时客户手里的发票金额就打架，报关/收汇会重复申报。
+ * 先整单后补批次（或反过来）都是合法顺序，所以不硬挡——但必须让人看着
+ * 「重叠了多少钱」亲手确认，而不是悄悄出两张对不上的票。
+ */
+export function assertCiNoOverlap(orderId: number, docNo: string, confirmedOverlap = false): number {
+  const db = getDb()
+  const piNo = String(
+    (db.get('SELECT pi_no FROM orders WHERE id = ?', [orderId]) as { pi_no?: string } | null)?.pi_no ?? ''
+  ).trim()
+  if (!piNo) return 0
+  const base = ciNoOf(piNo)
+  const rows = db.all(
+    `SELECT doc_no, version, amount FROM doc_versions
+     WHERE order_id = ? AND kind = 'ci' AND voided_at IS NULL`,
+    [orderId]
+  ) as { doc_no?: string; version?: number; amount?: number }[]
+  const isWhole = docNo === base
+  const overlap = rows
+    .filter((r) => (isWhole ? String(r.doc_no ?? '') !== base : String(r.doc_no ?? '') === base))
+    .reduce((s, r) => s + Number(r.amount ?? 0), 0)
+  if (overlap <= 0.005) return 0
+  if (!confirmedOverlap) {
+    throw new Error(
+      `这张 CI 和已存档的${isWhole ? '批次' : '整单'} CI 重叠 ${overlap.toFixed(2)}：客户手里会有两张金额对不上的发票，报关和收汇可能重复申报。` +
+        `确实要出，请在开票弹窗里勾选确认；要改数请先作废旧存档再重出。`
+    )
+  }
+  return overlap
 }

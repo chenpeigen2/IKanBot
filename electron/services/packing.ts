@@ -121,7 +121,8 @@ function assertNotOverPacked(
 /**
  * 这一批出过 CI 吗？出了就是客户手里那张纸的依据：
  * 箱明细、批次本身都不能再改，否则系统按新箱数重算批次金额，纸面却不会跟着变。
- * 返回最新一版 CI 的版次（0 = 没出过），报错时能说清楚是哪一版。
+ * 返回最新一版有效 CI 的版次（0 = 没出过）。作废的存档不算：
+ * 作废就是摘掉「纸面依据」资格，批次解锁、金额按当前数据重算，可重出正确的一版。
  */
 function archivedCiVersion(orderId: number, plNo: string): number {
   const db = getDb()
@@ -130,7 +131,8 @@ function archivedCiVersion(orderId: number, plNo: string): number {
   ).trim()
   if (!piNo) return 0
   const row = db.get(
-    `SELECT MAX(version) AS v FROM doc_versions WHERE order_id = ? AND kind = 'ci' AND doc_no = ?`,
+    `SELECT MAX(version) AS v FROM doc_versions
+     WHERE order_id = ? AND kind = 'ci' AND voided_at IS NULL AND doc_no = ?`,
     [orderId, ciNoOf(piNo, plNo)]
   ) as { v?: number | null } | null
   return Number(row?.v ?? 0)
@@ -155,7 +157,7 @@ function assertBatchLinesEditable(orderId: number, plId: number): number {
   const ciVer = archivedCiVersion(orderId, String(cur.pl_no))
   if (ciVer > 0) {
     throw new Error(
-      `装箱单 ${String(cur.pl_no)} 已经出过 CI（第 ${ciVer} 版存档），箱明细不能再改：那一批的金额已经按这些箱子印给客户了，改了系统重算的数和纸面就对不上。确实要改，请把整张订单作废后按新单重开。`
+      `装箱单 ${String(cur.pl_no)} 已经出过 CI（第 ${ciVer} 版存档），箱明细不能再改：那一批的金额已经按这些箱子印给客户了，改了系统重算的数和纸面就对不上。确实装错了，先把这一版 CI 存档作废（操作历史里写明原因），箱子改对后重出正确的一版。`
     )
   }
   const status = cur.ship_status == null ? null : (String(cur.ship_status) as BatchShipStatus)
@@ -338,7 +340,7 @@ export function deletePackingList(orderId: number, plId: number): PackingList[] 
   const ciVer = archivedCiVersion(orderId, String(cur.pl_no))
   if (ciVer > 0) {
     throw new Error(
-      `装箱单 ${String(cur.pl_no)} 已经出过 CI（第 ${ciVer} 版存档），不能删除：删了这一批，存档的发票就找不到对应的箱单和金额了。这一批只能留着，和发出去的票对得上。`
+      `装箱单 ${String(cur.pl_no)} 已经出过 CI（第 ${ciVer} 版存档），不能删除：删了这一批，存档的发票就找不到对应的箱单和金额了。先作废那版 CI 存档，这一批才能删。`
     )
   }
   const status = cur.ship_status == null ? null : (String(cur.ship_status) as BatchShipStatus)
@@ -374,7 +376,7 @@ export function voidPackingList(orderId: number, plId: number, reason = ''): Pac
   const ciVer = archivedCiVersion(orderId, String(cur.pl_no))
   if (ciVer > 0) {
     throw new Error(
-      `装箱单 ${String(cur.pl_no)} 已经出过 CI（第 ${ciVer} 版存档），不能作废：发票已经按这一批发给客户了，作废会让箱单、发票和订单三边的金额对不上。`
+      `装箱单 ${String(cur.pl_no)} 已经出过 CI（第 ${ciVer} 版存档），不能作废：发票已经按这一批发给客户了，作废会让箱单、发票和订单三边的金额对不上。先作废那版 CI 存档（写明原因），这一批才能作废。`
     )
   }
   transact(() => {
@@ -495,6 +497,10 @@ export function updatePackingListInfo(
     }
   }
 
+  // 已出 CI 的批次改船期/柜号这类纸面字段：数据可以改（舱位变了是真实发生），
+  // 但必须提醒「客户手里那张 CI 不会跟着变」，免得两边悄悄分叉还没人知道
+  const ciVer = archivedCiVersion(orderId, String(cur.pl_no))
+
   const pick = (v: string | null | undefined, old: unknown) => (v === undefined ? String(old ?? '') : (v ?? ''))
   transact(() => {
     db.run(
@@ -540,6 +546,13 @@ export function updatePackingListInfo(
     if (nextStatus === 'delivered') cmp('签收日期', patch.deliveredDate, cur.delivered_at)
     if (nextStatus !== curStatus) {
       parts.push(`状态 ${curStatus ? SHIP_STATUS_LABEL[curStatus] : '未设置'} → ${nextStatus ? SHIP_STATUS_LABEL[nextStatus] : '未设置'}`)
+    }
+    if (ciVer > 0) {
+      // CI 印的就是柜号/船名/ETD/封条/提单号这几个字段：改了哪个就提醒哪个
+      const paperLabels = ['柜号', '船名航次', 'ETD', '实际开船', '封条号', '提单号', '单据日期']
+      if (parts.some((p) => paperLabels.some((k) => p.startsWith(k)))) {
+        parts.push(`注意：这一批已出 CI 第 ${ciVer} 版存档，已发出的纸面不会跟着变，请核对后重出正确的一版`)
+      }
     }
     logEvent(
       orderId,
