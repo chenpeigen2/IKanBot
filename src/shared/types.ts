@@ -218,6 +218,8 @@ export interface CustomerStats {
   outstandingOrders: number
   /** 未收金额里的打样费部分（基准币），客户页用来拆开显示 */
   outstandingSamples: number
+  /** 名下打样单总数：对账单入口不能把只打样的客户挡在外面 */
+  sampleCount: number
   /** 尚未追回的坏账（基准币），不进待收，但客户页要能看见 */
   badDebt: number
   /** 成本没录全的订单数：这些单的毛利是假的，不能当成真毛利看 */
@@ -784,14 +786,16 @@ export type DocKind = 'pi' | 'pl' | 'ci' | 'quotation'
  * orders_all 才是全量底稿（含草稿与作废），文件名写死了「仅供复盘」，
  * 免得两套数据在 Excel 里长成一个样子。
  */
-export type ExportKind = 'orders' | 'orders_all' | 'payments' | 'items' | 'monthly'
+export type ExportKind = 'orders' | 'orders_all' | 'payments' | 'items' | 'monthly' | 'statement'
 
 export const EXPORT_FILE_NAME: Record<ExportKind, string> = {
   orders: '订单台账.csv',
   orders_all: '订单底稿_含草稿作废_仅供复盘.csv',
   payments: '收款台账.csv',
   items: '款号明细台账.csv',
-  monthly: '月度汇总.csv'
+  monthly: '月度汇总.csv',
+  // 对账单默认名会带客户与截止日（见 dashboard.statementFileName），这里只是兜底
+  statement: '客户对账单.csv'
 }
 
 /**

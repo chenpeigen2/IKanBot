@@ -6575,6 +6575,191 @@ check(
 check('旧记录不进月报', !getDb().get('SELECT id FROM payments WHERE sample_order_id = ? LIMIT 1', [r25Legacy.id]))
 samples.deleteSample(r25Legacy.id)
 
+/* ---------------- R26 客户对账单 ---------------- */
+section('R26 客户对账单：订单 + 打样 + 逐笔收款，一张表对得清')
+
+const r26Base = getSettings().baseCurrency
+const r26C = customers.saveCustomer({
+  company: 'R26 Statement Co',
+  contact: 'Olga',
+  email: 'olga@r26.com',
+  phone: '',
+  country: 'NL',
+  address: '',
+  zipCode: '',
+  attn: '',
+  paymentPref: ''
+})
+
+// ① 订单：含让利（负费用行）+ 部分收款
+const r26Order = orders.createOrder({
+  customerId: r26C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R26-STMT'
+})
+await orders.addOrderItem(r26Order.id, { styleNo: 'R26-A', quantity: 10, unitPrice: 10 })
+orders.updateOrderCharges(r26Order.id, [{ label: '折让', amount: -10 }], 'R26 客户让利')
+orders.addPayment(r26Order.id, { paidAt: localDate(), amount: 40, method: 'T/T', bankRef: 'R26-SLIP', note: '定金' })
+
+// ② 草稿单：客户手里没有这张单，不许出现在对账单上
+const r26Draft = orders.createOrder({ customerId: r26C.id, currency: 'USD', exchangeRate: 7.2, piNo: 'PI-R26-DRAFT' })
+await orders.addOrderItem(r26Draft.id, { styleNo: 'R26-D', quantity: 1, unitPrice: 9 })
+
+// ③ 作废单：钱真到账了，得让客户认出这张单和这笔钱
+const r26Void = orders.createOrder({
+  customerId: r26C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R26-VOID'
+})
+await orders.addOrderItem(r26Void.id, { styleNo: 'R26-V', quantity: 2, unitPrice: 10 })
+orders.addPayment(r26Void.id, { paidAt: localDate(), amount: 20, method: 'T/T', bankRef: 'R26-VOID-PAY' })
+orders.voidOrder(r26Void.id, 'R26 客户取消')
+
+// ④ 打样：未收（部分收款）、免单、取消但收过钱
+const r26S1 = samples.saveSample({
+  customerId: r26C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: localDate(),
+  expressFee: 5,
+  items: [{ styleNo: 'R26-S1', productName: '样品一', color: 'Black', size: 'M', quantity: 1, unitPrice: 10 }]
+})
+samples.addSamplePayment(r26S1.id, { paidAt: localDate(), amount: 5, method: 'T/T', bankRef: 'R26-SLIP' })
+const r26S2 = samples.saveSample({
+  customerId: r26C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: localDate(),
+  feeStatus: 'waived',
+  items: [{ styleNo: 'R26-S2', productName: '样品二', color: 'Grey', size: 'L', quantity: 1, unitPrice: 20 }]
+})
+const r26S3 = samples.saveSample({
+  customerId: r26C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: localDate(),
+  items: [{ styleNo: 'R26-S3', productName: '样品三', color: 'Navy', size: 'S', quantity: 1, unitPrice: 10 }]
+})
+samples.addSamplePayment(r26S3.id, { paidAt: localDate(), amount: 8, bankRef: 'R26-S3-PAY' })
+samples.saveSample({ id: r26S3.id, status: 'cancelled', note: 'R26 客户不要了' })
+
+// ⑤ 客户多付：单列预收结余，不许压成负的未收
+const r26Over = orders.createOrder({
+  customerId: r26C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R26-OVER'
+})
+await orders.addOrderItem(r26Over.id, { styleNo: 'R26-OVER', quantity: 1, unitPrice: 10 })
+orders.addPayment(r26Over.id, { paidAt: localDate(), amount: 15, method: 'T/T', bankRef: 'R26-OVER-PAY', note: '多付' })
+
+// ⑥ 老数据：汇率没填（现在新建会拦，历史库可能有）
+const r26S4 = samples.saveSample({
+  customerId: r26C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: localDate(),
+  items: [{ styleNo: 'R26-S4', productName: '样品四', color: 'White', size: 'XL', quantity: 1, unitPrice: 10 }]
+})
+getDb().run('UPDATE sample_orders SET exchange_rate = 0 WHERE id = ?', [r26S4.id])
+
+const r26Csv = dashboard.exportCsv('statement', { customerId: r26C.id })
+const r26Rows = parseCsv(r26Csv)
+const r26Head = r26Rows[0]
+const r26Body = r26Rows.slice(1)
+const r26Col = (name: string): number => r26Head.indexOf(name)
+const r26Find = (kind: string, docNo: string): string[] | undefined =>
+  r26Body.find((r) => r[r26Col('类型')] === kind && r[r26Col('单据号')] === docNo)
+const r26Cell = (row: string[] | undefined, name: string): string => (row ? row[r26Col(name)] : '<缺行>')
+
+check('对账单首列是「类型」，下游求和能按类型筛', r26Head[0] === '类型', r26Head.join('|'))
+check(
+  '对账单不含成本 / 毛利 / 坏账未追回这些内部列',
+  !r26Head.some((h) => h.includes('成本') || h.includes('毛利') || h.includes('坏账未追回')),
+  r26Head.join('|')
+)
+check('对账单有逐笔收款要用的流水号列', r26Head.includes('银行流水号'))
+
+const r26OrderRow = r26Find('订单', r26Order.orderNo)
+eq('订单行：金额 = 100 − 让利 10', r26Cell(r26OrderRow, '金额(原币)'), '90')
+eq('订单行：已收 40', r26Cell(r26OrderRow, '已收(原币)'), '40')
+eq('订单行：未收 50', r26Cell(r26OrderRow, '未收(原币)'), '50')
+eq('订单行：未收折基准 = 50 × 7.2', r26Cell(r26OrderRow, `未收(${r26Base})`), '360')
+check('订单行备注写明让利已计入金额', r26Cell(r26OrderRow, '备注').includes('折让'), r26Cell(r26OrderRow, '备注'))
+check('草稿单不上对账单', !r26Body.some((r) => r[r26Col('单据号')] === r26Draft.orderNo), r26Csv.slice(0, 200))
+const r26VoidRow = r26Find('订单', r26Void.orderNo)
+eq('作废单照列，状态写清已作废', r26Cell(r26VoidRow, '状态'), '已作废')
+eq('作废单不再计未收', r26Cell(r26VoidRow, '未收(原币)'), '0')
+eq('作废单上已收的钱照列', r26Cell(r26VoidRow, '已收(原币)'), '20')
+check('作废单备注说明不计应收', r26Cell(r26VoidRow, '备注').includes('不计应收'), r26Cell(r26VoidRow, '备注'))
+
+const r26S1Row = r26Find('打样单', r26S1.sampleNo)
+eq('打样行：样品费 + 快递费 = 15', r26Cell(r26S1Row, '金额(原币)'), '15')
+eq('打样行：已收 5', r26Cell(r26S1Row, '已收(原币)'), '5')
+eq('打样行：未收 10', r26Cell(r26S1Row, '未收(原币)'), '10')
+eq('打样行：未收折基准 = 10 × 7.2', r26Cell(r26S1Row, `未收(${r26Base})`), '72')
+check('打样行带收款状态', r26Cell(r26S1Row, '状态').includes('未收'), r26Cell(r26S1Row, '状态'))
+const r26S2Row = r26Find('打样单', r26S2.sampleNo)
+eq('免单打样：未收 0', r26Cell(r26S2Row, '未收(原币)'), '0')
+check('免单打样状态写「客户免单」', r26Cell(r26S2Row, '状态').includes('客户免单'), r26Cell(r26S2Row, '状态'))
+const r26S3Row = r26Find('打样单', r26S3.sampleNo)
+eq('取消的打样单收回过钱也不计未收', r26Cell(r26S3Row, '未收(原币)'), '0')
+eq('取消的打样单上实收照列', r26Cell(r26S3Row, '已收(原币)'), '8')
+check('取消的打样单状态写「已取消」', r26Cell(r26S3Row, '状态').includes('已取消'), r26Cell(r26S3Row, '状态'))
+const r26S4Row = r26Find('打样单', r26S4.sampleNo)
+eq('汇率未填的打样单原币待收照列', r26Cell(r26S4Row, '未收(原币)'), '10')
+eq('汇率未填折不出来就不瞎折', r26Cell(r26S4Row, `未收(${r26Base})`), '0')
+check('汇率未填在备注里说清楚', r26Cell(r26S4Row, '备注').includes('汇率未填'), r26Cell(r26S4Row, '备注'))
+
+const r26Splits = r26Body.filter((r) => r[r26Col('类型')] === '收款' && r[r26Col('银行流水号')] === 'R26-SLIP')
+eq('一笔水单拆给订单和打样，对账单上两条都在', r26Splits.length, 2)
+check(
+  '收款行标出是哪张单的钱',
+  r26Splits.some((r) => r[r26Col('单据号')] === r26Order.orderNo) &&
+    r26Splits.some((r) => r[r26Col('单据号')] === r26S1.sampleNo),
+  JSON.stringify(r26Splits)
+)
+eq('收款行金额是原币到账额', r26Cell(r26Splits.find((r) => r[r26Col('单据号')] === r26Order.orderNo), '金额(原币)'), '40')
+check(
+  '作废单上的到账也留在收款明细里',
+  r26Body.some((r) => r[r26Col('类型')] === '收款' && r[r26Col('银行流水号')] === 'R26-VOID-PAY'),
+  JSON.stringify(r26Body.filter((r) => r[r26Col('类型')] === '收款'))
+)
+
+const r26OverRow = r26Find('订单', r26Over.orderNo)
+eq('多付的订单未收不出现负数', r26Cell(r26OverRow, '未收(原币)'), '0')
+check('多付在备注里写成预收结余', r26Cell(r26OverRow, '备注').includes('预收结余'), r26Cell(r26OverRow, '备注'))
+const r26Prepaid = r26Body.find((r) => r[r26Col('类型')] === '预收结余' && r[r26Col('币种')] === 'USD')
+eq('多付的钱单独列一行预收结余', r26Cell(r26Prepaid, '金额(原币)'), '5')
+check('预收结余注明可抵下张单或退还', r26Cell(r26Prepaid, '备注').includes('可抵下张单'), r26Cell(r26Prepaid, '备注'))
+
+const r26UsdTotal = r26Body.find((r) => r[r26Col('类型')] === '合计' && r[r26Col('币种')] === 'USD')
+eq('USD 小计：未收 70', r26Cell(r26UsdTotal, '未收(原币)'), '70')
+eq('USD 小计：已收 88', r26Cell(r26UsdTotal, '已收(原币)'), '88')
+const r26BaseTotal = r26Body.find((r) => r[r26Col('类型')] === '合计' && r[r26Col('币种')] === r26Base)
+eq('基准币合计行不写原币金额（免得被看成「已收 0」）', r26Cell(r26BaseTotal, '已收(原币)'), '')
+const r26BaseOpen = Number(r26Cell(r26BaseTotal, `未收(${r26Base})`) || 0)
+check(
+  '表尾未收合计 = 客户页「未收」（同一口径）',
+  Math.abs(r26BaseOpen - money.customerReceivable(r26C.id)) < 0.01,
+  `对账单 ${r26BaseOpen}，客户页 ${money.customerReceivable(r26C.id)}`
+)
+eq('表尾合计 = 订单 360 + 打样 72（汇率未填的单不瞎折）', r26BaseOpen, 432)
+
+const r26File = dashboard.statementFileName(r26C.id)
+check('对账单文件名带客户名与截止日', r26File.includes('R26 Statement Co') && r26File.includes(localDate()), r26File)
+check(
+  '没有单据的客户导出被拦下（不是给一张空表）',
+  r8err(() => dashboard.exportCsv('statement', { customerId: customers.saveCustomer({ company: 'R26 Empty Co' }).id })).includes(
+    '没有可对账'
+  )
+)
+
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
 console.log(`通过 ${passed} 项，失败 ${failed} 项`)

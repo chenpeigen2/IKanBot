@@ -207,6 +207,12 @@ export function customerStats(customerId: number): CustomerStats {
   const outstandingOrders = rows.reduce((s, r) => s + r.receivableBase, 0)
   const outstandingSamples = sampleReceivable(customerId)
   const outstanding = outstandingOrders + outstandingSamples
+  // 名下打样单总数：只打过样的客户也要能导出对账单
+  const sampleCount = Number(
+    (getDb().get('SELECT COUNT(*) AS c FROM sample_orders WHERE customer_id = ?', [customerId]) as
+      | { c?: number }
+      | null)?.c ?? 0
+  )
   // 坏账不进待收，但客户页要能看见这家客户赖过多少钱
   const badDebt = rows.reduce((s, r) => s + r.badDebtBase, 0)
   const missingCostOrders = rows.filter((r) => r.missingCostItems > 0).length
@@ -228,6 +234,7 @@ export function customerStats(customerId: number): CustomerStats {
     outstanding,
     outstanding_orders: outstandingOrders,
     outstanding_samples: outstandingSamples,
+    sample_count: sampleCount,
     bad_debt: badDebt,
     missing_cost_orders: missingCostOrders
   })

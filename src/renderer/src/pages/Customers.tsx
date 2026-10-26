@@ -718,8 +718,9 @@ export default function Customers() {
             </div>
           )}
 
-          {/* 客户问「我还欠哪几张 PI」时不用再逐单手抄：对账单导出走订单台账同一份口径 */}
-          {detail.orders.length > 0 ? (
+          {/* 客户问「我还欠哪几张 PI、样品费收没收」时不用再逐单手抄：
+              对账单是给客户看的那一份（订单 + 打样单 + 逐笔收款），不带成本毛利 */}
+          {detail.orders.length > 0 || detail.stats.sampleCount > 0 ? (
             <div style={{ marginTop: 10, display: 'flex', gap: 8 }}>
               {detail.stats.outstanding > 0 ? (
                 <Button variant="primary" onClick={() => void openSplit(detail.c)}>
@@ -729,8 +730,8 @@ export default function Customers() {
               <Button
                 onClick={async () => {
                   try {
-                    const f = await window.api.exporter.csv('orders', { customerId: detail.c.id })
-                    if (f) toast(`已导出 ${detail.c.company} 的订单对账单`)
+                    const f = await window.api.exporter.csv('statement', { customerId: detail.c.id })
+                    if (f) toast(`已导出 ${detail.c.company} 的对账单（含打样单与收款明细）`)
                   } catch (e) {
                     toast((e as Error).message || '导出没成功', 'error')
                   }

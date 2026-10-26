@@ -7,12 +7,19 @@ import {
   listOrderMoney,
   notInStatuses,
   receivedByMonth,
-  sampleReceivable
+  sampleReceivable,
+  sampleStatementRows
 } from './money'
 import { factoryDeliveredQuantity } from './shipping'
 import { isLocalDate, localDate, localDateOf, localMonthOf } from '../../src/shared/date'
-import { isBillingStatus } from '../../src/shared/billing'
-import { PAYMENT_METHOD_LABEL, PAYMENT_STATUS_LABEL, SHIP_STATUS_LABEL } from '../../src/shared/types'
+import { isBillingStatus, shownRemaining } from '../../src/shared/billing'
+import {
+  PAYMENT_METHOD_LABEL,
+  PAYMENT_STATUS_LABEL,
+  SAMPLE_FEE_STATUS_LABEL,
+  SAMPLE_STATUS_LABEL,
+  SHIP_STATUS_LABEL
+} from '../../src/shared/types'
 import type {
   DashboardStats,
   ExportKind,
@@ -931,6 +938,11 @@ export function exportCsv(kind: ExportKind, filter?: OrderExportFilter): string 
       return monthlyCsv(base)
     case 'payments':
       return paymentsCsv(base)
+    case 'statement': {
+      const customerId = Number(filter?.customerId ?? 0)
+      if (!customerId) throw new Error('导出对账单必须指定客户。')
+      return statementCsv(customerId, base)
+    }
     default: {
       // 加了新 kind 却忘了在这里分支：让编译器在这里叫，别让它静默掉进收款分支
       const never: never = kind
@@ -1166,6 +1178,239 @@ function paymentsCsv(base: string): string {
 /** 报表里用到的金额：四舍五入到分，但保持数字类型（负数不能被当成 Excel 公式加前缀） */
 function money2(v: number): number {
   return Math.round((Number(v) || 0) * 100) / 100
+}
+
+/**
+ * 客户对账单（R26）：发给客户看的那一份，和内部订单台账是两张表。
+ *
+ * 三件事必须成立：
+ *   1. 不含成本、毛利、坏账未追回这类内部数字——这张表客户会拿去跟自己的水单核；
+ *   2. 订单行取 listOrderMoney（含作废/失效，好让客户认得出已经付过钱的那张单），
+ *      打样行取 sampleStatementRows，收款行取 cashFlowRows——全是现成口径，不另写 SQL；
+ *   3. 表尾「未收」合计（折基准币）必须等于客户页的未收（customerReceivable）。
+ *
+ * 已收一律按单据汇率折算，与待收同一套数；每笔收款行只列原币到账额——
+ * 拿逐笔快照去合计会和待收差一个汇兑差，对账单是应收账，不是现金流量表。
+ */
+function statementCsv(customerId: number, base: string): string {
+  const today = localDate()
+  const orders = listOrderMoney({ customerId, includeVoided: true }).filter(
+    // 草稿还没发出去，客户手里没有这张单，别放上对账单
+    (r) => r.paymentStatus !== 'draft'
+  )
+  const samples = sampleStatementRows(customerId)
+  const flows = cashFlowRows({ customerId })
+  if (orders.length === 0 && samples.length === 0 && flows.length === 0) {
+    throw new Error('这家客户还没有订单或打样单，没有可对账的内容。')
+  }
+
+  type StatementRow = {
+    kind: '订单' | '打样单' | '收款' | '合计' | '预收结余'
+    docNo: string
+    piNo: string
+    date: string
+    status: string
+    currency: string
+    amount: number
+    paid: number
+    writtenOff: number
+    open: number
+    rate: number
+    openBase: number
+    method: string
+    bankRef: string
+    note: string
+  }
+  const blank = {
+    docNo: '',
+    piNo: '',
+    date: '',
+    status: '',
+    currency: '',
+    amount: 0,
+    paid: 0,
+    writtenOff: 0,
+    open: 0,
+    rate: 0,
+    openBase: 0,
+    method: '',
+    bankRef: '',
+    note: ''
+  }
+
+  const docs: StatementRow[] = []
+  for (const r of orders) {
+    const rate = Number(r.exchangeRate) || 0
+    const open = shownRemaining(r.paymentStatus, r.receivable)
+    const prepaid = r.remaining < -0.001 ? -r.remaining : 0
+    const notes: string[] = []
+    if (!isBillingStatus(r.paymentStatus)) {
+      notes.push(`此单${PAYMENT_STATUS_LABEL[r.paymentStatus as keyof typeof PAYMENT_STATUS_LABEL] ?? r.paymentStatus}，不计应收；已到的钱仍是实收`)
+    }
+    if (r.negativeCharges < -0.001) notes.push(`含折让/抵扣 ${money2(r.negativeCharges)}（已计入单据金额）`)
+    if (r.netWrittenOff > 0.001) notes.push(`其中已让利（短款/坏账核销）${money2(r.netWrittenOff)}`)
+    if (open > 0.001 && rate <= 0) notes.push('汇率未填，未折算')
+    if (prepaid > 0.001) notes.push(`实收比单据多 ${money2(prepaid)}（预收结余）`)
+    docs.push({
+      ...blank,
+      kind: '订单',
+      docNo: r.orderNo,
+      piNo: r.piNo,
+      date: localDateOf(r.createdAt),
+      status: PAYMENT_STATUS_LABEL[r.paymentStatus as keyof typeof PAYMENT_STATUS_LABEL] ?? r.paymentStatus,
+      currency: r.currency,
+      amount: money2(r.grandTotal),
+      paid: money2(r.paidAmount),
+      writtenOff: money2(r.netWrittenOff),
+      open: money2(open),
+      rate,
+      openBase: rate > 0 ? money2(open * rate) : 0,
+      note: notes.join('；')
+    })
+  }
+  for (const s of samples) {
+    const rate = s.exchangeRate > 0 ? s.exchangeRate : 0
+    const statusText = SAMPLE_STATUS_LABEL[s.status as keyof typeof SAMPLE_STATUS_LABEL] ?? s.status
+    const feeText = SAMPLE_FEE_STATUS_LABEL[s.feeStatus as keyof typeof SAMPLE_FEE_STATUS_LABEL] ?? s.feeStatus
+    const notes: string[] = []
+    if (s.status === 'cancelled') notes.push(`已取消，实收 ${money2(s.recovered)} 留在账上`)
+    else if (s.feeStatus === 'waived') notes.push('客户免单，未收 0')
+    else if (s.feeStatus === 'offset') {
+      notes.push(`已抵扣入订单${s.convertedOrderNo ? ` ${s.convertedOrderNo}` : ''}（不是现金，但账上已收回）`)
+    }
+    if (s.feeStatus === 'unpaid' && s.recovered > 0.001) notes.push(`已收 ${money2(s.recovered)}`)
+    if (s.open > 0.001 && rate <= 0) notes.push('汇率未填，未折算')
+    if (s.prepaid > 0.001) notes.push(`实收比单据多 ${money2(s.prepaid)}（预收结余）`)
+    docs.push({
+      ...blank,
+      kind: '打样单',
+      docNo: s.sampleNo,
+      date: s.sampleDate,
+      status: `${statusText} · ${feeText}`,
+      currency: s.currency,
+      amount: money2(s.totalFee),
+      paid: money2(s.recovered),
+      open: money2(s.open),
+      rate,
+      openBase: rate > 0 ? money2(s.open * rate) : 0,
+      note: notes.join('；')
+    })
+  }
+  docs.sort((a, b) => a.date.localeCompare(b.date) || a.kind.localeCompare(b.kind) || a.docNo.localeCompare(b.docNo))
+
+  const payments: StatementRow[] = flows
+    .map((f) => ({
+      ...blank,
+      kind: '收款' as const,
+      docNo: f.docNo,
+      piNo: f.piNo,
+      date: f.paidAt,
+      status: f.statusText,
+      currency: f.currency,
+      amount: money2(f.amount),
+      rate: f.exchangeRate,
+      method: f.method,
+      bankRef: f.bankRef,
+      note: f.note
+    }))
+    .sort((a, b) => a.date.localeCompare(b.date) || a.docNo.localeCompare(b.docNo))
+
+  // 多币种混在一列里没有意义：先按币种给原币小计，再给一行基准币的「未收」总数
+  const totals: StatementRow[] = []
+  const currencies = [...new Set(docs.map((d) => d.currency))].sort()
+  for (const cur of currencies) {
+    const rs = docs.filter((d) => d.currency === cur)
+    totals.push({
+      ...blank,
+      kind: '合计',
+      date: today,
+      status: `${cur} 共 ${rs.length} 张单据`,
+      currency: cur,
+      amount: money2(rs.reduce((s, d) => s + d.amount, 0)),
+      paid: money2(rs.reduce((s, d) => s + d.paid, 0)),
+      writtenOff: money2(rs.reduce((s, d) => s + d.writtenOff, 0)),
+      open: money2(rs.reduce((s, d) => s + d.open, 0))
+    })
+  }
+  const openBaseTotal = money2(docs.reduce((s, d) => s + d.openBase, 0))
+  totals.push({
+    ...blank,
+    kind: '合计',
+    date: today,
+    status: `截至 ${today}`,
+    currency: base,
+    openBase: openBaseTotal,
+    note: '与客户页「未收」同一口径'
+  })
+
+  // 多收的钱单列：压进待收会变负数，客户会以为我们算错了
+  const prepaidBy = new Map<string, number>()
+  for (const r of orders) {
+    if (r.remaining < -0.001) prepaidBy.set(r.currency, (prepaidBy.get(r.currency) ?? 0) + -r.remaining)
+  }
+  for (const s of samples) {
+    if (s.prepaid > 0.001) prepaidBy.set(s.currency, (prepaidBy.get(s.currency) ?? 0) + s.prepaid)
+  }
+  const prepaidRows: StatementRow[] = [...prepaidBy.entries()]
+    .filter(([, v]) => v > 0.001)
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([cur, v]) => ({
+      ...blank,
+      kind: '预收结余',
+      date: today,
+      currency: cur,
+      amount: money2(v),
+      note: '客户多付，可抵下张单或线下退还；不计入应收'
+    }))
+
+  const header = [
+    '类型',
+    '单据号',
+    'PI号',
+    '日期',
+    '状态',
+    '币种',
+    '金额(原币)',
+    '已收(原币)',
+    '已让利(原币)',
+    '未收(原币)',
+    '汇率',
+    `未收(${base})`,
+    '方式',
+    '银行流水号',
+    '备注'
+  ]
+  const lines = [...docs, ...payments, ...prepaidRows, ...totals].map((r) => {
+    // 基准币合计行只有「未收(基准币)」这一列有意义：别的列写 0 会被当成「已收 0」
+    const isBaseTotal = r.kind === '合计' && r.status.startsWith('截至')
+    return [
+      r.kind,
+      r.docNo,
+      r.piNo,
+      r.date,
+      r.status,
+      r.currency,
+      isBaseTotal ? '' : r.amount,
+      isBaseTotal ? '' : r.paid,
+      isBaseTotal ? '' : r.writtenOff,
+      isBaseTotal ? '' : r.open,
+      isBaseTotal ? '' : r.rate,
+      r.openBase,
+      r.method ? PAYMENT_METHOD_LABEL[r.method as keyof typeof PAYMENT_METHOD_LABEL] ?? r.method : '',
+      r.bankRef,
+      r.note
+    ]
+  })
+  return toCsv(header, lines)
+}
+
+/** 对账单默认文件名：客户名 + 截止日（同日导两家不能都叫「客户对账单_2026-10-26.csv」） */
+export function statementFileName(customerId: number): string {
+  const row = getDb().get('SELECT company FROM customers WHERE id = ?', [customerId]) as
+    | { company?: string }
+    | null
+  const name = String(row?.company ?? '').replace(/[\\/:*?"<>|]/g, '_').trim() || '客户'
+  return `对账单_${name}_${localDate()}.csv`
 }
 
 /**

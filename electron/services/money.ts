@@ -634,6 +634,8 @@ export function totalReceivable(filter: MoneyListFilter = {}): number {
  */
 export interface CashFlowRow {
   docType: 'order' | 'sample'
+  /** 订单 id / 打样单 id：对账单按这个对齐，别拿单号（手改过、可能重号） */
+  docId: number
   docNo: string
   piNo: string
   customerName: string
@@ -649,29 +651,41 @@ export interface CashFlowRow {
 }
 
 /**
- * 全项目唯一一份「收到的钱」的取数：月报到账、收款台账导出都从这里取。
+ * 全项目唯一一份「收到的钱」的取数：月报到账、收款台账导出、客户对账单都从这里取。
  * 打样费的抵扣（offset）绝不落 payments——订单负费用行已经计过一次，
  * 再落一条就是同一笔钱算两遍。所以这里只有订单流水 + 打样实收流水两类。
+ * 传 customerId 时两个分支各自过滤：混用参数会让一张水单带着全公司的钱出去。
  */
-export function cashFlowRows(): CashFlowRow[] {
+export function cashFlowRows(filter: { customerId?: number } = {}): CashFlowRow[] {
   const db = getDb()
   const cash = notInStatuses('o.payment_status', CASHFLOW_EXCLUDED_STATUSES)
+  const orderWhere = [cash.sql]
+  const orderParams: (string | number)[] = [...cash.params]
+  const sampleWhere: string[] = []
+  const sampleParams: (string | number)[] = []
+  if (filter.customerId != null) {
+    orderWhere.push('o.customer_id = ?')
+    orderParams.push(filter.customerId)
+    sampleWhere.push('s.customer_id = ?')
+    sampleParams.push(filter.customerId)
+  }
   const rows = db.all(
-    `SELECT 'order' AS doc_type, o.order_no AS doc_no, COALESCE(o.pi_no, '') AS pi_no,
+    `SELECT 'order' AS doc_type, o.id AS doc_id, o.order_no AS doc_no, COALESCE(o.pi_no, '') AS pi_no,
             o.payment_status AS doc_status, c.company AS customer_name, o.currency AS currency,
             p.paid_at AS paid_at, COALESCE(p.exchange_rate, o.exchange_rate) AS exchange_rate,
             p.amount AS amount, p.method AS method, p.bank_ref AS bank_ref, p.note AS note
      FROM payments p JOIN orders o ON o.id = p.order_id JOIN customers c ON c.id = o.customer_id
-     WHERE ${cash.sql}
+     WHERE ${orderWhere.join(' AND ')}
      UNION ALL
-     SELECT 'sample' AS doc_type, s.sample_no AS doc_no, '' AS pi_no,
+     SELECT 'sample' AS doc_type, s.id AS doc_id, s.sample_no AS doc_no, '' AS pi_no,
             s.status AS doc_status, c.company AS customer_name, s.currency AS currency,
             p.paid_at AS paid_at, COALESCE(p.exchange_rate, s.exchange_rate) AS exchange_rate,
             p.amount AS amount, p.method AS method, p.bank_ref AS bank_ref, p.note AS note
      FROM payments p JOIN sample_orders s ON s.id = p.sample_order_id
      JOIN customers c ON c.id = s.customer_id
+     ${sampleWhere.length ? 'WHERE ' + sampleWhere.join(' AND ') : ''}
      ORDER BY paid_at DESC`,
-    cash.params
+    [...orderParams, ...sampleParams]
   ) as Record<string, unknown>[]
   return rows.map((r) => {
     const docType = String(r.doc_type) === 'sample' ? 'sample' : 'order'
@@ -680,6 +694,7 @@ export function cashFlowRows(): CashFlowRow[] {
     const amount = Number(r.amount ?? 0)
     return {
       docType,
+      docId: Number(r.doc_id ?? 0),
       docNo: String(r.doc_no ?? ''),
       piNo: String(r.pi_no ?? ''),
       customerName: String(r.customer_name ?? ''),
@@ -801,37 +816,151 @@ export interface SampleOpenRow {
   receivable: number
 }
 
-export function sampleOpenRows(customerId?: number): SampleOpenRow[] {
+/** 一张打样单的金额底稿：待收、已收、对账单、欠款榜都从这一份取，不各写一条 SQL */
+interface SampleMoneyRow {
+  sampleId: number
+  sampleNo: string
+  customerId: number
+  status: string
+  feeStatus: string
+  currency: string
+  exchangeRate: number
+  sampleDate: string
+  /** 样品费（明细行合计） */
+  sampleFee: number
+  /** 样品费 + 快递费 */
+  totalFee: number
+  /** 真金白银收到的（payments 流水） */
+  collected: number
+  /** 转单时抵进订单的钱（不是现金，但账上已经收回） */
+  offsetSettled: number
+  /** 已收回 = 实收 + 抵扣；旧「已收无流水」按全额认 */
+  recovered: number
+  /** 已收回的钱转进了哪张订单（抵扣单才有） */
+  convertedOrderNo: string
+}
+
+function sampleMoneyRows(customerId?: number): SampleMoneyRow[] {
   const db = getDb()
-  const where = ["s.fee_status = 'unpaid'", "s.status != 'cancelled'"]
   const params: (string | number)[] = []
+  let where = ''
   if (customerId != null) {
-    where.push('s.customer_id = ?')
+    where = 'WHERE s.customer_id = ?'
     params.push(customerId)
   }
   const rows = db.all(
-    `SELECT s.id, s.sample_no, s.customer_id, s.status, s.currency, s.exchange_rate, s.express_fee,
+    `SELECT s.id, s.sample_no, s.customer_id, s.status, s.fee_status, s.currency, s.exchange_rate,
+            s.sample_date, s.express_fee, s.offset_amount, co.order_no AS converted_order_no,
             COALESCE((SELECT SUM(si.quantity * si.unit_price) FROM sample_order_items si
                       WHERE si.sample_order_id = s.id), 0) AS sample_fee,
             COALESCE((SELECT SUM(p.amount) FROM payments p
                       WHERE p.sample_order_id = s.id), 0) AS collected
-     FROM sample_orders s
-     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}`,
+     FROM sample_orders s LEFT JOIN orders co ON co.id = s.converted_order_id
+     ${where}`,
     params
   ) as Record<string, unknown>[]
-  const out: SampleOpenRow[] = []
-  for (const r of rows) {
-    const fee = Number(r.sample_fee ?? 0) + Number(r.express_fee ?? 0)
-    const left = fee - Number(r.collected ?? 0)
-    if (left <= 0.001) continue
-    out.push({
+  return rows.map((r) => {
+    const sampleFee = Number(r.sample_fee ?? 0)
+    const expressFee = Number(r.express_fee ?? 0)
+    const totalFee = sampleFee + expressFee
+    const collected = Number(r.collected ?? 0)
+    const feeStatus = String(r.fee_status ?? 'unpaid')
+    const offsetAmount = Number(r.offset_amount ?? 0)
+    // 老抵扣单 offset_amount=0（当年只抵样品费）；新单按实际抵扣额，含快递费
+    const offsetSettled = feeStatus === 'offset' ? (offsetAmount > 0 ? offsetAmount : sampleFee) : 0
+    // 旧「已向客户收」记录没有流水：按全额认，不能凭空造一条猜日期的流水
+    const recovered =
+      feeStatus === 'paid'
+        ? collected > 0
+          ? collected
+          : totalFee
+        : feeStatus === 'offset'
+          ? collected + offsetSettled
+          : feeStatus === 'unpaid'
+            ? collected
+            : 0
+    return {
       sampleId: Number(r.id),
       sampleNo: String(r.sample_no ?? ''),
       customerId: Number(r.customer_id),
       status: String(r.status ?? ''),
+      feeStatus,
       currency: String(r.currency ?? 'USD'),
       exchangeRate: Number(r.exchange_rate ?? 0),
+      sampleDate: String(r.sample_date ?? ''),
+      sampleFee,
+      totalFee,
+      collected,
+      offsetSettled,
+      recovered,
+      convertedOrderNo: String(r.converted_order_no ?? '')
+    }
+  })
+}
+
+export function sampleOpenRows(customerId?: number): SampleOpenRow[] {
+  const out: SampleOpenRow[] = []
+  for (const r of sampleMoneyRows(customerId)) {
+    // 只有未收的单还挂着应收；取消的单不收钱
+    if (r.feeStatus !== 'unpaid' || r.status === 'cancelled') continue
+    const left = r.totalFee - r.collected
+    if (left <= 0.001) continue
+    out.push({
+      sampleId: r.sampleId,
+      sampleNo: r.sampleNo,
+      customerId: r.customerId,
+      status: r.status,
+      currency: r.currency,
+      exchangeRate: r.exchangeRate,
       receivable: left
+    })
+  }
+  return out
+}
+
+/** 对账单用的打样行：已收齐/已抵扣/已免单/取消过但收过钱的都要在表上 */
+export interface SampleBillRow {
+  sampleId: number
+  sampleNo: string
+  status: string
+  feeStatus: string
+  currency: string
+  exchangeRate: number
+  sampleDate: string
+  totalFee: number
+  /** 已收回（实收 + 抵扣；旧记录按全额） */
+  recovered: number
+  /** 原币待收 */
+  open: number
+  /** 客户多付的原币（预收结余） */
+  prepaid: number
+  convertedOrderNo: string
+}
+
+export function sampleStatementRows(customerId: number): SampleBillRow[] {
+  const out: SampleBillRow[] = []
+  for (const r of sampleMoneyRows(customerId)) {
+    // 一分钱没涉及过的免费样不用上表，否则对账单全是噪声；
+    // 取消的单只有真的收过钱（或抵扣过）才留一行，让客户认得出这笔钱
+    if (r.totalFee <= 0.001 && r.collected <= 0.001 && r.offsetSettled <= 0.001) continue
+    if (r.status === 'cancelled' && r.collected <= 0.001 && r.offsetSettled <= 0.001) continue
+    const cancelled = r.status === 'cancelled'
+    const open = !cancelled && r.feeStatus === 'unpaid' ? Math.max(0, r.totalFee - r.collected) : 0
+    // 多付的钱要单独摆出来：压进待收里会变成负数，客户以为我们算错了
+    const over = r.collected - r.totalFee
+    out.push({
+      sampleId: r.sampleId,
+      sampleNo: r.sampleNo,
+      status: r.status,
+      feeStatus: r.feeStatus,
+      currency: r.currency,
+      exchangeRate: r.exchangeRate,
+      sampleDate: r.sampleDate,
+      totalFee: r.totalFee,
+      recovered: r.recovered,
+      open,
+      prepaid: over > 0.001 ? over : 0,
+      convertedOrderNo: r.convertedOrderNo
     })
   }
   return out
