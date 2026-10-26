@@ -13,7 +13,8 @@ import { assertQuantity, assertUnitPrice } from '../../src/shared/guards'
 import { getSettings } from './settings'
 import { createOrder, getOrder, assertSkuListUnique, assertPaymentInput } from './orders'
 import { logEvent } from './events'
-import { costInOrderCurrency } from './money'
+import { assertCreditSolvent, hasActiveCredit, reverseCreditsForTarget } from './credits'
+import { costInOrderCurrency, creditAppliedForSample } from './money'
 import { likeAny } from './search'
 import type { OrderDetail } from '../../src/shared/types'
 import type {
@@ -177,7 +178,10 @@ function hydrate(s: SampleOrder): SampleOrderDetail {
   // 待收（N23/R25）：未收才计；取消的单不收钱；已到的实收先抵掉，剩下的才是欠的。
   // 汇率必须有，否则工作台会少算 → 标记 rateMissing 提示补
   const cancelled = s.status === 'cancelled'
-  const owed = s.feeStatus === 'unpaid' && !cancelled ? Math.max(0, totalFee - collected) : 0
+  // 预收抵扣（R27）：客户账上的钱先垫了样品费，这部分不再是待收，也不是现金
+  const creditApplied = creditAppliedForSample(s.id)
+  const owed =
+    s.feeStatus === 'unpaid' && !cancelled ? Math.max(0, totalFee - collected - creditApplied) : 0
   const rateMissing = owed > 0 && !hasRate
   return {
     ...s,
@@ -194,6 +198,7 @@ function hydrate(s: SampleOrder): SampleOrderDetail {
     netAdvanceBase,
     collected,
     collectedBase: toBase(collected),
+    creditApplied,
     flowCount,
     legacyPaidNoFlow,
     // 待收（N23）：owed 已按 feeStatus / 取消筛过，这里只管折基准币
@@ -342,6 +347,24 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
       '「已抵扣」不能手工标记：这是样品费已经抵进某张订单的凭据，只有转订单时勾「样品费抵货款」才会自动记上。如果是真收到了钱，请选「已向客户收」。'
     )
   }
+  // 客户预收已经抵到这张单上：金额/币种/汇率/客户都是那笔抵扣的依据，改了余额就对不上。
+  // 只抵过预收、没落过收款流水的单，上面的流水锁不会触发，得单独锁。
+  const creditLocked = before ? hasActiveCredit('sample', Number(before.id)) : false
+  if (creditLocked && before) {
+    const moneyChanged =
+      Math.abs(storedFee - sampleFee) > 0.001 ||
+      Math.abs(expressFee - Number(before.express_fee ?? 0)) > 0.001 ||
+      Math.abs(exchangeRate - Number(before.exchange_rate ?? 0)) > 0.001 ||
+      (input.currency !== undefined && input.currency !== String(before.currency))
+    if (moneyChanged) {
+      throw new Error(
+        '这张打样单已经有客户预收抵到了样品费上：样品费、快递费、币种、汇率是那笔抵扣的依据，不能再改。要改请先在客户页撤销抵扣。'
+      )
+    }
+    if (input.customerId !== undefined && Number(input.customerId) !== Number(before.customer_id)) {
+      throw new Error('这张打样单已经有客户预收抵扣：换客户会让抵扣的钱串到另一家账上，请先在客户页撤销抵扣。')
+    }
+  }
   // 取消要留原因：这单从此不再跟，日后客户问起「那批样品呢」，只有备注这句话能交代
   if (input.status === 'cancelled' && String(before?.status ?? '') !== 'cancelled') {
     const reason = String(input.note ?? '').trim()
@@ -473,6 +496,16 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
     id = Number(res.lastInsertRowid)
   }
 
+  // 取消/免收之后这张单不再有待收：抵在它身上的预收要退回客户余额，
+  // 否则这笔钱既不在待收里、也不在余额里，两边都找不到
+  const finalStatus = before ? keepText('status', 'status') || String(before.status) : String(input.status ?? 'pending')
+  if (finalStatus === 'cancelled' && String(before?.status ?? '') !== 'cancelled') {
+    reverseCreditsForTarget('sample', id, '打样单已取消，预收抵扣回退')
+  }
+  if (feeStatus === 'waived' && String(before?.fee_status ?? '') !== 'waived') {
+    reverseCreditsForTarget('sample', id, '打样费改为免收，预收抵扣回退')
+  }
+
   if (itemsProvided) {
     for (const it of items) {
       // 手打的款号：商品库里有就记上（以后能跟款号台账对上）
@@ -501,6 +534,15 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
       )
     }
   }
+  // 总额改小或把单换到别的客户，都会让原客户的预收来源变小：
+  // 已经抵出去的钱不能因此穿仓（报错由外层事务整单回滚）
+  if (before) {
+    const prevTotal = storedFee + Number(before.express_fee ?? 0)
+    const shrunk = sampleFee + expressFee < prevTotal - 0.001
+    const movedCustomer =
+      input.customerId !== undefined && Number(input.customerId) !== Number(before.customer_id)
+    if (shrunk || movedCustomer) assertCreditSolvent(Number(before.customer_id))
+  }
   return getSample(id)!
 }
 
@@ -515,6 +557,12 @@ export function deleteSample(id: number): void {
         `这张打样单已经转成订单 ${o.orderNo}，删了以后就查不到原始打样记录了。确实不要了，请先作废订单，再删打样单。`
       )
     }
+  }
+  // 预收抵扣记在这张单上：删单会让这笔余额「用到哪儿去了」失去凭据
+  if (hasActiveCredit('sample', id)) {
+    throw new Error(
+      `这张打样单上还有未撤销的客户预收抵扣，不能删：删了这笔余额用到哪儿就查不到了。请先在客户页撤销抵扣，再删单。`
+    )
   }
   // 有收款流水就不能删：删了单，银行水单上的钱在系统里就找不到来路了。
   // 撤销流水要写原因，撤销完再删（那才是「钱退了、单也不要了」的完整交代）
@@ -587,9 +635,11 @@ export function convertSampleToOrder(
   // 在标记「已抵扣」后凭空消失。已免收的没有可抵的，别再扣一遍。
   // R25：一部分已经按水单收了（fee_status 仍是 unpaid），就只抵「还没收的那部分」——
   // 整笔再抵一次，同一块钱会在订单负费用行和银行流水里各算一遍。
+  // 一部分已经被客户预收抵掉了：能收的现金只剩「总额 − 已收 − 已抵扣」，
+  // 不扣预收就会出现「现金和预收各付一遍」的双付
   const paidAlready = s.feeStatus === 'paid' ? s.totalFee : s.collected
   const openFee =
-    s.feeStatus === 'waived' ? 0 : Math.max(0, s.totalFee - paidAlready)
+    s.feeStatus === 'waived' ? 0 : Math.max(0, s.totalFee - paidAlready - Number(s.creditApplied ?? 0))
   const offsetTotal = opts.offsetSampleFee && openFee > 0.001 ? openFee : 0
   const charges =
     offsetTotal > 0
@@ -769,10 +819,12 @@ export function addSamplePayment(sampleId: number, p: SamplePaymentInput): Sampl
   if (!(rate > 0)) {
     throw new Error('这张打样单没有汇率：收款要折进月报，请先编辑打样单填上汇率再登记收款。')
   }
-  const remaining = Math.max(0, s.totalFee - s.collected)
+  const remaining = Math.max(0, s.totalFee - s.collected - Number(s.creditApplied ?? 0))
   if (amount > remaining + 0.001) {
+    const creditPart =
+      Number(s.creditApplied ?? 0) > 0.001 ? ` − 预收抵扣 ${Number(s.creditApplied).toFixed(2)}` : ''
     throw new Error(
-      `这笔 ${amount.toFixed(2)} 超过了还没收的 ${remaining.toFixed(2)} ${s.currency}（应收 ${s.totalFee.toFixed(2)} − 已收 ${s.collected.toFixed(2)}）。多出来的钱不属于这张打样单，请核对水单。`
+      `这笔 ${amount.toFixed(2)} 超过了还没收的 ${remaining.toFixed(2)} ${s.currency}（应收 ${s.totalFee.toFixed(2)} − 已收 ${s.collected.toFixed(2)}${creditPart}）。多出来的钱不属于这张打样单，请核对水单。`
     )
   }
   transact(() => {
@@ -836,6 +888,8 @@ export function deleteSamplePayment(sampleId: number, paymentId: number, reason:
       `撤销收款 ${amount.toFixed(2)} ${s.currency}（${paidAt}${bankRef ? `，流水号 ${bankRef}` : ''}）原因：${why}`
     )
     syncSampleFeeStatus(sampleId)
+    // 取消/免收单的实收、多收的钱都是客户预收的来源：撤销不能把已抵出去的余额撤成负数
+    assertCreditSolvent(s.customerId)
   })
   return getSample(sampleId)!
 }

@@ -16,6 +16,7 @@ import * as packing from '../electron/services/packing'
 import { shipmentSummary, factoryDeliveredQuantity } from '../electron/services/shipping'
 import * as dashboard from '../electron/services/dashboard'
 import * as money from '../electron/services/money'
+import * as credits from '../electron/services/credits'
 import { getSettings, saveSettings, markBackupOk, markBackupFail, baseCurrencyLocked } from '../electron/services/settings'
 import { createBackup, inspectBackup, listBackups, pruneBackups, restoreBackup } from '../electron/services/backup'
 import * as docs from '../electron/services/docs'
@@ -6735,7 +6736,11 @@ const r26OverRow = r26Find('订单', r26Over.orderNo)
 eq('多付的订单未收不出现负数', r26Cell(r26OverRow, '未收(原币)'), '0')
 check('多付在备注里写成预收结余', r26Cell(r26OverRow, '备注').includes('预收结余'), r26Cell(r26OverRow, '备注'))
 const r26Prepaid = r26Body.find((r) => r[r26Col('类型')] === '预收结余' && r[r26Col('币种')] === 'USD')
-eq('多付的钱单独列一行预收结余', r26Cell(r26Prepaid, '金额(原币)'), '5')
+eq(
+  '多付的钱单独列一行预收结余（R27 起余额 = 多付 5 + 作废余款 20 + 取消单实收 8）',
+  r26Cell(r26Prepaid, '金额(原币)'),
+  '33'
+)
 check('预收结余注明可抵下张单或退还', r26Cell(r26Prepaid, '备注').includes('可抵下张单'), r26Cell(r26Prepaid, '备注'))
 
 const r26UsdTotal = r26Body.find((r) => r[r26Col('类型')] === '合计' && r[r26Col('币种')] === 'USD')
@@ -6759,6 +6764,326 @@ check(
     '没有可对账'
   )
 )
+
+/* ---------------- R27 客户预收余额与负费用并账 ---------------- */
+section('R27 客户预收：多收 / 作废余款 / 取消单实收是同一份余额，抵扣不落现金')
+
+const r27Base = getSettings().baseCurrency
+const r27C = customers.saveCustomer({
+  company: 'R27 Credit Co',
+  contact: 'Ada',
+  email: 'ada@r27.com',
+  phone: '',
+  country: 'US',
+  address: '',
+  zipCode: '',
+  attn: '',
+  paymentPref: ''
+})
+const r27Other = customers.saveCustomer({
+  company: 'R27 Other Co',
+  contact: '',
+  email: '',
+  phone: '',
+  country: 'US',
+  address: '',
+  zipCode: '',
+  attn: '',
+  paymentPref: ''
+})
+
+// 来源①：正常单多付 5
+const r27Over = orders.createOrder({
+  customerId: r27C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R27-OVER'
+})
+await orders.addOrderItem(r27Over.id, { styleNo: 'R27-OVER', quantity: 1, unitPrice: 10 })
+orders.addPayment(r27Over.id, { paidAt: localDate(), amount: 15, method: 'T/T', bankRef: 'R27-OVER-PAY' })
+
+// 来源②：作废单上真到账的 20（单不欠钱了，钱必须有去处）
+const r27Void = orders.createOrder({
+  customerId: r27C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R27-VOID'
+})
+await orders.addOrderItem(r27Void.id, { styleNo: 'R27-V', quantity: 2, unitPrice: 10 })
+orders.addPayment(r27Void.id, { paidAt: localDate(), amount: 20, method: 'T/T', bankRef: 'R27-VOID-PAY' })
+orders.voidOrder(r27Void.id, 'R27 客户取消')
+
+// 来源③：取消的打样单上收到的 8
+const r27S1 = samples.saveSample({
+  customerId: r27C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: localDate(),
+  items: [{ styleNo: 'R27-S1', productName: '取消样品', color: 'Black', size: 'M', quantity: 1, unitPrice: 10 }]
+})
+samples.addSamplePayment(r27S1.id, { paidAt: localDate(), amount: 8, bankRef: 'R27-S1-PAY' })
+samples.saveSample({ id: r27S1.id, status: 'cancelled', note: 'R27 客户自己打样了' })
+
+const r27Bal = money.customerCreditBalance(r27C.id)
+eq('预收余额按币种归集（只有 USD）', r27Bal.map((c) => c.currency), ['USD'])
+const r27Usd = r27Bal[0]
+eq('来源合计 = 多付 5 + 作废余款 20 + 取消单实收 8', r27Usd.gross, 33)
+eq('未抵扣时可用 = 来源合计', r27Usd.available, 33)
+eq('三笔来源都列出来', r27Usd.sources.length, 3)
+const r27SrcNos = r27Usd.sources.map((s) => s.docNo)
+check(
+  '来源能追到具体单据',
+  [r27Over.orderNo, r27Void.orderNo, r27S1.sampleNo].every((no) => r27SrcNos.includes(no)),
+  JSON.stringify(r27SrcNos)
+)
+eq('没出现过的币种没有预收', money.customerCreditAvailable(r27C.id, 'EUR'), 0)
+
+// 可抵的目标：一张 30 的订单、一张 12 的打样单
+const r27Target = orders.createOrder({
+  customerId: r27C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R27-T'
+})
+await orders.addOrderItem(r27Target.id, { styleNo: 'R27-T', quantity: 3, unitPrice: 10 })
+const r27TargetItem = orders.getOrder(r27Target.id)!.items[0]
+const r27S2 = samples.saveSample({
+  customerId: r27C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: localDate(),
+  items: [{ styleNo: 'R27-S2', productName: '可抵样品', color: 'Grey', size: 'L', quantity: 1, unitPrice: 12 }]
+})
+const r27Draft = orders.createOrder({
+  customerId: r27C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  piNo: 'PI-R27-DRAFT'
+})
+await orders.addOrderItem(r27Draft.id, { styleNo: 'R27-D', quantity: 1, unitPrice: 9 })
+
+const r27Apply = (over: Partial<Parameters<typeof credits.applyCredit>[0]>): void => {
+  credits.applyCredit({
+    customerId: r27C.id,
+    currency: 'USD',
+    targetKind: 'order',
+    targetId: r27Target.id,
+    amount: 1,
+    ...over
+  })
+}
+
+check('金额必须大于 0', r8err(() => r27Apply({ amount: 0 })).includes('必须大于 0'))
+check('草稿单不抵（草稿不进应收）', r8err(() => r27Apply({ targetId: r27Draft.id })).includes('草稿'))
+check('作废单不抵（已经没有待收）', r8err(() => r27Apply({ targetId: r27Void.id })).includes('失效/作废'))
+check(
+  '取消的打样单不抵',
+  r8err(() => r27Apply({ targetKind: 'sample', targetId: r27S1.id })).includes('没有待收')
+)
+check('不能拿别家客户的钱抵这家的单', r8err(() => r27Apply({ customerId: r27Other.id })).includes('不属于当前客户'))
+check('跨币种不抵（没有唯一正确的汇率）', r8err(() => r27Apply({ currency: 'EUR' })).includes('跨币种'))
+check('不能超过这张单的待收', r8err(() => r27Apply({ amount: 31 })).includes('不能再抵'))
+
+const r27CashBefore = money.receivedByMonth().reduce((sum, m) => sum + m.amount, 0)
+const r27AfterApply = credits.applyCredit({
+  customerId: r27C.id,
+  currency: 'USD',
+  targetKind: 'order',
+  targetId: r27Target.id,
+  amount: 30,
+  note: 'R27 抵这张单'
+})
+const r27TargetAfter = orders.getOrder(r27Target.id)!
+eq('抵 30 后客户可用预收只剩 3', money.customerCreditAvailable(r27C.id, 'USD'), 3)
+eq('订单待收归零', r27TargetAfter.remaining, 0)
+eq('订单标成已结清（预收也是收过的钱）', r27TargetAfter.paymentStatus, 'settled')
+eq('订单金额不因抵扣改变', r27TargetAfter.grandTotal, 30)
+eq('抵扣不伪造现金流水', r27TargetAfter.payments.length, 0)
+eq(
+  '抵扣不进现金流',
+  money.receivedByMonth().reduce((sum, m) => sum + m.amount, 0),
+  r27CashBefore
+)
+eq('抵扣台账记一笔', r27AfterApply[0].applications.length, 1)
+check(
+  '抵扣能追到目标单',
+  r27AfterApply[0].applications[0].targetNo === r27Target.orderNo,
+  JSON.stringify(r27AfterApply[0].applications)
+)
+check(
+  '预收抵过的单不能再收一遍现金',
+  r8err(() => orders.addPayment(r27Target.id, { paidAt: localDate(), amount: 1 })).includes('重复收')
+)
+const r27ShrinkErr = r8err(() => orders.updateOrderItem(r27Target.id, r27TargetItem.id, { quantity: 1 }))
+check('改小金额会兜不住抵扣，拦下', r27ShrinkErr.includes('不够覆盖'), r27ShrinkErr)
+check(
+  '换客户会串账，拦下',
+  r8err(() => orders.updateOrder(r27Target.id, { customerId: r27Other.id })).includes('换客户')
+)
+check(
+  '不能超过客户可用预收',
+  r8err(() => r27Apply({ targetKind: 'sample', targetId: r27S2.id, amount: 5 })).includes('可用预收只有 3.00')
+)
+credits.applyCredit({
+  customerId: r27C.id,
+  currency: 'USD',
+  targetKind: 'sample',
+  targetId: r27S2.id,
+  amount: 3
+})
+eq('打样单记下预收抵扣 3', samples.getSample(r27S2.id)!.creditApplied, 3)
+eq(
+  '打样单待收 = 12 − 3',
+  money.sampleOpenRows(r27C.id).find((r) => r.sampleId === r27S2.id)!.receivable,
+  9
+)
+check(
+  '预收抵过的打样单不能再收满额现金',
+  r8err(() => samples.addSamplePayment(r27S2.id, { paidAt: localDate(), amount: 10 })).includes('预收抵扣 3.00')
+)
+
+const r27Statement = parseCsv(dashboard.exportCsv('statement', { customerId: r27C.id }))
+const r27Head = r27Statement[0]
+const r27Body = r27Statement.slice(1)
+const r27Col = (name: string): number => r27Head.indexOf(name)
+const r27Row = (kind: string, docNo: string): string[] | undefined =>
+  r27Body.find((r) => r[r27Col('类型')] === kind && r[r27Col('单据号')] === docNo)
+check('对账单新增「预收抵扣」列', r27Head.includes('预收抵扣(原币)'))
+const r27OrderRow = r27Row('订单', r27Target.orderNo)!
+eq('抵过的订单行未收 0', r27OrderRow[r27Col('未收(原币)')], '0')
+eq('订单行标出预收抵扣 30', r27OrderRow[r27Col('预收抵扣(原币)')], '30')
+check(
+  '订单行备注写明抵扣是非现金',
+  r27OrderRow[r27Col('备注')].includes('非现金'),
+  r27OrderRow[r27Col('备注')]
+)
+const r27SampleRow = r27Row('打样单', r27S2.sampleNo)!
+eq('打样行未收 9', r27SampleRow[r27Col('未收(原币)')], '9')
+eq('打样行标出预收抵扣 3', r27SampleRow[r27Col('预收抵扣(原币)')], '3')
+const r27Prepaid = r27Body.find((r) => r[r27Col('类型')] === '预收结余' && r[r27Col('币种')] === 'USD')!
+eq('预收结余行 = 来源 33 − 已抵扣 33', r27Prepaid[r27Col('金额(原币)')], '0')
+check(
+  '预收结余写清来源与已抵扣',
+  r27Prepaid[r27Col('备注')].includes('来源 33') && r27Prepaid[r27Col('备注')].includes('已抵扣 33'),
+  r27Prepaid[r27Col('备注')]
+)
+const r27BaseTotal = r27Body.find((r) => r[r27Col('类型')] === '合计' && r[r27Col('币种')] === r27Base)!
+const r27Open = Number(r27BaseTotal[r27Col(`未收(${r27Base})`)])
+check(
+  '表尾未收 = 客户页未收（同一口径）',
+  Math.abs(r27Open - money.customerReceivable(r27C.id)) < 0.01,
+  `${r27Open} vs ${money.customerReceivable(r27C.id)}`
+)
+eq('表尾未收 = 打样单剩下的 9 × 7.2', r27Open, 64.8)
+
+const r27App = money
+  .customerCreditBalance(r27C.id)[0]
+  .applications.find((a) => a.targetKind === 'order' && a.targetId === r27Target.id)!
+const r27AfterReverse = credits.reverseCredit(r27App.id, 'R27 抵错了单')
+eq('撤销后可用预收回到 30', r27AfterReverse.find((c) => c.currency === 'USD')!.available, 30)
+eq('撤销后订单待收回来', orders.getOrder(r27Target.id)!.remaining, 30)
+eq('撤销后状态退回客户已确认', orders.getOrder(r27Target.id)!.paymentStatus, 'confirmed')
+const r27RevRow = getDb().get('SELECT reversed_at, reversed_reason FROM credit_applications WHERE id = ?', [
+  r27App.id
+]) as { reversed_at?: string | null; reversed_reason?: string } | null
+check(
+  '撤销不删台账，写清原因',
+  !!r27RevRow?.reversed_at && r27RevRow.reversed_reason === 'R27 抵错了单',
+  JSON.stringify(r27RevRow)
+)
+check('重复撤销被拦下', r8err(() => credits.reverseCredit(r27App.id, 'R27 再撤一次')).includes('撤销过'))
+
+// 目标单作废：抵扣自动回退，钱回到客户账上
+const r27D = orders.createOrder({
+  customerId: r27C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R27-D'
+})
+await orders.addOrderItem(r27D.id, { styleNo: 'R27-D2', quantity: 5, unitPrice: 10 })
+credits.applyCredit({ customerId: r27C.id, currency: 'USD', targetKind: 'order', targetId: r27D.id, amount: 10 })
+eq('作废前可用 20', money.customerCreditAvailable(r27C.id, 'USD'), 20)
+orders.voidOrder(r27D.id, 'R27 作废带抵扣的单')
+eq('作废后抵扣自动回退', money.customerCreditAvailable(r27C.id, 'USD'), 30)
+eq('作废单上不再挂抵扣', orders.getOrder(r27D.id)!.creditApplied, 0)
+
+// 目标打样单取消：抵扣同样自动回退
+const r27S3 = samples.saveSample({
+  customerId: r27C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: localDate(),
+  items: [{ styleNo: 'R27-S3', productName: '待取消样品', color: 'Navy', size: 'S', quantity: 1, unitPrice: 20 }]
+})
+credits.applyCredit({
+  customerId: r27C.id,
+  currency: 'USD',
+  targetKind: 'sample',
+  targetId: r27S3.id,
+  amount: 10
+})
+eq('取消前可用 20', money.customerCreditAvailable(r27C.id, 'USD'), 20)
+samples.saveSample({ id: r27S3.id, status: 'cancelled', note: 'R27 样品取消，抵扣回退' })
+eq('取消打样单后抵扣自动回退', money.customerCreditAvailable(r27C.id, 'USD'), 30)
+eq('取消单上不再挂抵扣', samples.getSample(r27S3.id)!.creditApplied, 0)
+
+// 挂着抵扣的单不能删：余额用到哪儿去了必须有凭据
+const r27E = orders.createOrder({
+  customerId: r27C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R27-E'
+})
+await orders.addOrderItem(r27E.id, { styleNo: 'R27-E', quantity: 1, unitPrice: 10 })
+credits.applyCredit({ customerId: r27C.id, currency: 'USD', targetKind: 'order', targetId: r27E.id, amount: 5 })
+check('挂着预收抵扣的订单不能删', r8err(() => orders.deleteOrder(r27E.id)).includes('预收抵扣'))
+const r27EApp = money
+  .customerCreditBalance(r27C.id)[0]
+  .applications.find((a) => a.targetKind === 'order' && a.targetId === r27E.id)!
+credits.reverseCredit(r27EApp.id, 'R27 撤销后可删')
+
+const r27S4 = samples.saveSample({
+  customerId: r27C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: localDate(),
+  items: [{ styleNo: 'R27-S4', productName: '带抵扣样品', color: 'White', size: 'XL', quantity: 1, unitPrice: 10 }]
+})
+credits.applyCredit({
+  customerId: r27C.id,
+  currency: 'USD',
+  targetKind: 'sample',
+  targetId: r27S4.id,
+  amount: 5
+})
+check('挂着预收抵扣的打样单不能删', r8err(() => samples.deleteSample(r27S4.id)).includes('预收抵扣'))
+const r27S4App = money
+  .customerCreditBalance(r27C.id)[0]
+  .applications.find((a) => a.targetKind === 'sample' && a.targetId === r27S4.id)!
+credits.reverseCredit(r27S4App.id, 'R27 撤销后可删')
+
+// 删掉预收来源不能把已经抵出去的钱删成负数
+const r27F = orders.createOrder({
+  customerId: r27C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R27-F'
+})
+await orders.addOrderItem(r27F.id, { styleNo: 'R27-F', quantity: 5, unitPrice: 10 })
+credits.applyCredit({ customerId: r27C.id, currency: 'USD', targetKind: 'order', targetId: r27F.id, amount: 30 })
+eq('全部抵出去后可用清零', money.customerCreditAvailable(r27C.id, 'USD'), 0)
+const r27OverPay = orders.getOrder(r27Over.id)!.payments[0]
+check(
+  '删掉预收来源会让余额穿仓，拦下',
+  r8err(() => orders.deletePayment(r27Over.id, r27OverPay.id, 'R27 试删')).includes('缺口')
+)
+eq('拦下后流水原样还在', orders.getOrder(r27Over.id)!.payments.length, 1)
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

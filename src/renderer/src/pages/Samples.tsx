@@ -235,6 +235,12 @@ export default function Samples() {
                           ) : s.collected > 0.001 ? (
                             <div className="faint">已收 {money(s.collected)}</div>
                           ) : null}
+                          {/* R27：客户预收抵的那部分不是现金，列表上单独标，别让人以为没收钱 */}
+                          {s.creditApplied > 0.001 ? (
+                            <div className="faint" title="用客户预收抵扣，不算现金到账">
+                              预收抵 {money(s.creditApplied, s.currency)}
+                            </div>
+                          ) : null}
                         </td>
                         <td className="mono clip-100" title={s.trackingNo || ''}>
                           {s.trackingNo || '—'}
@@ -515,7 +521,10 @@ function SamplePayModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const remaining = Math.max(0, Number(detail.totalFee ?? 0) - Number(detail.collected ?? 0))
+  const remaining = Math.max(
+    0,
+    Number(detail.totalFee ?? 0) - Number(detail.collected ?? 0) - Number(detail.creditApplied ?? 0)
+  )
   const convertedLive = !!detail.convertedOrderId && detail.convertedOrderStatus !== 'void'
   const canAdd =
     detail.status !== 'cancelled' &&
@@ -582,6 +591,12 @@ function SamplePayModal({
           <span className="muted">已收（银行流水）</span>
           <span>{money(Number(detail.collected) || 0, detail.currency)}</span>
         </div>
+        {Number(detail.creditApplied ?? 0) > 0.001 ? (
+          <div>
+            <span className="muted">客户预收抵扣（非现金）</span>
+            <span>{money(Number(detail.creditApplied) || 0, detail.currency)}</span>
+          </div>
+        ) : null}
         <div className="total">
           <span>待收</span>
           <span>{money(remaining, detail.currency)}</span>

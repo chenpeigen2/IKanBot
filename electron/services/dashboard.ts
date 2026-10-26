@@ -4,6 +4,7 @@ import { getSettings } from './settings'
 import {
   EXCLUDED_STATUSES,
   cashFlowRows,
+  customerCreditBalance,
   listOrderMoney,
   notInStatuses,
   receivedByMonth,
@@ -1220,6 +1221,8 @@ function statementCsv(customerId: number, base: string): string {
     method: string
     bankRef: string
     note: string
+    /** 这张单里用客户预收抵掉的原币金额（非现金） */
+    credit: number
   }
   const blank = {
     docNo: '',
@@ -1235,7 +1238,8 @@ function statementCsv(customerId: number, base: string): string {
     openBase: 0,
     method: '',
     bankRef: '',
-    note: ''
+    note: '',
+    credit: 0
   }
 
   const docs: StatementRow[] = []
@@ -1243,12 +1247,15 @@ function statementCsv(customerId: number, base: string): string {
     const rate = Number(r.exchangeRate) || 0
     const open = shownRemaining(r.paymentStatus, r.receivable)
     const prepaid = r.remaining < -0.001 ? -r.remaining : 0
+    const creditUsed = Number(r.creditApplied ?? 0)
     const notes: string[] = []
     if (!isBillingStatus(r.paymentStatus)) {
       notes.push(`此单${PAYMENT_STATUS_LABEL[r.paymentStatus as keyof typeof PAYMENT_STATUS_LABEL] ?? r.paymentStatus}，不计应收；已到的钱仍是实收`)
+      if (r.paidAmount > 0.001) notes.push(`实收 ${money2(r.paidAmount)} 已计入客户预收结余`)
     }
     if (r.negativeCharges < -0.001) notes.push(`含折让/抵扣 ${money2(r.negativeCharges)}（已计入单据金额）`)
     if (r.netWrittenOff > 0.001) notes.push(`其中已让利（短款/坏账核销）${money2(r.netWrittenOff)}`)
+    if (creditUsed > 0.001) notes.push(`其中预收抵扣 ${money2(creditUsed)}（非现金，从客户预收余额冲减）`)
     if (open > 0.001 && rate <= 0) notes.push('汇率未填，未折算')
     if (prepaid > 0.001) notes.push(`实收比单据多 ${money2(prepaid)}（预收结余）`)
     docs.push({
@@ -1265,7 +1272,8 @@ function statementCsv(customerId: number, base: string): string {
       open: money2(open),
       rate,
       openBase: rate > 0 ? money2(open * rate) : 0,
-      note: notes.join('；')
+      note: notes.join('；'),
+      credit: money2(creditUsed)
     })
   }
   for (const s of samples) {
@@ -1273,12 +1281,15 @@ function statementCsv(customerId: number, base: string): string {
     const statusText = SAMPLE_STATUS_LABEL[s.status as keyof typeof SAMPLE_STATUS_LABEL] ?? s.status
     const feeText = SAMPLE_FEE_STATUS_LABEL[s.feeStatus as keyof typeof SAMPLE_FEE_STATUS_LABEL] ?? s.feeStatus
     const notes: string[] = []
-    if (s.status === 'cancelled') notes.push(`已取消，实收 ${money2(s.recovered)} 留在账上`)
-    else if (s.feeStatus === 'waived') notes.push('客户免单，未收 0')
+    if (s.status === 'cancelled') {
+      notes.push(`已取消，实收 ${money2(s.recovered)} 留在账上`)
+      if (s.recovered > 0.001) notes.push('这笔实收已计入客户预收结余')
+    } else if (s.feeStatus === 'waived') notes.push('客户免单，未收 0')
     else if (s.feeStatus === 'offset') {
       notes.push(`已抵扣入订单${s.convertedOrderNo ? ` ${s.convertedOrderNo}` : ''}（不是现金，但账上已收回）`)
     }
     if (s.feeStatus === 'unpaid' && s.recovered > 0.001) notes.push(`已收 ${money2(s.recovered)}`)
+    if (s.creditApplied > 0.001) notes.push(`其中预收抵扣 ${money2(s.creditApplied)}（非现金，从客户预收余额冲减）`)
     if (s.open > 0.001 && rate <= 0) notes.push('汇率未填，未折算')
     if (s.prepaid > 0.001) notes.push(`实收比单据多 ${money2(s.prepaid)}（预收结余）`)
     docs.push({
@@ -1293,7 +1304,8 @@ function statementCsv(customerId: number, base: string): string {
       open: money2(s.open),
       rate,
       openBase: rate > 0 ? money2(s.open * rate) : 0,
-      note: notes.join('；')
+      note: notes.join('；'),
+      credit: money2(s.creditApplied)
     })
   }
   docs.sort((a, b) => a.date.localeCompare(b.date) || a.kind.localeCompare(b.kind) || a.docNo.localeCompare(b.docNo))
@@ -1343,25 +1355,19 @@ function statementCsv(customerId: number, base: string): string {
     note: '与客户页「未收」同一口径'
   })
 
-  // 多收的钱单列：压进待收会变负数，客户会以为我们算错了
-  const prepaidBy = new Map<string, number>()
-  for (const r of orders) {
-    if (r.remaining < -0.001) prepaidBy.set(r.currency, (prepaidBy.get(r.currency) ?? 0) + -r.remaining)
-  }
-  for (const s of samples) {
-    if (s.prepaid > 0.001) prepaidBy.set(s.currency, (prepaidBy.get(s.currency) ?? 0) + s.prepaid)
-  }
-  const prepaidRows: StatementRow[] = [...prepaidBy.entries()]
-    .filter(([, v]) => v > 0.001)
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([cur, v]) => ({
-      ...blank,
-      kind: '预收结余',
-      date: today,
-      currency: cur,
-      amount: money2(v),
-      note: '客户多付，可抵下张单或线下退还；不计入应收'
-    }))
+  // 预收结余：多收的钱、作废/取消单留在账上的实收，都从 money.ts 的同一份余额派生，
+  // 减去已经抵到别的单上的部分。压进待收会变负数，客户会以为我们算错了
+  const prepaidRows: StatementRow[] = customerCreditBalance(customerId).map((c) => ({
+    ...blank,
+    kind: '预收结余',
+    date: today,
+    currency: c.currency,
+    amount: money2(c.available),
+    note:
+      c.available < -0.001
+        ? `预收出现缺口 ${money2(-c.available)}：来源 ${money2(c.gross)} − 已抵扣 ${money2(c.applied)}。来源单据被改动过，请先在客户页核对抵扣`
+        : `可用 ${money2(c.available)}（来源 ${money2(c.gross)} − 已抵扣 ${money2(c.applied)}）；可抵下张单或线下退还；不计入应收`
+  }))
 
   const header = [
     '类型',
@@ -1378,7 +1384,8 @@ function statementCsv(customerId: number, base: string): string {
     `未收(${base})`,
     '方式',
     '银行流水号',
-    '备注'
+    '备注',
+    '预收抵扣(原币)'
   ]
   const lines = [...docs, ...payments, ...prepaidRows, ...totals].map((r) => {
     // 基准币合计行只有「未收(基准币)」这一列有意义：别的列写 0 会被当成「已收 0」
@@ -1398,7 +1405,8 @@ function statementCsv(customerId: number, base: string): string {
       r.openBase,
       r.method ? PAYMENT_METHOD_LABEL[r.method as keyof typeof PAYMENT_METHOD_LABEL] ?? r.method : '',
       r.bankRef,
-      r.note
+      r.note,
+      isBaseTotal ? '' : r.credit
     ]
   })
   return toCsv(header, lines)

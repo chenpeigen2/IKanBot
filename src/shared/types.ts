@@ -311,7 +311,9 @@ export interface OrderDetail extends Order {
   missingCostItems: number
   totalQuantity: number
   paidAmount: number
-  /** 待收（含费用合计 − 已收 − 核销，不会出现负数；多收的部分不显示为待收） */
+  /** 用客户预收抵扣的金额（非现金，R27）：只冲待收，不动已收/总额/毛利 */
+  creditApplied: number
+  /** 待收（含费用合计 − 已收 − 预收抵扣 − 核销，不会出现负数；多收的部分不显示为待收） */
   remaining: number
   /** 待收原始值（可能为负，表示多收了） */
   remainingRaw: number
@@ -924,6 +926,8 @@ export interface SampleOrderDetail extends SampleOrder {
   collected: number
   /** 实收流水折基准币（无汇率为 null） */
   collectedBase: number | null
+  /** 用客户预收抵扣的金额（原币，R27；非现金，只冲待收） */
+  creditApplied: number
   /** 实收流水笔数；feeStatus=paid 且为 0 = 旧记录只改了旗子，月报里没有这笔 */
   flowCount: number
   /** 旧记录·无流水：历史「已向客户收」没有落过流水，金额按全额认已收但不可追溯 */
@@ -986,4 +990,46 @@ export interface CustomerReceivable {
   oldestUnpaidDate: string | null
   /** 最老未收货款挂账天数（从下单日起算） */
   oldestUnpaidDays: number
+}
+
+/* ---------------- 客户预收（R27）：余额由 payments 现状派生，抵扣另记台账 ---------------- */
+
+/** 一笔「已经收到、但不再属于某张单」的钱 */
+export interface CustomerCreditSource {
+  kind: 'order' | 'sample'
+  docId: number
+  docNo: string
+  piNo: string
+  date: string
+  statusText: string
+  currency: string
+  exchangeRate: number
+  /** 原币：多收的部分，或作废/取消/免单后留在账上的实收 */
+  amount: number
+}
+
+/** 一笔预收抵扣（只记非现金的用途，撤销也留行） */
+export interface CustomerCreditApplication {
+  id: number
+  currency: string
+  amount: number
+  targetKind: 'order' | 'sample'
+  targetId: number
+  targetNo: string
+  appliedAt: string
+  note: string
+  actor: string
+}
+
+/** 客户在某个币种下的预收余额（原币） */
+export interface CustomerCreditCurrency {
+  currency: string
+  /** 来源合计 = 多收 + 作废/取消/免单余款 */
+  gross: number
+  /** 已抵扣合计 */
+  applied: number
+  /** 可用 = gross − applied；来源单据后来被改小可能变负，界面必须亮红提示 */
+  available: number
+  sources: CustomerCreditSource[]
+  applications: CustomerCreditApplication[]
 }

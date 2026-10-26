@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IKanApi } from '../../src/shared/api'
 import type {
+  CustomerCreditCurrency,
   CustomerReceivable,
   ExportKind,
   MonthlyReportRow,
@@ -167,6 +168,12 @@ const api: IKanApi = {
     monthly: () => call<MonthlyReportRow[]>('report:monthly'),
     receivables: () => call<CustomerReceivable[]>('report:receivables'),
     customerOrderRows: (customerId: number) => call<any[]>('report:customerOrderRows', customerId)
+  },
+  credits: {
+    balance: (customerId: number) => call<CustomerCreditCurrency[]>('credits:balance', customerId),
+    apply: (input: any) => call<CustomerCreditCurrency[]>('credits:apply', input),
+    reverse: (applicationId: number, reason: string) =>
+      call<CustomerCreditCurrency[]>('credits:reverse', applicationId, reason)
   },
   settings: {
     get: () => call<any>('settings:get'),

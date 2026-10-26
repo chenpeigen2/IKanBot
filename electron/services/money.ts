@@ -27,9 +27,17 @@
 import { getDb } from '../db'
 import { localMonthOf, localDateOf, localDate } from '../../src/shared/date'
 import { ciNoOf } from '../../src/shared/documents'
-import { NON_BILLING_STATUSES } from '../../src/shared/billing'
-import type { CustomerReceivable, PackingAmount, PackingAmountLine, QuotationCharge } from '../../src/shared/types'
-import { PAYMENT_STATUS_LABEL, SAMPLE_STATUS_LABEL } from '../../src/shared/types'
+import { NON_BILLING_STATUSES, isBillingStatus } from '../../src/shared/billing'
+import type {
+  CustomerCreditApplication,
+  CustomerCreditCurrency,
+  CustomerCreditSource,
+  CustomerReceivable,
+  PackingAmount,
+  PackingAmountLine,
+  QuotationCharge
+} from '../../src/shared/types'
+import { PAYMENT_STATUS_LABEL, SAMPLE_FEE_STATUS_LABEL, SAMPLE_STATUS_LABEL } from '../../src/shared/types'
 
 /** 解析费用行 JSON（运费/保险等） */
 export function parseCharges(v: unknown): QuotationCharge[] {
@@ -102,6 +110,12 @@ export interface MoneyInput {
   settlements?: SettlementInput[]
   /** 定金比例，0.3 = 30% */
   depositRatio: number
+  /**
+   * 用客户预收抵扣的金额（原币，R27）。
+   * 这不是现金：现金流里没有这条，毛利和单据总额也不能被它改动，
+   * 只是「这笔待收已经由客户账上的余额覆盖」。
+   */
+  creditApplied?: number
 }
 
 /** 计算口径的输出 */
@@ -112,11 +126,13 @@ export interface OrderMoney {
   chargesTotal: number
   /** 含费用合计 = 货值 + 费用（PI / CI / 报价单 / PL 上的 TOTAL） */
   grandTotal: number
-  /** 已收 */
+  /** 已收（真金白银的到账） */
   paidAmount: number
+  /** 用客户预收抵扣的金额（非现金，R27）：只冲待收，不动已收、总额和毛利 */
+  creditApplied: number
   /** 待收（原始值，可能因多收而为负） */
   remaining: number
-  /** 真正要向客户收的钱：含费用合计 − 已收，最小 0（多收不退） */
+  /** 真正要向客户收的钱：含费用合计 − 已收 − 预收抵扣，最小 0（多收不退） */
   receivable: number
   /** 定金金额 = 含费用合计 × 定金比例 */
   depositAmount: number
@@ -178,7 +194,10 @@ export function computeOrderMoney(input: MoneyInput): OrderMoney {
   const grandTotal = goodsValue + chargesTotal
   const paidAmount = (input.payments ?? []).reduce((s, p) => s + (Number(p.amount) || 0), 0)
   const st = summarizeSettlements(input.settlements ?? [])
-  const remaining = grandTotal - paidAmount - st.netWrittenOff
+  // 预收抵扣是「客户账上已有的钱换了个用途」：只冲待收，不算现金、不进毛利。
+  // 负数或 NaN 一律按 0——台账里不该有，但界面/老数据传进来也不能把待收反向撑大。
+  const creditApplied = Math.max(0, Number(input.creditApplied ?? 0) || 0)
+  const remaining = grandTotal - paidAmount - st.netWrittenOff - creditApplied
   const missingCostItems = items.filter((i) => i.unitCost == null).length
   const totalCost = items.reduce((s, i) => s + Number(i.quantity || 0) * (i.unitCost ?? 0), 0)
   // 负向费用（抵扣/折让）从毛利里扣；正向费用（运费等过手钱）维持原口径不进毛利
@@ -193,6 +212,7 @@ export function computeOrderMoney(input: MoneyInput): OrderMoney {
     chargesTotal,
     grandTotal,
     paidAmount,
+    creditApplied,
     remaining,
     receivable: remaining > 0 ? remaining : 0,
     depositAmount: grandTotal * Number(input.depositRatio || 0),
@@ -239,6 +259,8 @@ export interface OrderMoneyRow extends OrderMoney {
   /** 折算成基准币的金额 */
   grandTotalBase: number
   receivableBase: number
+  /** 预收抵扣折基准币（非现金） */
+  creditAppliedBase: number
   goodsValueBase: number
   costBase: number
   profitBase: number
@@ -292,7 +314,49 @@ export interface MoneyRef {
 }
 
 /**
- * 一批订单的金额：明细 / 收款 / 核销各一次 IN 查询，不逐单查。
+ * 订单上已经抵扣的客户预收（原币，R27）。只认未撤销的行。
+ * 传一批 id 时一条 SQL 搞定；列表、详情、对账单都必须从这里取，
+ * 不许各自去 SUM credit_applications。
+ */
+export function creditAppliedForOrders(ids: number[]): Map<number, number> {
+  const out = new Map<number, number>()
+  if (!ids.length) return out
+  const ph = ids.map(() => '?').join(',')
+  const rows = getDb().all(
+    `SELECT target_id, SUM(amount) AS amount FROM credit_applications
+     WHERE target_kind = 'order' AND reversed_at IS NULL AND target_id IN (${ph})
+     GROUP BY target_id`,
+    ids
+  ) as Record<string, unknown>[]
+  for (const r of rows) out.set(Number(r.target_id), Number(r.amount ?? 0))
+  return out
+}
+
+export function creditAppliedForOrder(id: number): number {
+  return creditAppliedForOrders([id]).get(id) ?? 0
+}
+
+/** 打样单上已经抵扣的客户预收（原币，R27） */
+export function creditAppliedForSamples(ids: number[]): Map<number, number> {
+  const out = new Map<number, number>()
+  if (!ids.length) return out
+  const ph = ids.map(() => '?').join(',')
+  const rows = getDb().all(
+    `SELECT target_id, SUM(amount) AS amount FROM credit_applications
+     WHERE target_kind = 'sample' AND reversed_at IS NULL AND target_id IN (${ph})
+     GROUP BY target_id`,
+    ids
+  ) as Record<string, unknown>[]
+  for (const r of rows) out.set(Number(r.target_id), Number(r.amount ?? 0))
+  return out
+}
+
+export function creditAppliedForSample(id: number): number {
+  return creditAppliedForSamples([id]).get(id) ?? 0
+}
+
+/**
+ * 一批订单的金额：明细 / 收款 / 核销 / 预收抵扣各一次 IN 查询，不逐单查。
  *
  * 列表页以前每张单跑 9 条查询，几百张单一点要等两秒多；
  * 批量版本把整页压成 3 条，算法仍然是 computeOrderMoney 那一个。
@@ -303,6 +367,7 @@ export function moneyForOrders(refs: MoneyRef[]): Map<number, OrderMoney> {
   const db = getDb()
   const ids = refs.map((r) => r.id)
   const ph = ids.map(() => '?').join(',')
+  const creditByOrder = creditAppliedForOrders(ids)
   const itemRows = db.all(
     `SELECT order_id, quantity, unit_price, unit_cost FROM order_items WHERE order_id IN (${ph})`,
     ids
@@ -351,7 +416,8 @@ export function moneyForOrders(refs: MoneyRef[]): Map<number, OrderMoney> {
         charges: parseCharges(ref.charges),
         payments: (paysBy.get(ref.id) ?? []).map((amount) => ({ amount })),
         settlements: settBy.get(ref.id) ?? [],
-        depositRatio: ref.depositRatio
+        depositRatio: ref.depositRatio,
+        creditApplied: creditByOrder.get(ref.id) ?? 0
       })
     )
   }
@@ -433,6 +499,7 @@ export function listOrderMoney(filter: MoneyListFilter = {}): OrderMoneyRow[] {
       exchangeRateDate: r.exchange_rate_date == null ? null : String(r.exchange_rate_date),
       grandTotalBase: m.grandTotal * rate,
       receivableBase: m.receivable * rate,
+      creditAppliedBase: m.creditApplied * rate,
       goodsValueBase: m.goodsValue * rate,
       costBase: m.totalCost * rate,
       profitBase: (m.profit ?? m.profitRaw) * rate,
@@ -836,6 +903,8 @@ interface SampleMoneyRow {
   offsetSettled: number
   /** 已收回 = 实收 + 抵扣；旧「已收无流水」按全额认 */
   recovered: number
+  /** 用客户预收抵扣的金额（非现金，R27） */
+  creditApplied: number
   /** 已收回的钱转进了哪张订单（抵扣单才有） */
   convertedOrderNo: string
 }
@@ -854,7 +923,10 @@ function sampleMoneyRows(customerId?: number): SampleMoneyRow[] {
             COALESCE((SELECT SUM(si.quantity * si.unit_price) FROM sample_order_items si
                       WHERE si.sample_order_id = s.id), 0) AS sample_fee,
             COALESCE((SELECT SUM(p.amount) FROM payments p
-                      WHERE p.sample_order_id = s.id), 0) AS collected
+                      WHERE p.sample_order_id = s.id), 0) AS collected,
+            COALESCE((SELECT SUM(ca.amount) FROM credit_applications ca
+                      WHERE ca.target_kind = 'sample' AND ca.target_id = s.id
+                        AND ca.reversed_at IS NULL), 0) AS credit_applied
      FROM sample_orders s LEFT JOIN orders co ON co.id = s.converted_order_id
      ${where}`,
     params
@@ -893,6 +965,7 @@ function sampleMoneyRows(customerId?: number): SampleMoneyRow[] {
       collected,
       offsetSettled,
       recovered,
+      creditApplied: Number(r.credit_applied ?? 0),
       convertedOrderNo: String(r.converted_order_no ?? '')
     }
   })
@@ -903,7 +976,8 @@ export function sampleOpenRows(customerId?: number): SampleOpenRow[] {
   for (const r of sampleMoneyRows(customerId)) {
     // 只有未收的单还挂着应收；取消的单不收钱
     if (r.feeStatus !== 'unpaid' || r.status === 'cancelled') continue
-    const left = r.totalFee - r.collected
+    // 预收抵扣过的部分已经由客户余额覆盖，不再计待收
+    const left = r.totalFee - r.collected - r.creditApplied
     if (left <= 0.001) continue
     out.push({
       sampleId: r.sampleId,
@@ -930,6 +1004,8 @@ export interface SampleBillRow {
   totalFee: number
   /** 已收回（实收 + 抵扣；旧记录按全额） */
   recovered: number
+  /** 用客户预收抵扣的金额（非现金，R27） */
+  creditApplied: number
   /** 原币待收 */
   open: number
   /** 客户多付的原币（预收结余） */
@@ -943,9 +1019,13 @@ export function sampleStatementRows(customerId: number): SampleBillRow[] {
     // 一分钱没涉及过的免费样不用上表，否则对账单全是噪声；
     // 取消的单只有真的收过钱（或抵扣过）才留一行，让客户认得出这笔钱
     if (r.totalFee <= 0.001 && r.collected <= 0.001 && r.offsetSettled <= 0.001) continue
-    if (r.status === 'cancelled' && r.collected <= 0.001 && r.offsetSettled <= 0.001) continue
+    if (r.status === 'cancelled' && r.collected <= 0.001 && r.offsetSettled <= 0.001 && r.creditApplied <= 0.001)
+      continue
     const cancelled = r.status === 'cancelled'
-    const open = !cancelled && r.feeStatus === 'unpaid' ? Math.max(0, r.totalFee - r.collected) : 0
+    const open =
+      !cancelled && r.feeStatus === 'unpaid'
+        ? Math.max(0, r.totalFee - r.collected - r.creditApplied)
+        : 0
     // 多付的钱要单独摆出来：压进待收里会变成负数，客户以为我们算错了
     const over = r.collected - r.totalFee
     out.push({
@@ -958,6 +1038,7 @@ export function sampleStatementRows(customerId: number): SampleBillRow[] {
       sampleDate: r.sampleDate,
       totalFee: r.totalFee,
       recovered: r.recovered,
+      creditApplied: r.creditApplied,
       open,
       prepaid: over > 0.001 ? over : 0,
       convertedOrderNo: r.convertedOrderNo
@@ -1027,4 +1108,125 @@ export function customerOpenRows(customerId: number): CustomerOpenRow[] {
  */
 export function customerReceivable(customerId: number): number {
   return totalReceivable({ customerId })
+}
+
+/* ---------------- 客户预收（R27） ---------------- */
+
+export type { CustomerCreditApplication, CustomerCreditCurrency, CustomerCreditSource }
+
+/**
+ * 客户预收余额：**不另存一份钱**，全部从 payments 的现状派生。
+ *
+ * 口径（与对账单「预收结余」行同一份）：
+ *   正常单   —— 实收 + 净核销 超过含费用合计的部分（客户多付）
+ *   作废/失效 —— 已经收到的全部现金（这单不再欠钱，钱必须有去处）
+ *   打样单   —— 取消/免单时收到的全部现金；其余按「实收 + 抵扣 − 应收」算多付
+ *   减：未撤销的抵扣台账
+ *
+ * 抵扣不是现金，所以这里绝不碰 payments，也绝不进现金流/毛利。
+ */
+export function customerCreditBalance(customerId: number): CustomerCreditCurrency[] {
+  const db = getDb()
+  const by = new Map<string, CustomerCreditCurrency>()
+  const bucket = (currency: string): CustomerCreditCurrency => {
+    const cur = by.get(currency) ?? {
+      currency,
+      gross: 0,
+      applied: 0,
+      available: 0,
+      sources: [],
+      applications: []
+    }
+    by.set(currency, cur)
+    return cur
+  }
+
+  for (const r of listOrderMoney({ customerId, includeVoided: true })) {
+    // 草稿还没成为正式生意，钱不该已经到账；真到了也不认（现金流同样排除草稿）
+    if (r.paymentStatus === 'draft') continue
+    const amount = isBillingStatus(r.paymentStatus)
+      ? Math.max(0, r.paidAmount + r.netWrittenOff - r.grandTotal)
+      : r.paidAmount
+    if (amount <= 0.001) continue
+    const b = bucket(r.currency)
+    b.gross += amount
+    b.sources.push({
+      kind: 'order',
+      docId: r.orderId,
+      docNo: r.orderNo,
+      piNo: r.piNo,
+      date: localDateOf(r.createdAt),
+      statusText:
+        PAYMENT_STATUS_LABEL[r.paymentStatus as keyof typeof PAYMENT_STATUS_LABEL] ?? r.paymentStatus,
+      currency: r.currency,
+      exchangeRate: r.exchangeRate,
+      amount
+    })
+  }
+
+  for (const r of sampleMoneyRows(customerId)) {
+    const amount =
+      r.status === 'cancelled' || r.feeStatus === 'waived'
+        ? r.collected
+        : Math.max(0, r.collected + r.offsetSettled - r.totalFee)
+    if (amount <= 0.001) continue
+    const b = bucket(r.currency)
+    b.gross += amount
+    b.sources.push({
+      kind: 'sample',
+      docId: r.sampleId,
+      docNo: r.sampleNo,
+      piNo: '',
+      date: r.sampleDate,
+      statusText: `打样·${SAMPLE_STATUS_LABEL[r.status as keyof typeof SAMPLE_STATUS_LABEL] ?? r.status} · ${
+        SAMPLE_FEE_STATUS_LABEL[r.feeStatus as keyof typeof SAMPLE_FEE_STATUS_LABEL] ?? r.feeStatus
+      }`,
+      currency: r.currency,
+      exchangeRate: r.exchangeRate,
+      amount
+    })
+  }
+
+  const appRows = db.all(
+    `SELECT ca.id, ca.currency, ca.amount, ca.target_kind, ca.target_id, ca.applied_at, ca.note, ca.actor,
+            COALESCE(o.order_no, s.sample_no, '') AS target_no
+     FROM credit_applications ca
+     LEFT JOIN orders o ON ca.target_kind = 'order' AND o.id = ca.target_id
+     LEFT JOIN sample_orders s ON ca.target_kind = 'sample' AND s.id = ca.target_id
+     WHERE ca.customer_id = ? AND ca.reversed_at IS NULL
+     ORDER BY ca.applied_at, ca.id`,
+    [customerId]
+  ) as Record<string, unknown>[]
+  for (const r of appRows) {
+    const b = bucket(String(r.currency ?? ''))
+    const amount = Number(r.amount ?? 0)
+    b.applied += amount
+    b.applications.push({
+      id: Number(r.id),
+      currency: String(r.currency ?? ''),
+      amount,
+      targetKind: String(r.target_kind ?? '') === 'sample' ? 'sample' : 'order',
+      targetId: Number(r.target_id ?? 0),
+      targetNo: String(r.target_no ?? ''),
+      appliedAt: String(r.applied_at ?? ''),
+      note: String(r.note ?? ''),
+      actor: String(r.actor ?? '')
+    })
+  }
+
+  const out: CustomerCreditCurrency[] = []
+  for (const b of by.values()) {
+    b.available = b.gross - b.applied
+    if (Math.abs(b.gross) <= 0.001 && Math.abs(b.applied) <= 0.001) continue
+    b.sources.sort((a, c) => a.date.localeCompare(c.date) || a.docNo.localeCompare(c.docNo))
+    b.applications.sort((a, c) => a.appliedAt.localeCompare(c.appliedAt) || a.id - c.id)
+    out.push(b)
+  }
+  return out.sort((a, b) => a.currency.localeCompare(b.currency))
+}
+
+/** 某币种可用预收（原币；来源被改动时可能是负数） */
+export function customerCreditAvailable(customerId: number, currency: string): number {
+  const hit = customerCreditBalance(customerId).find((c) => c.currency === currency)
+  return hit?.available ?? 0
 }

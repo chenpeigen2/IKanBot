@@ -12,6 +12,7 @@ import * as samples from '../services/samples'
 import * as packing from '../services/packing'
 import * as dashboard from '../services/dashboard'
 import * as money from '../services/money'
+import * as credits from '../services/credits'
 import * as settingsSvc from '../services/settings'
 import * as docsSvc from '../services/docs'
 import { createBackup, inspectBackup, listBackups, pickBackup, restoreBackup } from '../services/backup'
@@ -262,6 +263,13 @@ export function registerIpc(): void {
   handle('report:monthly', () => dashboard.monthlyReport())
   handle('report:receivables', () => money.receivableByCustomer())
   handle('report:customerOrderRows', (customerId: number) => money.customerOpenRows(customerId))
+
+  /* ---- 客户预收（R27）：余额派生，抵扣另记台账 ---- */
+  handle('credits:balance', (customerId: number) => money.customerCreditBalance(customerId))
+  handle('credits:apply', (input: credits.ApplyCreditInput) => credits.applyCredit(input))
+  handle('credits:reverse', (applicationId: number, reason: string) =>
+    credits.reverseCredit(applicationId, reason)
+  )
 
   /* ---- 设置 ---- */
   handle('settings:get', () => settingsSvc.getSettings())

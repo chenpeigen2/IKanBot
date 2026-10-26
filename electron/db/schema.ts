@@ -552,6 +552,36 @@ CREATE INDEX idx_payments_order ON payments(order_id);
 CREATE INDEX idx_payments_date ON payments(paid_at);
 CREATE INDEX idx_payments_sample ON payments(sample_order_id) WHERE sample_order_id IS NOT NULL;
 `
+  },
+  {
+    version: 21,
+    name: 'customer_credit_applications',
+    sql: `
+-- 客户预收抵扣台账（R27）。
+-- 预收余额不另立一张「钱」的表：钱仍然只认 payments，余额由
+-- 「已收但不属于任何一张单」派生（多收、作废/失效余款、取消/免单实收）。
+-- 这张表只记「这笔余额被哪张单用掉了」——抵扣不是现金，绝不进 payments/现金流，
+-- 否则同一笔钱会在月报里到账两次。撤销不删行，只写 reversed_at，留痕可追。
+CREATE TABLE credit_applications (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id     INTEGER NOT NULL REFERENCES customers(id),
+  currency        TEXT NOT NULL,
+  amount          REAL NOT NULL,
+  target_kind     TEXT NOT NULL CHECK (target_kind IN ('order', 'sample')),
+  target_id       INTEGER NOT NULL,
+  applied_at      TEXT NOT NULL,
+  note            TEXT NOT NULL DEFAULT '',
+  actor           TEXT NOT NULL DEFAULT '',
+  reversed_at     TEXT,
+  reversed_reason TEXT NOT NULL DEFAULT '',
+  created_at      TEXT NOT NULL,
+  CHECK (amount > 0),
+  CHECK (length(currency) > 0),
+  CHECK (reversed_at IS NULL OR length(reversed_reason) > 0)
+);
+CREATE INDEX idx_credit_app_customer ON credit_applications(customer_id, currency);
+CREATE INDEX idx_credit_app_target ON credit_applications(target_kind, target_id) WHERE reversed_at IS NULL;
+`
   }
 ]
 

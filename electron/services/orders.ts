@@ -3,10 +3,17 @@ import { existsSync, unlinkSync } from 'fs'
 import { basename, join } from 'path'
 import { mapOrder, mapOrderItem, mapPayment, mapPackingList, mapPackingListLine, mapEvent, mapSkuSummary, mapOrderPhoto, mapCustomer, mapSettlement } from '../db/mappers'
 import { getSettings } from './settings'
-import { computeOrderMoney, costInOrderCurrency, moneyForOrders, parseCharges } from './money'
+import {
+  computeOrderMoney,
+  costInOrderCurrency,
+  creditAppliedForOrder,
+  moneyForOrders,
+  parseCharges
+} from './money'
 import { likeAny } from './search'
 import { applyShipStatus, isShipStatusDerived, shipmentSummary } from './shipping'
 import { logEvent } from './events'
+import { assertCreditFitsOrder, assertCreditSolvent, hasActiveCredit, reverseCreditsForTarget } from './credits'
 import { addSamplePayment } from './samples'
 import { addDays, daysBetween, isLocalDate, localDate, localDayAfterUtc, localDayStartUtc } from '../../src/shared/date'
 import { billPartyOf, emptyParty, parseParty, patchParty, shipPartyOf, stringifyParty } from '../../src/shared/party'
@@ -519,7 +526,8 @@ function hydrate(order: Order, row?: Record<string, unknown>): OrderDetail {
     charges: order.charges,
     payments: payments.map((p) => ({ amount: p.amount })),
     settlements: settlements.map((s) => ({ kind: s.kind, amount: s.amount })),
-    depositRatio: order.depositRatio
+    depositRatio: order.depositRatio,
+    creditApplied: creditAppliedForOrder(order.id)
   })
 
   return {
@@ -538,6 +546,7 @@ function hydrate(order: Order, row?: Record<string, unknown>): OrderDetail {
     missingCostItems: m.missingCostItems,
     totalQuantity: m.totalQuantity,
     paidAmount: m.paidAmount,
+    creditApplied: m.creditApplied,
     remaining: m.receivable,
     remainingRaw: m.remaining,
     depositAmount: m.depositAmount,
@@ -815,6 +824,8 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
     logEvent(id, 'update', null, null, describeOrderChange(before, input))
     // 收款金额变了，状态可能需要重算
     recomputePaymentStatus(id)
+    // 有预收抵扣的单：换客户/币种或金额改小不能让那笔抵扣悬空
+    assertCreditFitsOrder(id)
   })
   return getOrder(id)!
 }
@@ -967,6 +978,9 @@ export function voidOrder(id: number, reason = '', opts: { confirmDocs?: boolean
     )
   }
   transact(() => {
+    // 单子作废就退出应收口径：已经抵在它身上的客户预收要退回客户余额，
+    // 否则这笔钱既不在待收里、也不在余额里，从账上凭空消失
+    reverseCreditsForTarget('order', id, `订单 ${cur.order_no} 作废，预收抵扣回退`)
     db.run('UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?', ['void', now(), id])
     // 下单抵扣的样品费不能跟着凭空消失：订单作废退出应收口径，
     // 打样单还挂着「已抵扣」的话，客户实际欠的样品费会从欠款榜、工作台同时蒸发。
@@ -1031,6 +1045,12 @@ export function deleteOrder(id: number): void {
   if (String(row.payment_status ?? '') === 'void') {
     throw new Error(`订单 ${orderNo} 已经作废，作废单是留档凭据，不能删除；要重新做生意请按新单重开。`)
   }
+  // 预收抵扣记在这张单上：删单会让这笔余额「用到哪儿去了」失去凭据
+  if (hasActiveCredit('order', id)) {
+    throw new Error(
+      `订单 ${orderNo} 上还有未撤销的客户预收抵扣，不能删：删了这笔余额用到哪儿就查不到了。请先在客户页撤销抵扣，再删单。`
+    )
+  }
   const cnt = (k: string): number => Number(row[k] ?? 0)
   const bits: string[] = []
   if (cnt('item_cnt')) bits.push(`${cnt('item_cnt')} 行明细`)
@@ -1087,6 +1107,7 @@ export function updateOrderCharges(orderId: number, charges: QuotationCharge[], 
     const detail = parts.length ? `修改费用：${parts.join('；')}` : '修改费用行'
     logEvent(orderId, 'update', null, null, reasonText ? `${detail}；原因：${reasonText}` : detail)
     recomputePaymentStatus(orderId)
+    assertCreditFitsOrder(orderId)
   })
   return getOrder(orderId)!
 }
@@ -1353,6 +1374,7 @@ export function updateOrderItem(
     applyShipStatus(orderId)
     // 金额变了，收款状态要重算（加单加到收不够要从「已收款」退回「部分收款」）
     recomputePaymentStatus(orderId)
+    assertCreditFitsOrder(orderId)
   })
   return getOrder(orderId)!
 }
@@ -1412,6 +1434,7 @@ export function removeOrderItem(orderId: number, itemId: number): OrderDetail {
     applyShipStatus(orderId)
     // 金额变了，收款状态要重算
     recomputePaymentStatus(orderId)
+    assertCreditFitsOrder(orderId)
   })
   return getOrder(orderId)!
 }
@@ -1476,6 +1499,7 @@ export function replaceOrderItems(orderId: number, items: OrderItemInput[]): Ord
     logEvent(orderId, 'item_replace', null, null, `批量生成 ${items.length} 个 SKU 行`)
     // 金额变了，收款状态要重算
     recomputePaymentStatus(orderId)
+    assertCreditFitsOrder(orderId)
   })
   return getOrder(orderId)!
 }
@@ -1542,8 +1566,8 @@ export function addPayment(orderId: number, p: PaymentInput): OrderDetail {
   // 现金流口径（只排除草稿）本来就把作废单的到账算进月报——闸门拦死只会让银行流水与系统账脱节。
   // 这里开正门：必须写明来路；这笔钱只进收款流水与月报，不复活订单、不动待收（recompute 对终态直接返回）。
   // 失效单不走这条门：它还有「改回客户已确认」的活路，走正常收款流程。
-  const cur = db.get('SELECT order_no, payment_status FROM orders WHERE id = ?', [orderId]) as
-    | { order_no?: string; payment_status?: string }
+  const cur = db.get('SELECT order_no, payment_status, currency FROM orders WHERE id = ?', [orderId]) as
+    | { order_no?: string; payment_status?: string; currency?: string }
     | null
   if (!cur) throw new Error('订单不存在')
   const curStatus = String(cur.payment_status ?? '')
@@ -1563,6 +1587,16 @@ export function addPayment(orderId: number, p: PaymentInput): OrderDetail {
     )
   }
   const { paidAt, amount } = assertPaymentInput(p)
+  // 有预收抵扣的单：现金只能收「预收之外还欠的那部分」，
+  // 否则同一块钱会被收两遍（预收抵一次、现金又收满全额）
+  if (!isVoided) {
+    const detail = getOrder(orderId)!
+    if (detail.creditApplied > 0.001 && amount > detail.remaining + 0.001) {
+      throw new Error(
+        `这张单已经有 ${detail.creditApplied.toFixed(2)} ${String(cur.currency ?? '')} 是客户预收抵掉的，现金待收只剩 ${detail.remaining.toFixed(2)}：再收 ${amount.toFixed(2)} 就重复收了。多出来的钱请登记到别的单上。`
+      )
+    }
+  }
   // 汇率快照：这笔到账按「落款那天订单上的汇率」折算进月报，
   // 以后订单汇率再改（出单据前的窗口期是允许的），历史到账不许跟着漂
   const rate = Number(
@@ -1684,7 +1718,7 @@ export function deletePayment(orderId: number, paymentId: number, reason = ''): 
     )
   }
   const row = db.get(
-    `SELECT p.paid_at, p.amount, p.bank_ref, p.created_at, o.currency
+    `SELECT p.paid_at, p.amount, p.bank_ref, p.created_at, o.currency, o.customer_id
      FROM payments p JOIN orders o ON o.id = p.order_id
      WHERE p.id = ? AND p.order_id = ?`,
     [paymentId, orderId]
@@ -1734,6 +1768,7 @@ export function deletePayment(orderId: number, paymentId: number, reason = ''): 
   const currency = String(row.currency ?? '')
   const bankRef = String(row.bank_ref ?? '')
   const paidAt = String(row.paid_at ?? '')
+  const customerId = Number(row.customer_id ?? 0)
   transact(() => {
     db.run('DELETE FROM payments WHERE id = ? AND order_id = ?', [paymentId, orderId])
     logEvent(
@@ -1744,6 +1779,8 @@ export function deletePayment(orderId: number, paymentId: number, reason = ''): 
       `删除收款 ${currency} ${amount.toFixed(2)}（${paidAt}${bankRef ? `，流水号 ${bankRef}` : ''}）原因：${why}`
     )
     recomputePaymentStatus(orderId)
+    // 作废单的钱、多收的钱都是客户预收的来源：删掉这笔流水不能把已经抵到别的单上的余额删成负数
+    if (customerId) assertCreditSolvent(customerId)
   })
   return getOrder(orderId)!
 }
@@ -1968,13 +2005,15 @@ export function recomputePaymentStatus(orderId: number): PaymentStatus {
   const paid = money.paidAmount
   // 核销过的钱不用再收：短款 + 坏账算「结清」，撤销记负数自然退回
   const writtenOff = money.netWrittenOff
+  // 客户预收抵扣也是已经收到的钱（只是先收在别的单上）：它同样把这张单收齐
+  const creditApplied = money.creditApplied
   const deposit = money.depositAmount
 
   // 注意：这里算出来的是「下一个状态」，跟当前状态无关，所以能往上走也能往下退
   let next: PaymentStatus = status
-  if (total > 0 && paid + writtenOff >= total - 0.001) next = 'settled'
-  else if (deposit > 0 && paid >= deposit - 0.001) next = 'paid'
-  else if (paid > 0) next = 'partial'
+  if (total > 0 && paid + writtenOff + creditApplied >= total - 0.001) next = 'settled'
+  else if (deposit > 0 && paid + creditApplied >= deposit - 0.001) next = 'paid'
+  else if (paid + creditApplied > 0) next = 'partial'
   else next = status === 'sent' ? 'sent' : 'confirmed'
 
   if (next !== status) {
@@ -2025,8 +2064,8 @@ export function setPaymentStatus(orderId: number, next: PaymentStatus, note = ''
     const allowed = Object.values(PAYMENT_STATUS_LABEL).join(' / ')
     throw new Error(`「${String(next)}」不是收款状态，请选择：${allowed}`)
   }
-  const cur = db.get('SELECT payment_status FROM orders WHERE id = ?', [orderId]) as
-    | { payment_status: string }
+  const cur = db.get('SELECT payment_status, customer_id FROM orders WHERE id = ?', [orderId]) as
+    | { payment_status: string; customer_id: number }
     | null
   if (!cur) throw new Error('订单不存在')
   // 作废是留档终态：从这里改回 confirmed 就等于把一张已取消的单偷偷塞回台账和应收
@@ -2041,8 +2080,15 @@ export function setPaymentStatus(orderId: number, next: PaymentStatus, note = ''
     )
   }
   transact(() => {
+    // 改成草稿/失效就退出应收口径：抵在这张单上的客户预收无处可落，先退回余额
+    if (!isBillingStatus(next)) {
+      reverseCreditsForTarget('order', orderId, `订单转为「${PAYMENT_STATUS_LABEL[next]}」，预收抵扣回退`)
+    }
     db.run('UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?', [next, now(), orderId])
     logEvent(orderId, 'payment_status', cur.payment_status, next, note)
+    // 失效单改回计费状态：预收来源从「全部到账」收回成「只有多收的部分」，
+    // 已经抵出去的钱可能就多于客户实际多付的了
+    if (isBillingStatus(next)) assertCreditSolvent(cur.customer_id)
   })
   return getOrder(orderId)!
 }

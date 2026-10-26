@@ -455,6 +455,9 @@ export default function OrderDetail() {
             <div className="stat-hint split">
               <span>待收 {money(order.remaining, order.currency)}</span>
               <span>定金 {money(order.depositAmount, order.currency)}</span>
+              {order.creditApplied > 0.001 ? (
+                <span>预收抵扣 {money(order.creditApplied, order.currency)}</span>
+              ) : null}
               {order.remainingRaw < 0 ? (
                 <span>已多收 {money(-order.remainingRaw, order.currency)}，不算在待收里</span>
               ) : null}

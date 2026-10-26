@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Modal, useToast, money, Empty, fmtDate, PaymentTag, ShipTag, Button, LoadError } from '../ui'
 import { localDate } from '../../../shared/date'
 import { INCOTERMS, PAYMENT_METHOD_LABEL, type PaymentMethod } from '../../../shared/types'
-import type { Customer } from '../../../shared/types'
+import type { Customer, CustomerCreditCurrency } from '../../../shared/types'
 
 interface Draft {
   id?: number
@@ -81,9 +81,14 @@ export default function Customers() {
   const [list, setList] = useState<Customer[]>([])
   const [keyword, setKeyword] = useState('')
   const [draft, setDraft] = useState<Draft | null>(null)
-  const [detail, setDetail] = useState<{ c: Customer; stats: any; orders: any[]; base: string; prices: any[] } | null>(
-    null
-  )
+  const [detail, setDetail] = useState<{
+    c: Customer
+    stats: any
+    orders: any[]
+    base: string
+    prices: any[]
+    credits: CustomerCreditCurrency[]
+  } | null>(null)
   const [includeInactive, setIncludeInactive] = useState(false)
   /** 水单拆分收款：一笔水单按行分摊到该客户名下的待收单 */
   const [split, setSplit] = useState<{
@@ -94,6 +99,16 @@ export default function Customers() {
     method: string
     note: string
     amounts: Record<number, string>
+    saving: boolean
+  } | null>(null)
+  /** 客户预收抵扣弹窗：同币种、仍待收的单里挑一张 */
+  const [creditApply, setCreditApply] = useState<{
+    c: Customer
+    currency: string
+    rows: any[]
+    target: string
+    amount: string
+    note: string
     saving: boolean
   } | null>(null)
   /** 读取失败不能装成「没有客户」 */
@@ -163,13 +178,14 @@ export default function Customers() {
   }
 
   const openDetail = async (c: Customer) => {
-    const [stats, orders, settings, prices] = await Promise.all([
+    const [stats, orders, settings, prices, credits] = await Promise.all([
       window.api.customers.stats(c.id),
       window.api.customers.orders(c.id),
       window.api.settings.get(),
-      window.api.customers.stylePriceHistory({ customerId: c.id })
+      window.api.customers.stylePriceHistory({ customerId: c.id }),
+      window.api.credits.balance(c.id)
     ])
-    setDetail({ c, stats, orders, base: settings?.baseCurrency ?? 'CNY', prices })
+    setDetail({ c, stats, orders, base: settings?.baseCurrency ?? 'CNY', prices, credits })
   }
 
   const openSplit = async (c: Customer) => {
@@ -228,6 +244,79 @@ export default function Customers() {
     } catch (e) {
       toast((e as Error).message, 'error')
       setSplit((s) => (s ? { ...s, saving: false } : s))
+    }
+  }
+
+  /**
+   * 用客户预收抵一张单（R27）：余额不是现金，抵扣只冲目标单的待收，
+   * 所以这里只让选同币种、还有待收的单。抵完刷新客户详情，余额与待收一起变。
+   */
+  const openApply = async (c: Customer, currency: string) => {
+    try {
+      const rows = (await window.api.report.customerOrderRows(c.id)).filter(
+        (r) => r.currency === currency && r.receivable > 0.001
+      )
+      if (!rows.length) {
+        toast(`这家客户没有 ${currency} 的待收单据可以抵`, 'error')
+        return
+      }
+      setCreditApply({
+        c,
+        currency,
+        rows,
+        target: `${rows[0].kind}:${rows[0].docId}`,
+        amount: '',
+        note: '',
+        saving: false
+      })
+    } catch (e) {
+      toast((e as Error).message || '待收单据没加载出来', 'error')
+    }
+  }
+
+  const saveApply = async () => {
+    if (!creditApply) return
+    const [kind, id] = creditApply.target.split(':')
+    const amount = Number(creditApply.amount)
+    if (!(amount > 0)) {
+      toast('填一个大于 0 的抵扣金额', 'error')
+      return
+    }
+    setCreditApply({ ...creditApply, saving: true })
+    try {
+      await window.api.credits.apply({
+        customerId: creditApply.c.id,
+        currency: creditApply.currency,
+        targetKind: kind === 'sample' ? 'sample' : 'order',
+        targetId: Number(id),
+        amount,
+        note: creditApply.note.trim()
+      })
+      toast(`已用客户预收抵扣 ${amount.toFixed(2)} ${creditApply.currency}（不算现金到账）`)
+      const c = creditApply.c
+      setCreditApply(null)
+      await openDetail(c)
+    } catch (e) {
+      toast((e as Error).message, 'error')
+      setCreditApply((s) => (s ? { ...s, saving: false } : s))
+    }
+  }
+
+  const reverseCredit = async (app: CustomerCreditCurrency['applications'][number]) => {
+    if (!detail) return
+    if (
+      !window.confirm(
+        `撤销这笔 ${app.amount.toFixed(2)} ${app.currency} 的预收抵扣？撤销后余额回来，${app.targetNo} 的待收也跟着回来。`
+      )
+    ) {
+      return
+    }
+    try {
+      await window.api.credits.reverse(app.id, '客户页手动撤销')
+      toast('已撤销这笔预收抵扣')
+      await openDetail(detail.c)
+    } catch (e) {
+      toast((e as Error).message, 'error')
     }
   }
 
@@ -641,6 +730,82 @@ export default function Customers() {
             </div>
           </div>
 
+          <h3 style={{ fontSize: 13, margin: '4px 0 8px' }}>客户预收（多收 / 作废余款 / 取消单实收）</h3>
+          {detail.credits.length === 0 ? (
+            <p className="faint" style={{ margin: '0 0 12px' }}>
+              暂无预收余额。客户多付的钱、作废单上已到的款、取消打样单的实收都会自动归到这里，可以抵下一张单。
+            </p>
+          ) : (
+            detail.credits.map((cc) => (
+              <div key={cc.currency} className="card" style={{ padding: 12, marginBottom: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                  <strong>{cc.currency}</strong>
+                  <span>
+                    可用{' '}
+                    <strong style={{ color: cc.available < -0.001 ? 'var(--danger)' : undefined }}>
+                      {money(cc.available, cc.currency)}
+                    </strong>
+                  </span>
+                  <span className="faint">
+                    来源 {money(cc.gross, cc.currency)} − 已抵扣 {money(cc.applied, cc.currency)}
+                  </span>
+                  <div className="spacer" />
+                  {cc.available > 0.001 ? (
+                    <Button size="sm" onClick={() => void openApply(detail.c, cc.currency)}>
+                      抵一张单
+                    </Button>
+                  ) : null}
+                </div>
+                {cc.available < -0.001 ? (
+                  <p style={{ color: 'var(--danger)', margin: '8px 0 0' }}>
+                    预收出现缺口 {money(-cc.available, cc.currency)}
+                    ：来源单据被改动过。请先撤销部分抵扣，再使用这笔余额。
+                  </p>
+                ) : null}
+                {cc.sources.length > 0 ? (
+                  <div className="faint" style={{ marginTop: 8, lineHeight: 1.7 }}>
+                    来源：
+                    {cc.sources
+                      .map((s) => `${s.docNo}（${s.statusText}）${money(s.amount, s.currency)}`)
+                      .join('；')}
+                  </div>
+                ) : null}
+                {cc.applications.length > 0 ? (
+                  <div className="table-wrap" style={{ marginTop: 8 }}>
+                    <table className="data">
+                      <thead>
+                        <tr>
+                          <th>抵扣到</th>
+                          <th>日期</th>
+                          <th className="num">金额</th>
+                          <th>备注</th>
+                          <th>操作人</th>
+                          <th />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {cc.applications.map((a) => (
+                          <tr key={a.id}>
+                            <td className="mono">{a.targetNo}</td>
+                            <td className="faint nowrap">{a.appliedAt}</td>
+                            <td className="num">{money(a.amount, a.currency)}</td>
+                            <td className="faint">{a.note || '—'}</td>
+                            <td className="faint">{a.actor || '—'}</td>
+                            <td style={{ textAlign: 'right' }}>
+                              <Button size="sm" variant="ghost" onClick={() => void reverseCredit(a)}>
+                                撤销
+                              </Button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : null}
+              </div>
+            ))
+          )}
+
           <h3 style={{ fontSize: 13, margin: '4px 0 8px' }}>历史成交价（报价前先看这家上次付了多少）</h3>
           {detail.prices.length === 0 ? (
             <Empty text="这个客户还没有成交过的款号" />
@@ -741,6 +906,58 @@ export default function Customers() {
               </Button>
             </div>
           ) : null}
+        </Modal>
+      ) : null}
+
+      {creditApply ? (
+        <Modal title={`用客户预收抵扣 · ${creditApply.c.company}`} onClose={() => setCreditApply(null)}>
+          <p className="faint" style={{ marginTop: 0 }}>
+            抵扣不是现金到账：只冲减目标单的待收，不进收款流水、月报和毛利。只能抵同一币种的单。
+          </p>
+          <div className="price-calc mb">
+            <div>
+              <span className="muted">币种</span>
+              <span>{creditApply.currency}</span>
+            </div>
+            <div>
+              <span className="muted">抵到哪张单</span>
+              <select
+                value={creditApply.target}
+                onChange={(e) => setCreditApply({ ...creditApply, target: e.target.value })}
+              >
+                {creditApply.rows.map((r) => (
+                  <option key={`${r.kind}-${r.docId}`} value={`${r.kind}:${r.docId}`}>
+                    {r.docNo} · 待收 {money(r.receivable, r.currency)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <span className="muted">抵扣金额</span>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                placeholder="0.00"
+                value={creditApply.amount}
+                onChange={(e) => setCreditApply({ ...creditApply, amount: e.target.value })}
+              />
+            </div>
+            <div>
+              <span className="muted">备注</span>
+              <input
+                placeholder="选填，如「上次多收的定金转过来」"
+                value={creditApply.note}
+                onChange={(e) => setCreditApply({ ...creditApply, note: e.target.value })}
+              />
+            </div>
+          </div>
+          <div style={{ marginTop: 12, display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <Button onClick={() => setCreditApply(null)}>取消</Button>
+            <Button variant="primary" disabled={creditApply.saving} onClick={() => void saveApply()}>
+              {creditApply.saving ? '抵扣中…' : '确认抵扣'}
+            </Button>
+          </div>
         </Modal>
       ) : null}
 

@@ -3,6 +3,7 @@
  * preload 暴露的 window.api 必须满足此接口。
  */
 import type {
+  CustomerCreditCurrency,
   CustomerReceivable,
   ExportKind,
   MonthlyReportRow,
@@ -181,6 +182,24 @@ export interface IKanApi {
     receivables(): Promise<CustomerReceivable[]>
     /** 某客户名下订单的金额行（拆分收款弹窗与对账导出同一份口径） */
     customerOrderRows(customerId: number): Promise<any[]>
+  }
+  /**
+   * 客户预收（R27）：余额从 payments 的现状派生（多收 / 作废余款 / 取消单实收），
+   * 抵扣另记台账。抵扣不是现金，绝不进收款流水与现金流，只冲目标单的待收。
+   */
+  credits: {
+    balance(customerId: number): Promise<CustomerCreditCurrency[]>
+    apply(input: {
+      customerId: number
+      currency: string
+      targetKind: 'order' | 'sample'
+      targetId: number
+      amount: number
+      appliedAt?: string
+      note?: string
+    }): Promise<CustomerCreditCurrency[]>
+    /** 撤销一笔抵扣（不删行，写原因）；余额和待收一起回来 */
+    reverse(applicationId: number, reason: string): Promise<CustomerCreditCurrency[]>
   }
   settings: {
     get(): Promise<any>
