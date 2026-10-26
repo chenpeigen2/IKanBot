@@ -882,12 +882,6 @@ export function setOrderParties(
   const baseShip = parseParty(row.ship_to_json) ?? shipPartyOf(live) ?? emptyParty()
   const billJson = stringifyParty(patchParty(baseBill, patch.billTo))
   const shipJson = stringifyParty(patchParty(baseShip, patch.shipTo))
-  db.run('UPDATE orders SET bill_to_json=?, ship_to_json=?, updated_at=? WHERE id=?', [
-    billJson,
-    shipJson,
-    now(),
-    orderId
-  ])
   const changed: string[] = []
   const labels: Record<keyof PartySnapshot, string> = {
     company: '公司',
@@ -909,7 +903,17 @@ export function setOrderParties(
   }
   diff('买方抬头', baseBill, patch.billTo)
   diff('收货抬头', baseShip, patch.shipTo)
-  logEvent(orderId, 'party_update', null, null, changed.join('；') || '抬头没改动')
+  const note = changed.join('；') || '抬头没改动'
+  // 抬头和留痕一起落：分开写会留下「纸面已经改了、历史却说没改」的对不上
+  transact(() => {
+    db.run('UPDATE orders SET bill_to_json=?, ship_to_json=?, updated_at=? WHERE id=?', [
+      billJson,
+      shipJson,
+      now(),
+      orderId
+    ])
+    logEvent(orderId, 'party_update', null, null, note)
+  })
   return getOrder(orderId)!
 }
 

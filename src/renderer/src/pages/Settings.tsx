@@ -58,10 +58,12 @@ export default function Settings() {
 
   useEffect(() => {
     void loadSettings()
-    void window.api.settings.baseLocked().then(setBaseLocked)
-    void window.api.app.paths().then(setPaths)
+    // 这三样都是页面骨架信息：读不出来要吭声，不能默默显示默认值
+    const fail = (what: string) => (e: unknown) => toast(`${what}没读出来：${(e as Error).message}`, 'error')
+    window.api.settings.baseLocked().then(setBaseLocked, fail('基准币种状态'))
+    window.api.app.paths().then(setPaths, fail('数据目录'))
     // 一进来先问主进程要当前状态：进度那一份只认主进程存的，页面刷新也不会丢
-    void window.api.updater.state().then(setUpdate)
+    window.api.updater.state().then(setUpdate, fail('更新状态'))
   }, [])
 
   // 订阅自动更新事件

@@ -568,16 +568,27 @@ export function reminders(): Reminder[] {
     const row = orderById.get(r.orderId)
     if (!row) continue
     if (r.paidAmount > 0) {
-      const since = lastPaid.get(r.orderId) || r.createdAt
+      // 尾款的主钟只认「货出去了多久」：分批小额付款会把「最后收款日」一路往后推，
+      // 结果最该催的客户永远不出现在提醒里。没收过货的单仍按最后收款日算（定金还在谈）。
+      const shipped = ['shipped', 'cleared', 'delivered', 'partial_shipped'].includes(String(row.ship_status))
+      const shipAt = shipClock.get(r.orderId) ?? shipEventClock.get(r.orderId) ?? null
+      const lastPaidAt = lastPaid.get(r.orderId) ?? null
+      const since = (shipped ? shipAt : null) ?? lastPaidAt ?? r.createdAt
       const days = daysFrom(since)
       if (days === null || days < s.remindBalanceDays) continue
+      const from =
+        since === shipAt
+          ? `自出运 ${String(since).slice(0, 10)}`
+          : since === lastPaidAt
+            ? `自最后收款 ${String(lastPaidAt).slice(0, 10)}`
+            : `自建单 ${String(since).slice(0, 10)}`
       add(
         {
           orderId: r.orderId,
           orderNo: r.orderNo,
           customerName: r.customerName,
           kind: 'balance',
-          message: `已收 ${r.paidAmount.toFixed(2)} / 待收 ${r.receivable.toFixed(2)}，尾款 ${days} 天未到账`,
+          message: `已收 ${r.paidAmount.toFixed(2)} / 待收 ${r.receivable.toFixed(2)}，尾款 ${days} 天未到账（${from}）`,
           days
         },
         'balance'

@@ -7913,6 +7913,86 @@ check('表头认不出时用人话报错', r31Err.includes('款号'), r31Err)
 check('报错回显读到的表头，一眼看出是乱码', r31Err.includes('Êý¾Ý'), r31Err)
 check('报错教用户改成 CSV UTF-8', r31Err.includes('UTF-8'), r31Err)
 
+/* ---------------- R32：报价有效期三态 + 尾款时钟 + 抬头留痕 ---------------- */
+
+section('R32 报价单：清空有效期就是「不设」，不再被偷偷写成今天+N')
+
+const r32Items = [{ styleNo: 'R32-Q', productName: '测试款', quantity: 10, unitPrice: 5 }]
+const r32Q = quotations.saveQuotation({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  items: r32Items
+})
+const r32ValidCell = (): string | null =>
+  (getDb().get('SELECT valid_until FROM quotations WHERE id = ?', [r32Q.id]) as { valid_until: string | null })
+    .valid_until
+check('新建时没给有效期仍按设置补默认（今天+N）', String(r32ValidCell() ?? '') > localDate(), String(r32ValidCell()))
+
+quotations.saveQuotation({ id: r32Q.id, customerId: c1.id, currency: 'USD', exchangeRate: 7.2, validUntil: '', items: r32Items })
+eq('把有效期清空后库里就是 NULL', r32ValidCell(), null)
+const r32ClearEv = quotations.listQuotationEvents(r32Q.id).find((e) => e.note.includes('有效期'))
+check('留痕写清「→ 未填」，答得出是谁把它改没的', !!r32ClearEv && r32ClearEv.note.includes('未填'), r32ClearEv?.note)
+
+quotations.saveQuotation({ id: r32Q.id, customerId: c1.id, currency: 'USD', exchangeRate: 7.2, items: r32Items })
+eq('漏传一次不会把「已清空」又写成今天+N', r32ValidCell(), null)
+
+quotations.saveQuotation({
+  id: r32Q.id,
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  validUntil: '2026-12-31',
+  items: r32Items
+})
+eq('填了日期就照填的落', r32ValidCell(), '2026-12-31')
+quotations.saveQuotation({ id: r32Q.id, customerId: c1.id, currency: 'USD', exchangeRate: 7.2, items: r32Items })
+eq('填过的有效期漏传也原样保留', r32ValidCell(), '2026-12-31')
+
+section('R32 尾款时钟：分批小额付款不再把催款提醒清零')
+
+const r32BalSettings = getSettings()
+saveSettings({ ...r32BalSettings, remindBalanceDays: 7 })
+
+const r32Ship = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r32Ship.id, { styleNo: 'R32-BAL', quantity: 100, unitPrice: 10 })
+orders.setShipStatus(r32Ship.id, 'shipped', 'R32 尾款时钟')
+const r32ShipEv = getDb().get(
+  "SELECT id FROM order_events WHERE order_id = ? AND kind = 'ship_status' ORDER BY id DESC LIMIT 1",
+  [r32Ship.id]
+) as { id?: number } | null
+// 货 30 天前就走了，昨天又收了一小笔：老口径按昨天起算 = 1 天，永远不提醒
+getDb().run('UPDATE order_events SET at = ? WHERE id = ?', [dAgoIso(30), Number(r32ShipEv?.id ?? 0)])
+await orders.addPayment(r32Ship.id, { paidAt: dAgo(1), amount: 100, method: 'T/T', bankRef: 'R32-P1' })
+const r32BalRem = dashboard.reminders().find((r) => r.kind === 'balance' && r.orderId === r32Ship.id)
+check('出运 30 天、昨天刚收一小笔，仍然催尾款', !!r32BalRem, JSON.stringify(r32BalRem))
+eq('天数按出运起算，不被最后收款清零', r32BalRem?.days, 30)
+check('文案说清是从哪天起算的', (r32BalRem?.message ?? '').includes('自出运'), r32BalRem?.message)
+
+const r32Idle = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+await orders.addOrderItem(r32Idle.id, { styleNo: 'R32-IDLE', quantity: 100, unitPrice: 10 })
+await orders.addPayment(r32Idle.id, { paidAt: dAgo(1), amount: 100, method: 'T/T', bankRef: 'R32-P2' })
+check(
+  '货还没走的单仍按最后收款日算，昨天刚收过就不催（不无脑提前）',
+  !dashboard.reminders().some((r) => r.kind === 'balance' && r.orderId === r32Idle.id)
+)
+saveSettings(r32BalSettings)
+
+section('R32 抬头与留痕一起落：改一次抬头必须留下一条 party_update')
+
+const r32PartyOrder = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'draft' })
+const r32Party = orders.setOrderParties(r32PartyOrder.id, { billTo: { company: 'ZZ 抬头测试公司' } })
+eq('抬头写进去了', r32Party.billTo.company, 'ZZ 抬头测试公司')
+eq(
+  '留痕同一条事务里落了',
+  Number(
+    (getDb().get("SELECT COUNT(*) AS n FROM order_events WHERE order_id = ? AND kind = 'party_update'", [
+      r32PartyOrder.id
+    ]) as { n?: number }).n ?? 0
+  ),
+  1
+)
+
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
 console.log(`通过 ${passed} 项，失败 ${failed} 项`)

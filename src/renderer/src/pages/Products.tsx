@@ -74,7 +74,10 @@ export default function Products() {
   }
 
   useEffect(() => {
-    void window.api.settings.get().then((s) => setBaseCurrency(s.baseCurrency || 'CNY'))
+    window.api.settings
+      .get()
+      .then((s) => setBaseCurrency(s.baseCurrency || 'CNY'))
+      .catch((e) => toast(`基准币种没读出来：${(e as Error).message}`, 'error'))
   }, [])
 
   // 首次进入和「显示已停用」切换都走这里

@@ -53,6 +53,8 @@ export default function Quotations() {
   const [detail, setDetail] = useState<any | null>(null)
   const [convertTarget, setConvertTarget] = useState<any | null>(null)
   const [convertVersions, setConvertVersions] = useState<any[]>([])
+  /** 历史版本拉取失败：转单按钮要停下来，不能拿「只有一版」的假象转出去 */
+  const [convertVersionsError, setConvertVersionsError] = useState('')
   const [convertRevision, setConvertRevision] = useState<number | null>(null)
   const [overrideBy, setOverrideBy] = useState('')
   const [overrideReason, setOverrideReason] = useState('')
@@ -101,10 +103,20 @@ export default function Quotations() {
     setConvertRevision(Number(q.revision ?? 1))
     setOverrideBy('')
     setOverrideReason('')
+    await loadConvertVersions(q)
+  }
+
+  /**
+   * 历史版本没拉出来时不许转单：下拉只剩「当前第 N 版」，
+   * 看着像只有一版，实际可能客户确认的是更早那一版的价格。
+   */
+  const loadConvertVersions = async (q: any) => {
+    setConvertVersionsError('')
     try {
       setConvertVersions(await window.api.quotations.versions(q.id))
-    } catch {
+    } catch (e) {
       setConvertVersions([])
+      setConvertVersionsError((e as Error).message || '历史版本没拉出来')
     }
   }
 
@@ -307,10 +319,14 @@ export default function Quotations() {
               <Button  onClick={() => setConvertTarget(null)}>
                 取消
               </Button>
-              <Button  onClick={() => void convert(convertTarget, 'draft')}>
+              <Button disabled={!!convertVersionsError} onClick={() => void convert(convertTarget, 'draft')}>
                 先存草稿
               </Button>
-              <Button variant="primary"  onClick={() => void convert(convertTarget, 'sent')}>
+              <Button
+                variant="primary"
+                disabled={!!convertVersionsError}
+                onClick={() => void convert(convertTarget, 'sent')}
+              >
                 PI 现在就发（待确认）
               </Button>
             </>
@@ -319,6 +335,14 @@ export default function Quotations() {
           <div className="alert info">
             款号、颜色、尺码、数量、单价、运费保险一个数字都不用重敲，报价单的汇率和汇率日期也原样带过去。
           </div>
+          {convertVersionsError ? (
+            <div className="alert warn">
+              历史版本没拉出来（{convertVersionsError}），先别转单——万一客户确认的是更早那一版的价格，转出去就是按错的价开票。
+              <div style={{ marginTop: 8 }}>
+                <Button onClick={() => void loadConvertVersions(convertTarget)}>重新拉一次</Button>
+              </div>
+            </div>
+          ) : null}
 
           <div className="field">
             <label>按哪一版转？</label>
@@ -326,7 +350,9 @@ export default function Quotations() {
               value={convertRevision ?? ''}
               onChange={(e) => setConvertRevision(e.target.value === '' ? null : Number(e.target.value))}
             >
-              {convertVersions.length === 0 ? (
+              {convertVersionsError ? (
+                <option value={convertRevision ?? ''}>版本没拉出来，先点上面「重新拉一次」</option>
+              ) : convertVersions.length === 0 ? (
                 <option value={convertRevision ?? ''}>当前第 {convertTarget.revision ?? 1} 版</option>
               ) : (
                 convertVersions.map((v) => (
@@ -416,15 +442,36 @@ function QuotationDetailModal({
   const [settings, setSettings] = useState<any>(null)
   const [docVersions, setDocVersions] = useState<any[]>([])
   const [events, setEvents] = useState<any[]>([])
+  /** 读失败和「真的没有」分开说：存档没拉出来却显示「还没有存档」，用户会以为凭据没存过 */
+  const [docError, setDocError] = useState('')
+  const [eventError, setEventError] = useState('')
 
   useEffect(() => {
-    void window.api.settings.get().then(setSettings)
+    window.api.settings
+      .get()
+      .then(setSettings)
+      .catch((e) => toast(`设置没读出来，Logo 可能不显示：${(e as Error).message}`, 'error'))
   }, [])
 
   /** 单据存档 + 报价单自己的操作历史 */
+  const loadDocs = () => {
+    setDocError('')
+    window.api.docs
+      .listQuotation(quotation.id)
+      .then(setDocVersions)
+      .catch((e) => setDocError((e as Error).message))
+  }
+  const loadEvents = () => {
+    setEventError('')
+    window.api.quotations
+      .events(quotation.id)
+      .then(setEvents)
+      .catch((e) => setEventError((e as Error).message))
+  }
   useEffect(() => {
-    void window.api.docs.listQuotation(quotation.id).then(setDocVersions)
-    void window.api.quotations.events(quotation.id).then(setEvents)
+    loadDocs()
+    loadEvents()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quotation.id])
 
   const buildImages = async (): Promise<ImageMap> => {
@@ -508,15 +555,19 @@ function QuotationDetailModal({
     }
   }
 
-  const setResult = async (result: QuotationResult) => {
-    await window.api.quotations.updateMeta(quotation.id, { result })
-    await onChanged()
+  /** 状态/结果是后端守门的（已转单、已作废都不许乱改）：报错必须弹出来，不能静默停在原地 */
+  const patchMeta = async (patch: { result?: QuotationResult; status?: QuotationStatus }) => {
+    try {
+      await window.api.quotations.updateMeta(quotation.id, patch)
+      await onChanged()
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
   }
 
-  const setStatus = async (status: QuotationStatus) => {
-    await window.api.quotations.updateMeta(quotation.id, { status })
-    await onChanged()
-  }
+  const setResult = (result: QuotationResult) => patchMeta({ result })
+
+  const setStatus = (status: QuotationStatus) => patchMeta({ status })
 
   return (
     <>
@@ -709,7 +760,11 @@ function QuotationDetailModal({
                 {docVersions.length === 0 ? (
                   <tr>
                     <td colSpan={5}>
-                      <Empty text="还没有存档。点「预览报价单」→「存到系统」就会存一版进来。" />
+                      {docError ? (
+                        <LoadError what="存档版本" message={docError} onRetry={loadDocs} />
+                      ) : (
+                        <Empty text="还没有存档。点「预览报价单」→「存到系统」就会存一版进来。" />
+                      )}
                     </td>
                   </tr>
                 ) : (
@@ -765,7 +820,11 @@ function QuotationDetailModal({
                 {events.length === 0 ? (
                   <tr>
                     <td colSpan={2}>
-                      <Empty text="还没有记录" />
+                      {eventError ? (
+                        <LoadError what="操作历史" message={eventError} onRetry={loadEvents} />
+                      ) : (
+                        <Empty text="还没有记录" />
+                      )}
                     </td>
                   </tr>
                 ) : (
@@ -861,23 +920,28 @@ function QuotationModal({
 
   useEffect(() => {
     void (async () => {
-      const [cs, s, ps, pt] = await Promise.all([
-        // 编辑老报价时，即使客户后来停用了，下拉里也得还有他
-        window.api.customers.list('', true),
-        window.api.settings.get(),
-        window.api.products.list(''),
-        window.api.orders.ports()
-      ])
-      setCustomers(cs)
-      setSettings(s)
-      setProducts(ps)
-      setPorts(pt)
-      if (!isEdit) {
-        setForm((f) => ({
-          ...f,
-          depositRatio: s.defaultDepositRatio ?? f.depositRatio,
-          validUntil: new Date(Date.now() + (s.piValidDays ?? 15) * 86400000).toISOString().slice(0, 10)
-        }))
+      try {
+        const [cs, s, ps, pt] = await Promise.all([
+          // 编辑老报价时，即使客户后来停用了，下拉里也得还有他
+          window.api.customers.list('', true),
+          window.api.settings.get(),
+          window.api.products.list(''),
+          window.api.orders.ports()
+        ])
+        setCustomers(cs)
+        setSettings(s)
+        setProducts(ps)
+        setPorts(pt)
+        if (!isEdit) {
+          setForm((f) => ({
+            ...f,
+            depositRatio: s.defaultDepositRatio ?? f.depositRatio,
+            validUntil: new Date(Date.now() + (s.piValidDays ?? 15) * 86400000).toISOString().slice(0, 10)
+          }))
+        }
+      } catch (e) {
+        // 以前这里没兜底：客户/商品没拉出来就是一片空白下拉，像数据被删了
+        toast(`弹窗的候选数据没拉出来：${(e as Error).message}`, 'error')
       }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -906,9 +970,15 @@ function QuotationModal({
       return
     }
     let alive = true
-    void window.api.customers.stylePriceHistory({ customerId: form.customerId }).then((rows) => {
-      if (alive) setLastPrices(rows.slice(0, 8))
-    })
+    window.api.customers
+      .stylePriceHistory({ customerId: form.customerId })
+      .then((rows) => {
+        if (alive) setLastPrices(rows.slice(0, 8))
+      })
+      .catch((e) => {
+        // 拉不到历史价不等于这个客户没历史价：说一声，别让人以为真是第一次报价
+        if (alive) toast(`历史成交价没拉出来：${(e as Error).message}`, 'error')
+      })
     return () => {
       alive = false
     }
@@ -1224,6 +1294,12 @@ function QuotationModal({
               >
                 +15天
               </Button>
+              <Button size="sm" onClick={() => setForm({ ...form, validUntil: '' })}>
+                清空（不设）
+              </Button>
+            </div>
+            <div className="hint" style={{ marginTop: 5 }}>
+              清空就是不设有效期，纸面 PI 不再印一个日期；系统不会替你改成「今天+15 天」。
             </div>
           </div>
           <div className="field">

@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IKanApi } from '../../src/shared/api'
 import type {
+  AppSettings,
   CustomerCreditCurrency,
   CustomerReceivable,
   ExportKind,
@@ -179,8 +180,8 @@ const api: IKanApi = {
       call<CustomerCreditCurrency[]>('credits:reverseRefund', refundId, reason)
   },
   settings: {
-    get: () => call<any>('settings:get'),
-    save: (s: any) => call<any>('settings:save', s),
+    get: () => call<AppSettings>('settings:get'),
+    save: (s: AppSettings) => call<AppSettings>('settings:save', s),
     baseLocked: () => call<boolean>('settings:baseLocked')
   },
   images: {

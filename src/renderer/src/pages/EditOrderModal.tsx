@@ -85,8 +85,9 @@ export default function EditOrderModal({
 
   useEffect(() => {
     // 已停用的客户也要能选：改历史单时下拉里必须还有当时那个客户
-    void window.api.customers.list('', true).then(setCustomers)
-    void window.api.orders.ports().then(setPorts)
+    const fail = (e: unknown) => toast(`下拉候选没拉出来：${(e as Error).message}`, 'error')
+    window.api.customers.list('', true).then(setCustomers, fail)
+    window.api.orders.ports().then(setPorts, fail)
   }, [])
 
   // 保存期间按住按钮：一次改单要写主表 + 历史 + 状态重算，连点两下会把同一份改动提交两遍

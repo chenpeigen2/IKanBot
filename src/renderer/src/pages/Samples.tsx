@@ -73,7 +73,10 @@ export default function Samples() {
   }, [kw, status])
 
   useEffect(() => {
-    void window.api.settings.get().then((s) => setBaseCurrency(s?.baseCurrency ?? 'CNY'))
+    window.api.settings
+      .get()
+      .then((s) => setBaseCurrency(s?.baseCurrency ?? 'CNY'))
+      .catch((e) => toast(`基准币种没读出来：${(e as Error).message}`, 'error'))
   }, [])
 
   const remove = async (s: any) => {
@@ -805,8 +808,9 @@ function SampleModal({
 
   useEffect(() => {
     // 编辑老打样单时，即使客户后来停用了也要能选回原来那个
-    void window.api.customers.list('', true).then(setCustomers)
-    void window.api.products.list('').then(setProducts)
+    const fail = (e: unknown) => toast(`下拉候选没拉出来：${(e as Error).message}`, 'error')
+    window.api.customers.list('', true).then(setCustomers, fail)
+    window.api.products.list('').then(setProducts, fail)
   }, [])
 
   const sampleFee = lines.reduce((s, l) => s + l.quantity * l.unitPrice, 0)

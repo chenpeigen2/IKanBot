@@ -324,7 +324,13 @@ function saveQuotationInner(input: QuotationInput): QuotationDetail {
   // 走到更新分支时再用数据库原值兜住漏传（见下面的 keepCharges/keepValidUntil）
   assertChargeAmounts(input.charges ?? [])
   const charges = JSON.stringify((input.charges ?? []).filter((c) => c.label.trim()))
-  const validUntil = input.validUntil ?? addDays(localDate(), settings.piValidDays)
+  /**
+   * 有效期三态：没传＝这次不动它（只有新建才给「今天+N」默认）；
+   * 传了但是空的＝用户明确清空，一律落 NULL。
+   * 清空绝不能悄悄写成「今天+N」：那张纸会印出一个客户从没确认过的日期。
+   */
+  const sentValidUntil = input.validUntil === undefined ? undefined : String(input.validUntil ?? '').trim() || null
+  const validUntil = sentValidUntil ?? addDays(localDate(), settings.piValidDays)
   // 汇率必须手动填：系统不拿默认值蒙人，也不替人编锁定日期
   const rate = Number(input.exchangeRate ?? 0)
   if (!rate || rate <= 0) throw new Error('请先按今天钉盘的汇率填写汇率')
@@ -373,7 +379,7 @@ function saveQuotationInner(input: QuotationInput): QuotationDetail {
     // 「这次没传」不等于「要清空」：漏传费用/有效期时保留数据库原值，
     // 否则编辑一次就把费用表写成空、有效期推到「今天+N」，客户手里那张纸悄悄变了
     const keepCharges = input.charges === undefined ? oldCharges : input.charges
-    const keepValidUntil = input.validUntil === undefined ? ((before.valid_until as string | null) ?? validUntil) : validUntil
+    const keepValidUntil = sentValidUntil === undefined ? ((before.valid_until as string | null) ?? null) : sentValidUntil
     // 汇率没变就沿用原来的日期；变了就记今天（谁改的谁负责）
     if (!rateDate) rateDate = oldRate === rate ? oldDate ?? localDate() : localDate()
     // 状态/结果没传就保持原样（编辑一张已转订单的报价单不能把状态打回草稿）

@@ -3,6 +3,7 @@
  * preload 暴露的 window.api 必须满足此接口。
  */
 import type {
+  AppSettings,
   CustomerCreditCurrency,
   CustomerReceivable,
   ExportKind,
@@ -213,8 +214,9 @@ export interface IKanApi {
     reverseRefund(refundId: number, reason: string): Promise<CustomerCreditCurrency[]>
   }
   settings: {
-    get(): Promise<any>
-    save(s: any): Promise<any>
+    /** 服务层读出来就归过一版（缺列补默认），到这里一定是完整的 AppSettings */
+    get(): Promise<AppSettings>
+    save(s: AppSettings): Promise<AppSettings>
     /** 基准币种是否已锁死（库里已有单据） */
     baseLocked(): Promise<boolean>
   }
