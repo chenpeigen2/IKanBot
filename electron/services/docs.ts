@@ -7,7 +7,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'path'
 import { dataDir, docsDir, getDb, transact } from '../db'
 import { logEvent } from './events'
 import { computeOrderMoney, parseCharges } from './money'
-import { ciNoOf } from '../../src/shared/documents'
+import { ciNoOf, latestAmountPerDocNo } from '../../src/shared/documents'
 import type { DocKind } from '../../src/shared/types'
 
 export interface DocVersion {
@@ -337,9 +337,14 @@ export function assertCiNoOverlap(orderId: number, docNo: string, confirmedOverl
     [orderId]
   ) as { doc_no?: string; version?: number; amount?: number }[]
   const isWhole = docNo === base
-  const overlap = rows
-    .filter((r) => (isWhole ? String(r.doc_no ?? '') !== base : String(r.doc_no ?? '') === base))
-    .reduce((s, r) => s + Number(r.amount ?? 0), 0)
+  // 按号取最新一版相加：重版过的 CI 老版本还挂在库里，全加会把重叠金额虚报成两倍
+  const amounts = latestAmountPerDocNo(
+    rows.map((r) => ({ docNo: String(r.doc_no ?? ''), version: Number(r.version ?? 0), amount: Number(r.amount ?? 0) }))
+  )
+  const overlap = [...amounts].reduce(
+    (s, [no, amt]) => s + (isWhole ? (no !== base ? amt : 0) : no === base ? amt : 0),
+    0
+  )
   if (overlap <= 0.005) return 0
   if (!confirmedOverlap) {
     throw new Error(

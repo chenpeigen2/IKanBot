@@ -121,6 +121,23 @@ export function ciNoOf(piNo: string, batchNo?: string): string {
   return batch ? `${base}-${batch}` : base
 }
 
+/**
+ * 同一个 CI 号可能重版过好几张（重版不作废旧版），要金额只能取每个号的最新一版。
+ * 批次金额那边取的就是 MAX(version)，这里必须同一个口径——
+ * 否则出过第二版的批次会在「CI 重叠」确认框里把重叠金额虚报成两倍，人可能据此作废错的那张票。
+ */
+export function latestAmountPerDocNo(
+  rows: { docNo: string; version: number; amount: number }[]
+): Map<string, number> {
+  const best = new Map<string, { version: number; amount: number }>()
+  for (const r of rows) {
+    const cur = best.get(r.docNo)
+    const version = Number(r.version) || 0
+    if (!cur || version >= cur.version) best.set(r.docNo, { version, amount: Number(r.amount) || 0 })
+  }
+  return new Map([...best].map(([docNo, v]) => [docNo, v.amount]))
+}
+
 /** 一张装箱单的纸面日期：补录过就用补录的，否则用建单当天（本地日） */
 export function plDocDateOf(pl: PackingList): string {
   return pl.docDate || localDateOf(pl.createdAt)

@@ -21,13 +21,14 @@ import type { OrderDetail } from '../../src/shared/types'
 import type {
   Customer,
   Payment,
+  PaymentStatus,
   SampleFeeStatus,
   SampleOrder,
   SampleOrderDetail,
   SampleOrderItem,
   SampleStatus
 } from '../../src/shared/types'
-import { SAMPLE_FEE_STATUS_LABEL, SAMPLE_STATUS_LABEL } from '../../src/shared/types'
+import { PAYMENT_STATUS_LABEL, SAMPLE_FEE_STATUS_LABEL, SAMPLE_STATUS_LABEL } from '../../src/shared/types'
 
 function now(): string {
   return new Date().toISOString()
@@ -819,12 +820,29 @@ export function addSamplePayment(sampleId: number, p: SamplePaymentInput): Sampl
     const o = getOrder(s.convertedOrderId)
     if (o && o.paymentStatus !== 'void') {
       throw new Error(
-        `这张打样单已经转成订单 ${o.orderNo}：样品费的钱请直接登记在订单上，这里只留转单前的实收。`
+        `这张打样单已经转成订单 ${o.orderNo}：样品费的钱请直接登记在订单上，这里只留转单前的实收。` +
+          (isBillingStatus(o.paymentStatus)
+            ? ''
+            : `现在那张单是「${PAYMENT_STATUS_LABEL[o.paymentStatus] ?? o.paymentStatus}」，` +
+              `样品费抵扣挂在它身上还没生效，这笔钱又回到了打样账上——先把那张订单恢复成计费状态（确认/续期）再收款，` +
+              `在这里另收一笔会和抵扣重复计。`)
       )
     }
   }
   if (s.feeStatus === 'offset') {
-    throw new Error(`打样单 ${s.sampleNo} 的样品费已经抵扣到订单里了：钱请登记在订单上，这里再落一笔会重复计。`)
+    // 这里不开「挂起就能收」的口子：转出的订单一旦恢复计费，抵扣会自动再生效，
+    // 那时这张单上又落了一笔现金，同一块钱就收了两次（应收口径也解释不了）。
+    const co = s.convertedOrderId ? getOrder(s.convertedOrderId) : null
+    const suspended = !!s.convertedOrderStatus && !isBillingStatus(s.convertedOrderStatus)
+    throw new Error(
+      `打样单 ${s.sampleNo} 的样品费已经抵扣进${co ? `订单 ${co.orderNo}` : '订单'}，这里再落一笔会重复计。` +
+        (suspended
+          ? `现在那张单是「${
+              PAYMENT_STATUS_LABEL[s.convertedOrderStatus as PaymentStatus] ?? s.convertedOrderStatus
+            }」，抵扣暂时挂起、这笔样品费又回到了待收——` +
+            `要收钱先把那张订单恢复成计费状态（确认报价/延长有效期），抵扣会自动生效，钱登记在那张单上。`
+          : `要改成收现金，请先撤销那笔抵扣（作废/退回那张转出订单，或按订单页的抵扣撤销通道处理），再来这里登记。`)
+    )
   }
   if (s.feeStatus === 'waived') {
     throw new Error(`打样单 ${s.sampleNo} 的样品费已免收：确实收到钱的话，请先把「打样费收款标记」改回「未收」再登记。`)

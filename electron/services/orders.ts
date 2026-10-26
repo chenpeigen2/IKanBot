@@ -2126,8 +2126,12 @@ export function setShipStatus(orderId: number, next: ShipStatus, note = ''): Ord
       `这张单的出货状态由装箱单批次汇总（当前：${SHIP_STATUS_LABEL[cur.ship_status as ShipStatus] ?? cur.ship_status}）。请到「装箱单」里改对应批次的出运状态，整单状态会自动跟着变。`
     )
   }
-  db.run('UPDATE orders SET ship_status = ?, updated_at = ? WHERE id = ?', [next, now(), orderId])
-  logEvent(orderId, 'ship_status', cur.ship_status, next, note)
+  transact(() => {
+    // 状态和留痕必须一起落：中间断掉会变成「状态改了、历史里没有」，
+    // 出货提醒的主钟（ship_status 事件）也就失去了那笔兜底时间
+    db.run('UPDATE orders SET ship_status = ?, updated_at = ? WHERE id = ?', [next, now(), orderId])
+    logEvent(orderId, 'ship_status', cur.ship_status, next, note)
+  })
   return getOrder(orderId)!
 }
 

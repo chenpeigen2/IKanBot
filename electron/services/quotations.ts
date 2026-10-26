@@ -823,9 +823,9 @@ export function convertToOrder(
       now(),
       order.id
     ])
-    if (overrideNote) {
-      db.run('UPDATE orders SET note = ? WHERE id = ?', [`${overrideNote}；${snap.note}`.replace(/^；/, ''), order.id])
-    }
+    // 过期报价的审批话术**只进操作历史**（下面那条 quotation_convert 事件），绝不写进订单备注：
+    // note 会原样印在 PI/CI 上发给客户，「经谁批准、为什么让步、有效期重置」都是我方内部口径，
+    // 客户看见议价底线，下次报价就拿它压人。原来这里还会整句覆盖掉「由报价单…转成」的凭据句。
     const saved = getOrder(order.id)!
     if (Math.abs(saved.grandTotal - snapGrand) > 0.005) {
       throw new Error(

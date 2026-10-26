@@ -29,7 +29,8 @@ import {
   renderSample,
   orderDocAmount,
   ciDocAmount,
-  ciNoOf
+  ciNoOf,
+  latestAmountPerDocNo
 } from '../src/shared/documents'
 import { localDate, localMonthOf, addDays } from '../src/shared/date'
 import { isBillingStatus, shownRemaining } from '../src/shared/billing'
@@ -652,10 +653,23 @@ const expiredOrder = quotations.convertToOrder(qExpired.id, {
   override: { approvedBy: '周文娟', reason: '老客户翻单，老板同意按旧价做' }
 })
 check('填了批准人和原因 → 可以沿用旧价转单', expiredOrder.id > 0)
+// R34：审批话术只进操作历史，绝不进订单备注——note 会原样印在 PI/CI 上发给客户
 check(
-  '订单备注写清了谁批准、为什么',
-  expiredOrder.note.includes('周文娟') && expiredOrder.note.includes('老客户翻单'),
+  '订单备注不带批准人/让步原因（发给客户的纸面）',
+  !expiredOrder.note.includes('周文娟') && !expiredOrder.note.includes('老客户翻单'),
   expiredOrder.note
+)
+check(
+  '订单备注保留转单凭据句（不再被覆盖掉）',
+  expiredOrder.note.includes('由报价单') && expiredOrder.note.includes('转成'),
+  expiredOrder.note
+)
+check(
+  '审批话术在订单操作历史里查得到',
+  orders
+    .listEvents(expiredOrder.id)
+    .some((e) => e.kind === 'quotation_convert' && e.note.includes('周文娟') && e.note.includes('老客户翻单')),
+  JSON.stringify(orders.listEvents(expiredOrder.id))
 )
 check(
   '报价单操作历史记下了沿用审批',
@@ -6199,7 +6213,13 @@ const r23Q = quotations.saveQuotation({
 const r23ExpOrder = quotations.convertToOrder(r23Q.id, { override: { approvedBy: '老板', reason: 'R23 客户认旧价' } })
 const r23ExpFresh = orders.getOrder(r23ExpOrder.id)!
 check('过期转单有效期被重置到未来', !!r23ExpFresh.validUntil && r23ExpFresh.validUntil > localDate(), String(r23ExpFresh.validUntil))
-check('转单留痕写明有效期重置', r23ExpFresh.note.includes('重置'), r23ExpFresh.note)
+// R34：有效期重置是我方内部口径，写在历史里，不写在发给客户的纸面上
+check(
+  '有效期重置只落在订单操作历史',
+  orders.listEvents(r23ExpOrder.id).some((e) => e.kind === 'quotation_convert' && e.note.includes('重置')),
+  JSON.stringify(orders.listEvents(r23ExpOrder.id))
+)
+check('订单备注不带有效期重置话术', !r23ExpFresh.note.includes('重置'), r23ExpFresh.note)
 
 // ⑧ R24 打样与报价的应收守门（先修口径，再谈把打样费落进流水）
 section('R24 打样守门：转单锁状态、抵扣只认转单、应收不清不许删')
@@ -8157,6 +8177,209 @@ check('月报带原币退款金额（没有汇率快照，不折基准币）', (
 const r33Dash = dashboard.dashboard()
 eq('工作台本月退款笔数与月报同一个数', r33Dash.monthRefunded, r33MonthRow?.refundCount)
 check('月度汇总导出多出退款两列且不改变收款列', dashboard.exportCsv('monthly').includes('本月退款笔数'), '')
+
+/* ---------------- R34 ---------------- */
+section('R34 台账导出的「待收」= 屏幕上那一列')
+
+const r34Base = getSettings().baseCurrency
+const r34ExpCust = customers.saveCustomer({ company: 'R34-EXPORT-CO' })
+const r34Void = orders.createOrder({
+  customerId: r34ExpCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'sent',
+  piNo: 'PI-R34-VOID'
+})
+await orders.addOrderItem(r34Void.id, { styleNo: 'R34-V', quantity: 10, unitPrice: 8 })
+orders.voidOrder(r34Void.id, 'R34 客户不做了')
+const r34Open = orders.createOrder({
+  customerId: r34ExpCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'sent',
+  piNo: 'PI-R34-OPEN'
+})
+await orders.addOrderItem(r34Open.id, { styleNo: 'R34-O', quantity: 10, unitPrice: 5 })
+const r34All = parseCsv(dashboard.exportCsv('orders_all'))
+const r34Head = r34All[0]
+const r34VoidRow = r34All.slice(1).find((l) => l[r34Head.indexOf('PI号')] === 'PI-R34-VOID')
+const r34OpenRow = r34All.slice(1).find((l) => l[r34Head.indexOf('PI号')] === 'PI-R34-OPEN')
+check('全量导出里两张单都在行上', !!r34VoidRow && !!r34OpenRow)
+eq('作废行导出的待收（原币）= 0，跟屏幕上的「—」同一个说法', Number(r34VoidRow![r34Head.indexOf('待收金额(原币)')]), 0)
+eq('作废行导出的待收（基准币）也归 0', Number(r34VoidRow![r34Head.indexOf(`待收金额(${r34Base})`)]), 0)
+check('作废行没有整行清零：合计仍按单子本身列着', Number(r34VoidRow![r34Head.indexOf('含费用合计(原币)')]) === 80)
+eq('计费状态的单照旧导出真实待收', Number(r34OpenRow![r34Head.indexOf('待收金额(原币)')]), 50)
+eq('基准币待收 = 待收 × 汇率', Number(r34OpenRow![r34Head.indexOf(`待收金额(${r34Base})`)]), 350)
+
+section('R34 覆盖导入：CSV 表头里没有的列不许抹平档案')
+
+products.saveProduct({
+  styleNo: 'R34-IMP',
+  name: '原品名',
+  composition: '100% Cotton',
+  sizes: ['M', 'L'],
+  colors: ['红', '蓝'],
+  costPrice: 20,
+  unitNetWeight: 0.7,
+  boxPieces: 20,
+  boxLength: 60,
+  boxWidth: 40,
+  boxHeight: 50,
+  factory: '原工厂',
+  factoryNo: 'F-1'
+})
+const r34Imp1 = products.importProductsCsv('款号,品名,成本价\nR34-IMP,改过的品名,25\n', 'overwrite')
+eq('覆盖导入报出更新 1 款', r34Imp1.updated, 1)
+const r34Keep = products.findProductByStyleNo('R34-IMP')!
+eq('表头里有的列照改（成本价）', r34Keep.costPrice, 25)
+eq('表头里有的列照改（品名）', r34Keep.name, '改过的品名')
+eq('表头里没有的尺码保留', r34Keep.sizes, ['M', 'L'])
+eq('表头里没有的颜色保留', r34Keep.colors, ['红', '蓝'])
+eq('表头里没有的工厂保留', r34Keep.factory, '原工厂')
+eq('表头里没有的工厂货号保留', r34Keep.factoryNo, 'F-1')
+eq('表头里没有的箱规保留', [r34Keep.boxLength, r34Keep.boxWidth, r34Keep.boxHeight], [60, 40, 50])
+eq('表头里没有的单件净重保留', r34Keep.unitNetWeight, 0.7)
+eq('表头里没有的每箱件数保留', r34Keep.boxPieces, 20)
+products.importProductsCsv('款号,尺码\nR34-IMP,\n', 'overwrite')
+eq('表头里有这一列、格子空着 = 仍按明确清空', products.findProductByStyleNo('R34-IMP')!.sizes, [])
+products.importProductsCsv('款号,箱规\nR34-IMP,50×30×20\n', 'overwrite')
+eq('箱规列在表头里就按新值覆盖', [products.findProductByStyleNo('R34-IMP')!.boxLength, products.findProductByStyleNo('R34-IMP')!.boxWidth], [50, 30])
+
+section('R34 CI 重叠闸门：同一个号只认最新一版')
+
+eq(
+  '同号取版本号最大的那版',
+  latestAmountPerDocNo([
+    { docNo: 'CI-A', version: 1, amount: 100 },
+    { docNo: 'CI-A', version: 3, amount: 130 },
+    { docNo: 'CI-A', version: 2, amount: 90 },
+    { docNo: 'CI-B', version: 9, amount: 7 }
+  ]).get('CI-A'),
+  130
+)
+const r34CiOrder = orders.createOrder({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R34-CI'
+})
+await orders.addOrderItem(r34CiOrder.id, { styleNo: 'R34-C', quantity: 20, unitPrice: 10 })
+const r34Pl = packing.createPackingList({
+  orderId: r34CiOrder.id,
+  lines: [{ boxNo: 'R34-1', styleNo: 'R34-C', quantity: 10 }]
+})[0]
+const r34BatchCi = ciNoOf('PI-R34-CI', r34Pl.plNo)
+docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r34 a'), docNo: r34BatchCi, kind: 'ci', orderId: r34CiOrder.id, amount: 100 })
+docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r34 b'), docNo: r34BatchCi, kind: 'ci', orderId: r34CiOrder.id, amount: 120 })
+eq('重版不作废旧版：库里两版都还在', docs.listDocVersions(r34CiOrder.id).filter((d) => d.docNo === r34BatchCi).length, 2)
+eq('整单 CI 的重叠额 = 最新版金额，不是两版相加', docs.assertCiNoOverlap(r34CiOrder.id, ciNoOf('PI-R34-CI'), true), 120)
+check(
+  '未确认时照样拦下重叠',
+  r8err(() => docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r34 w'), docNo: ciNoOf('PI-R34-CI'), kind: 'ci', orderId: r34CiOrder.id, amount: 200 })).includes('重叠')
+)
+
+section('R34 出货状态与留痕一起落 + 一分未收的催款兜底不再用 updated_at')
+
+const r34ShipSettings = getSettings()
+saveSettings({ ...r34ShipSettings, remindBalanceDays: 7 })
+const r34ShipOrder = orders.createOrder({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R34-SHIP'
+})
+await orders.addOrderItem(r34ShipOrder.id, { styleNo: 'R34-S', quantity: 10, unitPrice: 10 })
+orders.setShipStatus(r34ShipOrder.id, 'shipped', 'R34 手工出运')
+eq('状态落了', orders.getOrder(r34ShipOrder.id)!.shipStatus, 'shipped')
+check(
+  '同一次跃迁留下配对的 ship_status 事件（催款主钟的兜底）',
+  orders.listEvents(r34ShipOrder.id).some((e) => e.kind === 'ship_status' && e.toStatus === 'shipped')
+)
+
+const r34Legacy = orders.createOrder({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R34-LEGACY'
+})
+await orders.addOrderItem(r34Legacy.id, { styleNo: 'R34-L', quantity: 10, unitPrice: 50 })
+// 手工标已出运、批次和出货事件都没有，今天又改过备注
+getDb().run('UPDATE orders SET ship_status = ?, created_at = ?, updated_at = ? WHERE id = ?', [
+  'shipped',
+  `${addDays(localDate(), -40)} 09:00:00`,
+  `${localDate()} 10:00:00`,
+  r34Legacy.id
+])
+const r34LegacyRem = dashboard.reminders().find((r) => r.kind === 'balance' && r.orderId === r34Legacy.id)
+check('出运日期查不到也照样催，不再被今天的一次编辑清零', !!r34LegacyRem, JSON.stringify(r34LegacyRem))
+eq('天数按建单起算', r34LegacyRem?.days, 40)
+check('文案说清这个天数不是出运日', (r34LegacyRem?.message ?? '').includes('按建单日起算'), r34LegacyRem?.message)
+saveSettings(r34ShipSettings)
+
+section('R34 打样抵扣挂起：闸门不开，但报错指着正门')
+
+const r34OffCust = customers.saveCustomer({ company: 'R34-OFFSET-CO' })
+const r34OffSample = samples.saveSample({
+  customerId: r34OffCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: localDate(),
+  items: [{ styleNo: 'R34-OF', quantity: 1, unitPrice: 60, goodsUnitPrice: 200 }]
+})
+const r34OffOrder = samples.convertSampleToOrder(r34OffSample.id, { offsetSampleFee: true, paymentStatus: 'sent' })
+eq('转单后样品费标记为已抵扣', samples.getSample(r34OffSample.id)!.feeStatus, 'offset')
+// 订单退回草稿：抵扣派生挂起，这笔样品费重新回到打样待收
+getDb().run("UPDATE orders SET payment_status = 'draft' WHERE id = ?", [r34OffOrder.id])
+const r34OffOpen = money.sampleOpenRows(r34OffCust.id).find((r) => r.sampleId === r34OffSample.id)
+check('挂起中的样品费确实回到待收', !!r34OffOpen && r34OffOpen.receivable > 0.001, JSON.stringify(r34OffOpen))
+const r34OffErr = r8err(() => samples.addSamplePayment(r34OffSample.id, { paidAt: localDate(), amount: 60, bankRef: 'R34-OF-IN' }))
+check('仍不许在打样侧收这笔钱（订单恢复就会双算）', r34OffErr.includes('重复计'), r34OffErr)
+check('报错给出正门：先把那张订单恢复成计费状态', r34OffErr.includes('恢复成计费状态'), r34OffErr)
+check('不是一句「登记在订单上」把人赶进死胡同', r34OffErr.includes('草稿'), r34OffErr)
+
+section('R34 一笔水单拆到订单与打样：两种单据各归各的账')
+
+const r34SpCust = customers.saveCustomer({ company: 'R34-SPLIT-CO' })
+const r34SpOrder = orders.createOrder({
+  customerId: r34SpCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R34-SPLIT'
+})
+await orders.addOrderItem(r34SpOrder.id, { styleNo: 'R34-SP', quantity: 10, unitPrice: 20 })
+const r34SpSample = samples.saveSample({
+  customerId: r34SpCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: localDate(),
+  items: [{ styleNo: 'R34-SS', quantity: 1, unitPrice: 40 }]
+})
+const r34SpRows = money.customerOpenRows(r34SpCust.id)
+check(
+  '待收底稿同时有订单行和打样行（两种单据各自的自增 id，靠 kind 才分得开）',
+  r34SpRows.some((r) => r.kind === 'order' && r.docId === r34SpOrder.id) &&
+    r34SpRows.some((r) => r.kind === 'sample' && r.docId === r34SpSample.id),
+  JSON.stringify(r34SpRows.map((r) => [r.kind, r.docId, r.receivable]))
+)
+orders.batchAddPayments([
+  { orderId: r34SpOrder.id, paidAt: localDate(), amount: 100, bankRef: 'R34-SPLIT-BANK' },
+  { sampleOrderId: r34SpSample.id, paidAt: localDate(), amount: 40, bankRef: 'R34-SPLIT-BANK' }
+])
+eq('订单那半落在订单上', orders.getOrder(r34SpOrder.id)!.paidAmount, 100)
+eq('打样那半落在打样上', samples.getSample(r34SpSample.id)!.collected, 40)
+eq(
+  '订单待收只剩 100',
+  money.customerOpenRows(r34SpCust.id).find((r) => r.kind === 'order' && r.docId === r34SpOrder.id)!.receivable,
+  100
+)
+check(
+  '打样收齐后从待收底稿里消失（不会被错当成另一张同号的订单）',
+  !money.customerOpenRows(r34SpCust.id).some((r) => r.kind === 'sample' && r.docId === r34SpSample.id)
+)
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

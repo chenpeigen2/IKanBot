@@ -22,6 +22,7 @@ import {
   renderPl,
   renderCi,
   ciNoOf,
+  latestAmountPerDocNo,
   plDocDateOf,
   orderDocAmount,
   ciDocAmount,
@@ -199,7 +200,11 @@ export default function OrderDetail() {
     const render = (pending: boolean) => renderPl({ order, settings, images, rev, pending }, pl)
     // 存档金额按批次摊：三个批次各存自己那一份，加起来才等于 PI（服务层唯一口径 money.packingAmounts）
     const amounts = await window.api.pl.amounts(order.id)
-    const thisAmount = amounts.find((a: PackingAmount) => a.plId === plId)?.total ?? 0
+    // 金额找不到就抛，跟出 CI 那一侧同一口径：静默按 0 存档，
+    // 事后查「这批开了多少钱」只会查到一张 0 元的纸，对账时反而怀疑自己少记了一笔
+    const thisAmountRow = amounts.find((a: PackingAmount) => a.plId === plId)
+    if (!thisAmountRow) throw new Error('这一批的金额没读出来（可能刚被别的窗口删掉），请关掉预览重新打开')
+    const thisAmount = thisAmountRow.total
     setPreview({
       kind: 'pl',
       plId,
@@ -1127,7 +1132,12 @@ function CiModal({
   const baseCi = ciNoOf(order.piNo)
   const liveBatchCi = docVersions.filter((d: any) => d.kind === 'ci' && !d.voidedAt && d.docNo !== baseCi)
   const liveWholeCi = docVersions.some((d: any) => d.kind === 'ci' && !d.voidedAt && d.docNo === baseCi)
-  const overlapAmount = liveBatchCi.reduce((s: number, d: any) => s + (Number(d.amount) || 0), 0)
+  // 同一个 CI 号重版过几次，金额只算最新一版——和主进程 assertCiNoOverlap 同一个口径，
+  // 否则出过第二版的批次会把重叠金额虚报成两倍，人可能照着这个数作废错的那张票。
+  const overlapAmount = [...latestAmountPerDocNo(liveBatchCi).values()].reduce(
+    (s: number, amt) => s + (Number(amt) || 0),
+    0
+  )
   const overlap = batchId == null ? liveBatchCi.length > 0 : liveWholeCi
 
   const chargeTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)

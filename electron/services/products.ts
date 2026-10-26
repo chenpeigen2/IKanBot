@@ -442,25 +442,40 @@ export function importProductsCsv(text: string, mode: 'skip' | 'overwrite' = 'sk
     const box = boxRaw.split(/[×x*X*\s]+/).filter(Boolean).map((n) => Number(n))
     const boxOk = box.length === 3 && box.every((n) => Number.isFinite(n) && n > 0)
     const existing = findProductByStyleNo(styleNo)
+    // 覆盖导入时：表头里没有这一列 = 这份 CSV 根本不打算管这个字段，保留库里原值。
+    // 以前缺列一律按空串写回去——单证员只想拿 Excel 补一列成本价，整款的尺码、颜色、
+    // 箱规、工厂就被顺手抹平了，装箱单的毛重估算和毛利跟着塌，界面还只报一句「更新 N 款」。
+    // 表头里有这一列但格子是空的，仍按「明确要清空」处理（那是填表人的意思）。
+    const overwriting = !!existing && mode === 'overwrite'
+    const cur = existing
+    const text = (key: string, keep: string | undefined): string =>
+      col(key) >= 0 || !overwriting ? need(r, col(key)) : keep ?? ''
+    const num = (key: string, keep: number | null | undefined): number | null =>
+      col(key) >= 0 || !overwriting ? numOr(need(r, col(key))) : keep ?? null
+    const tags = (key: string, keep: string[] | undefined): string[] =>
+      col(key) >= 0 || !overwriting ? splitTags(need(r, col(key))) : keep ?? []
+    const hasBoxCol = col('box') >= 0
+    const boxSide = (i: number, keep: number | null | undefined): number | null =>
+      hasBoxCol || !overwriting ? (boxOk ? box[i] : null) : keep ?? null
     const input: ProductInput = {
       id: existing?.id,
       styleNo,
-      name: need(r, col('name')),
-      composition: need(r, col('composition')),
-      category: need(r, col('category')),
-      brand: need(r, col('brand')),
-      season: need(r, col('season')),
-      costPrice: numOr(need(r, col('costPrice'))),
-      sizes: splitTags(need(r, col('sizes'))),
-      colors: splitTags(need(r, col('colors'))),
-      unitNetWeight: numOr(need(r, col('unitNetWeight'))),
-      boxPieces: numOr(need(r, col('boxPieces'))),
-      boxLength: boxOk ? box[0] : null,
-      boxWidth: boxOk ? box[1] : null,
-      boxHeight: boxOk ? box[2] : null,
-      factory: need(r, col('factory')),
-      factoryNo: need(r, col('factoryNo')),
-      note: need(r, col('note'))
+      name: text('name', cur?.name),
+      composition: text('composition', cur?.composition),
+      category: text('category', cur?.category),
+      brand: text('brand', cur?.brand),
+      season: text('season', cur?.season),
+      costPrice: num('costPrice', cur?.costPrice),
+      sizes: tags('sizes', cur?.sizes),
+      colors: tags('colors', cur?.colors),
+      unitNetWeight: num('unitNetWeight', cur?.unitNetWeight),
+      boxPieces: num('boxPieces', cur?.boxPieces),
+      boxLength: boxSide(0, cur?.boxLength),
+      boxWidth: boxSide(1, cur?.boxWidth),
+      boxHeight: boxSide(2, cur?.boxHeight),
+      factory: text('factory', cur?.factory),
+      factoryNo: text('factoryNo', cur?.factoryNo),
+      note: text('note', cur?.note)
     }
     try {
       if (existing) {

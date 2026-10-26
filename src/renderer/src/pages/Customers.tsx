@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Modal, useToast, money, Empty, fmtDate, PaymentTag, ShipTag, Button, LoadError } from '../ui'
+import { Modal, useToast, money, Empty, fmtDate, PaymentTag, ShipTag, Button, LoadError, useLoadGuard } from '../ui'
 import { localDate } from '../../../shared/date'
 import { INCOTERMS, PAYMENT_METHOD_LABEL, type PaymentMethod } from '../../../shared/types'
 import type { Customer, CustomerCreditCurrency } from '../../../shared/types'
@@ -76,6 +76,27 @@ function toDraft(c: Customer): Draft {
   }
 }
 
+/** 待收行的唯一键：单据类型 + 单据号。订单和打样单各自有自己的自增 id，两个池子会撞号。 */
+const rowKey = (r: { kind: string; docId: number }) => `${r.kind}:${r.docId}`
+
+/**
+ * 水单总额核对：填了总额就说一句分配合不平。
+ * 只提示不拦——分期到账、尾款、汇损都会让水单和待收本来就不等，硬拦等于把人往回赶。
+ */
+function splitMismatch(rows: any[], amounts: Record<string, string>, bankTotal: string): string {
+  const total = Number(bankTotal)
+  if (!(total > 0)) return ''
+  if (new Set(rows.map((r) => r.currency)).size > 1) return ''
+  const allocated = rows.reduce((s, r) => s + Number(amounts[rowKey(r)] ?? 0), 0)
+  const diff = total - allocated
+  if (Math.abs(diff) <= 0.005) return ''
+  return `水单总额 ${total.toFixed(2)}，这里已分 ${allocated.toFixed(2)}：${
+    diff > 0
+      ? `还有 ${diff.toFixed(2)} 没分到单上——不分的钱会变成这家客户的预收`
+      : `多分了 ${(-diff).toFixed(2)}，超出这些单的待收合计`
+  }`
+}
+
 export default function Customers() {
   const toast = useToast()
   const [list, setList] = useState<Customer[]>([])
@@ -98,7 +119,10 @@ export default function Customers() {
     bankRef: string
     method: string
     note: string
-    amounts: Record<number, string>
+    /** 键是 `kind:docId`：orders 与 sample_orders 各有各的自增号，裸 docId 会让「订单 12」和「打样 12」共用一格 */
+    amounts: Record<string, string>
+    /** 水单总额：只用来当场核对分配合不平，不落库、不硬拦（分期/尾款/汇损都会让两边不等） */
+    bankTotal: string
     saving: boolean
   } | null>(null)
   /** 客户预收抵扣弹窗：同币种、仍待收的单里挑一张 */
@@ -188,7 +212,14 @@ export default function Customers() {
     }
   }
 
+  /**
+   * 客户详情：连点两家时，先点那家的响应可能后到，把后点的盖回去；
+   * 关了弹窗后迟到的响应还会把弹窗重新弹出来，所以落盘前必须问一句「我还是最新那次吗」。
+   */
+  const beginDetail = useLoadGuard()
+
   const openDetail = async (c: Customer) => {
+    const { isCurrent } = beginDetail()
     try {
       const [stats, orders, settings, prices, credits] = await Promise.all([
         window.api.customers.stats(c.id),
@@ -197,10 +228,18 @@ export default function Customers() {
         window.api.customers.stylePriceHistory({ customerId: c.id }),
         window.api.credits.balance(c.id)
       ])
+      if (!isCurrent()) return
       setDetail({ c, stats, orders, base: settings?.baseCurrency ?? 'CNY', prices, credits })
     } catch (e) {
+      if (!isCurrent()) return
       toast((e as Error).message || '客户详情没加载出来，请重试', 'error')
     }
+  }
+
+  /** 关弹窗要顺手把在飞的请求作废掉，否则晚到的响应会把刚关的窗再弹开 */
+  const closeDetail = () => {
+    beginDetail()
+    setDetail(null)
   }
 
   const openSplit = async (c: Customer) => {
@@ -210,7 +249,17 @@ export default function Customers() {
         toast('该客户名下没有待收的订单或打样单，不用拆', 'error')
         return
       }
-      setSplit({ c, rows, paidAt: localDate(), bankRef: '', method: 'T/T', note: '', amounts: {}, saving: false })
+      setSplit({
+        c,
+        rows,
+        paidAt: localDate(),
+        bankRef: '',
+        method: 'T/T',
+        note: '',
+        amounts: {},
+        bankTotal: '',
+        saving: false
+      })
     } catch (e) {
       toast((e as Error).message || '待收订单没加载出来', 'error')
     }
@@ -223,7 +272,9 @@ export default function Customers() {
       toast('先填银行流水号：拆分收款靠它把几笔收款归成同一笔水单，对账时找得到来路', 'error')
       return
     }
-    const filled = split.rows.map((r) => ({ row: r, amount: Number(split.amounts[r.docId] ?? 0) })).filter((x) => x.amount > 0)
+    const filled = split.rows
+      .map((r) => ({ row: r, amount: Number(split.amounts[rowKey(r)] ?? 0) }))
+      .filter((x) => x.amount > 0)
     if (!filled.length) {
       toast('至少给一张单填「本次收款」的金额', 'error')
       return
@@ -279,7 +330,7 @@ export default function Customers() {
         c,
         currency,
         rows,
-        target: `${rows[0].kind}:${rows[0].docId}`,
+        target: rowKey(rows[0]),
         amount: '',
         note: '',
         saving: false
@@ -404,6 +455,8 @@ export default function Customers() {
       toast((e as Error).message, 'error')
     }
   }
+
+  const splitNote = split ? splitMismatch(split.rows, split.amounts, split.bankTotal) : ''
 
   return (
     <>
@@ -715,7 +768,7 @@ export default function Customers() {
       ) : null}
 
       {detail ? (
-        <Modal title={detail.c.company} onClose={() => setDetail(null)} size="wide">
+        <Modal title={detail.c.company} onClose={closeDetail} size="wide">
           <div className="stat-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
             <div className="stat">
               <div className="stat-label">订单数</div>
@@ -1049,7 +1102,7 @@ export default function Customers() {
                 onChange={(e) => setCreditApply({ ...creditApply, target: e.target.value })}
               >
                 {creditApply.rows.map((r) => (
-                  <option key={`${r.kind}-${r.docId}`} value={`${r.kind}:${r.docId}`}>
+                  <option key={rowKey(r)} value={rowKey(r)}>
                     {r.docNo} · 待收 {money(r.receivable, r.currency)}
                   </option>
                 ))}
@@ -1181,6 +1234,17 @@ export default function Customers() {
                 onChange={(e) => setSplit({ ...split, note: e.target.value })}
               />
             </div>
+            <div>
+              <span className="muted">水单总额</span>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={split.bankTotal}
+                placeholder="银行实际到账多少（选填）"
+                onChange={(e) => setSplit({ ...split, bankTotal: e.target.value })}
+              />
+            </div>
           </div>
           <div className="table-wrap">
             <table className="data">
@@ -1195,7 +1259,7 @@ export default function Customers() {
               </thead>
               <tbody>
                 {split.rows.map((r) => {
-                  const amt = split.amounts[r.docId] ?? ''
+                  const amt = split.amounts[rowKey(r)] ?? ''
                   const over = Number(amt) > r.receivable + 0.001
                   return (
                     <tr key={`${r.kind}-${r.docId}`}>
@@ -1214,7 +1278,9 @@ export default function Customers() {
                           style={{ width: 120, textAlign: 'right' }}
                           value={amt}
                           placeholder="0"
-                          onChange={(e) => setSplit({ ...split, amounts: { ...split.amounts, [r.docId]: e.target.value } })}
+                          onChange={(e) =>
+                            setSplit({ ...split, amounts: { ...split.amounts, [rowKey(r)]: e.target.value } })
+                          }
                         />
                         {over ? <div className="faint">超过待收，提交时会再确认</div> : null}
                       </td>
@@ -1224,6 +1290,7 @@ export default function Customers() {
               </tbody>
             </table>
           </div>
+          {splitNote ? <div className="hint" style={{ marginTop: 8 }}>{splitNote}</div> : null}
           <div style={{ marginTop: 12, display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
             <Button onClick={() => setSplit(null)}>取消</Button>
             <Button variant="primary" disabled={split.saving} onClick={() => void saveSplit()}>

@@ -609,7 +609,10 @@ export function reminders(): Reminder[] {
     // 一分未收：货走了就必须催，不能因为没收过定金就当没事
     const shipped = ['shipped', 'cleared', 'delivered', 'partial_shipped'].includes(String(row.ship_status))
     if (!shipped) continue
-    const since = shipClock.get(r.orderId) ?? shipEventClock.get(r.orderId) ?? String(row.updated_at ?? '')
+    // 兜底用建单日，不用 updated_at：改个备注就会把「已出运 40 天一分未收」刷成「今天刚出运」，
+    // 这单当场从催款里消失。查不到出运时刻时明说是按建单算的，别让人以为货刚走。
+    const shipAt = shipClock.get(r.orderId) ?? shipEventClock.get(r.orderId) ?? null
+    const since = shipAt ?? String(row.created_at ?? '')
     const days = daysFrom(since)
     if (days === null || days < s.remindBalanceDays) continue
     const method = PAYMENT_METHOD_LABEL[r.paymentMethod as keyof typeof PAYMENT_METHOD_LABEL] ?? r.paymentMethod
@@ -619,7 +622,9 @@ export function reminders(): Reminder[] {
         orderNo: r.orderNo,
         customerName: r.customerName,
         kind: 'balance',
-        message: `货已出运 ${days} 天，一分未收（待收 ${r.receivable.toFixed(2)} ${r.currency}，付款方式 ${method}）`,
+        message:
+          `${shipAt ? `货已出运 ${days} 天` : `货已出运（出运日期没记录，按建单日起算 ${days} 天）`}，` +
+          `一分未收（待收 ${r.receivable.toFixed(2)} ${r.currency}，付款方式 ${method}）`,
         days
       },
       'unpaid-shipped'
@@ -1064,6 +1069,10 @@ function ordersCsv(rows: OrderMoneyRow[], base: string, filter?: OrderExportFilt
   ]
   const lines = rows.map((r) => {
     const rate = r.exchangeRate
+    // 「待收」两列走屏幕上那套口径：草稿/失效/作废不催款，显示「—」。
+    // 以前导出写的是裸 receivable——筛「已作废」导出的表里这些行还挂着正数，
+    // 老板在 Excel 里 SUM 出来的待收，跟订单页和工作台、对账单怎么加都对不上。
+    const open = shownRemaining(r.paymentStatus, r.receivable)
     return [
       r.orderNo,
       r.piNo,
@@ -1090,7 +1099,7 @@ function ordersCsv(rows: OrderMoneyRow[], base: string, filter?: OrderExportFilt
       // 成本没录全 → 毛利不可信，宁可空着，不许拿 0 成本凑一个好看的数
       r.missingCostItems > 0 ? '' : money2(r.profitRaw),
       money2(r.paidAmount),
-      money2(r.receivable),
+      money2(open),
       money2(r.creditApplied),
       money2(r.shortageAmount),
       money2(r.badDebtAmount),
@@ -1098,7 +1107,7 @@ function ordersCsv(rows: OrderMoneyRow[], base: string, filter?: OrderExportFilt
       money2(r.grandTotalBase),
       money2(r.costBase),
       money2(r.paidAmount * rate),
-      money2(r.receivable * rate),
+      money2(open * rate),
       money2(r.creditAppliedBase)
     ]
   })
