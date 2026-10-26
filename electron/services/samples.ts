@@ -9,6 +9,7 @@
 import { getDb, nextNo, transact } from '../db'
 import { mapCustomer, mapPayment } from '../db/mappers'
 import { localDate } from '../../src/shared/date'
+import { isBillingStatus } from '../../src/shared/billing'
 import { assertQuantity, assertUnitPrice } from '../../src/shared/guards'
 import { getSettings } from './settings'
 import { createOrder, getOrder, assertSkuListUnique, assertPaymentInput } from './orders'
@@ -161,6 +162,10 @@ function hydrate(s: SampleOrder): SampleOrderDetail {
   // 已收回（N33/R25）：paid = 流水收齐（旧记录无流水按全额认）；unpaid 可能有部分实收；
   // offset = 实际抵进订单的钱（R15 起含快递费；老记录 offset_amount=0 只抵样品费）；
   // waived = 免单，一分没收回
+  // 抵扣挂在转出的订单上：订单退回草稿/失效/作废时，抵扣还没生效（与 money.ts 同一口径）
+  const offsetSuspended =
+    s.feeStatus === 'offset' && !!s.convertedOrderStatus && !isBillingStatus(s.convertedOrderStatus)
+  const offsetSettled = offsetSuspended ? 0 : s.offsetAmount > 0 ? s.offsetAmount : sampleFee
   const recoveredFee =
     s.feeStatus === 'paid'
       ? legacyPaidNoFlow
@@ -168,7 +173,7 @@ function hydrate(s: SampleOrder): SampleOrderDetail {
         : collected
       : s.feeStatus === 'offset'
         ? // 抵扣单可能先收了部分现金（R25），已收回 = 实收 + 抵扣，别把现金那半漏掉
-          collected + (s.offsetAmount > 0 ? s.offsetAmount : sampleFee)
+          collected + offsetSettled
         : s.feeStatus === 'unpaid'
           ? collected
           : 0
@@ -180,8 +185,11 @@ function hydrate(s: SampleOrder): SampleOrderDetail {
   const cancelled = s.status === 'cancelled'
   // 预收抵扣（R27）：客户账上的钱先垫了样品费，这部分不再是待收，也不是现金
   const creditApplied = creditAppliedForSample(s.id)
+  // 抵扣被挂起时，样品费重新成为待收——和 sampleOpenRows / 对账单 / 催款提醒同一份口径
   const owed =
-    s.feeStatus === 'unpaid' && !cancelled ? Math.max(0, totalFee - collected - creditApplied) : 0
+    !cancelled && (s.feeStatus === 'unpaid' || offsetSuspended)
+      ? Math.max(0, totalFee - recoveredFee - creditApplied)
+      : 0
   const rateMissing = owed > 0 && !hasRate
   return {
     ...s,
@@ -201,6 +209,7 @@ function hydrate(s: SampleOrder): SampleOrderDetail {
     creditApplied,
     flowCount,
     legacyPaidNoFlow,
+    offsetSuspended,
     // 待收（N23）：owed 已按 feeStatus / 取消筛过，这里只管折基准币
     receivableBase: rateMissing ? 0 : owed * rate,
     rateMissing
@@ -239,7 +248,12 @@ export function listSamples(filter: { keyword?: string; customerId?: number; sta
 }
 
 export function getSample(id: number): SampleOrderDetail | null {
-  const row = getDb().get('SELECT * FROM sample_orders WHERE id = ?', [id]) as Record<string, unknown> | null
+  const row = getDb().get(
+    `SELECT s.*, o.payment_status AS converted_order_status
+     FROM sample_orders s LEFT JOIN orders o ON o.id = s.converted_order_id
+     WHERE s.id = ?`,
+    [id]
+  ) as Record<string, unknown> | null
   return row ? hydrate(mapSample(row)) : null
 }
 
@@ -636,6 +650,19 @@ export function convertSampleToOrder(
   const openFee =
     s.feeStatus === 'waived' ? 0 : Math.max(0, s.totalFee - paidAlready - Number(s.creditApplied ?? 0))
   const offsetTotal = opts.offsetSampleFee && openFee > 0.001 ? openFee : 0
+  // 抵扣行不能大于本单货值：合计一旦为负，系统会把 −合计 误当成客户多付，
+  // 凭空生成一笔可抵扣、可退真钱的预收。宁可拦下让人先处理样品费。
+  const goodsValue = s.items.reduce(
+    (sum, i) => sum + Number(i.quantity || 0) * Number(i.goodsUnitPrice || 0),
+    0
+  )
+  if (offsetTotal > goodsValue + 0.001) {
+    throw new Error(
+      `样品费及快递费还有 ${openFee.toFixed(2)} 没收回，超过这张订单的货值 ${goodsValue.toFixed(2)}。` +
+        `这样转单会让订单合计变成负数，系统会把差额误认成客户多付（能拿去抵别的单甚至退款）。` +
+        `请先按水单登记部分收款、把剩余部分免收，或补足大货明细后再转。`
+    )
+  }
   const charges =
     offsetTotal > 0
       ? [{ label: '样品费及快递费抵扣 Sample Fee & Courier (offset)', amount: -offsetTotal }]

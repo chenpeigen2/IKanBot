@@ -613,6 +613,11 @@ function SamplePayModal({
           样品费已经抵扣到订单里了：这不是现金，不会出现在收款流水和月报里（订单的负费用行已经记过一次）。
         </div>
       ) : null}
+      {detail.offsetSuspended ? (
+        <div className="alert warn">
+          转出的订单已退回草稿/失效/作废，抵扣暂不生效：样品费重新计入待收，订单恢复成正式单后会自动再抵，不需要重录。
+        </div>
+      ) : null}
       {detail.feeStatus === 'waived' ? <div className="alert info">这张单的样品费已免收。</div> : null}
       {convertedLive ? (
         <div className="alert info">

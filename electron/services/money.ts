@@ -921,6 +921,7 @@ function sampleMoneyRows(customerId?: number): SampleMoneyRow[] {
   const rows = db.all(
     `SELECT s.id, s.sample_no, s.customer_id, s.status, s.fee_status, s.currency, s.exchange_rate,
             s.sample_date, s.express_fee, s.offset_amount, co.order_no AS converted_order_no,
+            co.payment_status AS converted_order_status,
             COALESCE((SELECT SUM(si.quantity * si.unit_price) FROM sample_order_items si
                       WHERE si.sample_order_id = s.id), 0) AS sample_fee,
             COALESCE((SELECT SUM(p.amount) FROM payments p
@@ -939,8 +940,13 @@ function sampleMoneyRows(customerId?: number): SampleMoneyRow[] {
     const collected = Number(r.collected ?? 0)
     const feeStatus = String(r.fee_status ?? 'unpaid')
     const offsetAmount = Number(r.offset_amount ?? 0)
+    // 抵扣挂在转出的那张订单上：订单还是草稿/已失效/已作废时，它不在应收口径里，
+    // 抵扣就还没真正生效，样品费必须回到待收。否则这笔钱在应收、欠款榜、提醒三处同时蒸发；
+    // 订单恢复成计费状态后自动再抵，不需要改 fee_status（避免来回改状态时双扣）。
+    const convertedStatus = String(r.converted_order_status ?? '')
+    const offsetLive = feeStatus === 'offset' && (!convertedStatus || isBillingStatus(convertedStatus))
     // 老抵扣单 offset_amount=0（当年只抵样品费）；新单按实际抵扣额，含快递费
-    const offsetSettled = feeStatus === 'offset' ? (offsetAmount > 0 ? offsetAmount : sampleFee) : 0
+    const offsetSettled = offsetLive ? (offsetAmount > 0 ? offsetAmount : sampleFee) : 0
     // 旧「已向客户收」记录没有流水：按全额认，不能凭空造一条猜日期的流水
     const recovered =
       feeStatus === 'paid'
@@ -975,10 +981,14 @@ function sampleMoneyRows(customerId?: number): SampleMoneyRow[] {
 export function sampleOpenRows(customerId?: number): SampleOpenRow[] {
   const out: SampleOpenRow[] = []
   for (const r of sampleMoneyRows(customerId)) {
-    // 只有未收的单还挂着应收；取消的单不收钱
-    if (r.feeStatus !== 'unpaid' || r.status === 'cancelled') continue
+    // 只有未收的单还挂着应收；取消的单不收钱。
+    // 抵扣单要看转出订单是否生效：订单退回草稿/失效时 offsetSettled 归零，
+    // 样品费会在这里重新出现（与对账单、提醒同一份口径）。
+    if (r.status === 'cancelled') continue
+    if (r.feeStatus !== 'unpaid' && r.feeStatus !== 'offset') continue
+    if (r.offsetSettled > 0.001) continue
     // 预收抵扣过的部分已经由客户余额覆盖，不再计待收
-    const left = r.totalFee - r.collected - r.creditApplied
+    const left = r.totalFee - r.recovered - r.creditApplied
     if (left <= 0.001) continue
     out.push({
       sampleId: r.sampleId,
@@ -1023,9 +1033,11 @@ export function sampleStatementRows(customerId: number): SampleBillRow[] {
     if (r.status === 'cancelled' && r.collected <= 0.001 && r.offsetSettled <= 0.001 && r.creditApplied <= 0.001)
       continue
     const cancelled = r.status === 'cancelled'
+    // 与 sampleOpenRows 同一口径：未收，或抵扣单的转出订单还没生效（草稿/失效/作废）
     const open =
-      !cancelled && r.feeStatus === 'unpaid'
-        ? Math.max(0, r.totalFee - r.collected - r.creditApplied)
+      !cancelled &&
+      (r.feeStatus === 'unpaid' || (r.feeStatus === 'offset' && r.offsetSettled <= 0.001))
+        ? Math.max(0, r.totalFee - r.recovered - r.creditApplied)
         : 0
     // 多付的钱要单独摆出来：压进待收里会变成负数，客户以为我们算错了
     const over = r.collected - r.totalFee
@@ -1148,8 +1160,12 @@ export function customerCreditBalance(customerId: number): CustomerCreditCurrenc
   for (const r of listOrderMoney({ customerId, includeVoided: true })) {
     // 草稿还没成为正式生意，钱不该已经到账；真到了也不认（现金流同样排除草稿）
     if (r.paymentStatus === 'draft') continue
+    // 合计 ≤ 0 的单（样品费抵扣大于货值等）没有「多付」可退：只有真的收进来的现金算余额。
+    // 旧口径直接把 −grandTotal 当多付，会凭空生成一笔客户预收，甚至能退真钱出去。
     const amount = isBillingStatus(r.paymentStatus)
-      ? Math.max(0, r.paidAmount + r.netWrittenOff - r.grandTotal)
+      ? r.grandTotal > 0
+        ? Math.max(0, r.paidAmount + r.netWrittenOff - r.grandTotal)
+        : Math.max(0, r.paidAmount)
       : r.paidAmount
     if (amount <= 0.001) continue
     const b = bucket(r.currency)

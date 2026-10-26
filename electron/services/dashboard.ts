@@ -698,12 +698,14 @@ export function reminders(): Reminder[] {
   /* 6. 打样类：钱要催，压在手里的样品更要催 */
   const sampleRows = db.all(
     `SELECT s.id, s.sample_no, s.sample_date, s.created_at, s.shipped_at, s.status, s.fee_status,
-            s.currency, s.exchange_rate, s.express_fee, c.company AS customer_name,
+            s.offset_amount, s.currency, s.exchange_rate, s.express_fee, c.company AS customer_name,
+            o.payment_status AS converted_order_status,
             COALESCE((SELECT SUM(si.quantity * si.unit_price) FROM sample_order_items si
                       WHERE si.sample_order_id = s.id), 0) AS sample_fee,
             COALESCE((SELECT SUM(p.amount) FROM payments p
                       WHERE p.sample_order_id = s.id), 0) AS collected
      FROM sample_orders s JOIN customers c ON c.id = s.customer_id
+     LEFT JOIN orders o ON o.id = s.converted_order_id
      WHERE s.status != 'cancelled'`
   ) as Record<string, unknown>[]
   // 预收抵扣过的打样费已经由客户余额覆盖：催款只催净额（与 sampleOpenRows 同一个口径）
@@ -729,13 +731,26 @@ export function reminders(): Reminder[] {
         )
       }
     }
-    if (String(r.fee_status ?? 'unpaid') !== 'unpaid') continue
+    const feeStatus = String(r.fee_status ?? 'unpaid')
+    if (feeStatus === 'paid' || feeStatus === 'waived') continue
+    // 抵扣单：只有转出的订单还在计费状态时才算已抵；订单退回草稿/失效/作废，
+    // 样品费要重新催（与 sampleOpenRows / 对账单同一口径）
+    const convertedStatus = String(r.converted_order_status ?? '')
+    const offsetLive =
+      feeStatus === 'offset' && (!convertedStatus || isBillingStatus(convertedStatus))
+    const offsetSettled = offsetLive
+      ? Number(r.offset_amount ?? 0) > 0
+        ? Number(r.offset_amount)
+        : Number(r.sample_fee ?? 0)
+      : 0
+    if (feeStatus === 'offset' && offsetSettled > 0.001) continue
     // 催的是还欠的那部分：已经收了一半就只催另一半，预收抵掉的部分也不算欠
     const owed =
       Number(r.sample_fee ?? 0) +
       Number(r.express_fee ?? 0) -
       Number(r.collected ?? 0) -
-      (creditBySample.get(Number(r.id)) ?? 0)
+      (creditBySample.get(Number(r.id)) ?? 0) -
+      offsetSettled
     if (owed <= 0.001) continue
     const shippedAt = String(r.shipped_at ?? '').trim()
     const days = daysFrom(shippedAt || String(r.sample_date ?? '') || String(r.created_at ?? ''))

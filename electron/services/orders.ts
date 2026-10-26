@@ -773,6 +773,34 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
   const billJson = stringifyParty(patchParty(baseBill, input.billTo))
   const shipJson = stringifyParty(patchParty(baseShip, input.shipTo))
 
+  // 换客户不是改个抬头：收款流水、核销、预收抵扣、转单打样和存档单据都挂在当前客户名下，
+  // 换过去会让两边的对账单、银行流水和客户预收整体错位，而客户手里的纸面抬头不会跟着变。
+  // 只有「一张干净的空单」才允许换主（R21 的留痕场景）。
+  if (customerChanged) {
+    const sampleCount = Number(
+      (db.get('SELECT COUNT(*) AS n FROM sample_orders WHERE converted_order_id = ?', [id]) as
+        | { n?: number }
+        | null)?.n ?? 0
+    )
+    const credit = hasActiveCredit('order', id)
+    if (payCount > 0 || settleCount > 0 || credit || sampleCount > 0 || docCount > 0 || plCount > 0) {
+      const what = [
+        payCount > 0 ? `${payCount} 笔收款流水` : '',
+        settleCount > 0 ? `${settleCount} 笔核销` : '',
+        credit ? '客户预收抵扣' : '',
+        sampleCount > 0 ? `${sampleCount} 张转单打样抵扣` : '',
+        docCount > 0 ? `${docCount} 版单据存档` : '',
+        plCount > 0 ? `${plCount} 批箱单` : ''
+      ]
+        .filter(Boolean)
+        .join('、')
+      throw new Error(
+        `这张单已经有 ${what}，不能换客户：这些账和凭据都挂在原客户名下，换过去会让两边的对账单和银行流水对不上。` +
+          `确实要换客户，请先撤销这些记录，或作废这张单按新客户重开。`
+      )
+    }
+  }
+
   /**
    * 只写「这次真的传了」的列：input 里没有的键保留数据库原值。
    * 以前这里是全量替换（input.x ?? null），调用方少传一个日期，
@@ -2124,16 +2152,35 @@ export function setPaymentStatus(orderId: number, next: PaymentStatus, note = ''
         ?.n ?? 0
     )
     const credit = hasActiveCredit('order', orderId)
-    if (payCount > 0 || settleCount > 0 || credit) {
+    // 纸面凭据也算账：有存档 PI/CI 或箱单的单退回草稿，系统台账里整单消失，纸却还在客户/货代手里
+    const docCount = Number(
+      (db.get('SELECT COUNT(*) AS n FROM doc_versions WHERE order_id = ? AND voided_at IS NULL', [orderId]) as
+        | { n?: number }
+        | null)?.n ?? 0
+    )
+    const plCount = Number(
+      (db.get('SELECT COUNT(*) AS n FROM packing_lists WHERE order_id = ? AND voided_at IS NULL', [orderId]) as
+        | { n?: number }
+        | null)?.n ?? 0
+    )
+    const sampleCount = Number(
+      (db.get('SELECT COUNT(*) AS n FROM sample_orders WHERE converted_order_id = ?', [orderId]) as
+        | { n?: number }
+        | null)?.n ?? 0
+    )
+    if (payCount > 0 || settleCount > 0 || credit || docCount > 0 || plCount > 0 || sampleCount > 0) {
       const what = [
         payCount > 0 ? `${payCount} 笔收款流水` : '',
         settleCount > 0 ? `${settleCount} 笔核销` : '',
-        credit ? '客户预收抵扣' : ''
+        credit ? '客户预收抵扣' : '',
+        docCount > 0 ? `${docCount} 版单据存档` : '',
+        plCount > 0 ? `${plCount} 批箱单` : '',
+        sampleCount > 0 ? `${sampleCount} 张转单打样抵扣` : ''
       ]
         .filter(Boolean)
         .join('、')
       throw new Error(
-        `这张单已经有 ${what}，不能退回草稿：草稿不进应收和现金流，这些账会从系统里消失。确实不要这单，请走「⋯ → 作废此单」。`
+        `这张单已经有 ${what}，不能退回草稿：草稿不进应收和现金流，这些账会从系统里消失，纸面凭据却还在客户手里。确实不要这单，请走「⋯ → 作废此单」。`
       )
     }
   }

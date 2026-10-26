@@ -934,6 +934,8 @@ export interface SampleOrderDetail extends SampleOrder {
   flowCount: number
   /** 旧记录·无流水：历史「已向客户收」没有落过流水，金额按全额认已收但不可追溯 */
   legacyPaidNoFlow: boolean
+  /** 抵扣暂不生效：转出的订单已退回草稿/失效/作废，样品费重新计入待收（R29） */
+  offsetSuspended: boolean
   /** 公司净垫 = 公司总成本 − 已收回打样费（N33：真实垫了多少钱），基准币 */
   netAdvanceBase: number | null
   /** 待收（应收客户金额，折算基准币；feeStatus≠unpaid 或汇率缺失时为 0） */

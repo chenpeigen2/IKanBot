@@ -692,7 +692,9 @@ export default function OrderDetail() {
                           s === 'draft' &&
                           (order.payments.length > 0 ||
                             (order.settlements?.length ?? 0) > 0 ||
-                            order.creditApplied > 0.001)
+                            order.creditApplied > 0.001 ||
+                            docVersions.some((d: any) => !d.voidedAt) ||
+                            (order.packingLists ?? []).some((p: any) => !p.voidedAt))
                         )
                     ).map((s) => (
                       <option key={s} value={s}>

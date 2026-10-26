@@ -1200,7 +1200,7 @@ const smpOffset = samples.saveSample({
   currency: 'USD',
   exchangeRate: 7.2,
   exchangeRateDate: '2026-10-21',
-  items: [{ styleNo: 'A002', productName: '涤纶 Polo 衫', color: 'Navy', size: 'L', quantity: 1, unitPrice: 15, goodsUnitPrice: 15 }]
+  items: [{ styleNo: 'A002', productName: '涤纶 Polo 衫', color: 'Navy', size: 'L', quantity: 1, unitPrice: 15, goodsUnitPrice: 40 }]
 })
 const offsetOrder = samples.convertSampleToOrder(smpOffset.id, { offsetSampleFee: true, paymentStatus: 'sent' })
 const offsetCharge = (offsetOrder.charges ?? []).find((c: any) => c.amount < 0)
@@ -1211,12 +1211,13 @@ eq('抵扣后打样单标记为下单抵扣', smpOffsetAfter.feeStatus, 'offset'
 eq('抵扣的样品费+快递费都算已收回（USD40 × 7.2 折基准币）', smpOffsetAfter.feeRecoveredBase, 40 * 7.2)
 eq('抵扣的打样单不计待收', smpOffsetAfter.receivableBase, 0)
 
-// N-4：抵扣转出来的单可能不是 0 元——样品费 15 + 快递费 25 都抵掉，货值 15 − 抵扣 40 = −25
+// N-4：抵扣转出来的单可以是 0 元——样品费 15 + 快递费 25 都抵掉，货值 40 − 抵扣 40 = 0
+// （R29 起不允许抵穿：负合计会被误读成客户多付，转单时直接拦下）
 // 毛利 = 含费用合计（实收口径）− 成本，负数就写负数
-// 先补录成本（模拟她在订单明细里填成本）：货值 15 − 抵扣 40 − 成本 5 = −30
+// 先补录成本（模拟她在订单明细里填成本）：货值 40 − 抵扣 40 − 成本 5 = −5
 getDb().run('UPDATE order_items SET unit_cost = 5 WHERE order_id = ?', [offsetOrder.id])
 const offDetail = orders.getOrder(offsetOrder.id)!
-eq('抵扣单含费用合计 = −25（货值 15 被 40 的样品费+快递费抵穿）', offDetail.grandTotal, -25)
+eq('抵扣单含费用合计 = 0（货值 40 正好被样品费+快递费抵清，不抵穿）', offDetail.grandTotal, 0)
 eq(
   '抵扣单毛利 = 含费用合计 − 成本（不再拿货值凑漂亮数）',
   offDetail.totalProfit,
@@ -5344,7 +5345,7 @@ const r16Sample = samples.saveSample({
   currency: 'USD',
   exchangeRate: 7,
   exchangeRateDate: '2026-10-21',
-  items: [{ styleNo: 'R16-S1', productName: '打样', quantity: 1, unitPrice: 10, goodsUnitPrice: 10 }]
+  items: [{ styleNo: 'R16-S1', productName: '打样', quantity: 1, unitPrice: 10, goodsUnitPrice: 15 }]
 })
 const r16NoteOnly = samples.saveSample({ id: r16Sample.id, note: 'R16 只改备注' })
 eq('漏传 items 的编辑不清空样品行', r16NoteOnly.items.length, 1)
@@ -5618,7 +5619,7 @@ const r18OffSample = samples.saveSample({
   currency: 'USD',
   exchangeRate: 7,
   exchangeRateDate: '2026-10-21',
-  items: [{ styleNo: 'R18-S1', productName: '抵扣回退', color: 'Grey', size: 'M', quantity: 1, unitPrice: 10, goodsUnitPrice: 10 }]
+  items: [{ styleNo: 'R18-S1', productName: '抵扣回退', color: 'Grey', size: 'M', quantity: 1, unitPrice: 10, goodsUnitPrice: 15 }]
 })
 const r18OffOrder = samples.convertSampleToOrder(r18OffSample.id, { offsetSampleFee: true, paymentStatus: 'confirmed' })
 eq('转单后打样单挂「下单抵扣」', samples.getSample(r18OffSample.id)!.feeStatus, 'offset')
@@ -7241,7 +7242,7 @@ check(
 )
 check(
   '换客户会带走多付 → 预收缺口，拦下',
-  r8err(() => orders.updateOrder(r28A.id, { customerId: r28Other.id })).includes('缺口')
+  r8err(() => orders.updateOrder(r28A.id, { customerId: r28Other.id })).includes('换客户')
 )
 check(
   '整体替换明细变大 → 预收缺口，拦下',
@@ -7435,6 +7436,210 @@ check(
     })
   ).includes('未来')
 )
+
+section('R29 余额只来自真钱：转单抵扣随订单状态派生，有账不许换客户')
+
+// —— 转单抵扣超过货值：宁可不转，也不造负数合计（负数合计会被当成客户多付）
+const r29GuardCust = customers.saveCustomer({ company: 'R29-GUARD-CO' })
+const r29GuardSample = samples.saveSample({
+  customerId: r29GuardCust.id,
+  sampleDate: dAgo(3),
+  expressFee: 5,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: dAgo(3),
+  items: [
+    { styleNo: 'R29-G1', productName: '转单守门', color: 'Black', size: 'M', quantity: 1, unitPrice: 10, goodsUnitPrice: 10 }
+  ]
+})
+check(
+  '样品费+快递 15 超过货值 10，转单被拦下',
+  r8err(() => samples.convertSampleToOrder(r29GuardSample.id, { offsetSampleFee: true })).includes('负数')
+)
+const r29GuardAfter = samples.getSample(r29GuardSample.id)!
+eq('拦下后打样单仍是未收', r29GuardAfter.feeStatus, 'unpaid')
+eq('拦下后没有转出订单', r29GuardAfter.convertedOrderId, null)
+eq('拦下后客户没有凭空多出预收', money.customerCreditAvailable(r29GuardCust.id, 'USD'), 0)
+
+// —— 历史负数合计单：只有真到账的钱才算预收
+const r29NegCust = customers.saveCustomer({ company: 'R29-NEG-CO' })
+const r29Neg = orders.createOrder({
+  customerId: r29NegCust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R29-NEG'
+})
+orders.addOrderItem(r29Neg.id, { styleNo: 'R29-NEG', quantity: 1, unitPrice: 10 })
+orders.updateOrderCharges(r29Neg.id, [{ label: '折让', amount: -30 }], 'R29 造一张合计为负的历史单')
+eq('合计为负的单一分预收都不生', money.customerCreditAvailable(r29NegCust.id, 'USD'), 0)
+orders.addPayment(r29Neg.id, { paidAt: localDate(), amount: 20, bankRef: 'R29-NEG-IN' })
+eq('只认真实到账的 20', money.customerCreditAvailable(r29NegCust.id, 'USD'), 20)
+check(
+  '不能退超过真钱的部分',
+  r8err(() =>
+    credits.refundCredit({
+      customerId: r29NegCust.id,
+      currency: 'USD',
+      amount: 21,
+      bankRef: 'R29-NEG-OUT',
+      note: 'R29 试退'
+    })
+  ).includes('不够退')
+)
+
+// —— 打样抵扣随转出订单状态派生：草稿/失效期间回到待收，恢复后自动再抵
+const r29OffCust = customers.saveCustomer({ company: 'R29-OFFSET-CO' })
+const r29OffSample = samples.saveSample({
+  customerId: r29OffCust.id,
+  sampleDate: dAgo(30),
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: dAgo(30),
+  items: [
+    { styleNo: 'R29-O1', productName: '转单抵扣派生', color: 'White', size: 'L', quantity: 1, unitPrice: 40, goodsUnitPrice: 100 }
+  ]
+})
+const r29OffOrder = samples.convertSampleToOrder(r29OffSample.id, { offsetSampleFee: true })
+eq('转单默认落草稿', r29OffOrder.paymentStatus, 'draft')
+eq('抵扣行 −40', Number(r29OffOrder.charges.find((c: any) => Number(c.amount) < 0)?.amount), -40)
+const r29SampDraft = samples.getSample(r29OffSample.id)!
+eq('草稿期间打样单仍记「下单抵扣」', r29SampDraft.feeStatus, 'offset')
+eq('草稿期间抵扣暂不生效', r29SampDraft.offsetSuspended, true)
+eq('草稿期间样品费回到待收 40 × 7.2', r29SampDraft.receivableBase, 40 * 7.2)
+const r29StmtDraft = money.sampleStatementRows(r29OffCust.id).find((r) => r.sampleId === r29OffSample.id)!
+eq('对账单也把这 40 算未收', r29StmtDraft.open, 40)
+check(
+  '工作台重新催这笔打样费',
+  dashboard
+    .reminders()
+    .some((r) => r.kind === 'sample' && r.sampleId === r29OffSample.id && r.message.includes('打样费 40.00')),
+  JSON.stringify(dashboard.reminders().filter((r) => r.sampleId === r29OffSample.id).map((r) => r.message))
+)
+
+orders.setPaymentStatus(r29OffOrder.id, 'confirmed', 'R29 客户确认 PI，抵扣生效')
+const r29SampLive = samples.getSample(r29OffSample.id)!
+eq('订单确认后抵扣生效', r29SampLive.offsetSuspended, false)
+eq('订单确认后不再计待收', r29SampLive.receivableBase, 0)
+eq(
+  '确认后对账单未收归零',
+  money.sampleStatementRows(r29OffCust.id).find((r) => r.sampleId === r29OffSample.id)!.open,
+  0
+)
+check(
+  '确认后不再催打样费',
+  !dashboard
+    .reminders()
+    .some((r) => r.kind === 'sample' && r.sampleId === r29OffSample.id && r.message.includes('打样费')),
+  JSON.stringify(dashboard.reminders().filter((r) => r.sampleId === r29OffSample.id).map((r) => r.message))
+)
+
+orders.setPaymentStatus(r29OffOrder.id, 'expired', 'R29 客户改期，先标失效')
+const r29SampExpired = samples.getSample(r29OffSample.id)!
+eq('失效期间抵扣又挂起', r29SampExpired.offsetSuspended, true)
+eq('失效期间待收回到 40 × 7.2', r29SampExpired.receivableBase, 40 * 7.2)
+check(
+  '失效期间重新催款，金额写 40',
+  dashboard
+    .reminders()
+    .some((r) => r.kind === 'sample' && r.sampleId === r29OffSample.id && r.message.includes('打样费 40.00')),
+  JSON.stringify(dashboard.reminders().filter((r) => r.sampleId === r29OffSample.id).map((r) => r.message))
+)
+orders.setPaymentStatus(r29OffOrder.id, 'confirmed', 'R29 客户恢复，抵扣自动再生效')
+const r29SampBack = samples.getSample(r29OffSample.id)!
+eq('恢复确认后自动再抵，不用重录', r29SampBack.offsetSuspended, false)
+eq('恢复后待收又是 0', r29SampBack.receivableBase, 0)
+check(
+  '恢复后提醒消失',
+  !dashboard
+    .reminders()
+    .some((r) => r.kind === 'sample' && r.sampleId === r29OffSample.id && r.message.includes('打样费'))
+)
+
+// —— 有账的单不能换客户：钱和凭据都挂在原客户名下
+const r29A = customers.saveCustomer({ company: 'R29-CHANGE-A' })
+const r29B = customers.saveCustomer({ company: 'R29-CHANGE-B' })
+const r29Pay = orders.createOrder({
+  customerId: r29A.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R29-CHG'
+})
+orders.addOrderItem(r29Pay.id, { styleNo: 'R29-CHG', quantity: 1, unitPrice: 100 })
+orders.addPayment(r29Pay.id, { paidAt: localDate(), amount: 120, bankRef: 'R29-CHG-IN' })
+eq('多付的 20 记在 A 名下', money.customerCreditAvailable(r29A.id, 'USD'), 20)
+check(
+  '有收款流水的单不能换客户',
+  r8err(() => orders.updateOrder(r29Pay.id, { customerId: r29B.id })).includes('换客户')
+)
+eq('拦下后订单客户没变', orders.getOrder(r29Pay.id)!.customerId, r29A.id)
+eq('拦下后预收仍在 A 名下', money.customerCreditAvailable(r29A.id, 'USD'), 20)
+eq('拦下后 B 名下没有串过去的钱', money.customerCreditAvailable(r29B.id, 'USD'), 0)
+
+const r29ConvCust = customers.saveCustomer({ company: 'R29-CONV-CO' })
+const r29ConvSample = samples.saveSample({
+  customerId: r29ConvCust.id,
+  sampleDate: dAgo(5),
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: dAgo(5),
+  items: [
+    { styleNo: 'R29-C1', productName: '转单换客户', color: 'Grey', size: 'M', quantity: 1, unitPrice: 5, goodsUnitPrice: 50 }
+  ]
+})
+const r29ConvOrder = samples.convertSampleToOrder(r29ConvSample.id, { paymentStatus: 'sent' })
+check(
+  '有转单打样抵扣的订单不能换客户',
+  r8err(() => orders.updateOrder(r29ConvOrder.id, { customerId: r29B.id })).includes('换客户')
+)
+
+const r29DocCust = customers.saveCustomer({ company: 'R29-DOC-CO' })
+const r29Doc = orders.createOrder({
+  customerId: r29DocCust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R29-DOC'
+})
+docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r29 doc'), docNo: 'PI-R29-DOC', kind: 'pi', orderId: r29Doc.id })
+check(
+  '有单据存档的订单不能换客户',
+  r8err(() => orders.updateOrder(r29Doc.id, { customerId: r29B.id })).includes('换客户')
+)
+
+// —— 草稿闸门补上纸面凭据和转单打样
+check(
+  '有单据存档的单不能退回草稿',
+  r8err(() => orders.setPaymentStatus(r29Doc.id, 'draft')).includes('单据存档')
+)
+eq('拦下后状态还是客户已确认', orders.getOrder(r29Doc.id)!.paymentStatus, 'confirmed')
+
+const r29PlCust = customers.saveCustomer({ company: 'R29-PL-CO' })
+const r29PlOrder = orders.createOrder({
+  customerId: r29PlCust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R29-PL'
+})
+orders.addOrderItem(r29PlOrder.id, { styleNo: 'R29-PL', color: 'Black', size: 'M', quantity: 1, unitPrice: 10 })
+packing.createPackingList({
+  orderId: r29PlOrder.id,
+  containerNo: 'R29U1234567',
+  lines: [{ boxNo: 'NO.1', styleNo: 'R29-PL', color: 'Black', size: 'M', quantity: 1 }]
+})
+check(
+  '有箱单的单不能退回草稿',
+  r8err(() => orders.setPaymentStatus(r29PlOrder.id, 'draft')).includes('箱单')
+)
+eq('拦下后箱单那单状态没变', orders.getOrder(r29PlOrder.id)!.paymentStatus, 'confirmed')
+
+check(
+  '转出打样的订单不能退回草稿',
+  r8err(() => orders.setPaymentStatus(r29ConvOrder.id, 'draft')).includes('转单打样')
+)
+eq('拦下后转单还是 PI 已发', orders.getOrder(r29ConvOrder.id)!.paymentStatus, 'sent')
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
