@@ -65,9 +65,17 @@ export interface IKanApi {
     replaceItems(orderId: number, items: any[]): Promise<any>
     summarizeSkus(orderId: number): Promise<any[]>
     addPayment(orderId: number, p: any): Promise<any>
-    /** 拆分收款：一笔水单拆到多张单，整批一个事务，任一笔失败全部回滚 */
+    /** 拆分收款：一笔水单拆到多张单（订单或打样单），整批一个事务，任一笔失败全部回滚 */
     batchAddPayments(
-      entries: { orderId: number; paidAt: string; amount: number; method?: string; bankRef?: string; note?: string }[]
+      entries: {
+        orderId?: number
+        sampleOrderId?: number
+        paidAt: string
+        amount: number
+        method?: string
+        bankRef?: string
+        note?: string
+      }[]
     ): Promise<any[]>
     deletePayment(orderId: number, paymentId: number, reason: string): Promise<any>
     listSettlements(orderId: number): Promise<any[]>
@@ -116,6 +124,11 @@ export interface IKanApi {
     remove(id: number): Promise<void>
     /** 打样转订单（N24） */
     convert(id: number, opts?: { offsetSampleFee?: boolean; paymentStatus?: 'draft' | 'sent' }): Promise<any>
+    /** 打样费实收流水（R25）；抵扣不落流水 */
+    listPayments(id: number): Promise<any[]>
+    addPayment(id: number, p: any): Promise<any>
+    /** 撤销要写原因：真删流水，原因记进打样单的收款说明 */
+    deletePayment(id: number, paymentId: number, reason: string): Promise<any>
   }
   docs: {
     /** 把单据 PDF 存进系统存档目录，并记一版 */

@@ -176,7 +176,7 @@ export default function Customers() {
     try {
       const rows = (await window.api.report.customerOrderRows(c.id)).filter((r) => r.receivable > 0.001)
       if (!rows.length) {
-        toast('该客户名下没有待收的订单，不用拆', 'error')
+        toast('该客户名下没有待收的订单或打样单，不用拆', 'error')
         return
       }
       setSplit({ c, rows, paidAt: localDate(), bankRef: '', method: 'T/T', note: '', amounts: {}, saving: false })
@@ -192,7 +192,7 @@ export default function Customers() {
       toast('先填银行流水号：拆分收款靠它把几笔收款归成同一笔水单，对账时找得到来路', 'error')
       return
     }
-    const filled = split.rows.map((r) => ({ row: r, amount: Number(split.amounts[r.orderId] ?? 0) })).filter((x) => x.amount > 0)
+    const filled = split.rows.map((r) => ({ row: r, amount: Number(split.amounts[r.docId] ?? 0) })).filter((x) => x.amount > 0)
     if (!filled.length) {
       toast('至少给一张单填「本次收款」的金额', 'error')
       return
@@ -205,7 +205,7 @@ export default function Customers() {
     if (
       over.length &&
       !window.confirm(
-        `${over.map((x) => x.row.orderNo).join('、')} 本次收款超过了该单待收金额。超额一般意味着金额填错了，确认按实收登记吗？`
+        `${over.map((x) => x.row.docNo).join('、')} 本次收款超过了该单待收金额。超额一般意味着金额填错了，确认按实收登记吗？`
       )
     ) {
       return
@@ -214,7 +214,7 @@ export default function Customers() {
     try {
       await window.api.orders.batchAddPayments(
         filled.map((x) => ({
-          orderId: x.row.orderId,
+          ...(x.row.kind === 'sample' ? { sampleOrderId: x.row.docId } : { orderId: x.row.docId }),
           paidAt: split.paidAt,
           amount: x.amount,
           method: split.method,
@@ -746,7 +746,7 @@ export default function Customers() {
       {split ? (
         <Modal title={`水单拆分收款 · ${split.c.company}`} onClose={() => setSplit(null)} size="wide">
           <p className="faint" style={{ marginTop: 0 }}>
-            客户一笔水单付多张 PI 时，在这里按行分摊：整批共用一个流水号，任何一笔没登进去整批都会退回，不会出现落一半的钱。
+            客户一笔水单付多张 PI（或样品费）时，在这里按行分摊：整批共用一个流水号，任何一笔没登进去整批都会退回，不会出现落一半的钱。
           </p>
           <div className="price-calc mb">
             <div>
@@ -787,7 +787,7 @@ export default function Customers() {
             <table className="data">
               <thead>
                 <tr>
-                  <th>订单号</th>
+                  <th>单据号</th>
                   <th>PI号</th>
                   <th>状态</th>
                   <th className="num">待收</th>
@@ -796,15 +796,16 @@ export default function Customers() {
               </thead>
               <tbody>
                 {split.rows.map((r) => {
-                  const amt = split.amounts[r.orderId] ?? ''
+                  const amt = split.amounts[r.docId] ?? ''
                   const over = Number(amt) > r.receivable + 0.001
                   return (
-                    <tr key={r.orderId}>
-                      <td className="mono">{r.orderNo}</td>
-                      <td className="mono">{r.piNo || '—'}</td>
-                      <td>
-                        <PaymentTag status={r.paymentStatus} />
+                    <tr key={`${r.kind}-${r.docId}`}>
+                      <td className="mono">
+                        {r.docNo}
+                        {r.kind === 'sample' ? <span className="tag" style={{ marginLeft: 6 }}>打样</span> : null}
                       </td>
+                      <td className="mono">{r.piNo || '—'}</td>
+                      <td className="muted">{r.statusText}</td>
                       <td className="num">{money(r.receivable, r.currency)}</td>
                       <td className="num">
                         <input
@@ -814,7 +815,7 @@ export default function Customers() {
                           style={{ width: 120, textAlign: 'right' }}
                           value={amt}
                           placeholder="0"
-                          onChange={(e) => setSplit({ ...split, amounts: { ...split.amounts, [r.orderId]: e.target.value } })}
+                          onChange={(e) => setSplit({ ...split, amounts: { ...split.amounts, [r.docId]: e.target.value } })}
                         />
                         {over ? <div className="faint">超过待收，提交时会再确认</div> : null}
                       </td>

@@ -7,17 +7,18 @@
  *  - 样品单号、快递单号都能查（客户来问「上次那个样品寄到哪了」）
  */
 import { getDb, nextNo, transact } from '../db'
-import { mapCustomer } from '../db/mappers'
+import { mapCustomer, mapPayment } from '../db/mappers'
 import { localDate } from '../../src/shared/date'
 import { assertQuantity, assertUnitPrice } from '../../src/shared/guards'
 import { getSettings } from './settings'
-import { createOrder, getOrder, assertSkuListUnique } from './orders'
+import { createOrder, getOrder, assertSkuListUnique, assertPaymentInput } from './orders'
 import { logEvent } from './events'
 import { costInOrderCurrency } from './money'
 import { likeAny } from './search'
 import type { OrderDetail } from '../../src/shared/types'
 import type {
   Customer,
+  Payment,
   SampleFeeStatus,
   SampleOrder,
   SampleOrderDetail,
@@ -128,8 +129,19 @@ function hydrate(s: SampleOrder): SampleOrderDetail {
     >[]
   ).map(mapSampleItem)
   const sampleFee = items.reduce((sum, i) => sum + i.quantity * i.unitPrice, 0)
+  const totalFee = sampleFee + Number(s.expressFee ?? 0)
   const rate = Number(s.exchangeRate ?? 0)
   const hasRate = rate > 0
+  // 实收流水（R25）：打样费的钱也要有凭据。抵扣不落流水，所以这里只有真金白银。
+  const paidRow = db.get(
+    'SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS paid FROM payments WHERE sample_order_id = ?',
+    [s.id]
+  ) as { n?: number; paid?: number } | null
+  const flowCount = Number(paidRow?.n ?? 0)
+  const collected = Number(paidRow?.paid ?? 0)
+  // 旧记录：当年只把旗子改成「已向客户收」，从来没落过流水。
+  // 金额照全额认已收（不能凭空造一条猜日期的流水），界面标出来、月报里没有这笔。
+  const legacyPaidNoFlow = s.feeStatus === 'paid' && flowCount === 0
   /**
    * 列表上的金额必须同一币种，否则「净垫 130」这种数没人知道是美元还是人民币。
    * 口径按钱的来路分：
@@ -145,23 +157,27 @@ function hydrate(s: SampleOrder): SampleOrderDetail {
     sampleFeeBase == null || expressFeeBase == null ? null : sampleFeeBase + expressFeeBase
   // 公司总成本（N33）= 工厂打样费（基准币）+ 快递费（折基准币）
   const companyCostBase = expressFeeBase == null ? null : Number(s.factoryCost ?? 0) + expressFeeBase
-  // 已收回（N33）：paid = 客户连快递费一起付了；
-  // offset = 实际抵进订单的钱（R15 起含快递费；老记录 offset_amount=0，
-  // 按当时的「只抵样品费」算，不能拿新口径倒推成多收回一笔钱）
+  // 已收回（N33/R25）：paid = 流水收齐（旧记录无流水按全额认）；unpaid 可能有部分实收；
+  // offset = 实际抵进订单的钱（R15 起含快递费；老记录 offset_amount=0 只抵样品费）；
+  // waived = 免单，一分没收回
   const recoveredFee =
     s.feeStatus === 'paid'
-      ? sampleFee + Number(s.expressFee ?? 0)
+      ? legacyPaidNoFlow
+        ? totalFee
+        : collected
       : s.feeStatus === 'offset'
-        ? s.offsetAmount > 0
-          ? s.offsetAmount
-          : sampleFee
-        : 0
+        ? // 抵扣单可能先收了部分现金（R25），已收回 = 实收 + 抵扣，别把现金那半漏掉
+          collected + (s.offsetAmount > 0 ? s.offsetAmount : sampleFee)
+        : s.feeStatus === 'unpaid'
+          ? collected
+          : 0
   const feeRecoveredBase = hasRate ? recoveredFee * rate : null
   const netAdvanceBase =
     companyCostBase == null || feeRecoveredBase == null ? null : companyCostBase - feeRecoveredBase
-  // 待收（N23）：未收才计；取消的单不收钱；汇率必须有，否则工作台会少算 → 标记 rateMissing 提示补
+  // 待收（N23/R25）：未收才计；取消的单不收钱；已到的实收先抵掉，剩下的才是欠的。
+  // 汇率必须有，否则工作台会少算 → 标记 rateMissing 提示补
   const cancelled = s.status === 'cancelled'
-  const owed = s.feeStatus === 'unpaid' && !cancelled ? sampleFee + Number(s.expressFee ?? 0) : 0
+  const owed = s.feeStatus === 'unpaid' && !cancelled ? Math.max(0, totalFee - collected) : 0
   const rateMissing = owed > 0 && !hasRate
   return {
     ...s,
@@ -169,13 +185,17 @@ function hydrate(s: SampleOrder): SampleOrderDetail {
     items,
     totalQuantity: items.reduce((sum, i) => sum + i.quantity, 0),
     sampleFee,
-    totalFee: sampleFee + Number(s.expressFee ?? 0),
+    totalFee,
     sampleFeeBase,
     expressFeeBase,
     totalFeeBase,
     companyCostBase,
     feeRecoveredBase,
     netAdvanceBase,
+    collected,
+    collectedBase: toBase(collected),
+    flowCount,
+    legacyPaidNoFlow,
     // 待收（N23）：owed 已按 feeStatus / 取消筛过，这里只管折基准币
     receivableBase: rateMissing ? 0 : owed * rate,
     rateMissing
@@ -269,6 +289,52 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
   // N23：未收的打样费要进工作台待收款，折算必须有汇率——没有就不许存（跟订单一个规矩）
   if (feeStatus === 'unpaid' && sampleFee + expressFee > 0 && exchangeRate <= 0) {
     throw new Error('这张打样单还有应收没结（样品费+快递费），请先按今天钉盘的汇率填上汇率')
+  }
+  // 已登记过收款流水（R25）：钱到账的凭据已经钉住了当时的费用与汇率，
+  // 事后一改，流水折出来的金额和这张单的应收就对不上。
+  // 描述性的字眼（颜色/尺码/品名/快递单号）照旧能改。
+  const flowAgg = before
+    ? (db.get('SELECT COUNT(*) AS n FROM payments WHERE sample_order_id = ?', [Number(before.id)]) as
+        | { n?: number }
+        | null)
+    : null
+  const flowCount = Number(flowAgg?.n ?? 0)
+  if (before && flowCount > 0) {
+    const moneyChanged =
+      Math.abs(storedFee - sampleFee) > 0.001 ||
+      Math.abs(expressFee - Number(before.express_fee ?? 0)) > 0.001 ||
+      Math.abs(exchangeRate - Number(before.exchange_rate ?? 0)) > 0.001 ||
+      (input.currency !== undefined && input.currency !== String(before.currency)) ||
+      (input.exchangeRateDate !== undefined &&
+        input.exchangeRateDate !== String(before.exchange_rate_date ?? ''))
+    if (moneyChanged) {
+      throw new Error(
+        `这张打样单已经登记过 ${flowCount} 笔收款流水：样品费、快递费、汇率是那些流水的折算依据，不能再改。要改请先在「打样费收款」里逐笔撤销，再回来改。`
+      )
+    }
+    if (input.customerId !== undefined && Number(input.customerId) !== Number(before.customer_id)) {
+      throw new Error(
+        `这张打样单已经登记过收款流水，客户不能再改：流水和应收都记在这个客户名下。要改请先撤销收款。`
+      )
+    }
+    if (feeStatus !== String(before.fee_status)) {
+      throw new Error(
+        `这张打样单已经登记过收款流水，收款状态由流水自动推导，不能手工改。要更正请撤销对应收款（撤销要写原因），状态会跟着回退。`
+      )
+    }
+  }
+  // 「已向客户收」也不能手工勾（R25）：它现在由流水推导。
+  // 老记录本来就是 paid 的保持原样（钱当年确实收了，只是没落流水），
+  // 但新单想标已收，只能去登记水单——否则待收凭空消失、月报里也没有这笔钱。
+  if (
+    feeStatus === 'paid' &&
+    !before?.converted_order_id &&
+    String(before?.fee_status ?? '') !== 'paid' &&
+    sampleFee + expressFee > 0.001
+  ) {
+    throw new Error(
+      '「已向客户收」不能手工勾：请用打样费收款里的「登记收款」按水单逐笔记，收齐后系统会自动标成已收。手勾的话这笔钱会从月报里消失。'
+    )
   }
   // 「已抵扣」不是能手工勾的状态：它代表样品费真的抵进了某张订单，只有转单那一步才写
   if (feeStatus === 'offset' && (!input.id || String(before?.fee_status ?? '') !== 'offset')) {
@@ -450,6 +516,13 @@ export function deleteSample(id: number): void {
       )
     }
   }
+  // 有收款流水就不能删：删了单，银行水单上的钱在系统里就找不到来路了。
+  // 撤销流水要写原因，撤销完再删（那才是「钱退了、单也不要了」的完整交代）
+  if (s.flowCount > 0) {
+    throw new Error(
+      `这张打样单已经登记过 ${s.flowCount} 笔收款流水（实收 ${s.collected.toFixed(2)} ${s.currency}），删了钱就找不到来路。请先在「打样费收款」里逐笔撤销（撤销要写原因），再删单。`
+    )
+  }
   // 还挂着应收的单不能零留痕删掉：钱没收回、单也没了，账上这笔应收就凭空断线。
   // 先取消（取消要写原因），应收归零、原因入档，才允许删
   if (s.feeStatus === 'unpaid' && s.status !== 'cancelled' && s.totalFee > 0.001) {
@@ -511,11 +584,13 @@ export function convertSampleToOrder(
 
   // 样品费抵扣：变成订单里一条负数费用行，单据上印出来，客户对账看得懂。
   // 快递费也是公司垫的、也记在这张打样单的待收里：只抵样品费会让快递费
-  // 在标记「已抵扣」后凭空消失。已收 / 已免收的没有可抵的，别再扣一遍。
-  const offsetTotal =
-    opts.offsetSampleFee && s.feeStatus !== 'paid' && s.feeStatus !== 'waived'
-      ? s.sampleFee + Number(s.expressFee ?? 0)
-      : 0
+  // 在标记「已抵扣」后凭空消失。已免收的没有可抵的，别再扣一遍。
+  // R25：一部分已经按水单收了（fee_status 仍是 unpaid），就只抵「还没收的那部分」——
+  // 整笔再抵一次，同一块钱会在订单负费用行和银行流水里各算一遍。
+  const paidAlready = s.feeStatus === 'paid' ? s.totalFee : s.collected
+  const openFee =
+    s.feeStatus === 'waived' ? 0 : Math.max(0, s.totalFee - paidAlready)
+  const offsetTotal = opts.offsetSampleFee && openFee > 0.001 ? openFee : 0
   const charges =
     offsetTotal > 0
       ? [{ label: '样品费及快递费抵扣 Sample Fee & Courier (offset)', amount: -offsetTotal }]
@@ -582,7 +657,7 @@ export function convertSampleToOrder(
           'offset',
           `已抵扣到订单 ${order.orderNo}（样品费 ${s.sampleFee.toFixed(2)}${
             Number(s.expressFee ?? 0) > 0 ? ` + 快递费 ${Number(s.expressFee).toFixed(2)}` : ''
-          }）`,
+          }${paidAlready > 0.001 ? `；其中已按水单收 ${paidAlready.toFixed(2)}、抵扣 ${offsetTotal.toFixed(2)}` : ''}）`,
           offsetTotal,
           now(),
           id
@@ -601,6 +676,170 @@ export function convertSampleToOrder(
     return getOrder(order.id)!
   })
 }
+/* ---------------- 打样费收款（R25） ---------------- */
+
+export interface SamplePaymentInput {
+  paidAt: string
+  amount: number
+  method?: string
+  bankRef?: string
+  note?: string
+}
+
+/** 流水说明追加进 fee_note：打样单没有操作历史表，这句话就是唯一的账本 */
+function appendFeeNote(id: number, line: string): void {
+  const db = getDb()
+  const row = db.get('SELECT fee_note FROM sample_orders WHERE id = ?', [id]) as { fee_note?: string } | null
+  const prev = String(row?.fee_note ?? '').trim()
+  db.run('UPDATE sample_orders SET fee_note = ?, updated_at = ? WHERE id = ?', [
+    prev ? `${prev}；${line}` : line,
+    now(),
+    id
+  ])
+}
+
+/**
+ * 收齐与否由流水推导（R25）：登记/撤销后回写 fee_status。
+ * 抵扣 / 免收是人工定的终态，流水不能把它改回去。
+ */
+function syncSampleFeeStatus(id: number): void {
+  const db = getDb()
+  const row = db.get('SELECT fee_status, express_fee FROM sample_orders WHERE id = ?', [id]) as {
+    fee_status?: string
+    express_fee?: number
+  } | null
+  const cur = String(row?.fee_status ?? 'unpaid')
+  if (cur === 'offset' || cur === 'waived') return
+  const feeRow = db.get(
+    'SELECT COALESCE(SUM(quantity * unit_price), 0) AS fee FROM sample_order_items WHERE sample_order_id = ?',
+    [id]
+  ) as { fee?: number } | null
+  const total = Number(feeRow?.fee ?? 0) + Number(row?.express_fee ?? 0)
+  const paidRow = db.get('SELECT COALESCE(SUM(amount), 0) AS paid FROM payments WHERE sample_order_id = ?', [
+    id
+  ]) as { paid?: number } | null
+  const collected = Number(paidRow?.paid ?? 0)
+  const next = total > 0.001 && collected >= total - 0.001 ? 'paid' : 'unpaid'
+  if (next !== cur) {
+    db.run('UPDATE sample_orders SET fee_status = ?, updated_at = ? WHERE id = ?', [next, now(), id])
+  }
+}
+
+export function listSamplePayments(sampleId: number): Payment[] {
+  const rows = getDb().all(
+    'SELECT * FROM payments WHERE sample_order_id = ? ORDER BY paid_at DESC, id DESC',
+    [sampleId]
+  ) as Record<string, unknown>[]
+  return rows.map(mapPayment)
+}
+
+/**
+ * 登记一笔打样费实收（R25）。只有真金白银进这张表；
+ * 「下单抵扣」是订单里的负费用行，绝不在这里再落一笔（同一块钱算两遍）。
+ */
+export function addSamplePayment(sampleId: number, p: SamplePaymentInput): SampleOrderDetail {
+  const s = getSample(sampleId)
+  if (!s) throw new Error('打样单不存在')
+  if (s.status === 'cancelled') {
+    throw new Error(`打样单 ${s.sampleNo} 已取消：取消的单不再收钱。如果客户确实付了，请先把状态改回来（备注写明原因）再登记。`)
+  }
+  if (s.convertedOrderId) {
+    const o = getOrder(s.convertedOrderId)
+    if (o && o.paymentStatus !== 'void') {
+      throw new Error(
+        `这张打样单已经转成订单 ${o.orderNo}：样品费的钱请直接登记在订单上，这里只留转单前的实收。`
+      )
+    }
+  }
+  if (s.feeStatus === 'offset') {
+    throw new Error(`打样单 ${s.sampleNo} 的样品费已经抵扣到订单里了：钱请登记在订单上，这里再落一笔会重复计。`)
+  }
+  if (s.feeStatus === 'waived') {
+    throw new Error(`打样单 ${s.sampleNo} 的样品费已免收：确实收到钱的话，请先把「打样费收款标记」改回「未收」再登记。`)
+  }
+  if (s.feeStatus === 'paid' && s.totalFee > 0.001) {
+    throw new Error(
+      s.flowCount === 0
+        ? `打样单 ${s.sampleNo} 是按「已向客户收」记的老账（没有流水）。要补流水，请先在编辑里把收款标记改回「未收」，再按水单登记。`
+        : `打样单 ${s.sampleNo} 的样品费已经收齐（${s.collected.toFixed(2)} ${s.currency}），不能再登记：多收的钱不属于这张单。`
+    )
+  }
+  const { paidAt, amount } = assertPaymentInput(p)
+  const rate = Number(s.exchangeRate)
+  if (!(rate > 0)) {
+    throw new Error('这张打样单没有汇率：收款要折进月报，请先编辑打样单填上汇率再登记收款。')
+  }
+  const remaining = Math.max(0, s.totalFee - s.collected)
+  if (amount > remaining + 0.001) {
+    throw new Error(
+      `这笔 ${amount.toFixed(2)} 超过了还没收的 ${remaining.toFixed(2)} ${s.currency}（应收 ${s.totalFee.toFixed(2)} − 已收 ${s.collected.toFixed(2)}）。多出来的钱不属于这张打样单，请核对水单。`
+    )
+  }
+  transact(() => {
+    getDb().run(
+      `INSERT INTO payments(sample_order_id, paid_at, amount, method, bank_ref, note, exchange_rate, created_at)
+       VALUES(?,?,?,?,?,?,?,?)`,
+      [sampleId, paidAt, amount, p.method ?? 'T/T', p.bankRef ?? '', p.note ?? '', rate, now()]
+    )
+    appendFeeNote(
+      sampleId,
+      `登记收款 ${amount.toFixed(2)} ${s.currency}（${paidAt}${
+        p.bankRef ? `，流水号 ${p.bankRef}` : `，${p.method ?? 'T/T'}`
+      }）；汇率按 ${rate} 钉快照`
+    )
+    syncSampleFeeStatus(sampleId)
+  })
+  return getSample(sampleId)!
+}
+
+/**
+ * 撤销一笔打样费实收：真删流水（这是录错/退汇，不是坏账），原因写进 fee_note。
+ * 转单前撤销会同时把「已收齐」回退成未收，待收跟着回来。
+ */
+export function deleteSamplePayment(sampleId: number, paymentId: number, reason: string): SampleOrderDetail {
+  const why = String(reason ?? '').trim()
+  if (!why) {
+    throw new Error('撤销打样收款要写原因（例如“金额录错”“客户退汇”），操作历史里要留痕。')
+  }
+  const s = getSample(sampleId)
+  if (!s) throw new Error('打样单不存在')
+  if (s.convertedOrderId) {
+    const o = getOrder(s.convertedOrderId)
+    if (o && o.paymentStatus !== 'void') {
+      throw new Error(
+        `这张打样单已经转成订单 ${o.orderNo}：转单前的实收已经参与抵扣计算，不能回头撤销。要更正请到订单里处理。`
+      )
+    }
+  }
+  const db = getDb()
+  const row = db.get('SELECT paid_at, amount, bank_ref FROM payments WHERE id = ? AND sample_order_id = ?', [
+    paymentId,
+    sampleId
+  ]) as { paid_at?: string; amount?: number; bank_ref?: string } | null
+  if (!row) throw new Error('这条收款记录已经不存在了，刷新页面后再试。')
+  const usedBy = db.get(
+    'SELECT kind, amount, at FROM order_settlements WHERE payment_id = ? ORDER BY id LIMIT 1',
+    [paymentId]
+  ) as { kind?: string; amount?: number; at?: string } | null
+  if (usedBy) {
+    throw new Error(
+      `这笔收款已经用于订单核销（${String(usedBy.at ?? '')}，${Number(usedBy.amount ?? 0).toFixed(2)}），不能直接删：请先撤销对应的核销记录。`
+    )
+  }
+  const amount = Number(row.amount ?? 0)
+  const paidAt = String(row.paid_at ?? '')
+  const bankRef = String(row.bank_ref ?? '')
+  transact(() => {
+    db.run('DELETE FROM payments WHERE id = ? AND sample_order_id = ?', [paymentId, sampleId])
+    appendFeeNote(
+      sampleId,
+      `撤销收款 ${amount.toFixed(2)} ${s.currency}（${paidAt}${bankRef ? `，流水号 ${bankRef}` : ''}）原因：${why}`
+    )
+    syncSampleFeeStatus(sampleId)
+  })
+  return getSample(sampleId)!
+}
+
 /** 客户档案里的默认条款（打样转订单时用） */
 function db_customerDefaults(customerId: number): {
   incoterm: string

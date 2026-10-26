@@ -518,6 +518,40 @@ ALTER TABLE doc_versions ADD COLUMN void_reason TEXT;
 -- 和银行流水对不上。落款当时的汇率后，老收款回退订单汇率（残留漂移可接受）。
 ALTER TABLE payments ADD COLUMN exchange_rate REAL;
 `
+  },
+  {
+    version: 20,
+    name: 'sample_payments',
+    sql: `
+-- 打样费也要有流水：fee_status 只是个旗子，没有到账日、金额、流水号，
+-- 银行月单对不上，receivedByMonth 里也凭空少了这笔钱。
+-- 但 payments.order_id 是 NOT NULL，只打样、没有订单的客户落不进来；
+-- SQLite 改不了列约束，只能重建表（迁移本身在事务里，直接改列做不到）。
+-- 规则：一笔流水要么挂订单、要么挂打样单，绝不同时挂两边——
+-- 抵扣通道（订单负费用行）永远不落流水，否则同一笔钱会被算两次。
+CREATE TABLE payments_v20 (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id        INTEGER REFERENCES orders(id) ON DELETE CASCADE,
+  sample_order_id INTEGER REFERENCES sample_orders(id),
+  paid_at         TEXT NOT NULL,
+  amount          REAL NOT NULL DEFAULT 0,
+  method          TEXT NOT NULL DEFAULT 'T/T',
+  bank_ref        TEXT NOT NULL DEFAULT '',
+  note            TEXT NOT NULL DEFAULT '',
+  exchange_rate   REAL,
+  created_at      TEXT NOT NULL,
+  CHECK ((order_id IS NOT NULL) <> (sample_order_id IS NOT NULL))
+);
+-- id 必须原样带过来：order_settlements.payment_id 是裸整数（没有外键），
+-- 重新编号会让核销台账指向一笔不存在的收款。
+INSERT INTO payments_v20(id, order_id, sample_order_id, paid_at, amount, method, bank_ref, note, exchange_rate, created_at)
+  SELECT id, order_id, NULL, paid_at, amount, method, bank_ref, note, exchange_rate, created_at FROM payments;
+DROP TABLE payments;
+ALTER TABLE payments_v20 RENAME TO payments;
+CREATE INDEX idx_payments_order ON payments(order_id);
+CREATE INDEX idx_payments_date ON payments(paid_at);
+CREATE INDEX idx_payments_sample ON payments(sample_order_id) WHERE sample_order_id IS NOT NULL;
+`
   }
 ]
 

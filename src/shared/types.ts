@@ -539,10 +539,13 @@ export interface QuotationDetail extends Quotation {
   grandTotal: number
 }
 
-/** 收款流水 */
+/** 收款流水：要么挂订单，要么挂打样单，绝不同时挂两边 */
 export interface Payment {
   id: number
-  orderId: number
+  /** 订单收款才有；打样费收款为 null */
+  orderId: number | null
+  /** 打样费收款才有；订单收款为 null */
+  sampleOrderId: number | null
   paidAt: string
   amount: number
   method: string
@@ -913,6 +916,14 @@ export interface SampleOrderDetail extends SampleOrder {
   companyCostBase: number | null
   /** 公司已收回的打样费（paid/offset 才算收回；unpaid/waived 没收回），基准币 */
   feeRecoveredBase: number | null
+  /** 实收流水合计（原币，R25）：未收单也可能是部分收款 */
+  collected: number
+  /** 实收流水折基准币（无汇率为 null） */
+  collectedBase: number | null
+  /** 实收流水笔数；feeStatus=paid 且为 0 = 旧记录只改了旗子，月报里没有这笔 */
+  flowCount: number
+  /** 旧记录·无流水：历史「已向客户收」没有落过流水，金额按全额认已收但不可追溯 */
+  legacyPaidNoFlow: boolean
   /** 公司净垫 = 公司总成本 − 已收回打样费（N33：真实垫了多少钱），基准币 */
   netAdvanceBase: number | null
   /** 待收（应收客户金额，折算基准币；feeStatus≠unpaid 或汇率缺失时为 0） */

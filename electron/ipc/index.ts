@@ -225,6 +225,11 @@ export function registerIpc(): void {
   handle('samples:save', (input: any) => samples.saveSample(input))
   handle('samples:delete', (id: number) => samples.deleteSample(id))
   handle('samples:convert', (id: number, opts?: any) => samples.convertSampleToOrder(id, opts ?? {}))
+  handle('samples:listPayments', (id: number) => samples.listSamplePayments(id))
+  handle('samples:addPayment', (id: number, p: any) => samples.addSamplePayment(id, p ?? {}))
+  handle('samples:deletePayment', (id: number, paymentId: number, reason: string) =>
+    samples.deleteSamplePayment(id, paymentId, reason)
+  )
 
   /* ---- 装箱单 ---- */
   handle('pl:list', (orderId: number) => packing.listPackingLists(orderId))
@@ -256,7 +261,7 @@ export function registerIpc(): void {
   handle('dashboard:reminders', () => dashboard.reminders())
   handle('report:monthly', () => dashboard.monthlyReport())
   handle('report:receivables', () => money.receivableByCustomer())
-  handle('report:customerOrderRows', (customerId: number) => money.listOrderMoney({ customerId }))
+  handle('report:customerOrderRows', (customerId: number) => money.customerOpenRows(customerId))
 
   /* ---- 设置 ---- */
   handle('settings:get', () => settingsSvc.getSettings())

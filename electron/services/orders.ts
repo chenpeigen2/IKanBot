@@ -7,6 +7,7 @@ import { computeOrderMoney, costInOrderCurrency, moneyForOrders, parseCharges } 
 import { likeAny } from './search'
 import { applyShipStatus, isShipStatusDerived, shipmentSummary } from './shipping'
 import { logEvent } from './events'
+import { addSamplePayment } from './samples'
 import { addDays, daysBetween, isLocalDate, localDate, localDayAfterUtc, localDayStartUtc } from '../../src/shared/date'
 import { billPartyOf, emptyParty, parseParty, patchParty, shipPartyOf, stringifyParty } from '../../src/shared/party'
 import { isBillingStatus } from '../../src/shared/billing'
@@ -26,6 +27,7 @@ import type {
   PaymentMethod,
   PaymentStatus,
   QuotationCharge,
+  SampleOrderDetail,
   Settlement,
   SettlementKind,
   ShipStatus,
@@ -1505,10 +1507,36 @@ export function summarizeSkus(orderId: number): SkuSummary[] {
 
 /* ---------------- 收款 ---------------- */
 
-export function addPayment(
-  orderId: number,
-  p: { paidAt: string; amount: number; method?: string; bankRef?: string; note?: string }
-): OrderDetail {
+export interface PaymentInput {
+  paidAt: string
+  amount: number
+  method?: string
+  bankRef?: string
+  note?: string
+}
+
+/**
+ * 收款日期与金额的唯一守门：订单收款、打样费收款、水单拆分共用这一份。
+ * 分成几处各写一遍，迟早有一处忘掉「不能填未来日期」，那笔钱就从本月到账里漂走。
+ */
+export function assertPaymentInput(p: { paidAt: string; amount: number }): { paidAt: string; amount: number } {
+  const paidAt = String(p.paidAt ?? '').trim()
+  // 空日期会让这笔钱从「本月收款」和月报里消失，只剩订单上的已收能看见
+  if (!isLocalDate(paidAt)) {
+    throw new Error('收款日期要填完整（例如 2026-10-24）。空日期的收款不会进本月收款和月报。')
+  }
+  // 钱不可能在未来到账：填成明年会把「本月到账」和账期催款一起带偏
+  if (paidAt > localDate()) {
+    throw new Error(`收款日期 ${paidAt} 还没到。请填银行水单上的实际到账日，最晚是今天（${localDate()}）。`)
+  }
+  const amount = Number(p.amount)
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error('收款金额必须是大于 0 的数。')
+  }
+  return { paidAt, amount }
+}
+
+export function addPayment(orderId: number, p: PaymentInput): OrderDetail {
   const db = getDb()
   // 作废单不再有「待收」，但钱真的到账时要能落账：
   // 现金流口径（只排除草稿）本来就把作废单的到账算进月报——闸门拦死只会让银行流水与系统账脱节。
@@ -1534,21 +1562,7 @@ export function addPayment(
       `订单 ${String(cur.order_no ?? '')} 还是草稿：草稿不进现金流，登记了也不会出现在「本月到账」和月报里。请先把收款状态改成「已发出」或「已确认」，再登记收款。`
     )
   }
-  const paidAt = String(p.paidAt ?? '').trim()
-  // 空日期会让这笔钱从「本月收款」和月报里消失，只剩订单上的已收能看见
-  if (!isLocalDate(paidAt)) {
-    throw new Error('收款日期要填完整（例如 2026-10-24）。空日期的收款不会进本月收款和月报。')
-  }
-  // 钱不可能在未来到账：填成明年会把「本月到账」和账期催款一起带偏
-  if (paidAt > localDate()) {
-    throw new Error(
-      `收款日期 ${paidAt} 还没到。请填银行水单上的实际到账日，最晚是今天（${localDate()}）。`
-    )
-  }
-  const amount = Number(p.amount)
-  if (!Number.isFinite(amount) || amount <= 0) {
-    throw new Error('收款金额必须是大于 0 的数。')
-  }
+  const { paidAt, amount } = assertPaymentInput(p)
   // 汇率快照：这笔到账按「落款那天订单上的汇率」折算进月报，
   // 以后订单汇率再改（出单据前的窗口期是允许的），历史到账不许跟着漂
   const rate = Number(
@@ -1577,7 +1591,9 @@ export function addPayment(
 
 /** 一笔水单拆到多张单：每笔的落账参数（流水号必须整批一致，对账靠它归组） */
 export interface BatchPaymentEntry {
-  orderId: number
+  /** 订单和打样单二选一：一笔钱只属于一张单，不会同时挂两边 */
+  orderId?: number
+  sampleOrderId?: number
   paidAt: string
   amount: number
   method?: string
@@ -1589,8 +1605,9 @@ export interface BatchPaymentEntry {
  * 拆分收款：一个事务循环落 N 笔。任何一笔被守门拦下（草稿、日期、金额…）
  * 整批回滚——银行水单是一笔钱，账上要么整笔都在、要么一笔没有，
  * 落一半会让「水单总额」和「系统里的收款」对不上。
+ * R25：打样单的样品费也接进同一笔水单（客户一笔钱同时付订单和打样费是常事）。
  */
-export function batchAddPayments(entries: BatchPaymentEntry[]): OrderDetail[] {
+export function batchAddPayments(entries: BatchPaymentEntry[]): (OrderDetail | SampleOrderDetail)[] {
   if (!entries.length) throw new Error('没有要登记的收款：至少选一张单填金额。')
   const bankRef = String(entries[0].bankRef ?? '').trim()
   if (!bankRef) {
@@ -1601,32 +1618,53 @@ export function batchAddPayments(entries: BatchPaymentEntry[]): OrderDetail[] {
     if (String(e.bankRef ?? '').trim() !== bankRef) {
       throw new Error(`第 ${i + 1} 笔的流水号和第一笔不一致。拆分收款整批共用同一个流水号，不同的水单请分开登记。`)
     }
+    if ((e.orderId == null) === (e.sampleOrderId == null)) {
+      throw new Error(`第 ${i + 1} 笔没有指定单据：订单和打样单必须二选一。`)
+    }
     if (!Number.isFinite(Number(e.amount)) || Number(e.amount) <= 0) {
       throw new Error(`第 ${i + 1} 笔收款金额必须是大于 0 的数。`)
     }
   }
-  const results: OrderDetail[] = []
+  const results: (OrderDetail | SampleOrderDetail)[] = []
   transact(() => {
     for (let i = 0; i < entries.length; i++) {
       const e = entries[i]
+      const isSample = e.sampleOrderId != null
       try {
         results.push(
-          addPayment(e.orderId, {
-            paidAt: e.paidAt,
-            amount: Number(e.amount),
-            method: e.method,
-            bankRef,
-            note: [String(e.note ?? '').trim() || null, `水单拆分 ${i + 1}/${entries.length}`]
-              .filter(Boolean)
-              .join('；')
-          })
+          isSample
+            ? addSamplePayment(Number(e.sampleOrderId), {
+                paidAt: e.paidAt,
+                amount: Number(e.amount),
+                method: e.method,
+                bankRef,
+                note: [String(e.note ?? '').trim() || null, `水单拆分 ${i + 1}/${entries.length}`]
+                  .filter(Boolean)
+                  .join('；')
+              })
+            : addPayment(Number(e.orderId), {
+                paidAt: e.paidAt,
+                amount: Number(e.amount),
+                method: e.method,
+                bankRef,
+                note: [String(e.note ?? '').trim() || null, `水单拆分 ${i + 1}/${entries.length}`]
+                  .filter(Boolean)
+                  .join('；')
+              })
         )
       } catch (err) {
-        const no = String(
-          (getDb().get('SELECT order_no FROM orders WHERE id = ?', [e.orderId]) as { order_no?: string } | null)
-            ?.order_no ?? `#${e.orderId}`
-        )
-        throw new Error(`第 ${i + 1} 笔（订单 ${no}）没登进去，整批已回滚：${(err as Error).message}`)
+        const no = isSample
+          ? String(
+              (getDb().get('SELECT sample_no FROM sample_orders WHERE id = ?', [Number(e.sampleOrderId)]) as
+                | { sample_no?: string }
+                | null)?.sample_no ?? `#${e.sampleOrderId}`
+            )
+          : String(
+              (getDb().get('SELECT order_no FROM orders WHERE id = ?', [Number(e.orderId)]) as
+                | { order_no?: string }
+                | null)?.order_no ?? `#${e.orderId}`
+            )
+        throw new Error(`第 ${i + 1} 笔（${isSample ? '打样单' : '订单'} ${no}）没登进去，整批已回滚：${(err as Error).message}`)
       }
     }
   })
@@ -1635,6 +1673,16 @@ export function batchAddPayments(entries: BatchPaymentEntry[]): OrderDetail[] {
 
 export function deletePayment(orderId: number, paymentId: number, reason = ''): OrderDetail {
   const db = getDb()
+  // 打样单的流水也在这张表里：走错门删不掉，但得说清楚该去哪儿
+  const sampleRow = db.get(
+    'SELECT s.sample_no FROM payments p JOIN sample_orders s ON s.id = p.sample_order_id WHERE p.id = ?',
+    [paymentId]
+  ) as { sample_no?: string } | null
+  if (sampleRow) {
+    throw new Error(
+      `这笔收款是打样单 ${String(sampleRow.sample_no ?? '')} 的样品费流水，要在打样单的「打样费收款」里撤销（撤销要写原因）。`
+    )
+  }
   const row = db.get(
     `SELECT p.paid_at, p.amount, p.bank_ref, p.created_at, o.currency
      FROM payments p JOIN orders o ON o.id = p.order_id

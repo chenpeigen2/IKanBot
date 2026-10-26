@@ -1063,17 +1063,39 @@ try {
 }
 check('未收打样单没汇率不让存', smpRateErr.includes('汇率'), smpRateErr)
 
-// 已收款标记 → 不需要汇率，也不计应收
+// R25：已收不能手勾——必须真有流水；手勾的话这笔钱会从月报里消失
+let smpManualPaidErr = ''
+try {
+  samples.saveSample({
+    customerId: c1.id,
+    expressFee: 80,
+    feeStatus: 'paid',
+    items: [{ styleNo: 'A001', color: 'White', size: 'S', quantity: 1, unitPrice: 10 }]
+  })
+} catch (e) {
+  smpManualPaidErr = (e as Error).message
+}
+check('R25：「已向客户收」不能手工勾，要登记收款', smpManualPaidErr.includes('登记收款'), smpManualPaidErr)
+
+// 已收 = 真实流水收齐（自动推成 paid）；汇率是流水的折算依据
 const smpPaid = samples.saveSample({
   customerId: c1.id,
   expressFee: 80,
-  feeStatus: 'paid',
+  currency: 'USD',
+  exchangeRate: 7.15,
+  exchangeRateDate: '2026-10-21',
   items: [{ styleNo: 'A001', color: 'White', size: 'S', quantity: 1, unitPrice: 10 }]
 })
-eq('已收款标记不需要汇率', smpPaid.feeStatus, 'paid')
-eq('已收的样品费 + 快递费都算已收回（基准币）', smpPaid.feeRecoveredBase, null)
-eq('已收单没填汇率：样品费折不出来，界面上是「—」', smpPaid.sampleFeeBase, null)
-eq('已收的打样单不计待收', smpPaid.receivableBase, 0)
+const smpPaidFlow = samples.addSamplePayment(smpPaid.id, {
+  paidAt: localDate(),
+  amount: smpPaid.totalFee,
+  bankRef: 'E2E-R25-PAID'
+})
+eq('收齐后自动标成已收', smpPaidFlow.feeStatus, 'paid')
+eq('已收金额来自流水', smpPaidFlow.collected, 90)
+eq('已收的样品费 + 快递费折基准币', smpPaidFlow.feeRecoveredBase, 90 * 7.15)
+eq('收齐的打样单不计待收', smpPaidFlow.receivableBase, 0)
+eq('有流水的已收不是「旧记录·无流水」', smpPaidFlow.legacyPaidNoFlow, false)
 
 // N23：未收的打样费要进 totalReceivable（工作台口径）
 const smpUnpaid = samples.saveSample({
@@ -1108,7 +1130,7 @@ check('无汇率的未收单存不了（新校验拦住）', smpNoRateErr.includ
 const smpDates = samples.saveSample({
   customerId: c1.id,
   expressFee: 20,
-  feeStatus: 'paid',
+  feeStatus: 'waived',
   shippedAt: '2026-10-22',
   receivedAt: '2026-10-25',
   factoryCost: 30,
@@ -1252,7 +1274,7 @@ const smpPi = samples.saveSample({
   currency: 'USD',
   exchangeRate: 7.2,
   exchangeRateDate: '2026-10-21',
-  feeStatus: 'paid',
+  feeStatus: 'waived',
   items: [{ styleNo: 'A001', productName: '纯棉圆领T恤', color: 'Black', size: 'M', quantity: 1, unitPrice: 20, goodsUnitPrice: 8 }]
 })
 const piSentOrder = samples.convertSampleToOrder(smpPi.id, { offsetSampleFee: false, paymentStatus: 'sent' })
@@ -1328,6 +1350,13 @@ eq('不改号保存不被误拦', smpKeepNo.sampleNo, smpConv.sampleNo)
 getDb().run('DELETE FROM sample_orders WHERE sample_no = ?', [staleNo])
 samples.deleteSample(bumped.id)
 
+// R25：有收款流水的单不能直接删 → 先撤销流水（要写原因，原因进 feeNote），再取消留原因、删除
+const smpPaidFlows = samples.listSamplePayments(smpPaid.id)
+eq('打样收款落进流水表', smpPaidFlows.length, 1)
+const smpPaidReverted = samples.deleteSamplePayment(smpPaid.id, smpPaidFlows[0].id, 'E2E 清理：测试收款')
+eq('撤销后回到未收', smpPaidReverted.feeStatus, 'unpaid')
+check('撤销原因写进收款说明', smpPaidReverted.feeNote.includes('E2E 清理'))
+samples.saveSample({ id: smpPaid.id, status: 'cancelled', note: 'E2E 清理：测试单不收了' })
 samples.deleteSample(smpPaid.id)
 samples.deleteSample(smpDates.id)
 // R24 起未收的单要先取消留原因才允许删
@@ -5127,12 +5156,13 @@ const r15PaidCust = customers.saveCustomer({ company: 'R15-PAID-SAMPLE' })
 const r15PaidSample = samples.saveSample({
   customerId: r15PaidCust.id,
   expressFee: 5,
-  feeStatus: 'paid',
   currency: 'USD',
   exchangeRate: 7,
   exchangeRateDate: '2026-10-21',
   items: [{ styleNo: 'R15-S2', productName: '已收打样费', color: 'Grey', size: 'L', quantity: 1, unitPrice: 10, goodsUnitPrice: 10 }]
 })
+// R25：已收必须由真实流水推导
+samples.addSamplePayment(r15PaidSample.id, { paidAt: localDate(), amount: r15PaidSample.totalFee, bankRef: 'R15-PAID-FLOW' })
 const r15PaidOrder = samples.convertSampleToOrder(r15PaidSample.id, { offsetSampleFee: true, paymentStatus: 'draft' })
 eq('已收的打样费不再生成抵扣行', r15PaidOrder.charges.length, 0)
 eq('已收标记不被改成下单抵扣', samples.getSample(r15PaidSample.id)!.feeStatus, 'paid')
@@ -6297,6 +6327,253 @@ try {
   r24RemoveErr = (e as Error).message
 }
 check('撤掉让利也要写原因（客户该付的钱又变了）', r24RemoveErr.includes('让利'), r24RemoveErr)
+
+/* ============================================================
+ * 第 25 轮：打样费收款落流水（R25）
+ * ============================================================ */
+section('R25 v20 迁移：payments 同时支持订单与打样流水')
+
+const r25PayCols = getDb().all('PRAGMA table_info(payments)') as Record<string, unknown>[]
+check('payments 多了 sample_order_id', r25PayCols.some((c) => String(c.name) === 'sample_order_id'))
+check(
+  'order_id 改成可空（打样流水不挂订单）',
+  Number(r25PayCols.find((c) => String(c.name) === 'order_id')?.notnull ?? 1) === 0
+)
+check(
+  '两边都不挂的流水被 CHECK 拦住',
+  r8err(() => getDb().run("INSERT INTO payments(paid_at, created_at) VALUES('2026-10-01','x')")).length > 0
+)
+
+section('R25 打样费收款：实收落流水，抵扣绝不落')
+
+const r25C = customers.saveCustomer({ company: 'R25-SAMPLE-FLOW' })
+const r25Month = localDate().slice(0, 7)
+const monthOfR25 = () => money.receivedByMonth().find((m) => m.month === r25Month)?.amount ?? 0
+
+const r25Sample = samples.saveSample({
+  customerId: r25C.id,
+  expressFee: 5,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: '2026-10-21',
+  items: [{ styleNo: 'R25-S1', productName: '打样收款', color: 'Grey', size: 'M', quantity: 1, unitPrice: 10 }]
+})
+eq('应收 = 样品费 10 + 快递费 5', r25Sample.totalFee, 15)
+eq('未收时已收为 0', r25Sample.collected, 0)
+
+const r25MonthBefore = monthOfR25()
+const r25Partial = samples.addSamplePayment(r25Sample.id, {
+  paidAt: localDate(),
+  amount: 6,
+  bankRef: 'R25-PART'
+})
+eq('部分收款后仍是未收', r25Partial.feeStatus, 'unpaid')
+eq('已收 = 6（来自流水）', r25Partial.collected, 6)
+eq('待收只剩没付的 9 × 7.2', r25Partial.receivableBase, 9 * 7.2)
+eq('已收回（原币折算）= 6 × 7.2', r25Partial.feeRecoveredBase, 6 * 7.2)
+eq('流水笔数', r25Partial.flowCount, 1)
+check('收款写进了收款说明（打样单没有事件表）', r25Partial.feeNote.includes('登记收款'), r25Partial.feeNote)
+check('打样实收计入本月到账（按流水汇率快照）', Math.abs(monthOfR25() - r25MonthBefore - 6 * 7.2) < 0.01)
+
+check(
+  '超过未收余额的收款被拦下',
+  r8err(() => samples.addSamplePayment(r25Sample.id, { paidAt: localDate(), amount: 20 })).includes('超过了还没收')
+)
+check(
+  '未来日期收款被拦下',
+  r8err(() => samples.addSamplePayment(r25Sample.id, { paidAt: '2999-01-01', amount: 1 })).includes('还没到')
+)
+check(
+  '零金额收款被拦下',
+  r8err(() => samples.addSamplePayment(r25Sample.id, { paidAt: localDate(), amount: 0 })).includes('大于 0')
+)
+
+check(
+  '有流水后快递费不能再改',
+  r8err(() => samples.saveSample({ id: r25Sample.id, expressFee: 9 })).includes('收款流水')
+)
+check(
+  '有流水后汇率不能再改',
+  r8err(() => samples.saveSample({ id: r25Sample.id, exchangeRate: 7.5 })).includes('收款流水')
+)
+check(
+  '有流水后收款状态不能手工改（由流水推导）',
+  r8err(() => samples.saveSample({ id: r25Sample.id, feeStatus: 'waived' })).includes('流水自动推导')
+)
+eq('描述性字段仍可改', samples.saveSample({ id: r25Sample.id, note: 'R25 备注可改' }).note, 'R25 备注可改')
+
+const r25Flows1 = samples.listSamplePayments(r25Sample.id)
+eq('流水表能列出这笔', r25Flows1.length, 1)
+eq('打样流水的 orderId 为空', r25Flows1[0].orderId, null)
+eq('打样流水的 sampleOrderId 指回打样单', r25Flows1[0].sampleOrderId, r25Sample.id)
+check(
+  '撤销不写原因被拦下',
+  r8err(() => samples.deleteSamplePayment(r25Sample.id, r25Flows1[0].id, '')).includes('原因')
+)
+const r25Reverted = samples.deleteSamplePayment(r25Sample.id, r25Flows1[0].id, '金额录错')
+eq('撤销后回到未收', r25Reverted.feeStatus, 'unpaid')
+eq('撤销后已收归零', r25Reverted.collected, 0)
+eq('撤销后待收恢复全额', r25Reverted.receivableBase, 15 * 7.2)
+check('撤销原因写进收款说明', r25Reverted.feeNote.includes('金额录错'), r25Reverted.feeNote)
+eq('撤销是真删流水', samples.listSamplePayments(r25Sample.id).length, 0)
+
+const r25Paid = samples.addSamplePayment(r25Sample.id, {
+  paidAt: localDate(),
+  amount: 15,
+  bankRef: 'R25-FULL'
+})
+eq('收齐后自动标成已收', r25Paid.feeStatus, 'paid')
+eq('收齐后不计待收', r25Paid.receivableBase, 0)
+check(
+  '收齐后再收一笔被拦下',
+  r8err(() => samples.addSamplePayment(r25Sample.id, { paidAt: localDate(), amount: 1 })).includes('已经收齐')
+)
+check('有流水的单不能直接删', r8err(() => samples.deleteSample(r25Sample.id)).includes('收款流水'))
+check(
+  '订单入口删不掉打样流水（指回打样单）',
+  r8err(() => orders.deletePayment(r24Charged.id, samples.listSamplePayments(r25Sample.id)[0].id, 'x')).includes('打样单')
+)
+
+// 清理：先撤销流水（原因留痕），再取消留原因、删除
+samples.deleteSamplePayment(r25Sample.id, samples.listSamplePayments(r25Sample.id)[0].id, 'E2E 清理')
+samples.saveSample({ id: r25Sample.id, status: 'cancelled', note: 'E2E 清理：测试单不收了' })
+samples.deleteSample(r25Sample.id)
+eq('清理后打样单已删', samples.getSample(r25Sample.id), null)
+
+section('R25 水单拆分：订单与打样费同一笔水单')
+
+const r25TotalBefore = money.totalReceivable()
+const r25Sample2 = samples.saveSample({
+  customerId: r25C.id,
+  expressFee: 5,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: '2026-10-21',
+  items: [{ styleNo: 'R25-S2', productName: '拆分收款', color: 'Grey', size: 'L', quantity: 10, unitPrice: 1, goodsUnitPrice: 8 }]
+})
+check('打样未收计入全公司待收', Math.abs(money.totalReceivable() - r25TotalBefore - 15 * 7.2) < 0.01)
+eq('客户打样应收 = 15 × 7.2', money.sampleReceivable(r25C.id), 15 * 7.2)
+const r25OpenRows = money.customerOpenRows(r25C.id)
+const r25SampleRow = r25OpenRows.find((r) => r.kind === 'sample' && r.docId === r25Sample2.id)
+check('拆分表能列出打样单', !!r25SampleRow, JSON.stringify(r25OpenRows))
+eq('拆分表里打样单待收是原币', r25SampleRow?.receivable, 15)
+eq('拆分表里打样单带币种', r25SampleRow?.currency, 'USD')
+
+const r25Split = orders.createOrder({
+  customerId: r25C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R25-SPLIT'
+})
+await orders.addOrderItem(r25Split.id, { styleNo: 'R25-O1', quantity: 10, unitPrice: 10 })
+const r25Batch = orders.batchAddPayments([
+  { orderId: r25Split.id, paidAt: localDate(), amount: 30, bankRef: 'R25-SLIP' },
+  { sampleOrderId: r25Sample2.id, paidAt: localDate(), amount: 4, bankRef: 'R25-SLIP' }
+])
+eq('一笔水单同时落订单和打样单', r25Batch.length, 2)
+eq('订单那笔落在订单上', orders.getOrder(r25Split.id)!.payments[0].bankRef, 'R25-SLIP')
+eq('打样那笔落在打样单上', samples.listSamplePayments(r25Sample2.id)[0].bankRef, 'R25-SLIP')
+eq('拆分后打样待收只剩 11 × 7.2', money.sampleReceivable(r25C.id), 11 * 7.2)
+check(
+  '客户拆分表的待收跟着流水减少',
+  Math.abs((money.customerOpenRows(r25C.id).find((r) => r.kind === 'sample')?.receivable ?? 0) - 11) < 0.01
+)
+eq('排除已收齐/无待收后仍能列订单', money.customerOpenRows(r25C.id).some((r) => r.kind === 'order'), true)
+
+check(
+  '流号不一致整批拒收',
+  r8err(() =>
+    orders.batchAddPayments([
+      { orderId: r25Split.id, paidAt: localDate(), amount: 1, bankRef: 'R25-A' },
+      { sampleOrderId: r25Sample2.id, paidAt: localDate(), amount: 1, bankRef: 'R25-B' }
+    ])
+  ).includes('流水号')
+)
+check(
+  '两边都不指定单据被拦下',
+  r8err(() => orders.batchAddPayments([{ paidAt: localDate(), amount: 1, bankRef: 'R25-X' }])).includes('二选一')
+)
+const r25PaysBeforeBad = orders.getOrder(r25Split.id)!.payments.length
+const r25FlowsBeforeBad = samples.listSamplePayments(r25Sample2.id).length
+check(
+  '第二笔超标 → 整批回滚，第一笔也不留',
+  r8err(() =>
+    orders.batchAddPayments([
+      { orderId: r25Split.id, paidAt: localDate(), amount: 1, bankRef: 'R25-SLIP-BAD' },
+      { sampleOrderId: r25Sample2.id, paidAt: localDate(), amount: 99, bankRef: 'R25-SLIP-BAD' }
+    ])
+  ).includes('整批已回滚')
+)
+eq('回滚后订单没多出一笔', orders.getOrder(r25Split.id)!.payments.length, r25PaysBeforeBad)
+eq('回滚后打样单也没多出一笔', samples.listSamplePayments(r25Sample2.id).length, r25FlowsBeforeBad)
+
+const r25Csv = dashboard.exportCsv('payments')
+check('收款台账多了「单据类型」列（加在最后一列）', r25Csv.includes('单据类型'))
+const r25SlipLines = r25Csv.split(/\r?\n/).filter((l) => l.includes('R25-SLIP'))
+eq('同一笔水单在台账里两条（订单 + 打样）', r25SlipLines.length, 2)
+check('有一条标成打样单', r25SlipLines.some((l) => l.trim().endsWith('打样单')), r25SlipLines.join(' | '))
+check('有一条标成订单', r25SlipLines.some((l) => l.trim().endsWith('订单')), r25SlipLines.join(' | '))
+
+section('R25 转单抵扣只抵没付的那部分；作废回退不吞实收')
+
+const r25ConvOrder = samples.convertSampleToOrder(r25Sample2.id, {
+  offsetSampleFee: true,
+  paymentStatus: 'confirmed'
+})
+eq(
+  '只抵还没收的 11（15 − 已收 4）',
+  Number(r25ConvOrder.charges.find((c: any) => Number(c.amount) < 0)?.amount),
+  -11
+)
+const r25ConvSample = samples.getSample(r25Sample2.id)!
+eq('转单后打样单挂「下单抵扣」', r25ConvSample.feeStatus, 'offset')
+eq('抵扣金额记 11', r25ConvSample.offsetAmount, 11)
+eq('已收回 = 实收 4 + 抵扣 11 = 全额', r25ConvSample.feeRecoveredBase, 15 * 7.2)
+check(
+  '转单后不能再登记打样收款',
+  r8err(() => samples.addSamplePayment(r25Sample2.id, { paidAt: localDate(), amount: 1 })).includes('转成订单')
+)
+const r25ConvFlow = samples.listSamplePayments(r25Sample2.id)[0]
+check(
+  '转单后不能撤销转单前的实收',
+  r8err(() => samples.deleteSamplePayment(r25Sample2.id, r25ConvFlow.id, 'x')).includes('不能回头撤销')
+)
+
+orders.voidOrder(r25ConvOrder.id, 'R25 客户取消，整单作废')
+const r25VoidedSample = samples.getSample(r25Sample2.id)!
+eq('订单作废后抵扣回退为未收', r25VoidedSample.feeStatus, 'unpaid')
+eq('作废后实收 4 还留在流水里', r25VoidedSample.collected, 4)
+eq('作废后应收只剩没付的 11', r25VoidedSample.receivableBase, 11 * 7.2)
+
+const r25VoidReverted = samples.deleteSamplePayment(r25Sample2.id, r25ConvFlow.id, 'R25 客户退汇')
+eq('作废后可以撤销实收，应收回到全额', r25VoidReverted.receivableBase, 15 * 7.2)
+samples.saveSample({ id: r25Sample2.id, status: 'cancelled', note: 'R25 清理：客户退汇，单不跟了' })
+samples.deleteSample(r25Sample2.id)
+eq('清理后拆分用打样单已删', samples.getSample(r25Sample2.id), null)
+
+section('R25 旧记录：当年只改了旗子，不凭空造流水')
+
+const r25Legacy = samples.saveSample({
+  customerId: r25C.id,
+  expressFee: 5,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: '2026-10-21',
+  items: [{ styleNo: 'R25-S3', productName: '旧记录', color: 'Grey', size: 'S', quantity: 1, unitPrice: 10 }]
+})
+getDb().run("UPDATE sample_orders SET fee_status = 'paid' WHERE id = ?", [r25Legacy.id])
+const r25LegacyRead = samples.getSample(r25Legacy.id)!
+eq('旧记录·无流水能认出来', r25LegacyRead.legacyPaidNoFlow, true)
+eq('旧记录按全额认已收', r25LegacyRead.feeRecoveredBase, 15 * 7.2)
+eq('旧记录不计待收', r25LegacyRead.receivableBase, 0)
+eq('旧记录没有流水', samples.listSamplePayments(r25Legacy.id).length, 0)
+check(
+  '旧记录补流水要先改回未收',
+  r8err(() => samples.addSamplePayment(r25Legacy.id, { paidAt: localDate(), amount: 15 })).includes('老账')
+)
+check('旧记录不进月报', !getDb().get('SELECT id FROM payments WHERE sample_order_id = ? LIMIT 1', [r25Legacy.id]))
+samples.deleteSample(r25Legacy.id)
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

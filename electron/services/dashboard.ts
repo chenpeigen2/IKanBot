@@ -2,8 +2,8 @@ import { getDb } from '../db'
 import { mapDashboard, mapMonthlyReport } from '../db/mappers'
 import { getSettings } from './settings'
 import {
-  CASHFLOW_EXCLUDED_STATUSES,
   EXCLUDED_STATUSES,
+  cashFlowRows,
   listOrderMoney,
   notInStatuses,
   receivedByMonth,
@@ -687,7 +687,9 @@ export function reminders(): Reminder[] {
     `SELECT s.id, s.sample_no, s.sample_date, s.created_at, s.shipped_at, s.status, s.fee_status,
             s.currency, s.exchange_rate, s.express_fee, c.company AS customer_name,
             COALESCE((SELECT SUM(si.quantity * si.unit_price) FROM sample_order_items si
-                      WHERE si.sample_order_id = s.id), 0) AS sample_fee
+                      WHERE si.sample_order_id = s.id), 0) AS sample_fee,
+            COALESCE((SELECT SUM(p.amount) FROM payments p
+                      WHERE p.sample_order_id = s.id), 0) AS collected
      FROM sample_orders s JOIN customers c ON c.id = s.customer_id
      WHERE s.status != 'cancelled'`
   ) as Record<string, unknown>[]
@@ -713,8 +715,9 @@ export function reminders(): Reminder[] {
       }
     }
     if (String(r.fee_status ?? 'unpaid') !== 'unpaid') continue
-    const owed = Number(r.sample_fee ?? 0) + Number(r.express_fee ?? 0)
-    if (owed <= 0) continue
+    // 催的是还欠的那部分：已经收了一半就只催另一半
+    const owed = Number(r.sample_fee ?? 0) + Number(r.express_fee ?? 0) - Number(r.collected ?? 0)
+    if (owed <= 0.001) continue
     const shippedAt = String(r.shipped_at ?? '').trim()
     const days = daysFrom(shippedAt || String(r.sample_date ?? '') || String(r.created_at ?? ''))
     if (days === null || days < s.remindPaymentDays) continue
@@ -927,7 +930,7 @@ export function exportCsv(kind: ExportKind, filter?: OrderExportFilter): string 
     case 'monthly':
       return monthlyCsv(base)
     case 'payments':
-      return paymentsCsv(db, base)
+      return paymentsCsv(base)
     default: {
       // 加了新 kind 却忘了在这里分支：让编译器在这里叫，别让它静默掉进收款分支
       const never: never = kind
@@ -1124,18 +1127,11 @@ function monthlyCsv(base: string): string {
 
 /** 收款流水：现金流口径（草稿单的钱不算真收款），并带上订单状态——
  *  作废/失效单的钱确实到账了，但看的人得知道这单已经作废 */
-function paymentsCsv(db: ReturnType<typeof getDb>, base: string): string {
-  // 折算汇率与 money.ts receivedByMonth 同一口径：收款快照优先，没有快照才退回订单汇率
-  const cash = notInStatuses('o.payment_status', CASHFLOW_EXCLUDED_STATUSES)
-  const rows = db.all(
-    `SELECT p.paid_at, o.order_no, o.pi_no, o.payment_status, c.company, o.currency,
-            COALESCE(p.exchange_rate, o.exchange_rate) AS exchange_rate,
-            p.amount, p.method, p.bank_ref, p.note
-     FROM payments p JOIN orders o ON o.id=p.order_id JOIN customers c ON c.id=o.customer_id
-     WHERE ${cash.sql}
-     ORDER BY p.paid_at DESC`,
-    cash.params
-  ) as Record<string, unknown>[]
+function paymentsCsv(base: string): string {
+  // 取数与月报到账同一份（cashFlowRows）：订单收款 + 打样实收。
+  // 打样抵扣不落流水，这里也不会出现——同一笔钱只能有一条来路。
+  const rows = cashFlowRows()
+  // 「单据类型」加在最后一列：前面的列序是别人报表的下游约定，插在中间会错位
   const header = [
     '收款日期',
     '订单号',
@@ -1147,20 +1143,22 @@ function paymentsCsv(db: ReturnType<typeof getDb>, base: string): string {
     `金额(${base})`,
     '方式',
     '银行流水号',
-    '备注'
+    '备注',
+    '单据类型'
   ]
   const lines = rows.map((r) => [
-    r.paid_at,
-    r.order_no,
-    r.pi_no,
-    r.company,
-    PAYMENT_STATUS_LABEL[String(r.payment_status) as keyof typeof PAYMENT_STATUS_LABEL] ?? r.payment_status,
+    r.paidAt,
+    r.docNo,
+    r.piNo,
+    r.customerName,
+    r.statusText,
     r.currency,
-    money2(Number(r.amount)),
-    money2(Number(r.amount) * Number(r.exchange_rate)),
+    money2(r.amount),
+    money2(r.amountBase),
     r.method,
-    r.bank_ref,
-    r.note
+    r.bankRef,
+    r.note,
+    r.docType === 'sample' ? '打样单' : '订单'
   ])
   return toCsv(header, lines)
 }

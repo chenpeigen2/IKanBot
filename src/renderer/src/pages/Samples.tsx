@@ -42,6 +42,8 @@ export default function Samples() {
   const [keyword, setKeyword] = useState(searchParams.get('kw') ?? '')
   const [status, setStatus] = useState('')
   const [editing, setEditing] = useState<any | null>(null)
+  /** R25：打样费实收流水（登记 / 撤销） */
+  const [paying, setPaying] = useState<any | null>(null)
   const [preview, setPreview] = useState<{ html: string; no: string } | null>(null)
   const [converting, setConverting] = useState<any | null>(null)
   /** N-2：转单前必须问一句 PI 发不发（草稿单不进销售额/待收，忘了改状态就是对账事故） */
@@ -226,6 +228,13 @@ export default function Samples() {
                         </td>
                         <td>
                           <SampleFeeTag status={s.feeStatus} />
+                          {s.legacyPaidNoFlow ? (
+                            <div className="faint" title="升级前只改了收款标记，没有流水；月报里没有这笔">
+                              旧记录·无流水
+                            </div>
+                          ) : s.collected > 0.001 ? (
+                            <div className="faint">已收 {money(s.collected)}</div>
+                          ) : null}
                         </td>
                         <td className="mono clip-100" title={s.trackingNo || ''}>
                           {s.trackingNo || '—'}
@@ -239,6 +248,15 @@ export default function Samples() {
                             : '未寄'}
                         </td>
                         <td className="cell-actions">
+                          {s.totalFee > 0 || s.collected > 0 ? (
+                            <button
+                              className="link"
+                              onClick={() => setPaying(s)}
+                              title="登记 / 撤销打样费实收（按银行水单）"
+                            >
+                              收款
+                            </button>
+                          ) : null}
                           {s.convertedOrderId ? (
                             <>
                               <button
@@ -410,6 +428,14 @@ export default function Samples() {
         />
       ) : null}
 
+      {paying ? (
+        <SamplePayModal
+          sample={paying}
+          onClose={() => setPaying(null)}
+          onChanged={load}
+        />
+      ) : null}
+
       {preview ? (
         <Modal
           title={`样品单预览 ${preview.no}`}
@@ -447,6 +473,254 @@ export default function Samples() {
         </Modal>
       ) : null}
     </>
+  )
+}
+
+/* ================= 打样费收款（R25） ================= */
+
+function SamplePayModal({
+  sample,
+  onClose,
+  onChanged
+}: {
+  sample: any
+  onClose: () => void
+  onChanged: () => Promise<void>
+}) {
+  const toast = useToast()
+  const [detail, setDetail] = useState<any>(sample)
+  const [rows, setRows] = useState<any[]>([])
+  const [busy, setBusy] = useState(false)
+  const [form, setForm] = useState({ paidAt: today(), amount: '', method: 'T/T', bankRef: '', note: '' })
+  const [revoking, setRevoking] = useState<{ id: number; reason: string } | null>(null)
+
+  const loadPayments = async () => {
+    try {
+      setRows(await window.api.samples.listPayments(sample.id))
+    } catch (e) {
+      toast((e as Error).message || '收款流水没加载出来', 'error')
+    }
+  }
+  const reload = async () => {
+    try {
+      const fresh = await window.api.samples.get(sample.id)
+      if (fresh) setDetail(fresh)
+    } catch {
+      // 详情拿不到时保留列表行上的数，流水列表仍可看
+    }
+    await loadPayments()
+  }
+  useEffect(() => {
+    void reload()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const remaining = Math.max(0, Number(detail.totalFee ?? 0) - Number(detail.collected ?? 0))
+  const convertedLive = !!detail.convertedOrderId && detail.convertedOrderStatus !== 'void'
+  const canAdd =
+    detail.status !== 'cancelled' &&
+    !convertedLive &&
+    detail.feeStatus !== 'offset' &&
+    detail.feeStatus !== 'waived' &&
+    !(detail.feeStatus === 'paid' && detail.totalFee > 0.001)
+
+  const add = async () => {
+    if (busy) return
+    const amount = Number(form.amount)
+    if (!(amount > 0)) {
+      toast('收款金额要大于 0', 'error')
+      return
+    }
+    setBusy(true)
+    try {
+      await window.api.samples.addPayment(sample.id, {
+        paidAt: form.paidAt,
+        amount,
+        method: form.method,
+        bankRef: form.bankRef.trim(),
+        note: form.note.trim()
+      })
+      toast('已登记打样费收款')
+      setForm({ ...form, amount: '', bankRef: '', note: '' })
+      await reload()
+      await onChanged()
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const revoke = async () => {
+    if (!revoking || busy) return
+    if (!revoking.reason.trim()) {
+      toast('撤销收款要写原因（例如“金额录错”“客户退汇”）', 'error')
+      return
+    }
+    setBusy(true)
+    try {
+      await window.api.samples.deletePayment(sample.id, revoking.id, revoking.reason.trim())
+      toast('已撤销这笔收款')
+      setRevoking(null)
+      await reload()
+      await onChanged()
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal title={`打样费收款 · ${detail.sampleNo}`} onClose={onClose} size="wide">
+      <div className="price-calc mb">
+        <div>
+          <span className="muted">应收（样品费 + 快递费）</span>
+          <span>{money(Number(detail.totalFee) || 0, detail.currency)}</span>
+        </div>
+        <div>
+          <span className="muted">已收（银行流水）</span>
+          <span>{money(Number(detail.collected) || 0, detail.currency)}</span>
+        </div>
+        <div className="total">
+          <span>待收</span>
+          <span>{money(remaining, detail.currency)}</span>
+        </div>
+      </div>
+
+      {detail.legacyPaidNoFlow ? (
+        <div className="alert warn">
+          这笔样品费当年是按「已向客户收」记的老账，没有银行流水（月报里也没有）。要补流水，请先关掉这里，在「编辑」里把收款标记改回「未收」，再按水单登记。
+        </div>
+      ) : null}
+      {detail.feeStatus === 'offset' ? (
+        <div className="alert info">
+          样品费已经抵扣到订单里了：这不是现金，不会出现在收款流水和月报里（订单的负费用行已经记过一次）。
+        </div>
+      ) : null}
+      {detail.feeStatus === 'waived' ? <div className="alert info">这张单的样品费已免收。</div> : null}
+      {convertedLive ? (
+        <div className="alert info">
+          这张打样单已经转成订单：转单前的实收只能看、不能再改；转单之后收到的钱请登记在订单上。
+        </div>
+      ) : null}
+      {detail.status === 'cancelled' ? <div className="alert warn">这张打样单已取消，不能再登记收款。</div> : null}
+
+      {canAdd ? (
+        <div className="price-calc mb">
+          <div>
+            <span className="muted">到账日</span>
+            <input
+              type="date"
+              value={form.paidAt}
+              max={today()}
+              onChange={(e) => setForm({ ...form, paidAt: e.target.value })}
+            />
+          </div>
+          <div>
+            <span className="muted">金额（{detail.currency}）</span>
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              value={form.amount}
+              placeholder={remaining.toFixed(2)}
+              onChange={(e) => setForm({ ...form, amount: e.target.value })}
+            />
+          </div>
+          <div>
+            <span className="muted">方式</span>
+            <select value={form.method} onChange={(e) => setForm({ ...form, method: e.target.value })}>
+              {['T/T', 'L/C', 'PayPal', '西联', '其他'].map((m) => (
+                <option key={m}>{m}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <span className="muted">银行流水号</span>
+            <input
+              value={form.bankRef}
+              placeholder="选填，但填了对账更省事"
+              onChange={(e) => setForm({ ...form, bankRef: e.target.value })}
+            />
+          </div>
+          <div>
+            <span className="muted">备注</span>
+            <input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} />
+          </div>
+          <div>
+            <span className="muted">&nbsp;</span>
+            <Button variant="primary" disabled={busy} onClick={() => void add()}>
+              登记收款
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th>到账日</th>
+              <th className="num">金额</th>
+              <th>方式 / 流水号</th>
+              <th>备注</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr>
+                <td colSpan={5}>
+                  <Empty text="还没有收款流水。客户真付了钱，用上面的表单按银行水单登记；抵扣不在这里，转订单时自动记。" />
+                </td>
+              </tr>
+            ) : (
+              rows.map((p) => {
+                const rev = revoking?.id === p.id ? revoking : null
+                return (
+                  <tr key={p.id}>
+                    <td className="nowrap">{fmtDate(p.paidAt)}</td>
+                    <td className="num">{money(Number(p.amount) || 0, detail.currency)}</td>
+                    <td className="mono">{p.bankRef || p.method || '—'}</td>
+                    <td className="muted">{p.note || '—'}</td>
+                    <td className="cell-actions">
+                      {rev ? (
+                        <>
+                          <input
+                            value={rev.reason}
+                            placeholder="撤销原因（必填）"
+                            onChange={(e) => setRevoking({ ...rev, reason: e.target.value })}
+                          />
+                          <button className="link" onClick={() => void revoke()}>
+                            确认撤销
+                          </button>
+                          <button className="link" onClick={() => setRevoking(null)}>
+                            取消
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          className="link"
+                          disabled={convertedLive}
+                          title={convertedLive ? '转单后不能撤销转单前的实收' : ''}
+                          onClick={() => setRevoking({ id: p.id, reason: '' })}
+                        >
+                          撤销
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div className="hint">
+        只有真金白银进这张表；「下单抵扣」是订单里的负费用行，不会在这里重复记一笔。撤销是更正录错的流水，原因会写进打样单的收款说明。
+      </div>
+    </Modal>
   )
 }
 
@@ -507,6 +781,13 @@ function SampleModal({
 
   const sampleFee = lines.reduce((s, l) => s + l.quantity * l.unitPrice, 0)
   const totalQty = lines.reduce((s, l) => s + l.quantity, 0)
+  // 已收回预览：paid 由流水收齐推导；offset 是抵进订单的钱；未收时可能有部分实收
+  const recoveredPreview =
+    form.feeStatus === 'paid'
+      ? sampleFee + (Number(form.expressFee) || 0)
+      : form.feeStatus === 'offset'
+        ? Number(draft.offsetAmount) || sampleFee + (Number(form.expressFee) || 0)
+        : Number(draft.collected) || 0
 
   const setLine = (uid: string, patch: Partial<LineRow>) =>
     setLines((ls) => ls.map((l) => (l.uid === uid ? { ...l, ...patch } : l)))
@@ -710,15 +991,20 @@ function SampleModal({
           <label>打样费收款标记</label>
           <select
             value={form.feeStatus}
+            disabled={Number(draft.flowCount ?? 0) > 0}
             onChange={(e) => setForm({ ...form, feeStatus: e.target.value as SampleFeeStatus })}
           >
             {SAMPLE_FEE_STATUS_ORDER.map((f) => (
-              <option key={f} value={f}>
+              <option key={f} value={f} disabled={(f === 'paid' || f === 'offset') && form.feeStatus !== f}>
                 {SAMPLE_FEE_STATUS_LABEL[f]}
               </option>
             ))}
           </select>
-          <div className="hint">只有「未收」会计进工作台待收款和催款提醒</div>
+          <div className="hint">
+            {Number(draft.flowCount ?? 0) > 0
+              ? '这张单已经有收款流水：收款状态由流水自动推导，不能手工改（撤销流水后会跟着回退）。'
+              : '「已向客户收」要用列表里的「收款」按水单登记，收齐后自动标记；「下单抵扣」只有转订单时才会自动记。只有「未收」会计进待收和催款提醒。'}
+          </div>
         </div>
         <div className="field">
           <label>币种 / 汇率 / 汇率日期（未收时必填）</label>
@@ -909,9 +1195,9 @@ function SampleModal({
           <span>{money(Number(form.factoryCost || 0) + (Number(form.expressFee) || 0))}</span>
         </div>
         <div>
-          <span className="muted">已收回的样品费（已收 / 下单抵扣才计）</span>
-          <span className={form.feeStatus === 'paid' || form.feeStatus === 'offset' ? '' : 'faint'}>
-            {money(form.feeStatus === 'paid' || form.feeStatus === 'offset' ? sampleFee : 0)}
+          <span className="muted">已收回的样品费（实收流水 / 下单抵扣）</span>
+          <span className={recoveredPreview > 0.001 ? '' : 'faint'}>
+            {money(recoveredPreview)}
           </span>
         </div>
         <div className="total">
@@ -920,7 +1206,7 @@ function SampleModal({
             {money(
               Number(form.factoryCost || 0) +
                 (Number(form.expressFee) || 0) -
-                (form.feeStatus === 'paid' || form.feeStatus === 'offset' ? sampleFee : 0)
+                recoveredPreview
             )}
           </span>
         </div>

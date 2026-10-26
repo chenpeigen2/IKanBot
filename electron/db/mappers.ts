@@ -223,7 +223,8 @@ export function mapOrderItem(r: Row): OrderItem {
 export function mapPayment(r: Row): Payment {
   return {
     id: num(r.id),
-    orderId: num(r.order_id),
+    orderId: r.order_id == null ? null : num(r.order_id),
+    sampleOrderId: r.sample_order_id == null ? null : num(r.sample_order_id),
     paidAt: str(r.paid_at),
     amount: num(r.amount),
     method: str(r.method),

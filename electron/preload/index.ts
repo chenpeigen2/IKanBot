@@ -106,7 +106,11 @@ const api: IKanApi = {
     get: (id: number) => call<any>('samples:get', id),
     save: (input: any) => call<any>('samples:save', input),
     remove: (id: number) => call<void>('samples:delete', id),
-    convert: (id: number, opts?: any) => call<any>('samples:convert', id, opts)
+    convert: (id: number, opts?: any) => call<any>('samples:convert', id, opts),
+    listPayments: (id: number) => call<any[]>('samples:listPayments', id),
+    addPayment: (id: number, p: any) => call<any>('samples:addPayment', id, p),
+    deletePayment: (id: number, paymentId: number, reason: string) =>
+      call<any>('samples:deletePayment', id, paymentId, reason)
   },
   docs: {
     save: (payload: {

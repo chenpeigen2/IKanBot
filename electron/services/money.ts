@@ -29,6 +29,7 @@ import { localMonthOf, localDateOf, localDate } from '../../src/shared/date'
 import { ciNoOf } from '../../src/shared/documents'
 import { NON_BILLING_STATUSES } from '../../src/shared/billing'
 import type { CustomerReceivable, PackingAmount, PackingAmountLine, QuotationCharge } from '../../src/shared/types'
+import { PAYMENT_STATUS_LABEL, SAMPLE_STATUS_LABEL } from '../../src/shared/types'
 
 /** 解析费用行 JSON（运费/保险等） */
 export function parseCharges(v: unknown): QuotationCharge[] {
@@ -627,29 +628,94 @@ export function totalReceivable(filter: MoneyListFilter = {}): number {
 }
 
 /**
+ * 一笔真金白银的到账流水（订单收款 + 打样费收款），折算汇率与所属单据口径一致。
+ * 现金流口径只看订单草稿：草稿还没发出去，收到的钱是预收，不算这票的到账。
+ * 打样单没有草稿概念，钱到账就算——取消/免单也一样，银行里真有这笔。
+ */
+export interface CashFlowRow {
+  docType: 'order' | 'sample'
+  docNo: string
+  piNo: string
+  customerName: string
+  statusText: string
+  currency: string
+  paidAt: string
+  exchangeRate: number
+  amount: number
+  amountBase: number
+  method: string
+  bankRef: string
+  note: string
+}
+
+/**
+ * 全项目唯一一份「收到的钱」的取数：月报到账、收款台账导出都从这里取。
+ * 打样费的抵扣（offset）绝不落 payments——订单负费用行已经计过一次，
+ * 再落一条就是同一笔钱算两遍。所以这里只有订单流水 + 打样实收流水两类。
+ */
+export function cashFlowRows(): CashFlowRow[] {
+  const db = getDb()
+  const cash = notInStatuses('o.payment_status', CASHFLOW_EXCLUDED_STATUSES)
+  const rows = db.all(
+    `SELECT 'order' AS doc_type, o.order_no AS doc_no, COALESCE(o.pi_no, '') AS pi_no,
+            o.payment_status AS doc_status, c.company AS customer_name, o.currency AS currency,
+            p.paid_at AS paid_at, COALESCE(p.exchange_rate, o.exchange_rate) AS exchange_rate,
+            p.amount AS amount, p.method AS method, p.bank_ref AS bank_ref, p.note AS note
+     FROM payments p JOIN orders o ON o.id = p.order_id JOIN customers c ON c.id = o.customer_id
+     WHERE ${cash.sql}
+     UNION ALL
+     SELECT 'sample' AS doc_type, s.sample_no AS doc_no, '' AS pi_no,
+            s.status AS doc_status, c.company AS customer_name, s.currency AS currency,
+            p.paid_at AS paid_at, COALESCE(p.exchange_rate, s.exchange_rate) AS exchange_rate,
+            p.amount AS amount, p.method AS method, p.bank_ref AS bank_ref, p.note AS note
+     FROM payments p JOIN sample_orders s ON s.id = p.sample_order_id
+     JOIN customers c ON c.id = s.customer_id
+     ORDER BY paid_at DESC`,
+    cash.params
+  ) as Record<string, unknown>[]
+  return rows.map((r) => {
+    const docType = String(r.doc_type) === 'sample' ? 'sample' : 'order'
+    const status = String(r.doc_status ?? '')
+    const exchangeRate = Number(r.exchange_rate ?? 0)
+    const amount = Number(r.amount ?? 0)
+    return {
+      docType,
+      docNo: String(r.doc_no ?? ''),
+      piNo: String(r.pi_no ?? ''),
+      customerName: String(r.customer_name ?? ''),
+      statusText:
+        docType === 'sample'
+          ? `打样·${SAMPLE_STATUS_LABEL[status as keyof typeof SAMPLE_STATUS_LABEL] ?? status}`
+          : PAYMENT_STATUS_LABEL[status as keyof typeof PAYMENT_STATUS_LABEL] ?? status,
+      currency: String(r.currency ?? ''),
+      paidAt: String(r.paid_at ?? ''),
+      exchangeRate,
+      amount,
+      amountBase: amount * exchangeRate,
+      method: String(r.method ?? ''),
+      bankRef: String(r.bank_ref ?? ''),
+      note: String(r.note ?? '')
+    } as CashFlowRow
+  })
+}
+
+/**
  * 到账金额按「到账月」归集（基准币），现金流口径：只排除草稿单。
  *
  * 这是全项目唯一一份「某个月收到多少钱」的实现——工作台的本月收款、
  * 月度报表的收款列、月度汇总导出都从这里取，两处各写一遍 SQL
  * 迟早会漂出两个数（红线：算钱的 SQL 不许在报表里另起一套）。
  * 已作废/失效单的钱真到账了就是到账了，所以这里用 CASHFLOW 状态集合。
+ * 打样费（R25）也走同一份流水：实收落 payments，抵扣不落。
  */
 export function receivedByMonth(): { month: string; amount: number }[] {
-  const db = getDb()
-  const cash = notInStatuses('o.payment_status', CASHFLOW_EXCLUDED_STATUSES)
-  const rows = db.all(
-    `SELECT p.paid_at AS paid_at, p.amount * COALESCE(p.exchange_rate, o.exchange_rate) AS amount_base
-     FROM payments p JOIN orders o ON o.id = p.order_id
-     WHERE ${cash.sql}`,
-    cash.params
-  ) as Record<string, unknown>[]
   const by = new Map<string, number>()
-  for (const r of rows) {
+  for (const r of cashFlowRows()) {
     // 老数据里可能有空日期或非 YYYY-MM-DD 的收款日：这些钱认到账，但不认月份，
     // 不能让它冒出一个 "null" 月把报表撑成垃圾行
-    const m = localMonthOf(String(r.paid_at ?? ''))
+    const m = localMonthOf(r.paidAt)
     if (!/^\d{4}-\d{2}$/.test(m)) continue
-    by.set(m, (by.get(m) ?? 0) + Number(r.amount_base ?? 0))
+    by.set(m, (by.get(m) ?? 0) + r.amountBase)
   }
   return [...by.entries()].map(([month, amount]) => ({ month, amount })).sort((a, b) => b.month.localeCompare(a.month))
 }
@@ -720,12 +786,23 @@ export function receivableByCustomer(): CustomerReceivable[] {
 }
 
 /**
- * 打样单待收（基准币，N23）：样品费 + 快递费，只有 fee_status='unpaid' 才算。
- * 汇率缺失的单不计入（否则折不准），它们在打样页上会亮「汇率未填」提醒补。
+ * 打样单待收明细（R25）：应收 = 样品费 + 快递费 − 已到的实收流水。
+ * 只有 fee_status='unpaid' 的单还挂着应收；取消的单不收钱。
+ * 行级明细与全公司合计共用这一份取数，界面上的数和待收总额才是同一个数。
  */
-export function sampleReceivable(customerId?: number): number {
+export interface SampleOpenRow {
+  sampleId: number
+  sampleNo: string
+  customerId: number
+  status: string
+  currency: string
+  exchangeRate: number
+  /** 原币待收 */
+  receivable: number
+}
+
+export function sampleOpenRows(customerId?: number): SampleOpenRow[] {
   const db = getDb()
-  // 取消的打样单不再向客户收钱：样品都没做/没寄，催款是错的
   const where = ["s.fee_status = 'unpaid'", "s.status != 'cancelled'"]
   const params: (string | number)[] = []
   if (customerId != null) {
@@ -733,20 +810,86 @@ export function sampleReceivable(customerId?: number): number {
     params.push(customerId)
   }
   const rows = db.all(
-    `SELECT s.exchange_rate, s.express_fee,
+    `SELECT s.id, s.sample_no, s.customer_id, s.status, s.currency, s.exchange_rate, s.express_fee,
             COALESCE((SELECT SUM(si.quantity * si.unit_price) FROM sample_order_items si
-                      WHERE si.sample_order_id = s.id), 0) AS sample_fee
+                      WHERE si.sample_order_id = s.id), 0) AS sample_fee,
+            COALESCE((SELECT SUM(p.amount) FROM payments p
+                      WHERE p.sample_order_id = s.id), 0) AS collected
      FROM sample_orders s
      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}`,
     params
   ) as Record<string, unknown>[]
-  let total = 0
+  const out: SampleOpenRow[] = []
   for (const r of rows) {
-    const rate = Number(r.exchange_rate ?? 0)
-    if (rate <= 0) continue // 汇率没填 → 不计入（打样页有提醒）
-    total += (Number(r.sample_fee ?? 0) + Number(r.express_fee ?? 0)) * rate
+    const fee = Number(r.sample_fee ?? 0) + Number(r.express_fee ?? 0)
+    const left = fee - Number(r.collected ?? 0)
+    if (left <= 0.001) continue
+    out.push({
+      sampleId: Number(r.id),
+      sampleNo: String(r.sample_no ?? ''),
+      customerId: Number(r.customer_id),
+      status: String(r.status ?? ''),
+      currency: String(r.currency ?? 'USD'),
+      exchangeRate: Number(r.exchange_rate ?? 0),
+      receivable: left
+    })
+  }
+  return out
+}
+
+/**
+ * 打样单待收（基准币，N23/R25）：汇率缺失的单不计入（否则折不准），
+ * 它们在打样页上会亮「汇率未填」提醒补。
+ */
+export function sampleReceivable(customerId?: number): number {
+  let total = 0
+  for (const r of sampleOpenRows(customerId)) {
+    if (r.exchangeRate <= 0) continue
+    total += r.receivable * r.exchangeRate
   }
   return total
+}
+
+/**
+ * 客户名下所有还欠钱的单据（订单 + 打样单）——「水单拆分」按行分摊用。
+ * R25 起打样费也走同一笔水单：客户一笔钱同时付订单和样品费是常事。
+ */
+export interface CustomerOpenRow {
+  kind: 'order' | 'sample'
+  docId: number
+  docNo: string
+  piNo: string
+  statusText: string
+  currency: string
+  /** 原币待收 */
+  receivable: number
+}
+
+export function customerOpenRows(customerId: number): CustomerOpenRow[] {
+  const orders: CustomerOpenRow[] = listOrderMoney({ customerId })
+    .filter((r) => r.receivable > 0.001)
+    .map((r) => ({
+      kind: 'order',
+      docId: r.orderId,
+      docNo: r.orderNo,
+      piNo: r.piNo,
+      statusText: PAYMENT_STATUS_LABEL[r.paymentStatus as keyof typeof PAYMENT_STATUS_LABEL] ?? r.paymentStatus,
+      currency: r.currency,
+      receivable: r.receivable
+    }))
+  // 没填汇率的打样单摆进来也登记不了（服务层会拦），不如先让打样页提醒补汇率
+  const samples: CustomerOpenRow[] = sampleOpenRows(customerId)
+    .filter((r) => r.exchangeRate > 0)
+    .map((r) => ({
+      kind: 'sample',
+      docId: r.sampleId,
+      docNo: r.sampleNo,
+      piNo: '',
+      statusText: `打样·${SAMPLE_STATUS_LABEL[r.status as keyof typeof SAMPLE_STATUS_LABEL] ?? r.status}`,
+      currency: r.currency,
+      receivable: r.receivable
+    }))
+  return [...orders, ...samples]
 }
 
 /**
