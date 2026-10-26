@@ -9,7 +9,7 @@
 import { getDb, transact } from '../db'
 import { getSettings } from './settings'
 import { logEvent } from './events'
-import { recomputePaymentStatus } from './orders'
+import { getOrder, recomputePaymentStatus } from './orders'
 import { isLocalDate, localDate } from '../../src/shared/date'
 import { isBillingStatus } from '../../src/shared/billing'
 import {
@@ -56,6 +56,15 @@ function readOrderTarget(id: number): Target {
   if (!isBillingStatus(status)) {
     throw new Error(`订单 ${String(row.order_no ?? '')} 已失效/作废：它已经没有待收，预收抵扣无处可落。`)
   }
+  const detail = getOrder(id)
+  // 坏账已经从待收里拿掉过一次：再拿预收抵，同一笔欠款会同时算「坏账损失」和「预收抵扣」，
+  // 待收、坏账余额、客户余额三处对不上。追回款走「坏账追回」，别用预收替客户补。
+  if (detail && detail.badDebtOutstanding > 0.001) {
+    throw new Error(
+      `订单 ${String(row.order_no ?? '')} 还有 ${detail.badDebtOutstanding.toFixed(2)} ${currency} 坏账没追回：` +
+        `先走「坏账追回」或撤销那笔坏账，再拿预收抵扣——否则同一笔欠款会同时算坏账损失和预收抵扣。`
+    )
+  }
   const money = moneyForOrders([{ id, charges: row.charges, depositRatio: Number(row.deposit_ratio ?? 0) }]).get(id)
   return {
     kind: 'order',
@@ -69,12 +78,24 @@ function readOrderTarget(id: number): Target {
 
 function readSampleTarget(id: number): Target {
   const row = getDb().get(
-    'SELECT id, sample_no, customer_id, currency, status, fee_status FROM sample_orders WHERE id = ?',
+    `SELECT s.id, s.sample_no, s.customer_id, s.currency, s.status, s.fee_status, o.order_no AS converted_order_no
+     FROM sample_orders s LEFT JOIN orders o ON o.id = s.converted_order_id
+     WHERE s.id = ?`,
     [id]
   ) as Record<string, unknown> | null
   if (!row) throw new Error('打样单不存在')
   const customerId = Number(row.customer_id)
   const currency = String(row.currency ?? '').trim()
+  // 已经走「转单抵扣」的样品费由订单负费用行结清过一次，不能再拿预收抵第二次。
+  // R29 起转出订单退回草稿/失效时，这笔样品费会重新出现在待收里——
+  // 那只是抵扣暂挂，不是第二笔欠款；等订单恢复会自动再抵。
+  if (String(row.fee_status ?? '') === 'offset') {
+    const orderNo = String(row.converted_order_no ?? '').trim()
+    throw new Error(
+      `打样单 ${String(row.sample_no ?? '')} 的样品费已经抵进转出的订单${orderNo ? ` ${orderNo}` : ''}，不能再用客户预收抵一次。` +
+        `如果转出的订单退回了草稿/失效，请先把订单恢复成正式单，抵扣会自动生效。`
+    )
+  }
   const hit = sampleOpenRows(customerId).find((r) => r.sampleId === id)
   if (!hit) {
     throw new Error(

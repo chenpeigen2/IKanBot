@@ -783,6 +783,57 @@ export function cashFlowRows(filter: { customerId?: number } = {}): CashFlowRow[
 }
 
 /**
+ * 预收退款流水（R30）：钱从公司账上退给客户，是现金**流出**。
+ *
+ * 为什么不并进 cashFlowRows：
+ *  - 月报/工作台的「收款」是毛流入口径，退款不是收款；
+ *  - 对账单已经把退款单独列行（取自客户余额），并进 cashFlowRows 会列两遍；
+ *  - customer_refunds 没有汇率快照，硬折基准币只能猜一个汇率。
+ * 所以这里只给「收款台账」补一条原币负流水，基准币列留空，等有汇率快照再折。
+ * 只认未撤销的退款：撤销代表钱没出去，不能留在台账里。
+ */
+export interface RefundFlowRow {
+  refundId: number
+  customerId: number
+  customerName: string
+  refundAt: string
+  currency: string
+  amount: number
+  bankRef: string
+  note: string
+  actor: string
+}
+
+export function refundFlowRows(filter: { customerId?: number } = {}): RefundFlowRow[] {
+  const db = getDb()
+  const where = ['r.reversed_at IS NULL']
+  const params: (string | number)[] = []
+  if (filter.customerId != null) {
+    where.push('r.customer_id = ?')
+    params.push(filter.customerId)
+  }
+  const rows = db.all(
+    `SELECT r.id, r.customer_id, c.company AS customer_name, r.currency, r.refund_at, r.amount,
+            r.bank_ref, r.note, r.actor
+     FROM customer_refunds r JOIN customers c ON c.id = r.customer_id
+     WHERE ${where.join(' AND ')}
+     ORDER BY r.refund_at DESC, r.id DESC`,
+    params
+  ) as Record<string, unknown>[]
+  return rows.map((r) => ({
+    refundId: Number(r.id ?? 0),
+    customerId: Number(r.customer_id ?? 0),
+    customerName: String(r.customer_name ?? ''),
+    refundAt: String(r.refund_at ?? ''),
+    currency: String(r.currency ?? ''),
+    amount: Number(r.amount ?? 0),
+    bankRef: String(r.bank_ref ?? ''),
+    note: String(r.note ?? ''),
+    actor: String(r.actor ?? '')
+  }))
+}
+
+/**
  * 到账金额按「到账月」归集（基准币），现金流口径：只排除草稿单。
  *
  * 这是全项目唯一一份「某个月收到多少钱」的实现——工作台的本月收款、
@@ -835,31 +886,40 @@ export function receivableByCustomer(): CustomerReceivable[] {
     cur.goodsBase += r.receivableBase
     by.set(r.customerId, cur)
   }
-  for (const [id, v] of by) v.sampleBase = sampleReceivable(id)
+  // 打样待收也走 sampleOpenRows 这一份口径：R29 起「转单抵扣挂起」（订单退回草稿/失效）
+  // 的样品费会重新出现在待收里。以前这里按 fee_status='unpaid' 另查一遍，
+  // 只有挂起抵扣打样单的客户会整家从欠款榜消失，榜合计又对不上工作台待收。
+  const sampleBaseByCustomer = new Map<number, number>()
+  for (const r of sampleOpenRows()) {
+    // 汇率没填时折不出来，不上榜；打样页会提醒补汇率
+    if (r.exchangeRate <= 0) continue
+    const base = r.receivable * r.exchangeRate
+    if (base <= 0.001) continue
+    sampleBaseByCustomer.set(r.customerId, (sampleBaseByCustomer.get(r.customerId) ?? 0) + base)
+  }
+  for (const [id, v] of by) v.sampleBase = sampleBaseByCustomer.get(id) ?? 0
   // 只打过样、还没下过单的客户也要上榜：打样费也是应收。
-  // 以前只从订单行出发，这类客户的未收在欠款榜上根本不出现，榜上的合计
-  // 也就对不上工作台「待收款金额」（那份是全公司口径，含打样费）。
-  const sampleCustomers = getDb().all(
-    `SELECT DISTINCT s.customer_id AS id, c.company AS company
-     FROM sample_orders s JOIN customers c ON c.id = s.customer_id
-     WHERE s.fee_status = 'unpaid' AND s.status != 'cancelled'`
-  ) as { id?: number; company?: string }[]
-  for (const r of sampleCustomers) {
-    const id = Number(r.id ?? 0)
-    if (!id || by.has(id)) continue
-    const sampleBase = sampleReceivable(id)
-    // 汇率没填时 sampleReceivable 返回 0：先不上榜，打样页会提醒补汇率
-    if (sampleBase <= 0) continue
-    by.set(id, {
-      customerId: id,
-      customerName: String(r.company ?? ''),
-      orders: 0,
-      goodsBase: 0,
-      sampleBase,
-      totalBase: sampleBase,
-      oldestUnpaidDate: null,
-      oldestUnpaidDays: 0
-    })
+  const sampleOnlyIds = [...sampleBaseByCustomer.keys()].filter((id) => !by.has(id))
+  if (sampleOnlyIds.length) {
+    const names = getDb().all(
+      `SELECT id, company FROM customers WHERE id IN (${sampleOnlyIds.map(() => '?').join(',')})`,
+      sampleOnlyIds
+    ) as { id?: number; company?: string }[]
+    const nameById = new Map(names.map((n) => [Number(n.id ?? 0), String(n.company ?? '')]))
+    for (const id of sampleOnlyIds) {
+      const sampleBase = sampleBaseByCustomer.get(id) ?? 0
+      if (sampleBase <= 0.001) continue
+      by.set(id, {
+        customerId: id,
+        customerName: nameById.get(id) ?? '',
+        orders: 0,
+        goodsBase: 0,
+        sampleBase,
+        totalBase: sampleBase,
+        oldestUnpaidDate: null,
+        oldestUnpaidDays: 0
+      })
+    }
   }
   for (const v of by.values()) v.totalBase = v.goodsBase + v.sampleBase
   // 敞口为 0 的客户不上欠款榜：收齐了还挂在榜上，业务员会以为账没对清

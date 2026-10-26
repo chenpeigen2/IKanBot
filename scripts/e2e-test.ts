@@ -7641,6 +7641,210 @@ check(
 )
 eq('拦下后转单还是 PI 已发', orders.getOrder(r29ConvOrder.id)!.paymentStatus, 'sent')
 
+section('R30 退款出账与坏账/抵扣不双算')
+
+// —— 退款补进收款台账：原币负数、基准币空着不猜
+const r30Cust = customers.saveCustomer({ company: 'R30-REFUND-CO' })
+const r30A = orders.createOrder({
+  customerId: r30Cust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R30-A'
+})
+orders.addOrderItem(r30A.id, { styleNo: 'R30-A', quantity: 1, unitPrice: 100 })
+orders.addPayment(r30A.id, { paidAt: localDate(), amount: 140, bankRef: 'R30-IN' })
+eq('R30 多付 40 记预收', money.customerCreditAvailable(r30Cust.id, 'USD'), 40)
+credits.refundCredit({
+  customerId: r30Cust.id,
+  currency: 'USD',
+  amount: 25,
+  bankRef: 'R30-OUT-1',
+  note: 'R30 客户多付退回'
+})
+const r30Flows = money.refundFlowRows({ customerId: r30Cust.id })
+eq('退款流水一笔', r30Flows.length, 1)
+eq('退款流水记原币 25', r30Flows[0]?.amount, 25)
+eq('退款流水带银行水单', r30Flows[0]?.bankRef, 'R30-OUT-1')
+eq('退款流水带客户名', r30Flows[0]?.customerName, 'R30-REFUND-CO')
+
+const r30Base = getSettings().baseCurrency
+const r30PayCsv = parseCsv(dashboard.exportCsv('payments'))
+const r30PayHead = r30PayCsv[0]
+const r30PayCol = (name: string): number => r30PayHead.indexOf(name)
+const r30RefundRow = r30PayCsv.slice(1).find((r) => r[r30PayCol('银行流水号')] === 'R30-OUT-1')
+check('退款在收款台账里有一条', !!r30RefundRow)
+eq('台账退款金额是负数', r30RefundRow?.[r30PayCol('金额(原币)')], '-25')
+eq('台账退款没有汇率快照，基准币留空', r30RefundRow?.[r30PayCol(`金额(${r30Base})`)], '')
+eq('台账把退款标成预收退款', r30RefundRow?.[r30PayCol('单据类型')], '预收退款')
+eq('台账退款状态写已退还', r30RefundRow?.[r30PayCol('订单状态')], '已退还')
+
+const r30RefundId = r30Flows[0].refundId
+credits.reverseRefund(r30RefundId, 'R30 水单录错，钱没退出去')
+eq('撤销的退款不再出现在流水里', money.refundFlowRows({ customerId: r30Cust.id }).length, 0)
+check('撤销的退款也从收款台账消失', !dashboard.exportCsv('payments').includes('R30-OUT-1'))
+eq('撤销后预收回到 40', money.customerCreditAvailable(r30Cust.id, 'USD'), 40)
+
+// —— 坏账没追回：普通收款和预收抵扣都不许再走一遍
+const r30DebtCust = customers.saveCustomer({ company: 'R30-DEBT-CO' })
+const r30Debt = orders.createOrder({
+  customerId: r30DebtCust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R30-DEBT'
+})
+orders.addOrderItem(r30Debt.id, { styleNo: 'R30-DEBT', quantity: 1, unitPrice: 100 })
+orders.addSettlement(r30Debt.id, { kind: 'bad_debt', amount: 50, reason: 'R30 客户失联' })
+eq('坏账未追回 50', orders.getOrder(r30Debt.id)!.badDebtOutstanding, 50)
+check(
+  '坏账没追回不能按普通收款记',
+  r8err(() =>
+    orders.addPayment(r30Debt.id, { paidAt: localDate(), amount: 20, bankRef: 'R30-BD-IN' })
+  ).includes('坏账追回')
+)
+const r30DebtSrc = orders.createOrder({
+  customerId: r30DebtCust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R30-DEBT-SRC'
+})
+orders.addOrderItem(r30DebtSrc.id, { styleNo: 'R30-DS', quantity: 1, unitPrice: 100 })
+orders.addPayment(r30DebtSrc.id, { paidAt: localDate(), amount: 130, bankRef: 'R30-BD-SRC' })
+eq('坏账客户有预收 30', money.customerCreditAvailable(r30DebtCust.id, 'USD'), 30)
+check(
+  '有坏账的单不能拿预收抵',
+  r8err(() =>
+    credits.applyCredit({
+      customerId: r30DebtCust.id,
+      currency: 'USD',
+      targetKind: 'order',
+      targetId: r30Debt.id,
+      amount: 30
+    })
+  ).includes('坏账')
+)
+eq('拦下后预收还是 30', money.customerCreditAvailable(r30DebtCust.id, 'USD'), 30)
+
+// —— 挂起中的转单抵扣：不能再拿预收抵第二次，提醒指回订单状态
+const r30SuspCust = customers.saveCustomer({ company: 'R30-SUSP-CO' })
+const r30SuspSrc = orders.createOrder({
+  customerId: r30SuspCust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R30-SUSP-SRC'
+})
+orders.addOrderItem(r30SuspSrc.id, { styleNo: 'R30-SS', quantity: 1, unitPrice: 100 })
+orders.addPayment(r30SuspSrc.id, { paidAt: localDate(), amount: 130, bankRef: 'R30-SUSP-IN' })
+eq('挂起样例客户有预收 30', money.customerCreditAvailable(r30SuspCust.id, 'USD'), 30)
+const r30SuspSample = samples.saveSample({
+  customerId: r30SuspCust.id,
+  sampleDate: dAgo(30),
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: dAgo(30),
+  items: [
+    { styleNo: 'R30-S1', productName: '挂起抵扣', color: 'White', size: 'L', quantity: 1, unitPrice: 20, goodsUnitPrice: 100 }
+  ]
+})
+samples.convertSampleToOrder(r30SuspSample.id, { offsetSampleFee: true })
+eq('样例抵扣挂起', samples.getSample(r30SuspSample.id)!.offsetSuspended, true)
+check(
+  '挂起抵扣的样品费不能再拿预收抵一次',
+  r8err(() =>
+    credits.applyCredit({
+      customerId: r30SuspCust.id,
+      currency: 'USD',
+      targetKind: 'sample',
+      targetId: r30SuspSample.id,
+      amount: 10
+    })
+  ).includes('自动生效')
+)
+eq('拦下后预收没动', money.customerCreditAvailable(r30SuspCust.id, 'USD'), 30)
+check(
+  '催款提醒指向恢复订单，而不是让人重复收款',
+  dashboard
+    .reminders()
+    .some(
+      (r) =>
+        r.kind === 'sample' &&
+        r.sampleId === r30SuspSample.id &&
+        r.message.includes('请先把订单恢复成正式单')
+    ),
+  JSON.stringify(dashboard.reminders().filter((r) => r.sampleId === r30SuspSample.id).map((r) => r.message))
+)
+
+// —— 欠款榜第五处口径：只有挂起抵扣打样单的客户也要上榜
+const r30OnlyCust = customers.saveCustomer({ company: 'R30-SAMPLE-ONLY' })
+const r30OnlySample = samples.saveSample({
+  customerId: r30OnlyCust.id,
+  sampleDate: dAgo(10),
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: dAgo(10),
+  items: [
+    { styleNo: 'R30-O1', productName: '只打样挂起', color: 'Grey', size: 'M', quantity: 1, unitPrice: 20, goodsUnitPrice: 100 }
+  ]
+})
+samples.convertSampleToOrder(r30OnlySample.id, { offsetSampleFee: true })
+const r30OnlyBoard = money.receivableByCustomer().find((r) => r.customerId === r30OnlyCust.id)
+check(
+  '只有挂起抵扣打样单的客户也上欠款榜',
+  !!r30OnlyBoard,
+  JSON.stringify(money.receivableByCustomer().filter((r) => r.customerId === r30OnlyCust.id))
+)
+eq('榜上打样敞口 20 × 7.2', r30OnlyBoard?.sampleBase, 20 * 7.2)
+const r30BoardSum = money.receivableByCustomer().reduce((s, r) => s + r.totalBase, 0)
+check(
+  '欠款榜合计 = 全公司待收',
+  Math.abs(r30BoardSum - money.totalReceivable()) < 0.01,
+  `${r30BoardSum} vs ${money.totalReceivable()}`
+)
+
+// —— 对账单币种小计补上预收抵扣（非现金那部分也要勾得出来）
+const r30StmtCust = customers.saveCustomer({ company: 'R30-STMT-CO' })
+const r30StmtSrc = orders.createOrder({
+  customerId: r30StmtCust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R30-STMT-SRC'
+})
+orders.addOrderItem(r30StmtSrc.id, { styleNo: 'R30-STS', quantity: 1, unitPrice: 100 })
+orders.addPayment(r30StmtSrc.id, { paidAt: localDate(), amount: 130, bankRef: 'R30-STMT-IN' })
+const r30StmtTarget = orders.createOrder({
+  customerId: r30StmtCust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R30-STMT-TGT'
+})
+orders.addOrderItem(r30StmtTarget.id, { styleNo: 'R30-STT', quantity: 1, unitPrice: 50 })
+orders.addPayment(r30StmtTarget.id, { paidAt: localDate(), amount: 20, bankRef: 'R30-STMT-IN-2' })
+credits.applyCredit({
+  customerId: r30StmtCust.id,
+  currency: 'USD',
+  targetKind: 'order',
+  targetId: r30StmtTarget.id,
+  amount: 30
+})
+const r30Stmt = parseCsv(dashboard.exportCsv('statement', { customerId: r30StmtCust.id }))
+const r30StmtHead = r30Stmt[0]
+const r30StmtCol = (name: string): number => r30StmtHead.indexOf(name)
+const r30UsdTotal = r30Stmt
+  .slice(1)
+  .find((r) => r[r30StmtCol('类型')] === '合计' && r[r30StmtCol('币种')] === 'USD')
+check('对账单有 USD 小计行', !!r30UsdTotal)
+eq('小计带上预收抵扣 30', r30UsdTotal?.[r30StmtCol('预收抵扣(原币)')], '30')
+check(
+  '小计备注说明抵扣是非现金',
+  r30UsdTotal?.[r30StmtCol('备注')].includes('预收抵扣 30'),
+  r30UsdTotal?.[r30StmtCol('备注')]
+)
+
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
 console.log(`通过 ${passed} 项，失败 ${failed} 项`)

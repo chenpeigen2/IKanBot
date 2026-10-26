@@ -9,6 +9,7 @@ import {
   listOrderMoney,
   notInStatuses,
   receivedByMonth,
+  refundFlowRows,
   sampleReceivable,
   sampleStatementRows
 } from './money'
@@ -744,6 +745,9 @@ export function reminders(): Reminder[] {
         : Number(r.sample_fee ?? 0)
       : 0
     if (feeStatus === 'offset' && offsetSettled > 0.001) continue
+    // 挂起中的抵扣：钱还是该收，但不能按打样费登记（服务层会拦），
+    // 提醒里直接说清下一步是把转出订单恢复成正式单
+    const offsetSuspended = feeStatus === 'offset' && !!convertedStatus && !isBillingStatus(convertedStatus)
     // 催的是还欠的那部分：已经收了一半就只催另一半，预收抵掉的部分也不算欠
     const owed =
       Number(r.sample_fee ?? 0) +
@@ -767,7 +771,8 @@ export function reminders(): Reminder[] {
           `打样费 ${owed.toFixed(2)} ${String(r.currency || 'USD')} 未收` +
           (rate > 0
             ? `（折合 ${(owed * rate).toFixed(2)}），${shippedAt ? `样品寄出 ${days} 天` : `挂单 ${days} 天还没寄出`}`
-            : '，且汇率未填（工作台待收里少算了这单，请补汇率）'),
+            : '，且汇率未填（工作台待收里少算了这单，请补汇率）') +
+          (offsetSuspended ? '；转出订单已退回草稿/失效，抵扣暂不生效，请先把订单恢复成正式单（会自动再抵）' : ''),
         days
       },
       'fee'
@@ -1168,8 +1173,10 @@ function monthlyCsv(base: string): string {
   return toCsv(header, lines)
 }
 
-/** 收款流水：现金流口径（草稿单的钱不算真收款），并带上订单状态——
- *  作废/失效单的钱确实到账了，但看的人得知道这单已经作废 */
+/** 收款台账：现金流口径（草稿单的钱不算真收款），并带上订单状态——
+ *  作废/失效单的钱确实到账了，但看的人得知道这单已经作废。
+ *  R30 起退款也在这里出一条原币负行：钱真从账上出去了，台账不能只记进不记出。
+ *  退款没有汇率快照，基准币列留空（宁可空着，不猜一个汇率把月报折错）。 */
 function paymentsCsv(base: string): string {
   // 取数与月报到账同一份（cashFlowRows）：订单收款 + 打样实收。
   // 打样抵扣不落流水，这里也不会出现——同一笔钱只能有一条来路。
@@ -1189,21 +1196,48 @@ function paymentsCsv(base: string): string {
     '备注',
     '单据类型'
   ]
-  const lines = rows.map((r) => [
-    r.paidAt,
-    r.docNo,
-    r.piNo,
-    r.customerName,
-    r.statusText,
-    r.currency,
-    money2(r.amount),
-    money2(r.amountBase),
-    r.method,
-    r.bankRef,
-    r.note,
-    r.docType === 'sample' ? '打样单' : '订单'
-  ])
-  return toCsv(header, lines)
+  const lines = rows
+    .map((r) => ({
+      date: r.paidAt,
+      cells: [
+        r.paidAt,
+        r.docNo,
+        r.piNo,
+        r.customerName,
+        r.statusText,
+        r.currency,
+        money2(r.amount),
+        money2(r.amountBase),
+        r.method,
+        r.bankRef,
+        r.note,
+        r.docType === 'sample' ? '打样单' : '订单'
+      ]
+    }))
+    .concat(
+      refundFlowRows().map((f) => ({
+        date: f.refundAt,
+        cells: [
+          f.refundAt,
+          '',
+          '',
+          f.customerName,
+          '已退还',
+          f.currency,
+          money2(-f.amount),
+          '',
+          '',
+          f.bankRef,
+          `${f.note || '退还客户预收'}${f.actor ? `（${f.actor}）` : ''}`,
+          '预收退款'
+        ]
+      }))
+    )
+    .sort((a, b) => b.date.localeCompare(a.date))
+  return toCsv(
+    header,
+    lines.map((l) => l.cells)
+  )
 }
 
 /** 报表里用到的金额：四舍五入到分，但保持数字类型（负数不能被当成 Excel 公式加前缀） */
@@ -1362,6 +1396,7 @@ function statementCsv(customerId: number, base: string): string {
   const currencies = [...new Set(docs.map((d) => d.currency))].sort()
   for (const cur of currencies) {
     const rs = docs.filter((d) => d.currency === cur)
+    const creditTotal = money2(rs.reduce((s, d) => s + d.credit, 0))
     totals.push({
       ...blank,
       kind: '合计',
@@ -1371,7 +1406,9 @@ function statementCsv(customerId: number, base: string): string {
       amount: money2(rs.reduce((s, d) => s + d.amount, 0)),
       paid: money2(rs.reduce((s, d) => s + d.paid, 0)),
       writtenOff: money2(rs.reduce((s, d) => s + d.writtenOff, 0)),
-      open: money2(rs.reduce((s, d) => s + d.open, 0))
+      open: money2(rs.reduce((s, d) => s + d.open, 0)),
+      credit: creditTotal,
+      note: creditTotal > 0.001 ? `其中预收抵扣 ${creditTotal}（非现金）；多收/退款见预收结余` : ''
     })
   }
   const openBaseTotal = money2(docs.reduce((s, d) => s + d.openBase, 0))

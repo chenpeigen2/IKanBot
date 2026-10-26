@@ -2123,8 +2123,9 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
         ) : null}
         {order.paymentStatus === 'void' ? (
           <div className="alert warn">
-            这张单已作废：作废后客户真退回/补来的钱（例如取消单退回的定金）可以在这里登记，
+            这张单已作废：作废后客户又汇来的钱（例如取消单补付的尾款）可以在这里登记，
             会进「本月到账」和月报，但不会复活这张单、也不改变它的待收。<strong>备注必须写明来路</strong>，以后对银行流水要靠它。
+            如果是<strong>我们要退钱给客户</strong>，请到客户页「退还预收」登记，别在这里记成正收款。
           </div>
         ) : null}
         <div className="field-row-3">

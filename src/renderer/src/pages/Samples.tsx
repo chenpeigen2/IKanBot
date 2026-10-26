@@ -521,9 +521,19 @@ function SamplePayModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // 已生效的转单抵扣也是「已收回」，不减掉会把已抵清的样品单显示成还欠一笔
+  const offsetSettled =
+    detail.feeStatus === 'offset' && !detail.offsetSuspended
+      ? Number(detail.offsetAmount ?? 0) > 0
+        ? Number(detail.offsetAmount)
+        : Number(detail.totalFee ?? 0)
+      : 0
   const remaining = Math.max(
     0,
-    Number(detail.totalFee ?? 0) - Number(detail.collected ?? 0) - Number(detail.creditApplied ?? 0)
+    Number(detail.totalFee ?? 0) -
+      Number(detail.collected ?? 0) -
+      Number(detail.creditApplied ?? 0) -
+      offsetSettled
   )
   const convertedLive = !!detail.convertedOrderId && detail.convertedOrderStatus !== 'void'
   const canAdd =
@@ -615,7 +625,7 @@ function SamplePayModal({
       ) : null}
       {detail.offsetSuspended ? (
         <div className="alert warn">
-          转出的订单已退回草稿/失效/作废，抵扣暂不生效：样品费重新计入待收，订单恢复成正式单后会自动再抵，不需要重录。
+          转出的订单已退回草稿/失效/作废，抵扣暂不生效：样品费重新计入待收，订单恢复成正式单后会自动再抵，不需要重录。这期间不能重复登记打样收款。
         </div>
       ) : null}
       {detail.feeStatus === 'waived' ? <div className="alert info">这张单的样品费已免收。</div> : null}

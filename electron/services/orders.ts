@@ -1646,6 +1646,14 @@ export function addPayment(orderId: number, p: PaymentInput): OrderDetail {
   // 否则同一块钱会被收两遍（预收抵一次、现金又收满全额）
   if (!isVoided) {
     const detail = getOrder(orderId)!
+    // 坏账已经从待收里拿掉过一次：再按普通收款记，同一笔钱会同时被算成
+    // 「坏账损失」和「客户多付」，凭空铸出可退的预收。钱到账请走「坏账追回」。
+    if (detail.badDebtOutstanding > 0.001) {
+      throw new Error(
+        `这张单还有 ${detail.badDebtOutstanding.toFixed(2)} ${String(cur.currency ?? '')} 坏账没追回：` +
+          `钱到账请走「坏账追回」登记，不能按普通收款记——否则同一笔欠款会同时算坏账损失和客户多付。`
+      )
+    }
     if (detail.creditApplied > 0.001 && amount > detail.remaining + 0.001) {
       throw new Error(
         `这张单已经有 ${detail.creditApplied.toFixed(2)} ${String(cur.currency ?? '')} 是客户预收抵掉的，现金待收只剩 ${detail.remaining.toFixed(2)}：再收 ${amount.toFixed(2)} 就重复收了。多出来的钱请登记到别的单上。`
