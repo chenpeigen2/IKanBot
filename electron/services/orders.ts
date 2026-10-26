@@ -1061,22 +1061,43 @@ export function assertChargeAmounts(charges: QuotationCharge[]): void {
 }
 
 /** 只改费用行（运费/保险），其他字段一个都不动 */
-export function updateOrderCharges(orderId: number, charges: QuotationCharge[]): OrderDetail {
+export function updateOrderCharges(orderId: number, charges: QuotationCharge[], reason = ''): OrderDetail {
   const db = getDb()
   const before = db.get('SELECT charges FROM orders WHERE id = ?', [orderId]) as Record<string, unknown> | null
   if (!before) throw new Error('订单不存在')
   assertOrderWritable(orderId, '改费用行')
   assertChargeAmounts(charges)
   const clean = charges.filter((c) => c.label.trim())
-  if (!sameCharges(parseCharges(before.charges), clean)) assertPricingEditable(orderId, '改费用行')
+  const beforeCharges = parseCharges(before.charges)
+  if (!sameCharges(beforeCharges, clean)) assertPricingEditable(orderId, '改费用行')
+  // 让利（负费用行）改一笔，客户该付的钱就变了：这是对外的价格让步，
+  // 不写原因的话日后只看到应收少了一块，没人说得清是谁答应的、为什么
+  const reasonText = String(reason ?? '').trim()
+  if (negativeChargesChanged(beforeCharges, clean) && !reasonText) {
+    throw new Error(
+      '这次改的是让利（负费用行），它会直接改变客户该付多少。请写明原因（例如「老客户运费对折」「补上次多收的 20」），这句话会记进订单操作历史。'
+    )
+  }
   // 改费用、留痕、重算状态必须同生同死：中途失败留着「费用改了、应收没重算」的单
   transact(() => {
     db.run('UPDATE orders SET charges=?, updated_at=? WHERE id=?', [JSON.stringify(clean), now(), orderId])
-    const parts = describeChargeChange(parseCharges(before.charges), clean)
-    logEvent(orderId, 'update', null, null, parts.length ? `修改费用：${parts.join('；')}` : '修改费用行')
+    const parts = describeChargeChange(beforeCharges, clean)
+    const detail = parts.length ? `修改费用：${parts.join('；')}` : '修改费用行'
+    logEvent(orderId, 'update', null, null, reasonText ? `${detail}；原因：${reasonText}` : detail)
     recomputePaymentStatus(orderId)
   })
   return getOrder(orderId)!
+}
+
+/** 负费用行（让利）有没有被增删/改额；正费用行的变化不在此列 */
+function negativeChargesChanged(oldCharges: QuotationCharge[], newCharges: QuotationCharge[]): boolean {
+  const snap = (list: QuotationCharge[]): string =>
+    list
+      .filter((c) => Number(c.amount) < 0)
+      .map((c) => `${c.label.trim()}\u0000${Number(c.amount)}`)
+      .sort()
+      .join('\u0001')
+  return snap(oldCharges) !== snap(newCharges)
 }
 
 /** 费用行变更说明（人话） */

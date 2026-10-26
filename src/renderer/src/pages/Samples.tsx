@@ -642,6 +642,9 @@ function SampleModal({
               </option>
             ))}
           </select>
+          {form.status === 'cancelled' ? (
+            <div className="hint">改成「已取消」时，备注里要写清原因：单子从此不再跟，这句话是唯一的交代。</div>
+          ) : null}
         </div>
       </div>
 

@@ -55,7 +55,8 @@ const api: IKanApi = {
     create: (input: any) => call<any>('orders:create', input),
     update: (id: number, input: any) => call<any>('orders:update', id, input),
     setParties: (id: number, patch: { billTo?: any; shipTo?: any }) => call<any>('orders:setParties', id, patch),
-    updateCharges: (id: number, charges: any[]) => call<any>('orders:updateCharges', id, charges),
+    updateCharges: (id: number, charges: any[], reason?: string) =>
+      call<any>('orders:updateCharges', id, charges, reason),
     remove: (id: number) => call<void>('orders:delete', id),
     /** 作废订单（客户取消 / 建错单）：记录全留，不进货值/待收/毛利 */
     void: (id: number, reason?: string, opts?: { confirmDocs?: boolean }) => call<any>('orders:void', id, reason, opts),

@@ -1033,8 +1033,19 @@ const sampleUpdated = samples.saveSample({
 eq('快递费可以改', sampleUpdated.expressFee, 150)
 eq('状态可以改', sampleUpdated.status, 'received')
 eq('改完合计跟着变', sampleUpdated.totalFee, 50 + 150)
+// R24：还挂着应收的单不许零留痕删掉（钱没收回、单也没了，应收凭空断线）
+let smpOwedDelErr = ''
+try {
+  samples.deleteSample(sample.id)
+} catch (e) {
+  smpOwedDelErr = (e as Error).message
+}
+check('有未收打样费的单不能直接删', smpOwedDelErr.includes('没收回'), smpOwedDelErr)
+check('被拦下时单还在', samples.getSample(sample.id) !== null)
+samples.saveSample({ id: sample.id, status: 'cancelled', note: '客户改用别家打样，这笔样品费不收了' })
+eq('取消后应收归零', samples.getSample(sample.id)!.receivableBase, 0)
 samples.deleteSample(sample.id)
-check('打样单可以删', samples.getSample(sample.id) === null)
+check('取消留原因后打样单可以删', samples.getSample(sample.id) === null)
 
 /* ---------------- 打样单：校验 / 三笔分清 / 应收进工作台 / 转订单 / 删拦截（N23/N24/N25/N33） ---------------- */
 section('打样单进阶：应收进工作台、转订单、三笔分清')
@@ -1319,6 +1330,8 @@ samples.deleteSample(bumped.id)
 
 samples.deleteSample(smpPaid.id)
 samples.deleteSample(smpDates.id)
+// R24 起未收的单要先取消留原因才允许删
+samples.saveSample({ id: smpUnpaid.id, status: 'cancelled', note: 'R24 清理：测试单，不收了' })
 samples.deleteSample(smpUnpaid.id)
 
 /* ---------------- r12：订单号 / PI号 / 报价号 / PL号 查重（单号是凭据，r10 N-3 续） ---------------- */
@@ -1978,6 +1991,24 @@ const smpCancel = samples.saveSample({
   items: [{ styleNo: 'R14-CANCEL', quantity: 1, unitPrice: 50 }]
 })
 const receivableBeforeCancel = money.sampleReceivable()
+// R24：取消要把原因留在备注里——这单从此不再跟，日后只能靠这句话交代
+let smpCancelNoReasonErr = ''
+try {
+  samples.saveSample({
+    id: smpCancel.id,
+    customerId: c2.id,
+    status: 'cancelled',
+    sampleDate: '2026-08-01',
+    expressFee: 80,
+    currency: 'USD',
+    exchangeRate: 7,
+    exchangeRateDate: '2026-08-01',
+    items: [{ styleNo: 'R14-CANCEL', quantity: 1, unitPrice: 50 }]
+  })
+} catch (e) {
+  smpCancelNoReasonErr = (e as Error).message
+}
+check('取消打样单不写原因被拦下', smpCancelNoReasonErr.includes('原因'), smpCancelNoReasonErr)
 const smpCancelled = samples.saveSample({
   id: smpCancel.id,
   customerId: c2.id,
@@ -1987,6 +2018,7 @@ const smpCancelled = samples.saveSample({
   currency: 'USD',
   exchangeRate: 7,
   exchangeRateDate: '2026-08-01',
+  note: '客户自己打样了，这笔不做了',
   items: [{ styleNo: 'R14-CANCEL', quantity: 1, unitPrice: 50 }]
 })
 eq('取消后打样单状态是已取消', smpCancelled.status, 'cancelled')
@@ -5300,8 +5332,14 @@ check(
   r8err(() => samples.deleteSample(r16Sample.id)).includes('先作废订单')
 )
 orders.voidOrder(r16Converted.id, 'R16 作废转出的订单')
+// R24：作废后抵扣回退为未收，样品费又成了应收——直接删会把这笔应收一起删没
+check(
+  '订单作废后样品费回到未收，仍不许零留痕删',
+  r8err(() => samples.deleteSample(r16Sample.id)).includes('没收回')
+)
+samples.saveSample({ id: r16Sample.id, status: 'cancelled', note: 'R16 订单作废，样品费不追了' })
 samples.deleteSample(r16Sample.id)
-check('订单作废后打样单可以删（提示与实现一致）', samples.getSample(r16Sample.id) === null)
+check('订单作废、样品单取消留原因后可以删', samples.getSample(r16Sample.id) === null)
 
 section('R16 实收数量不能超过改完后的箱明细')
 const r16Recv = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
@@ -6107,6 +6145,158 @@ const r23ExpOrder = quotations.convertToOrder(r23Q.id, { override: { approvedBy:
 const r23ExpFresh = orders.getOrder(r23ExpOrder.id)!
 check('过期转单有效期被重置到未来', !!r23ExpFresh.validUntil && r23ExpFresh.validUntil > localDate(), String(r23ExpFresh.validUntil))
 check('转单留痕写明有效期重置', r23ExpFresh.note.includes('重置'), r23ExpFresh.note)
+
+// ⑧ R24 打样与报价的应收守门（先修口径，再谈把打样费落进流水）
+section('R24 打样守门：转单锁状态、抵扣只认转单、应收不清不许删')
+
+const r24C = customers.saveCustomer({
+  company: 'R24 Sample Gate Co',
+  contact: 'Otto',
+  email: 'otto@r24.com',
+  phone: '',
+  country: 'NL',
+  address: '',
+  zipCode: '',
+  attn: '',
+  paymentPref: ''
+})
+const r24Smp = samples.saveSample({
+  customerId: r24C.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: localDate(),
+  items: [{ styleNo: 'R24-SMP', quantity: 2, unitPrice: 10, goodsUnitPrice: 12 }]
+})
+samples.convertSampleToOrder(r24Smp.id)
+let r24StatusErr = ''
+try {
+  samples.saveSample({ id: r24Smp.id, status: 'cancelled', note: '想直接取消掉' })
+} catch (e) {
+  r24StatusErr = (e as Error).message
+}
+check('转单后打样单状态被锁死', r24StatusErr.includes('状态不能再改'), r24StatusErr)
+eq('被拦下后状态没变', samples.getSample(r24Smp.id)!.status, 'pending')
+
+let r24OffsetErr = ''
+try {
+  samples.saveSample({
+    customerId: r24C.id,
+    feeStatus: 'offset',
+    currency: 'USD',
+    exchangeRate: 7,
+    exchangeRateDate: localDate(),
+    items: [{ styleNo: 'R24-OFF', quantity: 1, unitPrice: 5 }]
+  })
+} catch (e) {
+  r24OffsetErr = (e as Error).message
+}
+check('「已抵扣」不能手工标记（只有转单能写）', r24OffsetErr.includes('已抵扣'), r24OffsetErr)
+
+const r24Unpaid = samples.saveSample({
+  customerId: r24C.id,
+  expressFee: 5,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: localDate(),
+  items: [{ styleNo: 'R24-DEL', quantity: 1, unitPrice: 8 }]
+})
+let r24DelErr = ''
+try {
+  samples.deleteSample(r24Unpaid.id)
+} catch (e) {
+  r24DelErr = (e as Error).message
+}
+check('还挂着应收的样品单不能直接删', r24DelErr.includes('没收回'), r24DelErr)
+check('被拦下时单还在', samples.getSample(r24Unpaid.id) !== null)
+let r24CancelErr = ''
+try {
+  samples.saveSample({ id: r24Unpaid.id, status: 'cancelled' })
+} catch (e) {
+  r24CancelErr = (e as Error).message
+}
+check('取消不写原因被拦下', r24CancelErr.includes('原因'), r24CancelErr)
+samples.saveSample({ id: r24Unpaid.id, status: 'cancelled', note: '客户改走别家，样品费不追了' })
+eq('取消后待收归零', samples.getSample(r24Unpaid.id)!.receivableBase, 0)
+samples.deleteSample(r24Unpaid.id)
+check('取消留原因后可以删', samples.getSample(r24Unpaid.id) === null)
+
+section('R24 报价守门：已转单的报价不能再改成交结果')
+
+const r24Q = quotations.saveQuotation({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: localDate(),
+  incoterm: 'FOB',
+  paymentMethod: 'tt_deposit',
+  items: [{ styleNo: 'R24-Q', color: 'Red', size: 'M', quantity: 5, unitPrice: 4 }]
+})
+quotations.convertToOrder(r24Q.id)
+let r24QMetaErr = ''
+try {
+  quotations.updateQuotationMeta(r24Q.id, { status: 'expired' })
+} catch (e) {
+  r24QMetaErr = (e as Error).message
+}
+check('已转单的报价不能改回失效', r24QMetaErr.includes('已经转成订单'), r24QMetaErr)
+let r24QResultErr = ''
+try {
+  quotations.updateQuotationMeta(r24Q.id, { result: 'lost' })
+} catch (e) {
+  r24QResultErr = (e as Error).message
+}
+check('已转单的报价不能标成流失', r24QResultErr.includes('已经转成订单'), r24QResultErr)
+eq('原状态原样保存不被误拦', quotations.updateQuotationMeta(r24Q.id, { status: 'converted' }).status, 'converted')
+
+section('R24 让利留痕：负费用行一变就必须写原因')
+
+const r24Charged = orders.createOrder({ customerId: r24C.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R24-CHG' })
+await orders.addOrderItem(r24Charged.id, { styleNo: 'R24-CHG', quantity: 10, unitPrice: 10 })
+orders.updateOrderCharges(r24Charged.id, [{ label: '运费 Freight', amount: 50 }])
+let r24NegErr = ''
+try {
+  orders.updateOrderCharges(r24Charged.id, [
+    { label: '运费 Freight', amount: 50 },
+    { label: '让利 Discount', amount: -10 }
+  ])
+} catch (e) {
+  r24NegErr = (e as Error).message
+}
+check('加让利不写原因被拦下', r24NegErr.includes('让利'), r24NegErr)
+eq('被拦下后费用行没变', orders.getOrder(r24Charged.id)!.charges.length, 1)
+orders.updateOrderCharges(
+  r24Charged.id,
+  [
+    { label: '运费 Freight', amount: 50 },
+    { label: '让利 Discount', amount: -10 }
+  ],
+  '老客户运费对折'
+)
+const r24NegOrder = orders.getOrder(r24Charged.id)!
+eq('写了原因让利落库', Number(r24NegOrder.charges.find((c: any) => c.amount < 0)?.amount), -10)
+check(
+  '原因记进订单操作历史',
+  !!getDb().get("SELECT id FROM order_events WHERE order_id = ? AND note LIKE '%原因：老客户运费对折%' LIMIT 1", [
+    r24Charged.id
+  ])
+)
+orders.updateOrderCharges(r24Charged.id, [
+  { label: '运费 Freight', amount: 50 },
+  { label: '让利 Discount', amount: -10 }
+])
+eq('让利没动就不必重复写原因', orders.getOrder(r24Charged.id)!.charges.length, 2)
+orders.updateOrderCharges(r24Charged.id, [
+  { label: '运费 Freight', amount: 60 },
+  { label: '让利 Discount', amount: -10 }
+])
+eq('正费用行改价不受影响', Number(orders.getOrder(r24Charged.id)!.charges[0].amount), 60)
+let r24RemoveErr = ''
+try {
+  orders.updateOrderCharges(r24Charged.id, [{ label: '运费 Freight', amount: 60 }])
+} catch (e) {
+  r24RemoveErr = (e as Error).message
+}
+check('撤掉让利也要写原因（客户该付的钱又变了）', r24RemoveErr.includes('让利'), r24RemoveErr)
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

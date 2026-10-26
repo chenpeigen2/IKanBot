@@ -928,12 +928,31 @@ function ChargesEditor({
     (order.charges ?? []).map((c: any) => ({ uid: clientKey(), label: String(c.label), amount: Number(c.amount) || 0 }))
   )
   const total = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
+  const [reason, setReason] = useState('')
+  // 让利（负费用行）一动，客户该付的钱就变了：原因框先摆出来，别等保存才被拦
+  const negativeTouched = useMemo(() => {
+    const snap = (cs: { label: string; amount: number }[]): string =>
+      cs
+        .filter((c) => Number(c.amount) < 0)
+        .map((c) => `${c.label.trim()}\u0000${Number(c.amount)}`)
+        .sort()
+        .join('\u0001')
+    return (
+      snap(charges) !==
+      snap((order.charges ?? []).map((c: any) => ({ label: String(c.label ?? ''), amount: Number(c.amount) || 0 })))
+    )
+  }, [charges, order.charges])
 
   const save = async () => {
+    if (negativeTouched && !reason.trim()) {
+      toast('这次动了让利（负费用行），请写明原因：这句话会记进订单操作历史。', 'error')
+      return
+    }
     try {
       await window.api.orders.updateCharges(
         order.id,
-        charges.filter((c) => c.label.trim()).map((c) => ({ label: c.label, amount: c.amount }))
+        charges.filter((c) => c.label.trim()).map((c) => ({ label: c.label, amount: c.amount })),
+        reason.trim() || undefined
       )
       toast('费用已改，PI / CI 上的合计同步变了')
       await onSaved()
@@ -1024,6 +1043,17 @@ function ChargesEditor({
           保存费用
         </Button>
       </div>
+      {negativeTouched ? (
+        <div className="field mt-2">
+          <label>让利原因 *</label>
+          <input
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="为什么让这一步，如「老客户运费对折」「补上次多收的 20」"
+          />
+          <div className="hint">负费用行会直接改变客户该付的钱，这句原因会记进订单操作历史。</div>
+        </div>
+      ) : null}
     </div>
   )
 }

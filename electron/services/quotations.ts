@@ -626,10 +626,34 @@ export function updateQuotationMeta(
   meta: { status?: QuotationStatus; result?: QuotationResult }
 ): QuotationDetail {
   const db = getDb()
-  const cur = db.get('SELECT status, result, sent_at, confirmed_at FROM quotations WHERE id = ?', [id]) as
-    | { status: string; result: string; sent_at: string | null; confirmed_at: string | null }
+  const cur = db.get(
+    'SELECT status, result, sent_at, confirmed_at, converted_order_id FROM quotations WHERE id = ?',
+    [id]
+  ) as
+    | {
+        status: string
+        result: string
+        sent_at: string | null
+        confirmed_at: string | null
+        converted_order_id: number | null
+      }
     | null
   if (!cur) throw new Error('报价单不存在')
+  // 已转单的报价，成交与否已经由订单定案：再改成「已失效/失败」，同一个客户同一票货
+  // 会在报表里既算成交又算流失，订单的原始报价也成了无主凭据
+  if (cur.converted_order_id) {
+    const changed =
+      (meta.status !== undefined && meta.status !== cur.status) ||
+      (meta.result !== undefined && meta.result !== cur.result)
+    if (changed) {
+      const o = db.get('SELECT order_no FROM orders WHERE id = ?', [Number(cur.converted_order_id)]) as
+        | { order_no?: string }
+        | null
+      throw new Error(
+        `报价单已经转成订单 ${o?.order_no ?? ''}，状态和结果不能再改：这票货的成交与否已经由订单决定。要调整请直接改订单。`
+      )
+    }
+  }
   const ts = now()
   const status = meta.status ?? (cur.status as QuotationStatus)
   const statusChanged = status !== cur.status

@@ -158,8 +158,8 @@ export function registerIpc(): void {
   handle('orders:setParties', (id: number, patch: Parameters<typeof orders.setOrderParties>[1]) =>
     orders.setOrderParties(id, patch)
   )
-  handle('orders:updateCharges', (id: number, charges: any[]) =>
-    orders.updateOrderCharges(id, charges ?? [])
+  handle('orders:updateCharges', (id: number, charges: any[], reason?: string) =>
+    orders.updateOrderCharges(id, charges ?? [], reason ?? '')
   )
   handle('orders:delete', (id: number) => orders.deleteOrder(id))
   /** 作废订单（客户取消 / 建错单）：记录全留，不进货值/待收/毛利 */

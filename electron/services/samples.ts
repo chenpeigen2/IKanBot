@@ -24,7 +24,7 @@ import type {
   SampleOrderItem,
   SampleStatus
 } from '../../src/shared/types'
-import { SAMPLE_FEE_STATUS_LABEL } from '../../src/shared/types'
+import { SAMPLE_FEE_STATUS_LABEL, SAMPLE_STATUS_LABEL } from '../../src/shared/types'
 
 function now(): string {
   return new Date().toISOString()
@@ -270,6 +270,19 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
   if (feeStatus === 'unpaid' && sampleFee + expressFee > 0 && exchangeRate <= 0) {
     throw new Error('这张打样单还有应收没结（样品费+快递费），请先按今天钉盘的汇率填上汇率')
   }
+  // 「已抵扣」不是能手工勾的状态：它代表样品费真的抵进了某张订单，只有转单那一步才写
+  if (feeStatus === 'offset' && (!input.id || String(before?.fee_status ?? '') !== 'offset')) {
+    throw new Error(
+      '「已抵扣」不能手工标记：这是样品费已经抵进某张订单的凭据，只有转订单时勾「样品费抵货款」才会自动记上。如果是真收到了钱，请选「已向客户收」。'
+    )
+  }
+  // 取消要留原因：这单从此不再跟，日后客户问起「那批样品呢」，只有备注这句话能交代
+  if (input.status === 'cancelled' && String(before?.status ?? '') !== 'cancelled') {
+    const reason = String(input.note ?? '').trim()
+    if (!reason || reason === String(before?.note ?? '').trim()) {
+      throw new Error('取消打样单要写原因：请在备注里补一句为什么取消（例如「客户自己打样了」「改走别的款」），再保存。')
+    }
+  }
 
   let id = input.id
   const requestedNo = (input.sampleNo ?? '').trim()
@@ -291,9 +304,9 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
     // 已转订单的打样单：钱的部分（样品费合计 / 快递费 / 汇率）是那单的依据，
     // 事后一改订单就对不上。颜色、尺码、品名这些描述性的字眼照旧能改。
     if (before.converted_order_id) {
-      const o = db.get('SELECT order_no FROM orders WHERE id = ?', [Number(before.converted_order_id)]) as
-        | { order_no?: string }
-        | null
+      const o = db.get('SELECT order_no, payment_status FROM orders WHERE id = ?', [
+        Number(before.converted_order_id)
+      ]) as { order_no?: string; payment_status?: string } | null
       const moneyChanged =
         Math.abs(storedFee - sampleFee) > 0.001 ||
         Math.abs(expressFee - Number(before.express_fee ?? 0)) > 0.001 ||
@@ -316,6 +329,17 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
       if (feeStatus !== String(before.fee_status)) {
         throw new Error(
           `这张打样单已经转成订单 ${o?.order_no ?? ''}，样品费的收款状态不能再改（现在是「${SAMPLE_FEE_STATUS_LABEL[before.fee_status as SampleFeeStatus] ?? before.fee_status}」）：它和那单的抵扣、应收是绑在一起的。`
+        )
+      }
+      // 状态同样锁：转完单又标回「已取消」，这张单就从样品台账里消失，订单却还挂着它的抵扣。
+      // 订单已作废则不住拦：那单不再靠这张单作凭据，取消留原因后可以照常销档。
+      if (
+        o?.payment_status !== 'void' &&
+        input.status !== undefined &&
+        String(input.status) !== String(before.status)
+      ) {
+        throw new Error(
+          `这张打样单已经转成订单 ${o?.order_no ?? ''}，状态不能再改（现在是「${SAMPLE_STATUS_LABEL[before.status as SampleStatus] ?? before.status}」）：转单之后它跟那单绑在一起。样品环节要收尾，请直接改订单。`
         )
       }
     }
@@ -425,6 +449,13 @@ export function deleteSample(id: number): void {
         `这张打样单已经转成订单 ${o.orderNo}，删了以后就查不到原始打样记录了。确实不要了，请先作废订单，再删打样单。`
       )
     }
+  }
+  // 还挂着应收的单不能零留痕删掉：钱没收回、单也没了，账上这笔应收就凭空断线。
+  // 先取消（取消要写原因），应收归零、原因入档，才允许删
+  if (s.feeStatus === 'unpaid' && s.status !== 'cancelled' && s.totalFee > 0.001) {
+    throw new Error(
+      `这张打样单还有 ${s.totalFee.toFixed(2)} ${s.currency} 没收回（样品费+快递费）。真要销掉，请先把状态改成「已取消」并写明原因——应收会跟着归零、为什么取消也留在档案里；之后再删。`
+    )
   }
   getDb().run('DELETE FROM sample_orders WHERE id = ?', [id])
 }

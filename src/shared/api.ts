@@ -52,8 +52,8 @@ export interface IKanApi {
     update(id: number, input: any): Promise<any>
     /** 单独改单据抬头快照（重印时纠正地址，不动其他字段） */
     setParties(id: number, patch: { billTo?: any; shipTo?: any }): Promise<any>
-    /** 只改费用行（运费/保险），其他字段不动 */
-    updateCharges(id: number, charges: any[]): Promise<any>
+    /** 只改费用行（运费/保险），其他字段不动；动了让利（负费用行）必须写 reason */
+    updateCharges(id: number, charges: any[], reason?: string): Promise<any>
     remove(id: number): Promise<void>
     /** 作废订单（客户取消 / 建错单）：记录全留，不进货值/待收/毛利 */
     void(id: number, reason?: string, opts?: { confirmDocs?: boolean }): Promise<any>
