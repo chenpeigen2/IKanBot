@@ -516,25 +516,33 @@ function CreateOrderModal({
     const cust = customers.find((c) => c.id === id)
     // 快速 A→B 切换时 A 的响应可能后到：币种/术语/定金是凭据级字段，带错客户建出的单靠肉眼发现不了
     const { isCurrent } = beginTerms()
+    // 客户档案里的默认条款本地就有：后端那份「上单条款」只补币种和没建档时的兜底，
+    // 它失败了也要把档案默认值带上，否则界面留着上一家客户的字样更危险。
+    const applyTerms = (terms: any) =>
+      setForm((f) => ({
+        ...f,
+        currency: terms?.currency ?? f.currency,
+        incoterm: (cust?.defaultIncoterm || terms?.incoterm || f.incoterm) as Incoterm,
+        portOfLoading: cust?.defaultPortLoading || terms?.portOfLoading || f.portOfLoading,
+        portOfDestination: cust?.defaultPortDestination || terms?.portOfDestination || f.portOfDestination,
+        paymentMethod: (cust?.defaultPaymentMethod || terms?.paymentMethod || f.paymentMethod) as PaymentMethod,
+        depositRatio:
+          cust?.defaultDepositRatio != null
+            ? cust.defaultDepositRatio
+            : terms?.depositRatio ?? f.depositRatio
+      }))
     let terms: any = null
     try {
       terms = await window.api.orders.lastTerms(id)
-    } catch {
-      terms = null
+    } catch (e) {
+      // 带不出条款不等于这客户没做过单：静默吞掉会让人以为默认值就是这家客户的条款
+      if (!isCurrent()) return
+      applyTerms(null)
+      toast(`这家客户上一次的条款没带出来：${(e as Error).message}，已按客户档案的默认值填写，请手工核对币种/港口/定金`, 'error')
+      return
     }
     if (!isCurrent()) return
-    setForm((f) => ({
-      ...f,
-      currency: terms?.currency ?? f.currency,
-      incoterm: (cust?.defaultIncoterm || terms?.incoterm || f.incoterm) as Incoterm,
-      portOfLoading: cust?.defaultPortLoading || terms?.portOfLoading || f.portOfLoading,
-      portOfDestination: cust?.defaultPortDestination || terms?.portOfDestination || f.portOfDestination,
-      paymentMethod: (cust?.defaultPaymentMethod || terms?.paymentMethod || f.paymentMethod) as PaymentMethod,
-      depositRatio:
-        cust?.defaultDepositRatio != null
-          ? cust.defaultDepositRatio
-          : terms?.depositRatio ?? f.depositRatio
-    }))
+    applyTerms(terms)
     if (cust?.paymentPref) toast(`已带出「${cust.company}」的档案条款，确认一下`)
   }
 

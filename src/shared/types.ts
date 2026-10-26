@@ -745,6 +745,8 @@ export interface DashboardStats {
   /** 本月毛利是否可信 */
   monthProfitReliable: boolean
   monthReceived: number
+  /** 本月退给客户的预收笔数：钱是流出，不在 monthReceived 里，只在界面上说破差异 */
+  monthRefunded: number
   monthNewOrders: number
   /** 待收款拆分：客户还没确认（草稿 / PI 已发）的单（基准币） */
   pendingUnconfirmed: number
@@ -974,6 +976,10 @@ export interface MonthlyReportRow {
   badDebt: number
   /** 收款：按实际到账月份，不能与上面几列纵向相减 */
   received: number
+  /** 本月退给客户的预收笔数；钱是流出，没有并进 received，只在话术里说破 */
+  refundCount: number
+  /** 退款原币合计（按币种分列，如「1,200.00 USD · 800.00 CNY」）——无汇率快照，不折基准币 */
+  refundText: string
   /** 该月里成本没录全的订单数：这些单的毛利是假的 */
   missingCostOrders: number
 }

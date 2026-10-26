@@ -10,6 +10,7 @@ import {
   notInStatuses,
   receivedByMonth,
   refundFlowRows,
+  refundedByMonth,
   sampleReceivable,
   sampleStatementRows
 } from './money'
@@ -115,12 +116,16 @@ export function dashboard(): DashboardStats {
   // 以前这里和月度报表各写一遍 SUM，两处会各自漂出两个数。
   const thisMonth = localMonthOf(localDate())
   const monthReceived = receivedByMonth().find((m) => m.month === thisMonth)?.amount ?? 0
+  // 退款是钱流出，不并进到账（到账就是到账）；但当月退过钱要在这里点一笔，
+  // 否则老板看着「本月收款 8 万」去对银行流水，怎么也对不上。
+  const monthRefunded = refundedByMonth().find((m) => m.month === thisMonth)?.count ?? 0
 
   return {
     ...mapDashboard({
       ...(row ?? {}),
       pending_amount: pendingAmount,
       month_received: monthReceived,
+      month_refunded: monthRefunded,
       month_sales: monthRows.reduce((s, r) => s + r.grandTotalBase, 0),
       month_profit: monthProfitRaw
     }),
@@ -508,29 +513,35 @@ export function reminders(): Reminder[] {
       )
     }
 
-    // 到港后清款：见提单副本付款的钱不能只凭记忆
-    for (const b of batches) {
-      if (!['shipped', 'cleared'].includes(String(b.ship_status ?? ''))) continue
-      const diff = daysTo(b.eta_date)
-      if (diff === null || diff > 0) continue
+    // 到港后清款：见提单副本付款的钱不能只凭记忆。
+    // 一张单可能有多批已过 ETA：欠款是整单一个数，逐批各喊一遍会把「同一笔钱」
+    // 刷成 N 条提醒，老板看不出还欠多少，只会以为催款越堆越多。整单只出一条，批次号列在消息里。
+    const etaMissed = batches
+      .filter((b) => ['shipped', 'cleared'].includes(String(b.ship_status ?? '')))
+      .map((b) => ({ b, diff: daysTo(b.eta_date) }))
+      .filter((x): x is { b: (typeof batches)[number]; diff: number } => x.diff !== null && x.diff <= 0 && -x.diff >= s.remindBalanceDays)
+    if (etaMissed.length > 0) {
       const m = moneyRows.find((x) => x.orderId === orderId)
-      if (!m || m.receivable <= 0.001) continue
-      if (-diff < s.remindBalanceDays) continue
-      add(
-        {
-          orderId,
-          orderNo: String(r.order_no),
-          customerName: String(r.customer_name),
-          kind: 'balance',
-          plId: Number(b.pl_id),
-          plNo: String(b.pl_no),
-          message: `批次 ${String(b.pl_no)} 预计到港 ${String(b.eta_date)} 已过 ${-diff} 天，仍有 ${m.receivable.toFixed(
-            2
-          )} ${m.currency} 未收`,
-          days: diff
-        },
-        'eta-' + String(b.pl_id)
-      )
+      if (m && m.receivable > 0.001) {
+        const oldest = Math.min(...etaMissed.map((x) => x.diff))
+        const listed = (cap = 3): string => {
+          const nos = etaMissed.map((x) => String(x.b.pl_no))
+          return nos.slice(0, cap).join('、') + (nos.length > cap ? ` 等 ${nos.length} 批` : '')
+        }
+        add(
+          {
+            orderId,
+            orderNo: String(r.order_no),
+            customerName: String(r.customer_name),
+            kind: 'balance',
+            message: `批次 ${listed()} 预计到港已过期（最久 ${-oldest} 天），这单仍有 ${m.receivable.toFixed(2)} ${
+              m.currency
+            } 未收`,
+            days: oldest
+          },
+          'eta'
+        )
+      }
     }
   }
 
@@ -928,6 +939,18 @@ export function monthlyReport(): MonthlyReportRow[] {
     byMonth.set(p.month, cur)
   }
 
+  // 退款单列一份：customer_refunds 没有汇率快照，硬折基准币只能猜汇率，
+  // 所以只报笔数和原币合计，让「本月收款」与银行流水差出来的那截有地方解释。
+  const refundByMonth = new Map(
+    refundedByMonth().map((m) => [
+      m.month,
+      {
+        count: m.count,
+        text: m.byCurrency.map((c) => `${money2(c.amount)} ${c.currency}`).join(' · ')
+      }
+    ])
+  )
+
   return [...byMonth.values()]
     .sort((a, b) => (a.month < b.month ? 1 : -1))
     .map((r) =>
@@ -942,6 +965,8 @@ export function monthlyReport(): MonthlyReportRow[] {
         shortage: r.shortage,
         bad_debt: r.badDebt,
         received: r.received,
+        refund_count: refundByMonth.get(r.month)?.count ?? 0,
+        refund_text: refundByMonth.get(r.month)?.text ?? '',
         missing_cost_orders: r.missingCostOrders
       })
     )
@@ -1167,7 +1192,10 @@ function monthlyCsv(base: string): string {
     `短款核销(${base})`,
     `坏账未追回(${base})`,
     '成本未录全单数',
-    `收款(${base}·按到账月)`
+    `收款(${base}·按到账月)`,
+    // 退款与收款方向相反、且没有汇率快照，所以单独两列，不混进收款里
+    '本月退款笔数',
+    '退款(原币·按出账月，未折基准币)'
   ]
   const lines = monthlyReport().map((r) => [
     r.month,
@@ -1179,7 +1207,9 @@ function monthlyCsv(base: string): string {
     money2(r.shortage),
     money2(r.badDebt),
     r.missingCostOrders,
-    money2(r.received)
+    money2(r.received),
+    r.refundCount,
+    r.refundText
   ])
   return toCsv(header, lines)
 }
@@ -1364,6 +1394,9 @@ function statementCsv(customerId: number, base: string): string {
       notes.push(`已抵扣入订单${s.convertedOrderNo ? ` ${s.convertedOrderNo}` : ''}（不是现金，但账上已收回）`)
     }
     if (s.feeStatus === 'unpaid' && s.recovered > 0.001) notes.push(`已收 ${money2(s.recovered)}`)
+    // 升级前手工勾的「已收」没有单独的水单。钱照认，但对账单是发给客户的，
+    // 不能印「历史记账/无银行流水」这种内部话术，说成「早前已确认」就好。
+    if (s.legacyPaidNoFlow) notes.push(`其中 ${money2(s.recovered)} 为早前已确认的打样费，未单独列水单`)
     if (s.creditApplied > 0.001) notes.push(`其中预收抵扣 ${money2(s.creditApplied)}（非现金，从客户预收余额冲减）`)
     if (s.open > 0.001 && rate <= 0) notes.push('汇率未填，未折算')
     if (s.prepaid > 0.001) notes.push(`实收比单据多 ${money2(s.prepaid)}（预收结余）`)
@@ -1408,6 +1441,13 @@ function statementCsv(customerId: number, base: string): string {
   for (const cur of currencies) {
     const rs = docs.filter((d) => d.currency === cur)
     const creditTotal = money2(rs.reduce((s, d) => s + d.credit, 0))
+    // 合计行把「没有单独水单」的那部分也点出来：客户整表核完差额只剩这一处解释得通
+    const legacyTotal = money2(
+      samples.filter((s) => s.currency === cur && s.legacyPaidNoFlow).reduce((s, d) => s + d.recovered, 0)
+    )
+    const tail: string[] = []
+    if (creditTotal > 0.001) tail.push(`其中预收抵扣 ${creditTotal}（非现金）；多收/退款见预收结余`)
+    if (legacyTotal > 0.001) tail.push(`其中 ${legacyTotal} 为早前已确认的打样费，未单独列水单`)
     totals.push({
       ...blank,
       kind: '合计',
@@ -1419,7 +1459,7 @@ function statementCsv(customerId: number, base: string): string {
       writtenOff: money2(rs.reduce((s, d) => s + d.writtenOff, 0)),
       open: money2(rs.reduce((s, d) => s + d.open, 0)),
       credit: creditTotal,
-      note: creditTotal > 0.001 ? `其中预收抵扣 ${creditTotal}（非现金）；多收/退款见预收结余` : ''
+      note: tail.join('；')
     })
   }
   const openBaseTotal = money2(docs.reduce((s, d) => s + d.openBase, 0))

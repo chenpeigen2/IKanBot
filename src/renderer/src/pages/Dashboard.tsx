@@ -233,7 +233,9 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
             <div className="card-head">
               <h2>本月收款</h2>
               <div className="spacer" />
-              <span className="faint">到账合计</span>
+              <span className="faint">
+                {stats?.monthRefunded ? `到账合计 · 另退给客户 ${stats.monthRefunded} 笔` : '到账合计'}
+              </span>
             </div>
             <div className="card-body">
               <div className="stat-value small" style={{ marginBottom: 6 }}>

@@ -49,6 +49,7 @@ export default function Reports() {
       shortage: r2(a.shortage + r2(r.shortage)),
       badDebt: r2(a.badDebt + r2(r.badDebt)),
       received: r2(a.received + r2(r.received)),
+      refundCount: a.refundCount + r.refundCount,
       orders: a.orders + r.orders,
       missingCostOrders: a.missingCostOrders + r.missingCostOrders
     }),
@@ -60,6 +61,7 @@ export default function Reports() {
       shortage: 0,
       badDebt: 0,
       received: 0,
+      refundCount: 0,
       orders: 0,
       missingCostOrders: 0
     }
@@ -133,7 +135,10 @@ export default function Reports() {
           <div className="stat">
             <div className="stat-label">累计收款</div>
             <div className="stat-value">{money(totals.received, cur)}</div>
-            <div className="stat-hint">按到账月合计</div>
+            {/* 退款是钱流出，没有从收款里减掉：说破差异，老板才不至于拿这张表去对银行流水时对不上 */}
+            <div className="stat-hint">
+              {totals.refundCount ? `按到账月合计 · 不含退给客户的 ${totals.refundCount} 笔` : '按到账月合计'}
+            </div>
           </div>
           <div className="stat">
             <div className="stat-label">毛利率</div>
@@ -164,7 +169,7 @@ export default function Reports() {
 
         <Card
           title="月度汇总"
-          actions={<span className="faint">销售/成本/毛利按下单月 · 收款按到账月</span>}
+          actions={<span className="faint">销售/成本/毛利按下单月 · 收款按到账月（退款另列，未减进收款）</span>}
           bodyClass="tight"
         >
           {loading ? (
@@ -217,7 +222,15 @@ export default function Reports() {
                       <td className={`num ${r.badDebt ? '' : 'na'}`}>
                         {r.badDebt ? money(r.badDebt, cur) : '—'}
                       </td>
-                      <td className="num">{money(r.received, cur)}</td>
+                      <td className="num">
+                        {money(r.received, cur)}
+                        {/* 退款没有汇率快照，只能按原币报数；混进「收款」列会让 Excel 里 SUM 出来的数不等于银行流水 */}
+                        {r.refundCount ? (
+                          <span className="faint">
+                            （另退 {r.refundCount} 笔 {r.refundText}，未折{cur}）
+                          </span>
+                        ) : null}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

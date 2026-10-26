@@ -3122,9 +3122,31 @@ const unpaidRem = remShipped.find(
 check('出运 30 天、没收到过一分钱 → 照样催款', !!unpaidRem, JSON.stringify(remShipped.filter((r) => r.orderId === oShipped.id)))
 check('催款话术带上付款方式，一眼知道是赊销还是信用证', (unpaidRem?.message ?? '').includes('赊销'), unpaidRem?.message)
 check(
-  '预计到港已过、钱还没收齐 → 单独催一次（按批次 ETA）',
-  remShipped.some((r) => r.kind === 'balance' && r.plId === plR6[0].id && r.message.includes('到港')),
-  JSON.stringify(remShipped.filter((r) => r.plId === plR6[0].id).map((r) => r.message))
+  '预计到港已过、钱还没收齐 → 催一次（整单一条，消息里带批次号）',
+  remShipped.some(
+    (r) => r.kind === 'balance' && r.orderId === oShipped.id && r.message.includes(plR6[0].plNo) && r.message.includes('到港')
+  ),
+  JSON.stringify(remShipped.filter((r) => r.orderId === oShipped.id).map((r) => r.message))
+)
+const oEta2 = orders.createOrder({
+  customerId: cR6.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentMethod: 'oa',
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(oEta2.id, { styleNo: 'A001', productName: 'T恤', quantity: 10, unitPrice: 10 })
+const plEtaA = packing.createPackingList({ orderId: oEta2.id, lines: [{ styleNo: 'A001', quantity: 5 }] })
+const plEtaAll = packing.createPackingList({ orderId: oEta2.id, lines: [{ styleNo: 'A001', quantity: 5 }] })
+const plEta2 = [plEtaA[0], plEtaAll.find((p) => p.id !== plEtaA[0].id)!]
+packing.updatePackingListInfo(oEta2.id, plEta2[0].id, { shipStatus: 'shipped', atdDate: dAgo(40), etaDate: dAgo(24) })
+packing.updatePackingListInfo(oEta2.id, plEta2[1].id, { shipStatus: 'shipped', atdDate: dAgo(35), etaDate: dAgo(18) })
+const etaRem = dashboard.reminders().filter((r) => r.kind === 'balance' && r.orderId === oEta2.id && r.message.includes('到港'))
+eq('两批都过了 ETA → 只出一条整单待收（同一笔钱不喊两遍）', etaRem.length, 1)
+check(
+  '这一条把两个过期批次号都列出来',
+  etaRem.length === 1 && etaRem[0].message.includes(plEta2[0].plNo) && etaRem[0].message.includes(plEta2[1].plNo),
+  etaRem[0]?.message
 )
 check(
   '每条提醒自带唯一 key（界面折叠不会误伤同单另一条）',
@@ -7992,6 +8014,149 @@ eq(
   ),
   1
 )
+
+/* ---------------- R33：同值不改账 + 提醒不重复喊 + 对账单/月报把话说破 ---------------- */
+
+section('R33 收款状态改成原来那个值：什么都不许发生')
+
+const r33Cust = customers.saveCustomer({ company: 'R33-CALM-CO' })
+const r33Order = orders.createOrder({
+  customerId: r33Cust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R33-CALM'
+})
+await orders.addOrderItem(r33Order.id, { styleNo: 'R33-CALM', quantity: 1, unitPrice: 100 })
+const r33Clock = (): { updated_at: string; ev: number } =>
+  getDb().get(
+    `SELECT updated_at,
+            (SELECT COUNT(*) FROM order_events WHERE order_id = ? AND kind = 'payment_status') AS ev
+     FROM orders WHERE id = ?`,
+    [r33Order.id, r33Order.id]
+  ) as { updated_at: string; ev: number }
+const r33Before = r33Clock()
+const r33Same = orders.setPaymentStatus(r33Order.id, 'confirmed', '手滑点了一次一样的')
+const r33After = r33Clock()
+eq('同值不写库：updated_at 没动（状态时钟不被挪后）', r33After.updated_at, r33Before.updated_at)
+eq('同值不多一条「已确认 → 已确认」的脏历史', r33After.ev, r33Before.ev)
+eq('同值仍把整单原样返回', r33Same.paymentStatus, 'confirmed')
+// 草稿单重复点「草稿」：以前会把抵在这张单上的预收再回退一遍
+const r33Draft = orders.createOrder({ customerId: r33Cust.id, currency: 'USD', exchangeRate: 7.2, paymentStatus: 'draft' })
+await orders.addOrderItem(r33Draft.id, { styleNo: 'R33-D', quantity: 1, unitPrice: 100 })
+const r33DraftAgain = orders.setPaymentStatus(r33Draft.id, 'draft')
+eq('草稿单重复存草稿仍是草稿', r33DraftAgain.paymentStatus, 'draft')
+
+section('R33 多批过 ETA：同一笔欠款只喊一遍')
+
+const r33RemCust = customers.saveCustomer({ company: 'R33-ETA-CO' })
+const r33EtaOrder = orders.createOrder({
+  customerId: r33RemCust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(r33EtaOrder.id, { styleNo: 'R33-ETA', quantity: 10, unitPrice: 10 })
+const r33PlA = packing.createPackingList({ orderId: r33EtaOrder.id, lines: [{ styleNo: 'R33-ETA', quantity: 5 }] })
+const r33PlAll = packing.createPackingList({ orderId: r33EtaOrder.id, lines: [{ styleNo: 'R33-ETA', quantity: 5 }] })
+const r33PlB = r33PlAll.find((p) => p.id !== r33PlA[0].id)!
+packing.updatePackingListInfo(r33EtaOrder.id, r33PlA[0].id, { shipStatus: 'shipped', atdDate: dAgo(40), etaDate: dAgo(30) })
+packing.updatePackingListInfo(r33EtaOrder.id, r33PlB.id, { shipStatus: 'shipped', atdDate: dAgo(36), etaDate: dAgo(26) })
+const r33BalRem = dashboard.reminders().filter((x) => x.kind === 'balance' && x.orderId === r33EtaOrder.id && x.message.includes('到港'))
+eq('两批都过了 ETA → 一张单一条提醒', r33BalRem.length, 1)
+check('提醒里把两个批次号都点出来', !!r33BalRem[0] && r33BalRem[0].message.includes(r33PlA[0].plNo) && r33BalRem[0].message.includes(r33PlB.plNo), r33BalRem[0]?.message)
+check('天数取最久那批（催款先后排得出来）', r33BalRem[0]?.days, -30)
+
+section('R33 核销准入 = 计费口径：一个集合，不各自手写三个状态')
+
+for (const st of ['draft', 'expired', 'void'] as const) {
+  const c = customers.saveCustomer({ company: `R33-SETTLE-${st}` })
+  const o = orders.createOrder({ customerId: c.id, currency: 'USD', exchangeRate: 7.2, paymentStatus: 'confirmed' })
+  await orders.addOrderItem(o.id, { styleNo: 'R33-S', quantity: 1, unitPrice: 100 })
+  // 作废/失效的正门另有凭据核对，这里只验「非计费状态进不了核销」这道门，直接落库模拟历史脏数据
+  getDb().run('UPDATE orders SET payment_status = ? WHERE id = ?', [st, o.id])
+  check(
+    `${st} 单不能核销或坏账`,
+    r8err(() => orders.addSettlement(o.id, { kind: 'shortage', amount: 10, reason: 'R33' })).includes('不能做核销'),
+    r8err(() => orders.addSettlement(o.id, { kind: 'shortage', amount: 10, reason: 'R33' }))
+  )
+}
+
+section('R33 上单条款只认计费状态：草稿/失效/作废不能作为报价默认')
+
+const r33TermCust = customers.saveCustomer({ company: 'R33-TERMS-CO' })
+const r33TermOld = orders.createOrder({
+  customerId: r33TermCust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  portOfLoading: 'SHANGHAI'
+})
+await orders.addOrderItem(r33TermOld.id, { styleNo: 'R33-T1', quantity: 1, unitPrice: 10 })
+const r33TermNew = orders.createOrder({
+  customerId: r33TermCust.id,
+  currency: 'EUR',
+  exchangeRate: 7.8,
+  paymentStatus: 'draft',
+  portOfLoading: 'NINGBO'
+})
+await orders.addOrderItem(r33TermNew.id, { styleNo: 'R33-T2', quantity: 1, unitPrice: 10 })
+const r33Terms = orders.lastOrderTerms(r33TermCust.id)
+eq('最近一张草稿单被跳过：币种仍来自正式单', r33Terms?.currency, 'USD')
+eq('港口也来自正式单', r33Terms?.portOfLoading, 'SHANGHAI')
+
+section('R33 对账单：没有单笔水单的已收要说破，但用客户看得懂的话')
+
+const r33StmtCust = customers.saveCustomer({ company: 'R33-STMT-CO' })
+const r33StmtOrder = orders.createOrder({
+  customerId: r33StmtCust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R33-STMT'
+})
+await orders.addOrderItem(r33StmtOrder.id, { styleNo: 'R33-ST', quantity: 1, unitPrice: 200 })
+await orders.addPayment(r33StmtOrder.id, { paidAt: localDate(), amount: 200, bankRef: 'R33-ST-IN' })
+const r33StmtSample = samples.saveSample({
+  customerId: r33StmtCust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: localDate(),
+  items: [{ styleNo: 'R33-SS', productName: '旧记录样', color: 'Grey', size: 'S', quantity: 1, unitPrice: 30 }]
+})
+getDb().run("UPDATE sample_orders SET fee_status = 'paid' WHERE id = ?", [r33StmtSample.id])
+const r33Stmt = parseCsv(dashboard.exportCsv('statement', { customerId: r33StmtCust.id }))
+const r33StmtNoteCol = r33Stmt[0].indexOf('备注')
+const r33SampleLine = r33Stmt.find((l) => l[r33Stmt[0].indexOf('单据号')] === r33StmtSample.sampleNo)
+check('打样行中性标注「早前已确认…未单独列水单」', !!r33SampleLine && (r33SampleLine[r33StmtNoteCol] ?? '').includes('未单独列水单'), r33SampleLine?.[r33StmtNoteCol])
+check('不印内部话术（历史记账 / 无银行流水）', !!r33SampleLine && !(r33SampleLine[r33StmtNoteCol] ?? '').includes('银行流水'), r33SampleLine?.[r33StmtNoteCol])
+const r33TotalLine = r33Stmt.find((l) => l[0] === '合计' && l[r33Stmt[0].indexOf('币种')] === 'USD')
+check('币种合计行单列「其中 30.00 未单独列水单」', !!r33TotalLine && (r33TotalLine[r33StmtNoteCol] ?? '').includes('未单独列水单'), r33TotalLine?.[r33StmtNoteCol])
+
+section('R33 月报：退款笔数另列，不减进「收款」')
+
+const r33RefCust = customers.saveCustomer({ company: 'R33-REFUND-CO' })
+const r33RefSrc = orders.createOrder({
+  customerId: r33RefCust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R33-REF'
+})
+await orders.addOrderItem(r33RefSrc.id, { styleNo: 'R33-R', quantity: 1, unitPrice: 100 })
+await orders.addPayment(r33RefSrc.id, { paidAt: localDate(), amount: 140, bankRef: 'R33-R-IN' })
+const r33RefMonth = localMonthOf(localDate())
+const r33CashBefore = money.receivedByMonth().find((m) => m.month === r33RefMonth)?.amount ?? 0
+const r33RefundBefore = dashboard.monthlyReport().find((m) => m.month === r33RefMonth)?.refundCount ?? 0
+credits.refundCredit({ customerId: r33RefCust.id, currency: 'USD', amount: 40, refundAt: localDate(), bankRef: 'R33-R-OUT', note: 'R33 客户不要了' })
+const r33CashAfter = money.receivedByMonth().find((m) => m.month === r33RefMonth)?.amount ?? 0
+eq('退款不冲减现金流口径的「收款」', r33CashAfter, r33CashBefore)
+const r33MonthRow = dashboard.monthlyReport().find((m) => m.month === r33RefMonth)
+eq('月报把这笔新退款单列进本月笔数', (r33MonthRow?.refundCount ?? 0) - r33RefundBefore, 1)
+check('月报带原币退款金额（没有汇率快照，不折基准币）', (r33MonthRow?.refundText ?? '').includes('USD'), r33MonthRow?.refundText)
+const r33Dash = dashboard.dashboard()
+eq('工作台本月退款笔数与月报同一个数', r33Dash.monthRefunded, r33MonthRow?.refundCount)
+check('月度汇总导出多出退款两列且不改变收款列', dashboard.exportCsv('monthly').includes('本月退款笔数'), '')
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

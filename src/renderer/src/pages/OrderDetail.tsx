@@ -16,6 +16,7 @@ import {
   type ShipStatus,
   type PaymentMethod
 } from '../../../shared/types'
+import { isBillingStatus } from '../../../shared/billing'
 import {
   renderPi,
   renderPl,
@@ -1425,10 +1426,20 @@ function CiModal({
 function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<void> }) {
   const toast = useToast()
   const [products, setProducts] = useState<any[]>([])
+  const [productsError, setProductsError] = useState('')
   const [showAdd, setShowAdd] = useState(false)
 
+  const loadProducts = () => {
+    setProductsError('')
+    window.api.products
+      .list('')
+      .then(setProducts)
+      .catch((e) => setProductsError((e as Error).message))
+  }
+
   useEffect(() => {
-    void window.api.products.list('').then(setProducts)
+    loadProducts()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   /** 款号 → 可选颜色/尺码，供明细表里直接改颜色、尺码 */
@@ -1474,6 +1485,9 @@ function ItemsTab({ order, onChange }: { order: any; onChange: () => Promise<voi
           + 添加商品
         </Button>
       </div>
+
+      {/* 商品库没拉出来时颜色/尺码下拉是空的，不能长得像「库里真没这个款」 */}
+      {productsError ? <LoadError what="商品库（颜色/尺码下拉）" message={productsError} onRetry={loadProducts} /> : null}
 
       {order.items.length === 0 ? (
         <Empty text="还没有商品。点「添加商品」从商品库选款。" />
@@ -2054,7 +2068,8 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
     }
   }
 
-  const settleLocked = ['draft', 'expired', 'void'].includes(order.paymentStatus)
+  // 核销准入与后端 addSettlement 同一条口径（shared/billing），不再手写三个状态
+  const settleLocked = !isBillingStatus(order.paymentStatus)
   const settlements: any[] = order.settlements ?? []
   const reversedIds = new Set(
     settlements.filter((s) => s.reversesId != null).map((s) => Number(s.reversesId))
@@ -3236,21 +3251,45 @@ function CreatePlModal({
   const [shipQty, setShipQty] = useState<Record<string, string>>({})
   // 数量改过之后旧预览就作废了，空状态要提示「重新生成」而不是「还没设置每箱件数」
   const [previewStale, setPreviewStale] = useState(false)
+  /** 本批 SKU 行读失败 ≠ 这单没明细：不分开说，弹窗会长得像「无货可装」 */
+  const [skuError, setSkuError] = useState('')
+
+  const loadSkus = () => {
+    setSkuError('')
+    window.api.orders
+      .summarizeSkus(order.id)
+      .then((rows: any[]) => {
+        setSkus(rows)
+        setShipQty(Object.fromEntries(rows.map((s) => [skuKey(s), String(s.remainingQuantity)])))
+      })
+      .catch((e) => setSkuError((e as Error).message))
+  }
 
   useEffect(() => {
-    void window.api.orders.summarizeSkus(order.id).then((rows: any[]) => {
-      setSkus(rows)
-      setShipQty(Object.fromEntries(rows.map((s) => [skuKey(s), String(s.remainingQuantity)])))
-    })
+    loadSkus()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [order.id])
 
   /** 按商品库里的单件净重/每箱件数/箱规套用 */
   const applyFromLibrary = async () => {
-    const products = await window.api.products.list('')
+    let products: any[]
+    try {
+      products = await window.api.products.list('')
+    } catch (e) {
+      toast(`商品库没拉出来，箱规一个也没套：${(e as Error).message}`, 'error')
+      return
+    }
     const next: Record<string, any> = {}
+    const styleNos = [...new Set(skus.map((s) => s.styleNo))]
+    const missed = new Set<string>()
+    const noWeight = new Set<string>()
     for (const s of skus) {
       const p = products.find((x: any) => x.styleNo === s.styleNo)
-      if (!p) continue
+      if (!p) {
+        missed.add(s.styleNo)
+        continue
+      }
+      if (p.unitNetWeight == null) noWeight.add(s.styleNo)
       next[s.styleNo] = {
         pieces: p.boxPieces != null ? String(p.boxPieces) : '',
         unitNet: p.unitNetWeight != null ? String(p.unitNetWeight) : '',
@@ -3259,8 +3298,19 @@ function CreatePlModal({
         h: p.boxHeight != null ? String(p.boxHeight) : ''
       }
     }
+    const listed = (set: Set<string>, cap = 3): string => {
+      const arr = [...set]
+      return arr.slice(0, cap).join('、') + (arr.length > cap ? ` 等 ${arr.length} 个款号` : '')
+    }
+    if (missed.size === styleNos.length) {
+      toast(`商品库里一个款号都没找到（本批 ${styleNos.length} 个款号）：箱规套不上，请手工填或先去商品页建档`, 'error')
+      return
+    }
     setStyleCfg(next)
-    toast('已按商品库里的单件净重和箱规套用')
+    const bits: string[] = [`已按商品库套用 ${styleNos.length - missed.size}/${styleNos.length} 个款号的箱规`]
+    if (missed.size) bits.push(`没建档：${listed(missed)}`)
+    if (noWeight.size) bits.push(`缺单件净重（净重那栏仍要手工填）：${listed(noWeight)}`)
+    toast(bits.join(' · '))
   }
 
   const cfgFor = (styleNo: string) => styleCfg[styleNo] ?? {}
@@ -3352,6 +3402,8 @@ function CreatePlModal({
           这张单还有升级前的老批次没标出运状态。新建批次后整单仍按手工状态推进；建议先到「装箱单」里给老批次补上状态，整单才会改由批次汇总。
         </div>
       )}
+      {/* 款号行没读出来 ≠ 这单没货可装：不说清就会对着空表以为明细丢了 */}
+      {skuError ? <LoadError what="本批款号明细" message={skuError} onRetry={loadSkus} /> : null}
       <div className="field-row-3">
         <div className="field">
           <label>柜号 / 批次</label>

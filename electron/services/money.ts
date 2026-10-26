@@ -855,6 +855,30 @@ export function receivedByMonth(): { month: string; amount: number }[] {
 }
 
 /**
+ * 退款按「出账月」归集：这是一笔钱离开公司，和 receivedByMonth 的现金流入方向相反，
+ * 绝不能并进那份数（并了月报的「收款」就变成了净额，客户对不上水单）。
+ * customer_refunds 没有汇率快照，所以只按原币分列，展示层说明「不含退款」即可。
+ */
+export function refundedByMonth(): { month: string; count: number; byCurrency: { currency: string; amount: number }[] }[] {
+  const by = new Map<string, { count: number; cur: Map<string, number> }>()
+  for (const r of refundFlowRows()) {
+    const m = localMonthOf(r.refundAt)
+    if (!/^\d{4}-\d{2}$/.test(m)) continue
+    const hit = by.get(m) ?? { count: 0, cur: new Map<string, number>() }
+    hit.count += 1
+    hit.cur.set(r.currency, (hit.cur.get(r.currency) ?? 0) + r.amount)
+    by.set(m, hit)
+  }
+  return [...by.entries()]
+    .map(([month, v]) => ({
+      month,
+      count: v.count,
+      byCurrency: [...v.cur.entries()].map(([currency, amount]) => ({ currency, amount })).sort((a, b) => a.currency.localeCompare(b.currency))
+    }))
+    .sort((a, b) => b.month.localeCompare(a.month))
+}
+
+/**
  * 客户维度欠款榜（基准币）：待收 + 该客户的打样未收。
  * 走 listOrderMoney 的同一批行，不另写算钱的 SQL。
  */
@@ -964,6 +988,8 @@ interface SampleMoneyRow {
   offsetSettled: number
   /** 已收回 = 实收 + 抵扣；旧「已收无流水」按全额认 */
   recovered: number
+  /** 标了「已收」但一条单笔水单都没有（升级前的老记录），recovered 走的是全额兜底 */
+  legacyPaidNoFlow: boolean
   /** 用客户预收抵扣的金额（非现金，R27） */
   creditApplied: number
   /** 已收回的钱转进了哪张订单（抵扣单才有） */
@@ -1018,6 +1044,9 @@ function sampleMoneyRows(customerId?: number): SampleMoneyRow[] {
           : feeStatus === 'unpaid'
             ? collected
             : 0
+    // 「已收」却一笔单笔水单都没有 = 升级前手工勾的标记。钱认，但要能一眼看出
+    // 这笔没有水单可对账，不能和客户自己下的银行流水混成一堆。
+    const legacyPaidNoFlow = feeStatus === 'paid' && collected <= 0.001 && totalFee > 0.001
     return {
       sampleId: Number(r.id),
       sampleNo: String(r.sample_no ?? ''),
@@ -1032,6 +1061,7 @@ function sampleMoneyRows(customerId?: number): SampleMoneyRow[] {
       collected,
       offsetSettled,
       recovered,
+      legacyPaidNoFlow,
       creditApplied: Number(r.credit_applied ?? 0),
       convertedOrderNo: String(r.converted_order_no ?? '')
     }
@@ -1075,6 +1105,8 @@ export interface SampleBillRow {
   totalFee: number
   /** 已收回（实收 + 抵扣；旧记录按全额） */
   recovered: number
+  /** 标了「已收」但没有单笔水单（升级前的老记录）：钱认，对账单上要能区分 */
+  legacyPaidNoFlow: boolean
   /** 用客户预收抵扣的金额（非现金，R27） */
   creditApplied: number
   /** 原币待收 */
@@ -1111,6 +1143,7 @@ export function sampleStatementRows(customerId: number): SampleBillRow[] {
       sampleDate: r.sampleDate,
       totalFee: r.totalFee,
       recovered: r.recovered,
+      legacyPaidNoFlow: r.legacyPaidNoFlow,
       creditApplied: r.creditApplied,
       open,
       prepaid: over > 0.001 ? over : 0,

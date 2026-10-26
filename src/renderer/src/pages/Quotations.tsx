@@ -985,24 +985,41 @@ function QuotationModal({
   }, [form.customerId])
 
   /** 选客户后带出上一次的条款：先客户档案，再这个客户上一次的订单（跟新建订单同一套逻辑） */
+  const termsGuard = useLoadGuard()
   const onCustomerChange = async (id: number) => {
     setForm((f) => ({ ...f, customerId: id }))
     if (!id) return
     const cust = customers.find((c) => c.id === id)
     if (!cust) return
-    const terms = await window.api.orders.lastTerms(id)
-    setForm((f) => ({
-      ...f,
-      currency: (terms?.currency ?? f.currency) as Currency,
-      incoterm: (cust.defaultIncoterm || terms?.incoterm || f.incoterm) as Incoterm,
-      portOfLoading: cust.defaultPortLoading || terms?.portOfLoading || f.portOfLoading,
-      portOfDestination: cust.defaultPortDestination || terms?.portOfDestination || f.portOfDestination,
-      paymentMethod: (cust.defaultPaymentMethod || terms?.paymentMethod || f.paymentMethod) as PaymentMethod,
-      depositRatio:
-        cust.defaultDepositRatio != null
-          ? cust.defaultDepositRatio
-          : terms?.depositRatio ?? f.depositRatio
-    }))
+    // 快速 A→B 切换时 A 的响应可能后到：币种/定金是凭据级字段，带错客户等于发错价的 PI
+    const { isCurrent } = termsGuard()
+    // 客户档案里的默认条款是本地就有的，先落上：后端那次「上单条款」只是补币种和没建档的兜底，
+    // 不能因为它失败就连档案里写好的默认值也不给客户带。
+    const applyTerms = (terms: any) =>
+      setForm((f) => ({
+        ...f,
+        currency: (terms?.currency ?? f.currency) as Currency,
+        incoterm: (cust.defaultIncoterm || terms?.incoterm || f.incoterm) as Incoterm,
+        portOfLoading: cust.defaultPortLoading || terms?.portOfLoading || f.portOfLoading,
+        portOfDestination: cust.defaultPortDestination || terms?.portOfDestination || f.portOfDestination,
+        paymentMethod: (cust.defaultPaymentMethod || terms?.paymentMethod || f.paymentMethod) as PaymentMethod,
+        depositRatio:
+          cust.defaultDepositRatio != null
+            ? cust.defaultDepositRatio
+            : terms?.depositRatio ?? f.depositRatio
+      }))
+    let terms: any = null
+    try {
+      terms = await window.api.orders.lastTerms(id)
+    } catch (e) {
+      // 带不出条款不等于这客户没做过单：说一声，让人手工填，别静默留着上一家的币种
+      if (!isCurrent()) return
+      applyTerms(null)
+      toast(`这家客户上一次的条款没带出来：${(e as Error).message}，已按客户档案的默认值填写，请手工核对币种/港口/定金`, 'error')
+      return
+    }
+    if (!isCurrent()) return
+    applyTerms(terms)
     toast(
       `已带出「${cust.company}」的条款${
         cust.defaultPortLoading || terms?.portOfLoading ? '（含港口）' : ''

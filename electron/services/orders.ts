@@ -8,6 +8,7 @@ import {
   costInOrderCurrency,
   creditAppliedForOrder,
   moneyForOrders,
+  notInStatuses,
   parseCharges
 } from './money'
 import { likeAny } from './search'
@@ -17,7 +18,7 @@ import { assertCreditFitsOrder, assertCreditSolvent, hasActiveCredit, reverseCre
 import { addSamplePayment } from './samples'
 import { addDays, daysBetween, isLocalDate, localDate, localDayAfterUtc, localDayStartUtc } from '../../src/shared/date'
 import { billPartyOf, emptyParty, parseParty, patchParty, shipPartyOf, stringifyParty } from '../../src/shared/party'
-import { isBillingStatus } from '../../src/shared/billing'
+import { isBillingStatus, NON_BILLING_STATUSES } from '../../src/shared/billing'
 import { assertQuantity, assertUnitPrice } from '../../src/shared/guards'
 import { PAYMENT_STATUS_LABEL, SETTLEMENT_KIND_LABEL, SHIP_STATUS_LABEL, SHIP_STATUS_ORDER } from '../../src/shared/types'
 import type {
@@ -1906,7 +1907,8 @@ export function addSettlement(orderId: number, input: SettlementInput): OrderDet
   const db = getDb()
   const order = getOrder(orderId)
   if (!order) throw new Error('订单不存在')
-  if (['draft', 'expired', 'void'].includes(order.paymentStatus)) {
+  // 核销准入就是「要不要向客户收钱」这条口径：以后加免催状态只改 billing.ts 一处
+  if (!isBillingStatus(order.paymentStatus)) {
     throw new Error('草稿、已失效、已作废的订单不能做核销或坏账。先把订单状态改成正式单，再处理欠款。')
   }
   const kind = input.kind
@@ -2152,6 +2154,9 @@ export function setPaymentStatus(orderId: number, next: PaymentStatus, note = ''
       '收款状态下拉不能直接改成「已作废」：作废要先核对客户手里的 PI/CI 凭据。请到「⋯」菜单里走「作废此单」。'
     )
   }
+  // 同值就是没发生任何事：不早返回会重写 updated_at（把状态时钟挪后，尾款/催款提醒跟着变）、
+  // 多一条「确认 → 确认」的历史事件，还会对非计费状态再跑一遍预收抵扣回退。
+  if (cur.payment_status === next) return getOrder(orderId)!
   // 草稿不进应收、不进现金流，也不认收款状态：已经有流水/核销/预收抵扣的单退回草稿，
   // 这些账就从系统里静默消失（以前会顺手把抵扣回退掉，等于替客户把决定做了）。
   // 真不要这单请走作废：凭据核对、留痕、抵扣回退都按正门走。
@@ -2236,10 +2241,11 @@ export interface OrderTerms {
 
 export function lastOrderTerms(customerId: number): OrderTerms | null {
   // 只带「真做过」的单：客户取消过的那张的港口、定金不能变成下一单的默认值
+  const bill = notInStatuses('payment_status', NON_BILLING_STATUSES)
   const row = getDb().get(
-    `SELECT * FROM orders WHERE customer_id = ? AND payment_status NOT IN ('draft','expired','void')
+    `SELECT * FROM orders WHERE customer_id = ? AND ${bill.sql}
      ORDER BY created_at DESC, id DESC LIMIT 1`,
-    [customerId]
+    [customerId, ...bill.params]
   ) as Record<string, unknown> | null
   if (!row) return null
   return {
