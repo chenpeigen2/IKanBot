@@ -270,6 +270,8 @@ export function registerIpc(): void {
   handle('credits:reverse', (applicationId: number, reason: string) =>
     credits.reverseCredit(applicationId, reason)
   )
+  handle('credits:refund', (input: credits.RefundCreditInput) => credits.refundCredit(input))
+  handle('credits:reverseRefund', (refundId: number, reason: string) => credits.reverseRefund(refundId, reason))
 
   /* ---- 设置 ---- */
   handle('settings:get', () => settingsSvc.getSettings())

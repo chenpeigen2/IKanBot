@@ -286,7 +286,16 @@ export default function Orders() {
                           {money(o.grandTotal, o.currency)}
                         </td>
                         <td className="num nowrap">{money(o.paidAmount, o.currency)}</td>
-                        <td className="num nowrap" title={isBillingStatus(o.paymentStatus) ? undefined : '这张单不催款'}>
+                        <td
+                          className="num nowrap"
+                          title={
+                            !isBillingStatus(o.paymentStatus)
+                              ? '这张单不催款'
+                              : o.creditApplied > 0.001
+                                ? `含客户预收抵扣 ${money(o.creditApplied, o.currency)}（非现金，已冲减待收）`
+                                : undefined
+                          }
+                        >
                           {isBillingStatus(o.paymentStatus) ? money(shownRemaining(o.paymentStatus, o.remaining), o.currency) : <span className="faint">—</span>}
                         </td>
                         <td>

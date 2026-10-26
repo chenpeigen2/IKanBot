@@ -173,7 +173,10 @@ const api: IKanApi = {
     balance: (customerId: number) => call<CustomerCreditCurrency[]>('credits:balance', customerId),
     apply: (input: any) => call<CustomerCreditCurrency[]>('credits:apply', input),
     reverse: (applicationId: number, reason: string) =>
-      call<CustomerCreditCurrency[]>('credits:reverse', applicationId, reason)
+      call<CustomerCreditCurrency[]>('credits:reverse', applicationId, reason),
+    refund: (input: any) => call<CustomerCreditCurrency[]>('credits:refund', input),
+    reverseRefund: (refundId: number, reason: string) =>
+      call<CustomerCreditCurrency[]>('credits:reverseRefund', refundId, reason)
   },
   settings: {
     get: () => call<any>('settings:get'),

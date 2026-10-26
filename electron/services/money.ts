@@ -31,6 +31,7 @@ import { NON_BILLING_STATUSES, isBillingStatus } from '../../src/shared/billing'
 import type {
   CustomerCreditApplication,
   CustomerCreditCurrency,
+  CustomerCreditRefund,
   CustomerCreditSource,
   CustomerReceivable,
   PackingAmount,
@@ -1112,7 +1113,7 @@ export function customerReceivable(customerId: number): number {
 
 /* ---------------- 客户预收（R27） ---------------- */
 
-export type { CustomerCreditApplication, CustomerCreditCurrency, CustomerCreditSource }
+export type { CustomerCreditApplication, CustomerCreditCurrency, CustomerCreditRefund, CustomerCreditSource }
 
 /**
  * 客户预收余额：**不另存一份钱**，全部从 payments 的现状派生。
@@ -1122,8 +1123,9 @@ export type { CustomerCreditApplication, CustomerCreditCurrency, CustomerCreditS
  *   作废/失效 —— 已经收到的全部现金（这单不再欠钱，钱必须有去处）
  *   打样单   —— 取消/免单时收到的全部现金；其余按「实收 + 抵扣 − 应收」算多付
  *   减：未撤销的抵扣台账
+ *   减：已退还客户的退款（R28）
  *
- * 抵扣不是现金，所以这里绝不碰 payments，也绝不进现金流/毛利。
+ * 抵扣与退款都不是现金流入，所以这里绝不碰 payments，也绝不进现金流/毛利。
  */
 export function customerCreditBalance(customerId: number): CustomerCreditCurrency[] {
   const db = getDb()
@@ -1133,9 +1135,11 @@ export function customerCreditBalance(customerId: number): CustomerCreditCurrenc
       currency,
       gross: 0,
       applied: 0,
+      refunded: 0,
       available: 0,
       sources: [],
-      applications: []
+      applications: [],
+      refunds: []
     }
     by.set(currency, cur)
     return cur
@@ -1214,12 +1218,40 @@ export function customerCreditBalance(customerId: number): CustomerCreditCurrenc
     })
   }
 
+  const refundRows = db.all(
+    `SELECT id, currency, amount, refund_at, bank_ref, note, actor
+     FROM customer_refunds
+     WHERE customer_id = ? AND reversed_at IS NULL
+     ORDER BY refund_at, id`,
+    [customerId]
+  ) as Record<string, unknown>[]
+  for (const r of refundRows) {
+    const b = bucket(String(r.currency ?? ''))
+    const amount = Number(r.amount ?? 0)
+    b.refunded += amount
+    b.refunds.push({
+      id: Number(r.id),
+      currency: String(r.currency ?? ''),
+      amount,
+      refundAt: String(r.refund_at ?? ''),
+      bankRef: String(r.bank_ref ?? ''),
+      note: String(r.note ?? ''),
+      actor: String(r.actor ?? '')
+    })
+  }
+
   const out: CustomerCreditCurrency[] = []
   for (const b of by.values()) {
-    b.available = b.gross - b.applied
-    if (Math.abs(b.gross) <= 0.001 && Math.abs(b.applied) <= 0.001) continue
+    b.available = b.gross - b.applied - b.refunded
+    if (
+      Math.abs(b.gross) <= 0.001 &&
+      Math.abs(b.applied) <= 0.001 &&
+      Math.abs(b.refunded) <= 0.001
+    )
+      continue
     b.sources.sort((a, c) => a.date.localeCompare(c.date) || a.docNo.localeCompare(c.docNo))
     b.applications.sort((a, c) => a.appliedAt.localeCompare(c.appliedAt) || a.id - c.id)
+    b.refunds.sort((a, c) => a.refundAt.localeCompare(c.refundAt) || a.id - c.id)
     out.push(b)
   }
   return out.sort((a, b) => a.currency.localeCompare(b.currency))

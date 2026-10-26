@@ -534,15 +534,10 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
       )
     }
   }
-  // 总额改小或把单换到别的客户，都会让原客户的预收来源变小：
-  // 已经抵出去的钱不能因此穿仓（报错由外层事务整单回滚）
-  if (before) {
-    const prevTotal = storedFee + Number(before.express_fee ?? 0)
-    const shrunk = sampleFee + expressFee < prevTotal - 0.001
-    const movedCustomer =
-      input.customerId !== undefined && Number(input.customerId) !== Number(before.customer_id)
-    if (shrunk || movedCustomer) assertCreditSolvent(Number(before.customer_id))
-  }
+  // 任何改动都可能让这家客户的预收来源变小——改小总额、换客户、取消后恢复成在途、免单改回待收——
+  // 已经抵/退出去的钱就会穿仓，所以不挑方向。assertCreditSolvent 自带「没抵扣/退款就放行」的早退，
+  // 所以这里不再挑方向，改完统一复查；报错由外层事务整单回滚。
+  if (before) assertCreditSolvent(Number(before.customer_id))
   return getSample(id)!
 }
 

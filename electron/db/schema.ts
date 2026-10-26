@@ -582,6 +582,35 @@ CREATE TABLE credit_applications (
 CREATE INDEX idx_credit_app_customer ON credit_applications(customer_id, currency);
 CREATE INDEX idx_credit_app_target ON credit_applications(target_kind, target_id) WHERE reversed_at IS NULL;
 `
+  },
+  {
+    version: 22,
+    name: 'customer_credit_refunds',
+    sql: `
+-- 客户预收退款（R28）。
+-- 预收余额是「钱还在我们账上」：客户要回去时，余额必须跟着减，
+-- 否则同一笔钱退了还能再抵下一张单（账上双花）。退款是真金白银的出口，
+-- 不删来源流水（作废前的收款是留档凭据），只在这里记一笔退还对冲。
+-- 退还日期、银行水单、原因都是凭据；登记错了走 reversed_at 撤销，不删行。
+CREATE TABLE customer_refunds (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id     INTEGER NOT NULL REFERENCES customers(id),
+  currency        TEXT NOT NULL,
+  amount          REAL NOT NULL,
+  refund_at       TEXT NOT NULL,
+  bank_ref        TEXT NOT NULL,
+  note            TEXT NOT NULL DEFAULT '',
+  actor           TEXT NOT NULL DEFAULT '',
+  reversed_at     TEXT,
+  reversed_reason TEXT NOT NULL DEFAULT '',
+  created_at      TEXT NOT NULL,
+  CHECK (amount > 0),
+  CHECK (length(currency) > 0),
+  CHECK (length(bank_ref) > 0),
+  CHECK (reversed_at IS NULL OR length(reversed_reason) > 0)
+);
+CREATE INDEX idx_refunds_customer ON customer_refunds(customer_id, currency);
+`
   }
 ]
 

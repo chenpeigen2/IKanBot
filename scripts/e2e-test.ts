@@ -7085,6 +7085,357 @@ check(
 )
 eq('拦下后流水原样还在', orders.getOrder(r27Over.id)!.payments.length, 1)
 
+/* ---------------- R28 客户预收出口与来源守门 ---------------- */
+section('R28 客户预收一本账：退还正门、来源守门、草稿闸门、催款与台账同一口径')
+
+const r28C = customers.saveCustomer({
+  company: 'R28 Refund Co',
+  contact: '',
+  email: '',
+  phone: '',
+  country: 'US',
+  address: '',
+  zipCode: '',
+  attn: '',
+  paymentPref: ''
+})
+const r28Other = customers.saveCustomer({
+  company: 'R28 Other Co',
+  contact: '',
+  email: '',
+  phone: '',
+  country: 'US',
+  address: '',
+  zipCode: '',
+  attn: '',
+  paymentPref: ''
+})
+
+// 来源：一张多付 40 的单（100 的货，收到 140）
+const r28A = orders.createOrder({
+  customerId: r28C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R28-A'
+})
+orders.addOrderItem(r28A.id, { styleNo: 'R28-A', quantity: 1, unitPrice: 100 })
+orders.addPayment(r28A.id, { paidAt: localDate(), amount: 140, bankRef: 'R28-IN' })
+eq('R28 余额 = 多付 40', money.customerCreditAvailable(r28C.id, 'USD'), 40)
+
+// —— 退款守门：日期、水单、原因、可用额度，一道都不能少
+check(
+  '退 0 被拦',
+  r8err(() => credits.refundCredit({ customerId: r28C.id, currency: 'USD', amount: 0, bankRef: 'R28-OUT', note: 'x' })).includes(
+    '大于 0'
+  )
+)
+check(
+  '没水单被拦',
+  r8err(() => credits.refundCredit({ customerId: r28C.id, currency: 'USD', amount: 10, bankRef: '', note: 'x' })).includes(
+    '水单'
+  )
+)
+check(
+  '没原因被拦',
+  r8err(() =>
+    credits.refundCredit({ customerId: r28C.id, currency: 'USD', amount: 10, bankRef: 'R28-OUT', note: '' })
+  ).includes('原因')
+)
+check(
+  '未来日期被拦',
+  r8err(() =>
+    credits.refundCredit({
+      customerId: r28C.id,
+      currency: 'USD',
+      amount: 10,
+      refundAt: '2999-01-01',
+      bankRef: 'R28-OUT',
+      note: 'x'
+    })
+  ).includes('未来')
+)
+check(
+  '超过可用被拦',
+  r8err(() =>
+    credits.refundCredit({ customerId: r28C.id, currency: 'USD', amount: 45, bankRef: 'R28-OUT', note: 'x' })
+  ).includes('不够退')
+)
+check(
+  '跨币种没有余额可退',
+  r8err(() =>
+    credits.refundCredit({ customerId: r28C.id, currency: 'EUR', amount: 5, bankRef: 'R28-OUT', note: 'x' })
+  ).includes('不够退')
+)
+
+// —— 退 25：余额当场减，来源流水不删
+const r28AfterRefund = credits.refundCredit({
+  customerId: r28C.id,
+  currency: 'USD',
+  amount: 25,
+  refundAt: localDate(),
+  bankRef: 'R28-OUT-1',
+  note: 'R28 客户多付退回'
+})
+const r28Usd = r28AfterRefund.find((c) => c.currency === 'USD')!
+eq('退还后可用 15', r28Usd.available, 15)
+eq('已退还合计 25', r28Usd.refunded, 25)
+eq('退款台账一笔', r28Usd.refunds.length, 1)
+eq('退款不删来源流水：来源仍是 40', r28Usd.gross, 40)
+eq('来源流水还在', orders.getOrder(r28A.id)!.payments.length, 1)
+
+// —— 对账单：退款单列一行负数，结余写明「已退还」
+const r28Stmt = parseCsv(dashboard.exportCsv('statement', { customerId: r28C.id }))
+const r28Head = r28Stmt[0]
+const r28Body = r28Stmt.slice(1)
+const r28Col = (name: string): number => r28Head.indexOf(name)
+const r28RefundRow = r28Body.find((r) => r[r28Col('类型')] === '预收退款')!
+eq('对账单退款行金额 -25', r28RefundRow[r28Col('金额(原币)')], '-25')
+eq('对账单退款行带银行水单', r28RefundRow[r28Col('银行流水号')], 'R28-OUT-1')
+const r28Prepaid1 = r28Body.find((r) => r[r28Col('类型')] === '预收结余')!
+eq('对账单预收结余 15', r28Prepaid1[r28Col('金额(原币)')], '15')
+check('预收结余写明已退还 25', r28Prepaid1[r28Col('备注')].includes('已退还 25'), r28Prepaid1[r28Col('备注')])
+
+// —— 抵 10 到另一张单：余额 15 → 5，待收 30 → 20
+const r28B = orders.createOrder({
+  customerId: r28C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R28-B'
+})
+orders.addOrderItem(r28B.id, { styleNo: 'R28-B', quantity: 1, unitPrice: 30 })
+credits.applyCredit({ customerId: r28C.id, currency: 'USD', targetKind: 'order', targetId: r28B.id, amount: 10 })
+eq('抵 10 后可用 5', money.customerCreditAvailable(r28C.id, 'USD'), 5)
+eq('目标单待收 20', orders.getOrder(r28B.id)!.remaining, 20)
+
+// —— 撤销退款（水单录错）：余额回来；重复撤销被拦
+const r28RefundId = r28Usd.refunds[0].id
+credits.reverseRefund(r28RefundId, 'R28 水单录错，钱没退出去')
+eq('撤销退款后可用 30', money.customerCreditAvailable(r28C.id, 'USD'), 30)
+check('重复撤销退款被拦', r8err(() => credits.reverseRefund(r28RefundId, '再撤一次')).includes('撤销过'))
+
+// —— 把余额全部退出去（30）后，来源单据就不能再缩小
+credits.refundCredit({
+  customerId: r28C.id,
+  currency: 'USD',
+  amount: 30,
+  refundAt: localDate(),
+  bankRef: 'R28-OUT-2',
+  note: 'R28 剩余预收全退'
+})
+eq('再退 30 后可用 0', money.customerCreditAvailable(r28C.id, 'USD'), 0)
+check(
+  '改费用吃掉多付 → 预收缺口，拦下',
+  r8err(() => orders.updateOrderCharges(r28A.id, [{ label: 'R28 加价', amount: 10 }])).includes('缺口')
+)
+check(
+  '加明细吃掉多付 → 预收缺口，拦下',
+  r8err(() => orders.addOrderItem(r28A.id, { styleNo: 'R28-A2', quantity: 1, unitPrice: 10 })).includes('缺口')
+)
+check(
+  '改大单价 → 预收缺口，拦下',
+  r8err(() => orders.updateOrderItem(r28A.id, orders.getOrder(r28A.id)!.items[0].id, { unitPrice: 120 })).includes(
+    '缺口'
+  )
+)
+check(
+  '换客户会带走多付 → 预收缺口，拦下',
+  r8err(() => orders.updateOrder(r28A.id, { customerId: r28Other.id })).includes('缺口')
+)
+check(
+  '整体替换明细变大 → 预收缺口，拦下',
+  r8err(() => orders.replaceOrderItems(r28A.id, [{ styleNo: 'R28-A', quantity: 1, unitPrice: 120 }])).includes('缺口')
+)
+eq(
+  '改小单价不误伤（多付变多，不会穿仓）',
+  r8err(() => orders.updateOrderItem(r28A.id, orders.getOrder(r28A.id)!.items[0].id, { unitPrice: 90 })),
+  ''
+)
+orders.updateOrderItem(r28A.id, orders.getOrder(r28A.id)!.items[0].id, { unitPrice: 100 })
+
+// —— 草稿闸门：有流水 / 核销 / 抵扣的单不能退回草稿
+check(
+  '有预收抵扣的单不能退回草稿',
+  r8err(() => orders.setPaymentStatus(r28B.id, 'draft')).includes('不能退回草稿')
+)
+check(
+  '有收款流水的单不能退回草稿',
+  r8err(() => orders.setPaymentStatus(r28A.id, 'draft')).includes('不能退回草稿')
+)
+const r28C1 = orders.createOrder({
+  customerId: r28C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R28-C'
+})
+orders.addOrderItem(r28C1.id, { styleNo: 'R28-C', quantity: 1, unitPrice: 100 })
+orders.addSettlement(r28C1.id, { kind: 'shortage', amount: 100, reason: 'R28 短款核销' })
+check(
+  '有核销的单不能退回草稿',
+  r8err(() => orders.setPaymentStatus(r28C1.id, 'draft')).includes('不能退回草稿')
+)
+const r28Plain = orders.createOrder({
+  customerId: r28C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R28-PLAIN'
+})
+eq('干净的单仍可退回草稿', orders.setPaymentStatus(r28Plain.id, 'draft').paymentStatus, 'draft')
+
+// —— 打样单从取消恢复成在途：原来靠「取消单实收」撑着的余额会穿仓
+const r28S = samples.saveSample({
+  customerId: r28C.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: localDate(),
+  items: [{ styleNo: 'R28-S', productName: '取消样品', color: 'Black', size: 'M', quantity: 1, unitPrice: 40 }]
+})
+samples.addSamplePayment(r28S.id, { paidAt: localDate(), amount: 40, bankRef: 'R28-SMP' })
+samples.saveSample({ id: r28S.id, status: 'cancelled', note: 'R28 客户取消，实收留账' })
+eq('取消单实收进余额 40', money.customerCreditAvailable(r28C.id, 'USD'), 40)
+credits.applyCredit({ customerId: r28C.id, currency: 'USD', targetKind: 'order', targetId: r28B.id, amount: 20 })
+eq('再抵 20 后可用 20', money.customerCreditAvailable(r28C.id, 'USD'), 20)
+check(
+  '取消的打样单恢复成在途会让余额穿仓，拦下',
+  r8err(() => samples.saveSample({ id: r28S.id, status: 'pending' })).includes('缺口')
+)
+eq('拦下后打样单仍是已取消', samples.getSample(r28S.id)!.status, 'cancelled')
+
+// —— 订单台账导出补上抵扣列：已收 + 预收抵扣 + 待收 = 含费用合计
+const r28OrdersCsv = parseCsv(dashboard.exportCsv('orders'))
+const r28OrdersHead = r28OrdersCsv[0]
+check(
+  '订单台账新增预收抵扣两列',
+  r28OrdersHead.includes('预收抵扣(原币)') && r28OrdersHead.includes(`预收抵扣(${r27Base})`),
+  JSON.stringify(r28OrdersHead)
+)
+const r28BRow = r28OrdersCsv.slice(1).find((r) => r[r28OrdersHead.indexOf('订单号')] === orders.getOrder(r28B.id)!.orderNo)!
+eq('导出：订单 B 预收抵扣 30', Number(r28BRow[r28OrdersHead.indexOf('预收抵扣(原币)')]), 30)
+eq(
+  '导出对账链：已收 0 + 抵扣 30 + 待收 0 = 含费用 30',
+  Number(r28BRow[r28OrdersHead.indexOf('已收金额(原币)')]) +
+    Number(r28BRow[r28OrdersHead.indexOf('预收抵扣(原币)')]) +
+    Number(r28BRow[r28OrdersHead.indexOf('待收金额(原币)')]),
+  Number(r28BRow[r28OrdersHead.indexOf('含费用合计(原币)')])
+)
+const r28ListRow = orders.listOrderRows({ keyword: orders.getOrder(r28B.id)!.orderNo }).rows[0]
+eq('订单列表行带预收抵扣 30', r28ListRow.creditApplied, 30)
+
+// —— 催打样费认抵扣：抵清后不再催
+const r28R = customers.saveCustomer({
+  company: 'R28 Remind Co',
+  contact: '',
+  email: '',
+  phone: '',
+  country: 'US',
+  address: '',
+  zipCode: '',
+  attn: '',
+  paymentPref: ''
+})
+const r28RSrc = orders.createOrder({
+  customerId: r28R.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R28-RS'
+})
+orders.addOrderItem(r28RSrc.id, { styleNo: 'R28-RS', quantity: 1, unitPrice: 10 })
+orders.addPayment(r28RSrc.id, { paidAt: localDate(), amount: 30, bankRef: 'R28-RIN' })
+const r28Smp = samples.saveSample({
+  customerId: r28R.id,
+  sampleDate: '2026-08-01',
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: '2026-08-01',
+  items: [{ styleNo: 'R28-SMP', productName: '预收抵清样品', color: 'White', size: 'L', quantity: 1, unitPrice: 20 }]
+})
+check(
+  '抵清前会催打样费',
+  dashboard.reminders().some((r) => r.kind === 'sample' && r.sampleId === r28Smp.id && r.message.includes('打样费'))
+)
+credits.applyCredit({ customerId: r28R.id, currency: 'USD', targetKind: 'sample', targetId: r28Smp.id, amount: 20 })
+eq('打样单记下预收抵扣 20', samples.getSample(r28Smp.id)!.creditApplied, 20)
+check(
+  '预收抵清后不再催打样费',
+  !dashboard.reminders().some((r) => r.kind === 'sample' && r.sampleId === r28Smp.id && r.message.includes('打样费')),
+  JSON.stringify(dashboard.reminders().filter((r) => r.sampleId === r28Smp.id).map((r) => r.message))
+)
+
+// —— 催定金认抵扣：定金 30 抵掉 10，只催剩下的 20
+const r28D = customers.saveCustomer({
+  company: 'R28 Deposit Co',
+  contact: '',
+  email: '',
+  phone: '',
+  country: 'US',
+  address: '',
+  zipCode: '',
+  attn: '',
+  paymentPref: ''
+})
+const r28DSrc = orders.createOrder({
+  customerId: r28D.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R28-DS'
+})
+orders.addOrderItem(r28DSrc.id, { styleNo: 'R28-DS', quantity: 1, unitPrice: 10 })
+orders.addPayment(r28DSrc.id, { paidAt: localDate(), amount: 20, bankRef: 'R28-DIN' })
+const r28DTarget = orders.createOrder({
+  customerId: r28D.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  depositRatio: 0.3,
+  piNo: 'PI-R28-DT'
+})
+orders.addOrderItem(r28DTarget.id, { styleNo: 'R28-DT', quantity: 1, unitPrice: 100 })
+credits.applyCredit({ customerId: r28D.id, currency: 'USD', targetKind: 'order', targetId: r28DTarget.id, amount: 10 })
+orders.setPaymentStatus(r28DTarget.id, 'confirmed', 'R28 回到客户已确认，好测定金提醒')
+// 建单时就是 confirmed，催款时钟取的是所有 to_status=confirmed 事件里最晚的一条，
+// 所以创建事件也要一起往回拨，否则 MAX(at) 还是今天。
+getDb().run("UPDATE order_events SET at = ? WHERE order_id = ? AND to_status = 'confirmed'", [
+  new Date(Date.now() - 30 * 86400000).toISOString(),
+  r28DTarget.id
+])
+const r28DepositRem = dashboard
+  .reminders()
+  .find((r) => r.kind === 'payment' && r.orderId === r28DTarget.id && r.message.includes('定金'))
+check('定金提醒还在（客户确认了但没收齐）', !!r28DepositRem, JSON.stringify(dashboard.reminders().map((r) => r.message)))
+check('定金提醒扣掉预收抵掉的 10，只催 20', !!r28DepositRem && r28DepositRem.message.includes('定金 20.00'), r28DepositRem?.message)
+
+// —— 抵扣入参守门：对象类型和未来日期
+check(
+  '抵扣对象只能是订单或打样单',
+  r8err(() =>
+    credits.applyCredit({
+      customerId: r28D.id,
+      currency: 'USD',
+      targetKind: 'xxx' as any,
+      targetId: r28DTarget.id,
+      amount: 1
+    })
+  ).includes('订单或打样单')
+)
+check(
+  '抵扣日期不能填未来',
+  r8err(() =>
+    credits.applyCredit({
+      customerId: r28D.id,
+      currency: 'USD',
+      targetKind: 'order',
+      targetId: r28DTarget.id,
+      amount: 1,
+      appliedAt: '2999-01-01'
+    })
+  ).includes('未来')
+)
+
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
 console.log(`通过 ${passed} 项，失败 ${failed} 项`)

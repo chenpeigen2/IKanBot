@@ -683,8 +683,18 @@ export default function OrderDetail() {
                       }
                     }}
                   >
-                    {/* 作废只能走「⋯ → 作废此单」的凭据核对弹窗，下拉里不给这个旁路 */}
-                    {PAYMENT_STATUS_ORDER.filter((s) => s !== 'void').map((s) => (
+                    {/* 作废只能走「⋯ → 作废此单」的凭据核对弹窗，下拉里不给这个旁路；
+                        有收款/核销/预收抵扣的单也不能退回草稿（后端同样拦，草稿会让这些账静默消失） */}
+                    {PAYMENT_STATUS_ORDER.filter(
+                      (s) =>
+                        s !== 'void' &&
+                        !(
+                          s === 'draft' &&
+                          (order.payments.length > 0 ||
+                            (order.settlements?.length ?? 0) > 0 ||
+                            order.creditApplied > 0.001)
+                        )
+                    ).map((s) => (
                       <option key={s} value={s}>
                         {PAYMENT_STATUS_LABEL[s]}
                       </option>

@@ -379,6 +379,8 @@ export interface OrderListRow {
   /** 含费用合计（PI 上的 TOTAL，原币） */
   grandTotal: number
   paidAmount: number
+  /** 客户预收抵扣（非现金，已冲减待收） */
+  creditApplied: number
   /** 待收（原币，多收为 0） */
   remaining: number
   /** 待收折基准币：跨币种排序和「合计待收」用这个 */
@@ -1028,8 +1030,22 @@ export interface CustomerCreditCurrency {
   gross: number
   /** 已抵扣合计 */
   applied: number
-  /** 可用 = gross − applied；来源单据后来被改小可能变负，界面必须亮红提示 */
+  /** 已退还合计（真金白银退给客户，不再算余额） */
+  refunded: number
+  /** 可用 = gross − applied − refunded；来源单据后来被改小可能变负，界面必须亮红提示 */
   available: number
   sources: CustomerCreditSource[]
   applications: CustomerCreditApplication[]
+  refunds: CustomerCreditRefund[]
+}
+
+/** 一笔预收退款（钱退还给客户的凭据；登记错了撤销，不删行） */
+export interface CustomerCreditRefund {
+  id: number
+  currency: string
+  amount: number
+  refundAt: string
+  bankRef: string
+  note: string
+  actor: string
 }

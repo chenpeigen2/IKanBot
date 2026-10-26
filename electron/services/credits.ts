@@ -109,8 +109,17 @@ export function applyCredit(input: ApplyCreditInput): CustomerCreditCurrency[] {
   const currency = String(input.currency ?? '').trim().toUpperCase()
   if (!customerId) throw new Error('没有指定客户，不能抵扣预收。')
   if (!currency) throw new Error('没有指定币种，不能抵扣预收。')
+  if (input.targetKind !== 'order' && input.targetKind !== 'sample') {
+    throw new Error('抵扣对象只能是订单或打样单。')
+  }
   const amount = Math.round((Number(input.amount) || 0) * 100) / 100
   if (!(amount > 0)) throw new Error('抵扣金额必须大于 0。')
+  if (input.appliedAt != null && input.appliedAt !== '' && !isLocalDate(input.appliedAt)) {
+    throw new Error(`抵扣日期「${input.appliedAt}」不是有效日期。`)
+  }
+  if (input.appliedAt && input.appliedAt > localDate()) {
+    throw new Error('抵扣日期不能填未来：对账单按这一天排序，未来的日期会把余额排到还没发生的月份。')
+  }
 
   const target = readTarget(input.targetKind, input.targetId)
   if (target.customerId !== customerId) {
@@ -198,6 +207,83 @@ export function reverseCredit(applicationId: number, reason = ''): CustomerCredi
   return customerCreditBalance(customerId)
 }
 
+export interface RefundCreditInput {
+  customerId: number
+  currency: string
+  amount: number
+  /** 退款到账日；默认今天 */
+  refundAt?: string
+  /** 银行水单/转账凭据号，必填：退款是真金白银的出口 */
+  bankRef: string
+  note?: string
+}
+
+/**
+ * 把客户预收退还给客户（R28）。
+ *
+ * 余额是「钱还在我们账上」，退出去必须当场减掉，否则同一笔钱退了还能再抵下一张单。
+ * 这里绝不删来源流水（作废前的收款是留档凭据），只记一笔退还对冲。
+ * 日期、水单、原因都是凭据：日期不许填未来，水单必须能对上银行，原因要能回答「为什么退」。
+ */
+export function refundCredit(input: RefundCreditInput): CustomerCreditCurrency[] {
+  const customerId = Number(input.customerId)
+  const currency = String(input.currency ?? '').trim().toUpperCase()
+  const amount = Math.round((Number(input.amount) || 0) * 100) / 100
+  if (!customerId) throw new Error('没有指定客户，不能退还预收。')
+  if (!currency) throw new Error('没有指定币种，不能退还预收。')
+  if (!(amount > 0)) throw new Error('退还金额必须大于 0。')
+  const refundAt = String(input.refundAt ?? '').trim() || localDate()
+  if (!isLocalDate(refundAt)) throw new Error(`退款日期「${refundAt}」不是有效日期。`)
+  if (refundAt > localDate()) throw new Error('退款日期不能填未来：钱还没退出去。')
+  const bankRef = String(input.bankRef ?? '').trim()
+  if (!bankRef) {
+    throw new Error('退还预收必须填银行水单号：这是钱已经退给客户的凭据，对账时靠它和银行流水对上。')
+  }
+  const note = String(input.note ?? '').trim()
+  if (!note) {
+    throw new Error('退还预收要写原因（例如“客户取消尾单，多付退回”）：这笔钱离开公司账上，必须留痕。')
+  }
+  const available = customerCreditAvailable(customerId, currency)
+  if (available < -0.001) {
+    throw new Error(
+      `客户 ${currency} 预收已经有缺口（${available.toFixed(2)}）：来源单据被改动过。请先核对来源和抵扣，再办理退款。`
+    )
+  }
+  if (amount > available + 0.001) {
+    throw new Error(
+      `客户 ${currency} 可用预收只有 ${available.toFixed(2)}，不够退 ${amount.toFixed(2)}。`
+    )
+  }
+  const actor = getSettings().operator
+  transact(() => {
+    getDb().run(
+      `INSERT INTO customer_refunds(customer_id, currency, amount, refund_at, bank_ref, note, actor, created_at)
+       VALUES(?,?,?,?,?,?,?,?)`,
+      [customerId, currency, amount, refundAt, bankRef, note, actor, new Date().toISOString()]
+    )
+  })
+  return customerCreditBalance(customerId)
+}
+
+/** 撤销一笔退款（登记错了才用）：写 reversed_at，余额回来，不删行 */
+export function reverseRefund(refundId: number, reason = ''): CustomerCreditCurrency[] {
+  const db = getDb()
+  const row = db.get('SELECT id, customer_id, reversed_at FROM customer_refunds WHERE id = ?', [refundId]) as
+    | Record<string, unknown>
+    | null
+  if (!row) throw new Error('这笔预收退款已经不存在了，刷新页面后再试。')
+  if (row.reversed_at) throw new Error('这笔预收退款已经撤销过了。')
+  const why = String(reason ?? '').trim()
+  if (!why) throw new Error('撤销退款要写原因（例如“水单录错，钱没退出去”），操作历史要留痕。')
+  const customerId = Number(row.customer_id)
+  db.run('UPDATE customer_refunds SET reversed_at = ?, reversed_reason = ? WHERE id = ?', [
+    new Date().toISOString(),
+    why,
+    refundId
+  ])
+  return customerCreditBalance(customerId)
+}
+
 /**
  * 目标单作废/取消时自动回退它的全部抵扣。
  * 调用方必须已经在事务里（本函数不另开事务，避免嵌套时错误地提前提交）。
@@ -276,12 +362,22 @@ export function assertCreditFitsOrder(orderId: number): void {
  * 报错由外层事务回滚，不留下「账已经改了、预收却穿仓」的半截状态。
  */
 export function assertCreditSolvent(customerId: number): void {
+  const db = getDb()
+  // 绝大多数客户从没抵扣/退过预收：一次索引查找就放行，
+  // 这样把守门挂到每条改金额的路径上也不会拖慢日常编辑。
+  // 退款也算「有账」：退了钱再改小来源，同样会穿仓。
+  const hit = db.get(
+    `SELECT 1 AS hit FROM credit_applications WHERE customer_id = ? AND reversed_at IS NULL
+     UNION ALL
+     SELECT 1 FROM customer_refunds WHERE customer_id = ? AND reversed_at IS NULL
+     LIMIT 1`,
+    [customerId, customerId]
+  )
+  if (!hit) return
   const gaps = customerCreditBalance(customerId).filter((c) => c.available < -0.001)
   if (!gaps.length) return
   const detail = gaps.map((c) => `${c.currency} ${c.available.toFixed(2)}`).join('、')
   throw new Error(
-    `这笔改动会让客户预收出现缺口（${detail}）：已经有 ${gaps
-      .map((c) => c.applied.toFixed(2) + ' ' + c.currency)
-      .join('、')} 抵到了别的单上。请先在客户页撤销对应的预收抵扣，再改这笔钱。`
+    `这笔改动会让客户预收出现缺口（${detail}）：这些钱已经抵到了别的单上或退还给了客户。请先在客户页撤销对应的预收抵扣/退款，再改这笔钱。`
   )
 }

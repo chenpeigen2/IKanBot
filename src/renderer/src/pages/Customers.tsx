@@ -111,6 +111,17 @@ export default function Customers() {
     note: string
     saving: boolean
   } | null>(null)
+  /** 客户预收退款弹窗：钱真退出去了，余额必须当场减 */
+  const [refundModal, setRefundModal] = useState<{
+    c: Customer
+    currency: string
+    available: number
+    amount: string
+    refundAt: string
+    bankRef: string
+    note: string
+    saving: boolean
+  } | null>(null)
   /** 读取失败不能装成「没有客户」 */
   const [loadError, setLoadError] = useState('')
 
@@ -178,14 +189,18 @@ export default function Customers() {
   }
 
   const openDetail = async (c: Customer) => {
-    const [stats, orders, settings, prices, credits] = await Promise.all([
-      window.api.customers.stats(c.id),
-      window.api.customers.orders(c.id),
-      window.api.settings.get(),
-      window.api.customers.stylePriceHistory({ customerId: c.id }),
-      window.api.credits.balance(c.id)
-    ])
-    setDetail({ c, stats, orders, base: settings?.baseCurrency ?? 'CNY', prices, credits })
+    try {
+      const [stats, orders, settings, prices, credits] = await Promise.all([
+        window.api.customers.stats(c.id),
+        window.api.customers.orders(c.id),
+        window.api.settings.get(),
+        window.api.customers.stylePriceHistory({ customerId: c.id }),
+        window.api.credits.balance(c.id)
+      ])
+      setDetail({ c, stats, orders, base: settings?.baseCurrency ?? 'CNY', prices, credits })
+    } catch (e) {
+      toast((e as Error).message || '客户详情没加载出来，请重试', 'error')
+    }
   }
 
   const openSplit = async (c: Customer) => {
@@ -314,6 +329,76 @@ export default function Customers() {
     try {
       await window.api.credits.reverse(app.id, '客户页手动撤销')
       toast('已撤销这笔预收抵扣')
+      await openDetail(detail.c)
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
+  }
+
+  /**
+   * 退还客户预收（R28）：余额是「钱还在我们账上」，退出去必须记一笔，
+   * 否则同一笔钱退了还能再抵下一张单。日期、水单、原因都是凭据。
+   */
+  const openRefund = (c: Customer, cc: CustomerCreditCurrency) => {
+    setRefundModal({
+      c,
+      currency: cc.currency,
+      available: cc.available,
+      amount: '',
+      refundAt: localDate(),
+      bankRef: '',
+      note: '',
+      saving: false
+    })
+  }
+
+  const saveRefund = async () => {
+    if (!refundModal) return
+    const amount = Number(refundModal.amount)
+    if (!(amount > 0)) {
+      toast('填一个大于 0 的退还金额', 'error')
+      return
+    }
+    if (!refundModal.bankRef.trim()) {
+      toast('先填银行水单号：这是钱已经退给客户的凭据', 'error')
+      return
+    }
+    if (!refundModal.note.trim()) {
+      toast('写一句退款原因（例如「客户取消尾单，多付退回」）', 'error')
+      return
+    }
+    setRefundModal({ ...refundModal, saving: true })
+    try {
+      await window.api.credits.refund({
+        customerId: refundModal.c.id,
+        currency: refundModal.currency,
+        amount,
+        refundAt: refundModal.refundAt,
+        bankRef: refundModal.bankRef.trim(),
+        note: refundModal.note.trim()
+      })
+      toast(`已登记退还 ${amount.toFixed(2)} ${refundModal.currency}：这笔钱不再算可用预收`)
+      const c = refundModal.c
+      setRefundModal(null)
+      await openDetail(c)
+    } catch (e) {
+      toast((e as Error).message, 'error')
+      setRefundModal((s) => (s ? { ...s, saving: false } : s))
+    }
+  }
+
+  const reverseRefund = async (refund: CustomerCreditCurrency['refunds'][number]) => {
+    if (!detail) return
+    if (
+      !window.confirm(
+        `撤销这笔 ${refund.amount.toFixed(2)} ${refund.currency} 的退款记录？只有在「水单录错、钱其实没退出去」时才这么做，撤销后余额会恢复。`
+      )
+    ) {
+      return
+    }
+    try {
+      await window.api.credits.reverseRefund(refund.id, '客户页撤销退款（登记错误）')
+      toast('已撤销这笔退款记录，余额已恢复')
       await openDetail(detail.c)
     } catch (e) {
       toast((e as Error).message, 'error')
@@ -748,12 +833,18 @@ export default function Customers() {
                   </span>
                   <span className="faint">
                     来源 {money(cc.gross, cc.currency)} − 已抵扣 {money(cc.applied, cc.currency)}
+                    {cc.refunded > 0.001 ? ` − 已退还 ${money(cc.refunded, cc.currency)}` : ''}
                   </span>
                   <div className="spacer" />
                   {cc.available > 0.001 ? (
-                    <Button size="sm" onClick={() => void openApply(detail.c, cc.currency)}>
-                      抵一张单
-                    </Button>
+                    <>
+                      <Button size="sm" onClick={() => void openApply(detail.c, cc.currency)}>
+                        抵一张单
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => openRefund(detail.c, cc)}>
+                        退还
+                      </Button>
+                    </>
                   ) : null}
                 </div>
                 {cc.available < -0.001 ? (
@@ -793,6 +884,38 @@ export default function Customers() {
                             <td className="faint">{a.actor || '—'}</td>
                             <td style={{ textAlign: 'right' }}>
                               <Button size="sm" variant="ghost" onClick={() => void reverseCredit(a)}>
+                                撤销
+                              </Button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : null}
+                {cc.refunds.length > 0 ? (
+                  <div className="table-wrap" style={{ marginTop: 8 }}>
+                    <table className="data">
+                      <thead>
+                        <tr>
+                          <th>退还日期</th>
+                          <th>银行水单</th>
+                          <th className="num">金额</th>
+                          <th>原因</th>
+                          <th>操作人</th>
+                          <th />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {cc.refunds.map((f) => (
+                          <tr key={f.id}>
+                            <td className="faint nowrap">{f.refundAt}</td>
+                            <td className="mono">{f.bankRef}</td>
+                            <td className="num">{money(f.amount, f.currency)}</td>
+                            <td className="faint">{f.note || '—'}</td>
+                            <td className="faint">{f.actor || '—'}</td>
+                            <td style={{ textAlign: 'right' }}>
+                              <Button size="sm" variant="ghost" onClick={() => void reverseRefund(f)}>
                                 撤销
                               </Button>
                             </td>
@@ -956,6 +1079,64 @@ export default function Customers() {
             <Button onClick={() => setCreditApply(null)}>取消</Button>
             <Button variant="primary" disabled={creditApply.saving} onClick={() => void saveApply()}>
               {creditApply.saving ? '抵扣中…' : '确认抵扣'}
+            </Button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {refundModal ? (
+        <Modal title={`退还客户预收 · ${refundModal.c.company}`} onClose={() => setRefundModal(null)}>
+          <p className="faint" style={{ marginTop: 0 }}>
+            退还的是已经收到的钱：登记后这笔余额当场减掉，不能再拿去抵下一张单。日期、银行水单、原因都会留在这客户的预收台账里。
+          </p>
+          <div className="price-calc mb">
+            <div>
+              <span className="muted">币种</span>
+              <span>
+                {refundModal.currency} · 当前可用 {money(refundModal.available, refundModal.currency)}
+              </span>
+            </div>
+            <div>
+              <span className="muted">退还金额</span>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                placeholder="0.00"
+                value={refundModal.amount}
+                onChange={(e) => setRefundModal({ ...refundModal, amount: e.target.value })}
+              />
+            </div>
+            <div>
+              <span className="muted">退还日期</span>
+              <input
+                type="date"
+                max={localDate()}
+                value={refundModal.refundAt}
+                onChange={(e) => setRefundModal({ ...refundModal, refundAt: e.target.value })}
+              />
+            </div>
+            <div>
+              <span className="muted">银行水单号</span>
+              <input
+                value={refundModal.bankRef}
+                placeholder="退款水单上的流水号（必填）"
+                onChange={(e) => setRefundModal({ ...refundModal, bankRef: e.target.value })}
+              />
+            </div>
+            <div>
+              <span className="muted">原因</span>
+              <input
+                placeholder="必填，如「客户取消尾单，多付退回」"
+                value={refundModal.note}
+                onChange={(e) => setRefundModal({ ...refundModal, note: e.target.value })}
+              />
+            </div>
+          </div>
+          <div style={{ marginTop: 12, display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <Button onClick={() => setRefundModal(null)}>取消</Button>
+            <Button variant="primary" disabled={refundModal.saving} onClick={() => void saveRefund()}>
+              {refundModal.saving ? '登记中…' : '确认退还'}
             </Button>
           </div>
         </Modal>

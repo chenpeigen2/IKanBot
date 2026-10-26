@@ -4,6 +4,7 @@ import { getSettings } from './settings'
 import {
   EXCLUDED_STATUSES,
   cashFlowRows,
+  creditAppliedForSamples,
   customerCreditBalance,
   listOrderMoney,
   notInStatuses,
@@ -226,7 +227,11 @@ export function reminders(): Reminder[] {
   /* 2. 催定金：客户确认了，定金却没着落 */
   for (const r of moneyRows) {
     if (r.paymentStatus !== 'confirmed' || r.depositAmount <= 0) continue
-    const depositDue = Math.max(0, Math.min(r.receivable, r.depositAmount - r.paidAmount))
+    // 预收抵扣也是已经收到的钱：抵过一部分，定金就只剩差额要催
+    const depositDue = Math.max(
+      0,
+      Math.min(r.receivable, r.depositAmount - r.paidAmount - r.creditApplied)
+    )
     if (depositDue <= 0.001) continue
     const row = orderById.get(r.orderId)
     if (!row) continue
@@ -701,6 +706,8 @@ export function reminders(): Reminder[] {
      FROM sample_orders s JOIN customers c ON c.id = s.customer_id
      WHERE s.status != 'cancelled'`
   ) as Record<string, unknown>[]
+  // 预收抵扣过的打样费已经由客户余额覆盖：催款只催净额（与 sampleOpenRows 同一个口径）
+  const creditBySample = creditAppliedForSamples(sampleRows.map((r) => Number(r.id)))
   for (const r of sampleRows) {
     const sampleNo = String(r.sample_no)
     const who = String(r.customer_name)
@@ -723,8 +730,12 @@ export function reminders(): Reminder[] {
       }
     }
     if (String(r.fee_status ?? 'unpaid') !== 'unpaid') continue
-    // 催的是还欠的那部分：已经收了一半就只催另一半
-    const owed = Number(r.sample_fee ?? 0) + Number(r.express_fee ?? 0) - Number(r.collected ?? 0)
+    // 催的是还欠的那部分：已经收了一半就只催另一半，预收抵掉的部分也不算欠
+    const owed =
+      Number(r.sample_fee ?? 0) +
+      Number(r.express_fee ?? 0) -
+      Number(r.collected ?? 0) -
+      (creditBySample.get(Number(r.id)) ?? 0)
     if (owed <= 0.001) continue
     const shippedAt = String(r.shipped_at ?? '').trim()
     const days = daysFrom(shippedAt || String(r.sample_date ?? '') || String(r.created_at ?? ''))
@@ -985,13 +996,15 @@ function ordersCsv(rows: OrderMoneyRow[], base: string, filter?: OrderExportFilt
     '毛利(原币)',
     '已收金额(原币)',
     '待收金额(原币)',
+    '预收抵扣(原币)',
     '短款核销(原币)',
     '坏账核销(原币)',
     '坏账未追回(原币)',
     `含费用合计(${base})`,
     `成本(${base})`,
     `已收金额(${base})`,
-    `待收金额(${base})`
+    `待收金额(${base})`,
+    `预收抵扣(${base})`
   ]
   const lines = rows.map((r) => {
     const rate = r.exchangeRate
@@ -1022,13 +1035,15 @@ function ordersCsv(rows: OrderMoneyRow[], base: string, filter?: OrderExportFilt
       r.missingCostItems > 0 ? '' : money2(r.profitRaw),
       money2(r.paidAmount),
       money2(r.receivable),
+      money2(r.creditApplied),
       money2(r.shortageAmount),
       money2(r.badDebtAmount),
       money2(r.badDebtOutstanding),
       money2(r.grandTotalBase),
       money2(r.costBase),
       money2(r.paidAmount * rate),
-      money2(r.receivable * rate)
+      money2(r.receivable * rate),
+      money2(r.creditAppliedBase)
     ]
   })
   return toCsv(header, lines)
@@ -1206,7 +1221,7 @@ function statementCsv(customerId: number, base: string): string {
   }
 
   type StatementRow = {
-    kind: '订单' | '打样单' | '收款' | '合计' | '预收结余'
+    kind: '订单' | '打样单' | '收款' | '合计' | '预收结余' | '预收退款'
     docNo: string
     piNo: string
     date: string
@@ -1356,18 +1371,35 @@ function statementCsv(customerId: number, base: string): string {
   })
 
   // 预收结余：多收的钱、作废/取消单留在账上的实收，都从 money.ts 的同一份余额派生，
-  // 减去已经抵到别的单上的部分。压进待收会变负数，客户会以为我们算错了
-  const prepaidRows: StatementRow[] = customerCreditBalance(customerId).map((c) => ({
-    ...blank,
-    kind: '预收结余',
-    date: today,
-    currency: c.currency,
-    amount: money2(c.available),
-    note:
-      c.available < -0.001
-        ? `预收出现缺口 ${money2(-c.available)}：来源 ${money2(c.gross)} − 已抵扣 ${money2(c.applied)}。来源单据被改动过，请先在客户页核对抵扣`
-        : `可用 ${money2(c.available)}（来源 ${money2(c.gross)} − 已抵扣 ${money2(c.applied)}）；可抵下张单或线下退还；不计入应收`
-  }))
+  // 减去已经抵到别的单上的部分、也减去已经退还给客户的部分。
+  // 压进待收会变负数，客户会以为我们算错了
+  const credit = customerCreditBalance(customerId)
+  const prepaidRows: StatementRow[] = credit.map((c) => {
+    const parts = `来源 ${money2(c.gross)} − 已抵扣 ${money2(c.applied)}${c.refunded > 0.001 ? ` − 已退还 ${money2(c.refunded)}` : ''}`
+    return {
+      ...blank,
+      kind: '预收结余',
+      date: today,
+      currency: c.currency,
+      amount: money2(c.available),
+      note:
+        c.available < -0.001
+          ? `预收出现缺口 ${money2(-c.available)}：${parts}。来源单据被改动过，请先在客户页核对抵扣/退还`
+          : `可用 ${money2(c.available)}（${parts}）；可抵下张单或在客户页登记退还；不计入应收`
+    }
+  })
+  // 已退还的钱是真实出口：单列一行负数，客户拿对账单能和我们汇出去的水单对上
+  const refundRows: StatementRow[] = credit.flatMap((c) =>
+    c.refunds.map((f) => ({
+      ...blank,
+      kind: '预收退款' as const,
+      date: f.refundAt,
+      currency: c.currency,
+      amount: money2(-f.amount),
+      bankRef: f.bankRef,
+      note: `${f.note || '退还客户预收'}${f.actor ? `（${f.actor}）` : ''}`
+    }))
+  )
 
   const header = [
     '类型',
@@ -1387,7 +1419,7 @@ function statementCsv(customerId: number, base: string): string {
     '备注',
     '预收抵扣(原币)'
   ]
-  const lines = [...docs, ...payments, ...prepaidRows, ...totals].map((r) => {
+  const lines = [...docs, ...payments, ...refundRows, ...prepaidRows, ...totals].map((r) => {
     // 基准币合计行只有「未收(基准币)」这一列有意义：别的列写 0 会被当成「已收 0」
     const isBaseTotal = r.kind === '合计' && r.status.startsWith('截至')
     return [

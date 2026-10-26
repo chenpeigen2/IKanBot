@@ -437,6 +437,7 @@ export function listOrderRows(
       chargesTotal: m.chargesTotal,
       grandTotal: m.grandTotal,
       paidAmount: m.paidAmount,
+      creditApplied: m.creditApplied,
       remaining: m.receivable,
       remainingBase: m.receivable * rate,
       totalQuantity: m.totalQuantity,
@@ -826,6 +827,9 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
     recomputePaymentStatus(id)
     // 有预收抵扣的单：换客户/币种或金额改小不能让那笔抵扣悬空
     assertCreditFitsOrder(id)
+    // 换客户/换币种：原客户账上的「多收」跟着这单走了，已经抵出去的钱可能穿仓
+    if (customerChanged || newCurrency !== oldCurrency) assertCreditSolvent(Number(before.customer_id))
+    assertCreditSolvent(nextCustomerId)
   })
   return getOrder(id)!
 }
@@ -1085,7 +1089,10 @@ export function assertChargeAmounts(charges: QuotationCharge[]): void {
 /** 只改费用行（运费/保险），其他字段一个都不动 */
 export function updateOrderCharges(orderId: number, charges: QuotationCharge[], reason = ''): OrderDetail {
   const db = getDb()
-  const before = db.get('SELECT charges FROM orders WHERE id = ?', [orderId]) as Record<string, unknown> | null
+  const before = db.get('SELECT charges, customer_id FROM orders WHERE id = ?', [orderId]) as Record<
+    string,
+    unknown
+  > | null
   if (!before) throw new Error('订单不存在')
   assertOrderWritable(orderId, '改费用行')
   assertChargeAmounts(charges)
@@ -1108,6 +1115,8 @@ export function updateOrderCharges(orderId: number, charges: QuotationCharge[], 
     logEvent(orderId, 'update', null, null, reasonText ? `${detail}；原因：${reasonText}` : detail)
     recomputePaymentStatus(orderId)
     assertCreditFitsOrder(orderId)
+    // 让利/加费都会改变这单的「多收」残差：客户账上已抵/已退的钱不能被架空
+    assertCreditSolvent(Number(before.customer_id))
   })
   return getOrder(orderId)!
 }
@@ -1255,6 +1264,10 @@ export function addOrderItem(orderId: number, item: OrderItemInput): OrderDetail
 export function addOrderItems(orderId: number, items: OrderItemInput[]): OrderDetail {
   const db = getDb()
   assertOrderWritable(orderId, '加明细')
+  const customerId = Number(
+    (db.get('SELECT customer_id FROM orders WHERE id = ?', [orderId]) as { customer_id?: number } | null)
+      ?.customer_id ?? 0
+  )
   transact(() => {
     for (const item of items) insertOrderItem(orderId, item)
     db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
@@ -1262,6 +1275,8 @@ export function addOrderItems(orderId: number, items: OrderItemInput[]): OrderDe
     applyShipStatus(orderId)
     // 金额变了，应收总额 / 定金 / 待收都变了，收款状态要重算（可以往上也可以往下）
     recomputePaymentStatus(orderId)
+    // 加行会把客户原来的「多收」吃掉：已经抵/退出去的钱不能因此穿仓
+    if (customerId) assertCreditSolvent(customerId)
   })
   return getOrder(orderId)!
 }
@@ -1298,6 +1313,10 @@ export function updateOrderItem(
 ): OrderDetail {
   const db = getDb()
   assertOrderWritable(orderId, '改明细')
+  const customerId = Number(
+    (db.get('SELECT customer_id FROM orders WHERE id = ?', [orderId]) as { customer_id?: number } | null)
+      ?.customer_id ?? 0
+  )
   const cur = db.get('SELECT * FROM order_items WHERE id = ? AND order_id = ?', [itemId, orderId]) as
     | Record<string, unknown>
     | null
@@ -1375,6 +1394,8 @@ export function updateOrderItem(
     // 金额变了，收款状态要重算（加单加到收不够要从「已收款」退回「部分收款」）
     recomputePaymentStatus(orderId)
     assertCreditFitsOrder(orderId)
+    // 调大数量/单价会吃掉这家客户的「多收」残差，已抵/已退的钱不能被架空
+    if (customerId) assertCreditSolvent(customerId)
   })
   return getOrder(orderId)!
 }
@@ -1443,6 +1464,10 @@ export function removeOrderItem(orderId: number, itemId: number): OrderDetail {
 export function replaceOrderItems(orderId: number, items: OrderItemInput[]): OrderDetail {
   const db = getDb()
   assertOrderWritable(orderId, '整体替换明细')
+  const customerId = Number(
+    (db.get('SELECT customer_id FROM orders WHERE id = ?', [orderId]) as { customer_id?: number } | null)
+      ?.customer_id ?? 0
+  )
   const packed = Number(
     (
       db.get(
@@ -1500,6 +1525,8 @@ export function replaceOrderItems(orderId: number, items: OrderItemInput[]): Ord
     // 金额变了，收款状态要重算
     recomputePaymentStatus(orderId)
     assertCreditFitsOrder(orderId)
+    // 替换后的总额变大 = 原来客户多付的那截变小，已抵/已退的钱不能被架空
+    if (customerId) assertCreditSolvent(customerId)
   })
   return getOrder(orderId)!
 }
@@ -1957,6 +1984,10 @@ export function reverseSettlement(orderId: number, settlementId: number, reason 
   const why = String(reason ?? '').trim()
   if (!why) throw new Error('撤销核销要写原因，操作历史要留痕。')
   const label = SETTLEMENT_KIND_LABEL[kind] ?? kind
+  const customerId = Number(
+    (db.get('SELECT customer_id FROM orders WHERE id = ?', [orderId]) as { customer_id?: number } | null)
+      ?.customer_id ?? 0
+  )
   transact(() => {
     db.run(
       `INSERT INTO order_settlements(order_id, kind, amount, reason, evidence, reverses_id, payment_id, at, created_at)
@@ -1971,6 +2002,8 @@ export function reverseSettlement(orderId: number, settlementId: number, reason 
       `撤销${label} ${amount.toFixed(2)} 原因：${why}`
     )
     recomputePaymentStatus(orderId)
+    // 撤销核销会把这单的「多收」残差缩小：客户账上已抵/已退的钱不能被架空
+    if (customerId) assertCreditSolvent(customerId)
   })
   return getOrder(orderId)!
 }
@@ -2078,6 +2111,31 @@ export function setPaymentStatus(orderId: number, next: PaymentStatus, note = ''
     throw new Error(
       '收款状态下拉不能直接改成「已作废」：作废要先核对客户手里的 PI/CI 凭据。请到「⋯」菜单里走「作废此单」。'
     )
+  }
+  // 草稿不进应收、不进现金流，也不认收款状态：已经有流水/核销/预收抵扣的单退回草稿，
+  // 这些账就从系统里静默消失（以前会顺手把抵扣回退掉，等于替客户把决定做了）。
+  // 真不要这单请走作废：凭据核对、留痕、抵扣回退都按正门走。
+  if (next === 'draft' && cur.payment_status !== 'draft') {
+    const payCount = Number(
+      (db.get('SELECT COUNT(*) AS n FROM payments WHERE order_id = ?', [orderId]) as { n?: number } | null)?.n ?? 0
+    )
+    const settleCount = Number(
+      (db.get('SELECT COUNT(*) AS n FROM order_settlements WHERE order_id = ?', [orderId]) as { n?: number } | null)
+        ?.n ?? 0
+    )
+    const credit = hasActiveCredit('order', orderId)
+    if (payCount > 0 || settleCount > 0 || credit) {
+      const what = [
+        payCount > 0 ? `${payCount} 笔收款流水` : '',
+        settleCount > 0 ? `${settleCount} 笔核销` : '',
+        credit ? '客户预收抵扣' : ''
+      ]
+        .filter(Boolean)
+        .join('、')
+      throw new Error(
+        `这张单已经有 ${what}，不能退回草稿：草稿不进应收和现金流，这些账会从系统里消失。确实不要这单，请走「⋯ → 作废此单」。`
+      )
+    }
   }
   transact(() => {
     // 改成草稿/失效就退出应收口径：抵在这张单上的客户预收无处可落，先退回余额

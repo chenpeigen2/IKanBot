@@ -200,6 +200,17 @@ export interface IKanApi {
     }): Promise<CustomerCreditCurrency[]>
     /** 撤销一笔抵扣（不删行，写原因）；余额和待收一起回来 */
     reverse(applicationId: number, reason: string): Promise<CustomerCreditCurrency[]>
+    /** 退还客户预收（真金白银的出口：余额跟着减，不删来源流水） */
+    refund(input: {
+      customerId: number
+      currency: string
+      amount: number
+      refundAt?: string
+      bankRef: string
+      note: string
+    }): Promise<CustomerCreditCurrency[]>
+    /** 撤销一笔退款（登记错了才用，写原因）；余额回来 */
+    reverseRefund(refundId: number, reason: string): Promise<CustomerCreditCurrency[]>
   }
   settings: {
     get(): Promise<any>
