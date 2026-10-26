@@ -414,7 +414,16 @@ export function importProductsCsv(text: string, mode: 'skip' | 'overwrite' = 'sk
   const need = (r: string[], i: number): string => (i >= 0 ? String(r[i] ?? '').trim() : '')
 
   if (col('styleNo') < 0) {
-    throw new Error(`CSV 第一行没找到「款号」这一列。表头请照这个写：${CSV_TEMPLATE_HEADER}`)
+    // 报出读到的表头，用户一眼能看出是编码问题还是真的少了列
+    const seen = rows[0]
+      .slice(0, 3)
+      .map((h) => h.trim())
+      .join(' | ')
+    throw new Error(
+      `CSV 第一行没找到「款号」这一列，读到的是「${seen || '(空)'}」。` +
+        `要是这行看着像乱码，就是文件存成了别的编码：请用 Excel「另存为 → CSV UTF-8」再导一次。` +
+        `表头请照这个写：${CSV_TEMPLATE_HEADER}`
+    )
   }
 
   let created = 0

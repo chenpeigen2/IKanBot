@@ -116,7 +116,9 @@ export default function Orders() {
               to: to || undefined
             }
       const out = await window.api.exporter.csv('orders', filter)
-      if (out) toast(all ? '订单台账（全部）已导出' : hasFilter ? '已按当前筛选导出' : '订单台账已导出')
+      // 「全部」指的是不带当前筛选，台账口径照旧不含草稿/失效/作废——
+      // 真要那份底稿，去报表页「导出全量底稿」
+      if (out) toast(all ? '已导出全部订单台账（不含草稿/失效/作废）' : hasFilter ? '已按当前筛选导出' : '订单台账已导出')
     } catch (e) {
       toast((e as Error).message || '导出没成功', 'error')
     }
@@ -131,7 +133,12 @@ export default function Orders() {
           导出 Excel
         </Button>
         {hasFilter ? (
-          <Button onClick={() => void exportCsv(true)}>导出全部</Button>
+          <Button
+            onClick={() => void exportCsv(true)}
+            title="清掉当前筛选再导一次（仍不含草稿/失效/作废；要那份去报表页「导出全量底稿」）"
+          >
+            导出全部
+          </Button>
         ) : null}
         <Button variant="primary"  onClick={() => setShowCreate(true)}>
           + 新建订单

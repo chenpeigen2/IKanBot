@@ -128,8 +128,12 @@ export default function Settings() {
     try {
       const f = await window.api.backup.create()
       setLastBackupFile(f)
-      // 备份时间戳是备份服务写的，这里重新拉一次设置才拿得到
-      setS(await window.api.settings.get())
+      // 备份时间戳是备份服务写的，要拿回来才能刷新「最近一次成功备份」。
+      // 只合并这两个服务端字段：以前整份设置覆盖回表单，用户改到一半的条款会被冲掉。
+      const fresh = await window.api.settings.get()
+      setS((prev: any) =>
+        prev ? { ...prev, lastBackupAt: fresh.lastBackupAt, lastBackupError: fresh.lastBackupError } : prev
+      )
       toast('备份已创建')
     } catch (e) {
       toast((e as Error).message, 'error')

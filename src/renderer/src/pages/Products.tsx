@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Modal, useToast, money, Empty, Button, LoadError, PromptModal } from '../ui'
 import { imageUrl } from '../imageUrl'
 import type { Product, ProductImage } from '../../../shared/types'
+import { CSV_BOM, looksGarbled, pickCsvDecode } from '../../../shared/csv'
 
 interface Draft {
   id?: number
@@ -679,7 +680,9 @@ function ImportModal({ onClose, onDone }: { onClose: () => void; onDone: () => P
 
   const downloadTemplate = async () => {
     const header = await window.api.products.csvTemplate()
-    const blob = new Blob([`${header}\n`], { type: 'text/csv;charset=utf-8' })
+    // BOM 不能省：中文 Windows 的 Excel 双击打开没有 BOM 的 UTF-8 文件会按 GBK 解，
+    // 表头直接变乱码，用户以为模板坏了
+    const blob = new Blob([`${CSV_BOM}${header}\n`], { type: 'text/csv;charset=utf-8' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
     a.download = '商品库导入模板.csv'
@@ -695,15 +698,45 @@ function ImportModal({ onClose, onDone }: { onClose: () => void; onDone: () => P
       input.onchange = () => {
         const f = input.files?.[0]
         if (!f) return resolve()
-        const reader = new FileReader()
-        reader.onload = () => {
-          setText(String(reader.result ?? ''))
-          resolve()
-        }
-        reader.onerror = () => resolve()
-        reader.readAsText(f, 'utf-8')
+        void readFile(f).finally(() => resolve())
       }
       input.click()
+    })
+
+  /** 先按 UTF-8 读；读出乱码再按 GBK 读一遍（Excel「另存为 CSV」在中文 Windows 默认就是 GBK） */
+  const readFile = async (f: File) => {
+    let utf8: string
+    try {
+      utf8 = await readAsText(f, 'utf-8')
+    } catch (e) {
+      toast((e as Error).message, 'error')
+      return
+    }
+    // GBK 这一遍只是补救，读不动就留着 UTF-8 那份，让导入报错讲清读到的是什么表头
+    const chosen = looksGarbled(utf8)
+      ? pickCsvDecode([
+          { encoding: 'utf-8', text: utf8 },
+          { encoding: 'gbk', text: await readAsText(f, 'gbk').catch(() => '') }
+        ])
+      : { encoding: 'utf-8' as const, text: utf8 }
+    if (!chosen) {
+      toast(`「${f.name}」是空文件，没有内容可导入`, 'error')
+      return
+    }
+    setText(chosen.text)
+    if (chosen.encoding === 'gbk') {
+      toast('这份 CSV 是 GBK（ANSI）存的，已自动按 GBK 读出来；下次用「另存为 → CSV UTF-8」更稳')
+    }
+  }
+
+  const readAsText = (f: File, encoding: 'utf-8' | 'gbk') =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result ?? ''))
+      // 以前 onerror 直接 resolve()：读失败页面毫无反应，用户以为没点上按钮，又点一次
+      reader.onerror = () =>
+        reject(new Error(`「${f.name}」没读出来：文件可能正被 Excel 占用或已被移动，关掉 Excel 再试，或者把内容直接贴进来`))
+      reader.readAsText(f, encoding)
     })
 
   const run = async () => {
@@ -741,6 +774,7 @@ function ImportModal({ onClose, onDone }: { onClose: () => void; onDone: () => P
       <div className="hint">
         表头认中文也认英文（款号、品名、成分、尺码、颜色、成本价、工厂、工厂货号、每箱件数、箱规、单件净重、类目、品牌、季节、备注）。
         尺码/颜色用「、」或「,」分开。款号已经存在的默认跳过，选「覆盖」才会改档案。
+        文件用 UTF-8 或 GBK 存的都能读（GBK 会自动识别），也可以直接把内容贴进下面的框。
       </div>
       <div className="field" style={{ marginTop: 10 }}>
         <label>CSV 内容</label>

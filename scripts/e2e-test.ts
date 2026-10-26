@@ -35,6 +35,7 @@ import { localDate, localMonthOf, addDays } from '../src/shared/date'
 import { isBillingStatus, shownRemaining } from '../src/shared/billing'
 import { likeContains } from '../electron/services/search'
 import { INCOTERMS } from '../src/shared/types'
+import { CSV_BOM, looksGarbled, pickCsvDecode } from '../src/shared/csv'
 
 let passed = 0
 let failed = 0
@@ -7844,6 +7845,73 @@ check(
   r30UsdTotal?.[r30StmtCol('备注')].includes('预收抵扣 30'),
   r30UsdTotal?.[r30StmtCol('备注')]
 )
+
+/* ---------------- R31 CSV 编码与导入这几道门 ---------------- */
+section('R31 CSV 编码兜底：GBK 文件不再被当成「没有款号」')
+
+check('替换符算乱码', looksGarbled('\uFFFD,\uFFFD\uFFFD'))
+check('拉丁 mojibake 算乱码', looksGarbled('Êý¾Ý,Æ·Ãû\nA001,ºñ'))
+check('正常中文表头不算乱码', !looksGarbled('款号,品名\nA001,纯棉圆领T恤'))
+check('纯 ASCII 的 CSV 不算乱码（不白折腾一次 GBK）', !looksGarbled('styleNo,name\nA001,T-shirt'))
+check('带 BOM 的正常文件不算乱码', !looksGarbled(`${CSV_BOM}款号,品名`))
+check('带 BOM 的乱码文件仍然算乱码', looksGarbled(`${CSV_BOM}Êý¾Ý,Æ·Ãû`))
+check('空串不算乱码', !looksGarbled(''))
+
+eq(
+  'UTF-8 读出乱码时换 GBK 那份',
+  pickCsvDecode([
+    { encoding: 'utf-8', text: '\uFFFD,\uFFFD' },
+    { encoding: 'gbk', text: '款号,品名' }
+  ])?.encoding,
+  'gbk'
+)
+eq(
+  'UTF-8 正常时绝不换成 GBK',
+  pickCsvDecode([
+    { encoding: 'utf-8', text: '款号,品名' },
+    { encoding: 'gbk', text: 'Êý¾Ý,Æ·Ãû' }
+  ])?.encoding,
+  'utf-8'
+)
+eq(
+  '两份都乱时退回第一份，让表头报错说清读到了什么',
+  pickCsvDecode([
+    { encoding: 'utf-8', text: 'Êý¾Ý,Æ·Ãû' },
+    { encoding: 'gbk', text: 'ÂÊý,ÂÆ·' }
+  ])?.encoding,
+  'utf-8'
+)
+eq(
+  'UTF-8 是空文件就用 GBK 那份',
+  pickCsvDecode([
+    { encoding: 'utf-8', text: '   ' },
+    { encoding: 'gbk', text: '款号,品名' }
+  ])?.encoding,
+  'gbk'
+)
+eq('一份都没有就是 null', pickCsvDecode([]), null)
+
+// 模板现在带 BOM（Excel 双击不乱码），用户填完原样导回来时 BOM 不能挡住表头
+const r31Rows = products.parseCsvRows(`${CSV_BOM}${products.CSV_TEMPLATE_HEADER}\nR31-BOM,带BOM的款`)
+eq('parseCsvRows 会摘掉 BOM', r31Rows[0][0], '款号')
+const r31Imp = products.importProductsCsv(
+  `${CSV_BOM}${products.CSV_TEMPLATE_HEADER}\nR31-BOM,带BOM的款,100% Cotton,,,,,,,`,
+  'skip'
+)
+eq('带 BOM 的 CSV 正常导入 1 款', r31Imp.created, 1)
+const r31P = products.findProductByStyleNo('R31-BOM')
+check('导入后款号没有夹着 BOM', r31P?.styleNo === 'R31-BOM', String(r31P?.styleNo))
+if (r31P) products.deleteProduct(r31P.id)
+
+let r31Err = ''
+try {
+  products.importProductsCsv('Êý¾Ý,Æ·Ãû\nA001,1\n', 'skip')
+} catch (e) {
+  r31Err = (e as Error).message
+}
+check('表头认不出时用人话报错', r31Err.includes('款号'), r31Err)
+check('报错回显读到的表头，一眼看出是乱码', r31Err.includes('Êý¾Ý'), r31Err)
+check('报错教用户改成 CSV UTF-8', r31Err.includes('UTF-8'), r31Err)
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
