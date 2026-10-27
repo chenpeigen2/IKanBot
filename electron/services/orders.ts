@@ -1636,6 +1636,36 @@ export function assertPaymentInput(p: { paidAt: string; amount: number }): { pai
   return { paidAt, amount }
 }
 
+/**
+ * 同一张单不许把同一张水单记两次。
+ * 拆一张水单到几张单是正常业务（整批共用流水号），所以只在「同一张单」上拦；
+ * 空流水号不拦（很多老账、小额汇款根本没有流水号）。
+ * 比对前去掉首尾空格并忽略大小写：手抄流水号的大小写不一致，还是同一张水单。
+ */
+export function assertBankRefUnused(
+  target: { orderId?: number; sampleOrderId?: number },
+  bankRef: unknown
+): void {
+  const ref = String(bankRef ?? '').trim()
+  if (!ref) return
+  const bySample = target.sampleOrderId != null
+  const docId = bySample ? target.sampleOrderId! : target.orderId
+  if (docId == null) return
+  const dup = getDb().get(
+    `SELECT paid_at, amount FROM payments
+      WHERE ${bySample ? 'sample_order_id' : 'order_id'} = ?
+        AND UPPER(TRIM(bank_ref)) = UPPER(?)
+      ORDER BY id LIMIT 1`,
+    [docId, ref]
+  ) as { paid_at?: string; amount?: number } | null
+  if (!dup) return
+  throw new Error(
+    `这张单上已经登记过流水号「${ref}」的收款（${String(dup.paid_at ?? '')}，${Number(dup.amount ?? 0).toFixed(2)}）：` +
+      `同一张水单不能记两次，再记一次会让已收翻倍、凭空多出可退的预收。` +
+      `如果这笔钱要拆到别的单，请用「水单拆分收款」；如果上次录错了，请先撤销原记录再重录；确实没有流水号就留空。`
+  )
+}
+
 export function addPayment(orderId: number, p: PaymentInput): OrderDetail {
   const db = getDb()
   // 作废单不再有「待收」，但钱真的到账时要能落账：
@@ -1688,6 +1718,8 @@ export function addPayment(orderId: number, p: PaymentInput): OrderDetail {
       ?.exchange_rate ?? 1
   )
   transact(() => {
+    // 查重放在事务里：拆分收款整批落账时，同一张单被填两次会在这里当场拦下
+    assertBankRefUnused({ orderId }, p.bankRef)
     db.run(
       `INSERT INTO payments(order_id, paid_at, amount, method, bank_ref, note, exchange_rate, created_at)
        VALUES(?,?,?,?,?,?,?,?)`,

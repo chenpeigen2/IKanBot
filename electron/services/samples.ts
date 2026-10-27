@@ -12,7 +12,7 @@ import { assertLocalDate, localDate } from '../../src/shared/date'
 import { isBillingStatus } from '../../src/shared/billing'
 import { assertQuantity, assertUnitPrice, assertOptionalMoney } from '../../src/shared/guards'
 import { getSettings } from './settings'
-import { createOrder, getOrder, assertSkuListUnique, assertPaymentInput } from './orders'
+import { createOrder, getOrder, assertSkuListUnique, assertPaymentInput, assertBankRefUnused } from './orders'
 import { logEvent } from './events'
 import { assertCreditSolvent, hasActiveCredit, reverseCreditsForTarget } from './credits'
 import { costInOrderCurrency, creditAppliedForSample } from './money'
@@ -28,7 +28,7 @@ import type {
   SampleOrderItem,
   SampleStatus
 } from '../../src/shared/types'
-import { PAYMENT_STATUS_LABEL, SAMPLE_FEE_STATUS_LABEL, SAMPLE_STATUS_LABEL } from '../../src/shared/types'
+import { PAYMENT_STATUS_LABEL, SAMPLE_FEE_STATUS_LABEL, SAMPLE_FEE_STATUS_ORDER, SAMPLE_STATUS_LABEL } from '../../src/shared/types'
 
 function now(): string {
   return new Date().toISOString()
@@ -280,7 +280,16 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
   // 以前 filter 直接把数量≤0 的行丢掉，用户打了一半数字保存后那一行凭空消失，
   // 既不知道少了一行，也不知道为什么少
   const itemsProvided = input.items !== undefined
-  const items = (input.items ?? []).filter((i) => i.styleNo.trim())
+  // 款号可能来自 IPC/旧数据而缺字段：先规整成字符串再 trim，别让一行脏数据把整单保存变成 TypeError
+  const rawItems = (input.items ?? []).map((i) => ({ ...i, styleNo: String(i?.styleNo ?? '').trim() }))
+  // 只填了数量/单价、没写款号的行不能悄悄丢掉：丢掉就是「保存成功、金额少一截」的假平安
+  const blankIdx = rawItems.findIndex(
+    (i) => !i.styleNo && (Number(i.quantity ?? 0) !== 0 || Number(i.unitPrice ?? 0) !== 0)
+  )
+  if (blankIdx >= 0) {
+    throw new Error(`第 ${blankIdx + 1} 行填了数量或单价，但没写款号：这一行会被当成空行丢掉，样品费也少算。请补上款号，或把数量/单价清零。`)
+  }
+  const items = rawItems.filter((i) => i.styleNo)
   items.forEach((it) => {
     const who = `样品行 ${it.styleNo}`
     assertQuantity(it.quantity, `${who} 的数量`)
@@ -313,7 +322,18 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
     return v == null ? '' : String(v)
   }
   const expressFee = keepNum('expressFee', 'express_fee')
-  const feeStatus = (keep('feeStatus', 'fee_status') ?? 'unpaid') as SampleFeeStatus
+  const factoryCost = keepNum('factoryCost', 'factory_cost')
+  // 工厂打样费是公司自己的成本：负数会把净垫和年度成本一起算反，乱码会落成 NaN
+  assertOptionalMoney(factoryCost, '工厂打样费')
+  const rawFeeStatus = keep('feeStatus', 'fee_status') ?? 'unpaid'
+  // 状态是枚举列：'Paid'/'已收' 这种脏值会让待收、客户页、对账单三处各按各的理解跳单，
+  // 而工作台还在催——入口一次拦死，比事后对口径便宜
+  if (!SAMPLE_FEE_STATUS_ORDER.includes(rawFeeStatus as SampleFeeStatus)) {
+    throw new Error(
+      `打样费收款状态「${String(rawFeeStatus)}」不认识：只能是未收 / 已向客户收 / 已抵扣 / 免收。`
+    )
+  }
+  const feeStatus = rawFeeStatus as SampleFeeStatus
   const exchangeRate = keepNum('exchangeRate', 'exchange_rate')
   // 快递费是公司垫付、向客户收回的钱：负数会把净垫与应收一起算反，
   // 乱码会整列变成 NaN；服务层拦（IPC 任何调用方都能打）
@@ -479,7 +499,7 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
       ['note', keepText('note', 'note')],
       ['shipped_at', keepText('shippedAt', 'shipped_at')],
       ['received_at', keepText('receivedAt', 'received_at')],
-      ['factory_cost', keepNum('factoryCost', 'factory_cost')],
+      ['factory_cost', factoryCost],
       ['fee_status', feeStatus],
       ['fee_note', keepText('feeNote', 'fee_note')],
       ['currency', keepText('currency', 'currency') || 'USD'],
@@ -516,7 +536,7 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
         input.note ?? '',
         input.shippedAt ?? '',
         input.receivedAt ?? '',
-        Number(input.factoryCost ?? 0),
+        factoryCost,
         feeStatus,
         input.feeNote ?? '',
         input.currency ?? 'USD',
@@ -888,6 +908,7 @@ export function addSamplePayment(sampleId: number, p: SamplePaymentInput): Sampl
     )
   }
   transact(() => {
+    assertBankRefUnused({ sampleOrderId: sampleId }, p.bankRef)
     getDb().run(
       `INSERT INTO payments(sample_order_id, paid_at, amount, method, bank_ref, note, exchange_rate, created_at)
        VALUES(?,?,?,?,?,?,?,?)`,

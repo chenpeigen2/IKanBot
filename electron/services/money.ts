@@ -269,6 +269,21 @@ export interface OrderMoneyRow extends OrderMoney {
   badDebtBase: number
 }
 
+/**
+ * 定金还差多少（原币）：到账、预收抵扣、已核销的短款/坏账都算有「着落」。
+ * 工作台的催定金、待收四桶、尾款提醒的压制条件共用这一份，
+ * 否则会出现「提醒说还差 10、桶里算 30、尾款永远不催」。
+ */
+export function depositDueOf(
+  r: Pick<OrderMoneyRow, 'depositAmount' | 'receivable' | 'paidAmount' | 'netWrittenOff' | 'creditApplied'>
+): number {
+  if (!(r.depositAmount > 0)) return 0
+  return Math.max(
+    0,
+    Math.min(r.receivable, r.depositAmount - r.paidAmount - r.netWrittenOff - r.creditApplied)
+  )
+}
+
 /** 汇总时的筛选条件 */
 export interface MoneyListFilter {
   /** 只要这些订单（已排除的默认不算） */

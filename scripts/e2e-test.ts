@@ -9137,6 +9137,243 @@ check(
   `${r37QAgain.sentAt} / ${r37QAgain.updatedAt}`
 )
 
+/* ---------------- R38 ---------------- */
+
+section('R38 同一张水单不能在同一张单上记两次')
+
+const r38SlipCust = customers.saveCustomer({ company: 'R38-SLIP-CO' })
+const r38SlipA = orders.createOrder({
+  customerId: r38SlipCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(r38SlipA.id, { styleNo: 'R38-A', quantity: 100, unitPrice: 10 })
+const r38SlipB = orders.createOrder({
+  customerId: r38SlipCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(r38SlipB.id, { styleNo: 'R38-B', quantity: 100, unitPrice: 10 })
+const r38PaidCount = (id: number): number => orders.getOrder(id)!.payments.length
+
+orders.addPayment(r38SlipA.id, { paidAt: localDate(), amount: 100, method: 'T/T', bankRef: 'ZZ-R38-SLIP' })
+eq('第一笔带流水号照常落账', r38PaidCount(r38SlipA.id), 1)
+const r38DupMsg = r8err(() =>
+  orders.addPayment(r38SlipA.id, { paidAt: localDate(), amount: 200, method: 'T/T', bankRef: 'ZZ-R38-SLIP' })
+)
+check(
+  '同一张单、同一流水号再记一次当场拦下，并说出上次的日期与金额',
+  r38DupMsg.includes('同一张水单') && r38DupMsg.includes('100.00'),
+  r38DupMsg
+)
+eq('被拦下后没有多出流水（已收不会翻倍）', r38PaidCount(r38SlipA.id), 1)
+check(
+  '大小写不同也算同一张水单（手抄流水号常混大小写）',
+  r8err(() =>
+    orders.addPayment(r38SlipA.id, { paidAt: localDate(), amount: 50, method: 'T/T', bankRef: 'zz-r38-slip' })
+  ).includes('同一张水单')
+)
+check(
+  '同一流水号拆到另一张单照常放行（一笔水单付两张单是正常业务）',
+  r8err(() =>
+    orders.addPayment(r38SlipB.id, { paidAt: localDate(), amount: 300, method: 'T/T', bankRef: 'ZZ-R38-SLIP' })
+  ) === ''
+)
+orders.addPayment(r38SlipA.id, { paidAt: localDate(), amount: 10, method: 'T/T', bankRef: '' })
+orders.addPayment(r38SlipA.id, { paidAt: localDate(), amount: 10, method: 'T/T', bankRef: '   ' })
+eq('没有流水号的小额收款照常记（空号不判重）', r38PaidCount(r38SlipA.id), 3)
+
+check(
+  '水单拆分整批共用流水号照常放行',
+  r8err(() =>
+    orders.batchAddPayments([
+      { orderId: r38SlipA.id, paidAt: localDate(), amount: 5, bankRef: 'ZZ-R38-BATCH' },
+      { orderId: r38SlipB.id, paidAt: localDate(), amount: 5, bankRef: 'ZZ-R38-BATCH' }
+    ])
+  ) === ''
+)
+const r38BatchBefore = r38PaidCount(r38SlipA.id)
+const r38BatchDup = r8err(() =>
+  orders.batchAddPayments([
+    { orderId: r38SlipA.id, paidAt: localDate(), amount: 6, bankRef: 'ZZ-R38-BATCH2' },
+    { orderId: r38SlipA.id, paidAt: localDate(), amount: 7, bankRef: 'ZZ-R38-BATCH2' }
+  ])
+)
+check('拆分里同一张单填两行、同一个流水号 → 拦下', r38BatchDup.includes('同一张水单'), r38BatchDup)
+eq('拦下时整批回滚，第一行也没有落账', r38PaidCount(r38SlipA.id), r38BatchBefore)
+
+const r38SlipSample = samples.saveSample({
+  customerId: r38SlipCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: localDate(),
+  items: [{ styleNo: 'R38-S', productName: '水单判重样', color: 'White', size: 'L', quantity: 1, unitPrice: 10 }]
+})
+samples.addSamplePayment(r38SlipSample.id, { paidAt: localDate(), amount: 1, bankRef: 'ZZ-R38-SAMP' })
+check(
+  '打样费同流水号也不能在同一张打样单上记两次',
+  r8err(() =>
+    samples.addSamplePayment(r38SlipSample.id, { paidAt: localDate(), amount: 1, bankRef: 'zz-r38-samp' })
+  ).includes('同一张水单')
+)
+eq('打样单被拦下后仍只有一笔流水', samples.getSample(r38SlipSample.id)!.flowCount, 1)
+
+section('R38 定金差把已核销的钱算进去，尾款提醒不再被永久压住')
+
+const r38RemPrev = getSettings()
+saveSettings({ ...r38RemPrev, remindPaymentDays: 0, remindBalanceDays: 0 })
+const r38DepBefore = dashboard.dashboard()
+const r38DepCust = customers.saveCustomer({ company: 'R38-DEPOSIT-CO' })
+const r38MakeDep = async (styleNo: string): Promise<number> => {
+  const o = orders.createOrder({
+    customerId: r38DepCust.id,
+    currency: 'USD',
+    exchangeRate: 7,
+    paymentStatus: 'confirmed',
+    depositRatio: 0.3
+  })
+  await orders.addOrderItem(o.id, { styleNo, quantity: 10, unitPrice: 10 })
+  await orders.addPayment(o.id, { paidAt: localDate(), amount: 20, method: 'T/T', bankRef: `ZZ-${styleNo}` })
+  return o.id
+}
+// 单 1：定金 30，收 20，客户抹零核销 10 → 定金其实已经有着落
+const r38DepWritten = await r38MakeDep('R38-DEP-W')
+orders.addSettlement(r38DepWritten, { kind: 'shortage', amount: 10, reason: 'R38 客户抹零' })
+const r38RowWritten = money.listOrderMoney().find((r) => r.orderId === r38DepWritten)!
+eq('待收只算还欠的 70（已扣核销）', r38RowWritten.receivable, 70)
+eq('定金差额归零（核销也算有着落）', money.depositDueOf(r38RowWritten), 0)
+eq('订单状态仍如实停在部分收款（核销不等于收到钱）', orders.getOrder(r38DepWritten)!.paymentStatus, 'partial')
+const r38RemsWritten = dashboard.reminders().filter((r) => r.orderId === r38DepWritten)
+check(
+  '不再催那笔已经核销掉的定金',
+  !r38RemsWritten.some((r) => r.kind === 'payment'),
+  JSON.stringify(r38RemsWritten.map((r) => r.message))
+)
+check(
+  '尾款提醒回来，金额是真实还欠的 70',
+  r38RemsWritten.some((r) => r.kind === 'balance' && r.message.includes('70.00')),
+  JSON.stringify(r38RemsWritten.map((r) => r.message))
+)
+// 单 2：定金 30，收 20，没核销 → 定金差额 10，尾款还不该催
+const r38DepPlain = await r38MakeDep('R38-DEP-P')
+const r38RemsPlain = dashboard.reminders().filter((r) => r.orderId === r38DepPlain)
+const r38DepRem = r38RemsPlain.find((r) => r.kind === 'payment')
+check(
+  '没核销的单照旧催定金 10，并写明已收 20',
+  (r38DepRem?.message ?? '').includes('定金还差 10.00') && (r38DepRem?.message ?? '').includes('已收 20.00'),
+  r38DepRem?.message
+)
+check(
+  '定金没收齐时不喊尾款',
+  !r38RemsPlain.some((r) => r.kind === 'balance'),
+  JSON.stringify(r38RemsPlain.map((r) => r.message))
+)
+const r38DepAfter = dashboard.dashboard()
+eq(
+  '待收四桶：定金桶只装定金差额 10 × 7',
+  Math.round((r38DepAfter.pendingDeposit - r38DepBefore.pendingDeposit) * 100) / 100,
+  70
+)
+eq(
+  '待收四桶：尾款桶装两单各自的剩余（(70 + 70) × 7）',
+  Math.round((r38DepAfter.pendingBalance - r38DepBefore.pendingBalance) * 100) / 100,
+  980
+)
+eq(
+  '四桶合计仍等于待收总额',
+  Math.round(
+    (r38DepAfter.pendingUnconfirmed +
+      r38DepAfter.pendingDeposit +
+      r38DepAfter.pendingBalance +
+      r38DepAfter.pendingSample -
+      r38DepAfter.pendingAmount) *
+      100
+  ) / 100,
+  0
+)
+saveSettings(r38RemPrev)
+
+section('R38 打样入口：成本、收款状态、款号各行其位')
+
+const r38GuardCust = customers.saveCustomer({ company: 'R38-GUARD-CO' })
+const r38GuardBase = {
+  customerId: r38GuardCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: localDate(),
+  items: [] as any[]
+}
+check(
+  '工厂打样费填负数拦下（会把公司成本和净垫算反）',
+  r8err(() => samples.saveSample({ ...r38GuardBase, factoryCost: -1 })).includes('工厂打样费')
+)
+check(
+  '工厂打样费填乱码拦下（不会落成 NaN）',
+  r8err(() => samples.saveSample({ ...r38GuardBase, factoryCost: 'abc' as any })).includes('工厂打样费')
+)
+check(
+  '收款状态写了不认识的词拦下（脏值会让三处待收各说各话）',
+  r8err(() => samples.saveSample({ ...r38GuardBase, feeStatus: 'Paid' as any })).includes('不认识')
+)
+check(
+  '填了数量或单价却没写款号的行拦下（否则会被当空行丢掉，样品费少算）',
+  r8err(() =>
+    samples.saveSample({
+      ...r38GuardBase,
+      items: [{ styleNo: '', productName: '脏行', color: 'White', size: 'L', quantity: 1, unitPrice: 0 } as any]
+    })
+  ).includes('第 1 行')
+)
+const r38GuardCount = () =>
+  Number(
+    (
+      getDb().get('SELECT COUNT(*) AS n FROM sample_orders WHERE customer_id = ?', [r38GuardCust.id]) as {
+        n?: number
+      }
+    )?.n ?? 0
+  )
+eq('上面三次都被挡在写库之前，一张单都没留下', r38GuardCount(), 0)
+const r38GuardBlank = samples.saveSample({
+  ...r38GuardBase,
+  // 缺 styleNo 字段、又没有数量的行：按空行忽略，不该整单报 TypeError
+  items: [{ productName: '空行', quantity: 0, unitPrice: 0 } as any, { styleNo: '   ', quantity: 0, unitPrice: 0 } as any]
+})
+eq('真正空白的行照旧忽略', r38GuardBlank.items.length, 0)
+eq('这一张单正常存下来了', r38GuardCount(), 1)
+
+section('R38 打样列表待收与工作台同一口径')
+
+const r38OffCust = customers.saveCustomer({ company: 'R38-OFFSET-CO' })
+const r38Off = samples.saveSample({
+  customerId: r38OffCust.id,
+  sampleDate: dAgo(20),
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: dAgo(20),
+  items: [
+    { styleNo: 'R38-O1', productName: '抵扣挂起', color: 'White', size: 'L', quantity: 1, unitPrice: 40, goodsUnitPrice: 100 }
+  ]
+})
+samples.convertSampleToOrder(r38Off.id, { offsetSampleFee: true })
+const r38OffSusp = samples.getSample(r38Off.id)!
+eq('转出的订单是草稿：抵扣挂起', r38OffSusp.offsetSuspended, true)
+eq('挂起时待收按样品费算出来（列表不能再显示「—」）', r38OffSusp.receivableBase, 40 * 7.2)
+check(
+  '同一笔钱在工作台也催着',
+  dashboard.reminders().some((r) => r.kind === 'sample' && r.sampleId === r38Off.id && r.message.includes('打样费 40.00')),
+  JSON.stringify(dashboard.reminders().filter((r) => r.sampleId === r38Off.id).map((r) => r.message))
+)
+const r38Free = samples.saveSample({
+  customerId: r38OffCust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: localDate(),
+  items: [{ styleNo: 'R38-FREE', productName: '免费样', color: 'White', size: 'L', quantity: 1, unitPrice: 0 }]
+})
+eq('没有待收的打样单算出来是 0（界面照旧显示「—」）', r38Free.receivableBase, 0)
+
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
 console.log(`通过 ${passed} 项，失败 ${failed} 项`)

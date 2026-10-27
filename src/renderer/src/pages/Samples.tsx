@@ -214,12 +214,20 @@ export default function Samples() {
                         <td className="num nowrap">{moneyOrDash(s.expressFeeBase, baseCurrency)}</td>
                         <td className="num nowrap">{moneyOrDash(s.netAdvanceBase, baseCurrency)}</td>
                         <td className="num">
-                          {s.feeStatus === 'unpaid' && s.totalFee > 0 && !s.creditSettled ? (
-                            s.rateMissing ? (
-                              <span className="tag amber" title="汇率未填，工作台待收里少算了这单，请编辑补上">⚠ 汇率未填</span>
-                            ) : (
-                              <span>{money(s.receivableBase, baseCurrency)}</span>
-                            )
+                          {/* 待收只认服务层算好的 receivableBase：抵扣挂起（转出订单退回草稿/失效）
+                              时这笔钱确实又回到待收，列表不能再显示「—」跟工作台打架 */}
+                          {s.rateMissing ? (
+                            <span className="tag amber" title="汇率未填，工作台待收里少算了这单，请编辑补上">⚠ 汇率未填</span>
+                          ) : s.receivableBase > 0.001 ? (
+                            <span
+                              title={
+                                s.offsetSuspended
+                                  ? '转出的订单已退回草稿/失效：抵扣暂不生效，这笔样品费又回到待收'
+                                  : undefined
+                              }
+                            >
+                              {money(s.receivableBase, baseCurrency)}
+                            </span>
                           ) : (
                             <span className="faint">—</span>
                           )}

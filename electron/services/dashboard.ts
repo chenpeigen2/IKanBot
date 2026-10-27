@@ -6,6 +6,7 @@ import {
   cashFlowRows,
   creditAppliedForSamples,
   customerCreditBalance,
+  depositDueOf,
   listOrderMoney,
   notInStatuses,
   receivedByMonth,
@@ -62,7 +63,13 @@ export function dashboard(): DashboardStats {
   const bucket = (...statuses: string[]) =>
     all.filter((r) => statuses.includes(r.paymentStatus)).reduce((s, r) => s + r.receivableBase, 0)
   const pendingUnconfirmed = bucket('draft', 'sent')
-  const pendingDeposit = bucket('confirmed')
+  // 定金未收齐的（含只收了一部分的单）只把「定金差额」放这一桶：
+  // 以前 partial 单整笔剩余都算进「尾款」，把还没到期的定金混进尾款里催
+  const pendingDeposit = all.reduce(
+    (s, r) =>
+      r.paymentStatus === 'confirmed' || r.paymentStatus === 'partial' ? s + depositDueOf(r) * r.exchangeRate : s,
+    0
+  )
   // 尾款这一桶用减法：以后再加状态，也不会出现「四个桶加起来 ≠ 待收总额」这种尴尬
   const pendingBalance = goodsReceivable - pendingUnconfirmed - pendingDeposit
 
@@ -232,27 +239,29 @@ export function reminders(): Reminder[] {
   }
 
   /* 2. 催定金：客户确认了，定金却没着落 */
-  /**
-   * 定金还差多少（预收抵扣也算已收）：两个催款循环共用，免得各写一份口径。
-   * 定金没收齐时「尾款」还不存在——这时候的欠款就是定金本身。
-   */
-  const depositDueOf = (r: (typeof moneyRows)[number]): number =>
-    r.depositAmount > 0
-      ? Math.max(0, Math.min(r.receivable, r.depositAmount - r.paidAmount - r.creditApplied))
-      : 0
-
   for (const r of moneyRows) {
     // confirmed = 一分没收，partial = 收了一部分；两种都是「定金还没收齐」。
     // 以前只催 confirmed：客户打完一半定金、状态自动跳成「部分收款」后，这条提醒就消失了
     if ((r.paymentStatus !== 'confirmed' && r.paymentStatus !== 'partial') || r.depositAmount <= 0) continue
-    // 预收抵扣也是已经收到的钱：抵过一部分，定金就只剩差额要催
+    // 预收抵扣、核销过的短款/坏账也是已经有了着落的定金：只剩差额要催
     const depositDue = depositDueOf(r)
     if (depositDue <= 0.001) continue
     const row = orderById.get(r.orderId)
     if (!row) continue
     const days = daysFrom(clockOf(r.orderId, 'confirmed', String(row.created_at)))
     if (days === null || days < s.remindPaymentDays) continue
-    const received = Math.max(0, r.depositAmount - depositDue)
+    // 到账（含预收抵扣）与核销分开说：核销不是收到的钱，不能混进「已收」里充数
+    const received = Math.max(0, r.paidAmount + r.creditApplied)
+    const writtenOff = Math.min(r.netWrittenOff, Math.max(0, r.depositAmount - received))
+    const settledText =
+      received > 0.001 || writtenOff > 0.001
+        ? `（${[
+            received > 0.001 ? `已收 ${received.toFixed(2)}` : '',
+            writtenOff > 0.001 ? `已核销 ${writtenOff.toFixed(2)}` : ''
+          ]
+            .filter(Boolean)
+            .join('，')}）`
+        : ''
     add(
       {
         orderId: r.orderId,
@@ -260,8 +269,8 @@ export function reminders(): Reminder[] {
         customerName: r.customerName,
         kind: 'payment',
         message:
-          received > 0.001
-            ? `客户已确认 ${days} 天，定金还差 ${depositDue.toFixed(2)} ${r.currency} 未到账（已收 ${received.toFixed(2)}）`
+          received > 0.001 || writtenOff > 0.001
+            ? `客户已确认 ${days} 天，定金还差 ${depositDue.toFixed(2)} ${r.currency} 未到账${settledText}`
             : `客户已确认 ${days} 天，定金 ${depositDue.toFixed(2)} ${r.currency} 未到账`,
         days
       },
