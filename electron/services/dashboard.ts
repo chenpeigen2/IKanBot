@@ -1416,7 +1416,13 @@ function statementCsv(customerId: number, base: string): string {
       if (s.recovered > 0.001) notes.push('这笔实收已计入客户预收结余')
     } else if (s.feeStatus === 'waived') notes.push('客户免单，未收 0')
     else if (s.feeStatus === 'offset') {
-      notes.push(`已抵扣入订单${s.convertedOrderNo ? ` ${s.convertedOrderNo}` : ''}（不是现金，但账上已收回）`)
+      // 抵扣挂起（转出订单草稿/失效/作废）时未收是全额，不能再说「账上已收回」——
+      // 对账单发给客户，纸面必须和工作台、打样页说同一套话
+      if (s.offsetSuspended)
+        notes.push(
+          `样品费已抵扣入订单${s.convertedOrderNo ? ` ${s.convertedOrderNo}` : ''}，但该订单尚未生效，抵扣暂不生效，此笔暂计入未收`
+        )
+      else notes.push(`已抵扣入订单${s.convertedOrderNo ? ` ${s.convertedOrderNo}` : ''}（不是现金，但账上已收回）`)
     }
     if (s.feeStatus === 'unpaid' && s.recovered > 0.001) notes.push(`已收 ${money2(s.recovered)}`)
     // 升级前手工勾的「已收」没有单独的水单。钱照认，但对账单是发给客户的，

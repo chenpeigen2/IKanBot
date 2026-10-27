@@ -101,9 +101,17 @@ function snapshotDb(dbFile: string): Buffer {
 /** 保留最近 N 份备份 */
 export function pruneBackups(keep = 30): void {
   const dir = backupsDir()
+  // readdir 和 stat 之间文件可能被网盘/杀软挪走：prune 只是善后，
+  // 任何异常都不能让已经成功的备份被记成失败（createBackup 会进 catch 去 markBackupFail）
   const files = readdirSync(dir)
     .filter((f) => f.startsWith('ikanbot-') && f.endsWith('.zip'))
-    .map((f) => ({ f, t: statSync(join(dir, f)).mtimeMs }))
+    .map((f) => {
+      try {
+        return { f, t: statSync(join(dir, f)).mtimeMs }
+      } catch {
+        return { f, t: 0 }
+      }
+    })
     .sort((a, b) => b.t - a.t)
   for (const old of files.slice(keep)) {
     try {
@@ -115,7 +123,9 @@ export function pruneBackups(keep = 30): void {
 }
 
 /**
- * 启动时自动备份一次（同一天已有则跳过）。
+ * 自动备份一次（同一天已有则跳过）。启动时跑一次；进程常驻（托盘不关）时
+ * 由主进程的定时器每小时再喊一次——「每天一备」的承诺按自然日兑现，
+ * 不按进程生命周期。
  * 以前每次启动都打包：崩溃重启几次就把 30 份历史挤成同一天，
  * 真出事要退回上周时一份都没有。设置页和这里的注释都写「每天一次」，得兑现。
  */
@@ -358,7 +368,8 @@ export function listBackups(): Array<{ path: string; name: string; takenAt: stri
       path: join(dir, f),
       name: f,
       takenAt: stampFromName(f),
-      size: statSync(join(dir, f)).size
+      // 文件可能恰好在 readdir 后被删（网盘/杀软）：少一个文件比设置页整个打不开强
+      size: existsSync(join(dir, f)) ? statSync(join(dir, f)).size : 0
     }))
     .sort((a, b) => b.path.localeCompare(a.path))
 }

@@ -320,7 +320,12 @@ export default function Samples() {
                                 text: '预览打样单',
                                 onClick: async () => {
                                   const settings = await window.api.settings.get()
-                                  setPreview({ html: renderSample({ sample: s, settings }), no: s.sampleNo })
+                                  const images: Record<string, string> = {}
+                                  if (settings.company?.logoFile) {
+                                    const d = await window.api.images.readDataUrl(settings.company.logoFile)
+                                    if (d) images['__logo__'] = d
+                                  }
+                                  setPreview({ html: renderSample({ sample: s, settings, images }), no: s.sampleNo })
                                 }
                               },
                               { text: '删除', danger: true, onClick: () => void remove(s) }

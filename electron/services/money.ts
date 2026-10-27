@@ -1135,6 +1135,8 @@ export interface SampleBillRow {
   /** 客户多付的原币（预收结余） */
   prepaid: number
   convertedOrderNo: string
+  /** 抵扣挂起：转出订单草稿/失效/作废，样品费回到待收（与工作台、打样页同一口径） */
+  offsetSuspended: boolean
 }
 
 export function sampleStatementRows(customerId: number): SampleBillRow[] {
@@ -1168,7 +1170,8 @@ export function sampleStatementRows(customerId: number): SampleBillRow[] {
       creditApplied: r.creditApplied,
       open,
       prepaid: over > 0.001 ? over : 0,
-      convertedOrderNo: r.convertedOrderNo
+      convertedOrderNo: r.convertedOrderNo,
+      offsetSuspended: !cancelled && r.feeStatus === 'offset' && r.offsetSettled <= 0.001
     })
   }
   return out

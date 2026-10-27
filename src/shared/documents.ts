@@ -305,6 +305,9 @@ export function renderPi(ctx: DocContext): string {
   const totalQty = order.totalQuantity
   const deposit = order.depositAmount
   const balance = order.grandTotal - deposit
+  // 赊销（0%）与全额前收（100%）不印定金/尾款行：印出 "Deposit: USD 0.00" 客户会当算错账，
+  // 与界面（订单/报价详情）同口径，极值只看 TOTAL 行
+  const showDeposit = order.depositRatio > 0 && order.depositRatio < 1
   const rev = ctx.rev && ctx.rev > 0 ? ctx.rev : 0
   const revLabel = revHeadLabel(rev, !!ctx.pending)
   const revFoot = revFootHtml(rev, !!ctx.pending, localDateOf(order.createdAt))
@@ -396,12 +399,12 @@ export function renderPi(ctx: DocContext): string {
     <div class="term">
       <b>Payment Terms / 付款方式</b>
       ${esc(PAYMENT_METHOD_LABEL[order.paymentMethod])}
-      ${order.depositRatio > 0 && order.depositRatio < 1 ? ` — 定金 ${(order.depositRatio * 100).toFixed(0)}% / 尾款 ${(
+      ${showDeposit ? ` — 定金 ${(order.depositRatio * 100).toFixed(0)}% / 尾款 ${(
         (1 - order.depositRatio) *
         100
       ).toFixed(0)}%` : ''}
-      <div style="margin-top:3px">Deposit: ${fmtMoney(deposit, order.currency)}</div>
-      <div>Balance: ${fmtMoney(balance, order.currency)}</div>
+      ${showDeposit ? `<div style="margin-top:3px">Deposit: ${fmtMoney(deposit, order.currency)}</div>
+      <div>Balance: ${fmtMoney(balance, order.currency)}</div>` : ''}
       ${order.billTo?.paymentPref && !order.billFromProfile
         ? `<div style="margin-top:3px">Agreed Terms: ${esc(order.billTo.paymentPref)}</div>`
         : ''}
@@ -993,6 +996,8 @@ export function renderCi(ctx: DocContext, opts: CiOptions = {}): string {
 export interface SampleDocContext {
   sample: SampleOrderDetail
   settings: AppSettings
+  /** 打样单也要挂自家抬头 logo（data URL 内嵌，与 PI/PL/CI/报价同款） */
+  images: ImageMap
 }
 
 export function renderSample(ctx: SampleDocContext): string {
@@ -1018,7 +1023,7 @@ export function renderSample(ctx: SampleDocContext): string {
 <div class="page">
   <div class="head">
     <div>
-      ${co.logoFile && ctx.settings ? '' : ''}
+      ${co.logoFile && ctx.images[`__logo__`] ? `<img class="logo" src="${ctx.images['__logo__']}">` : ''}
       <div style="font-weight:700;font-size:12pt">${esc(co.name)}</div>
       <div style="font-size:8.5pt;color:#555;line-height:1.5">
         ${esc(co.address)}${co.phone ? `<br>Tel: ${esc(co.phone)}` : ''}${co.email ? `<br>Email: ${esc(

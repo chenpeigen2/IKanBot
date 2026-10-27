@@ -277,20 +277,23 @@ export function resolveDocPath(filePath: string): string {
   const raw = String(filePath ?? '').trim()
   if (!raw) throw new Error('没有文件')
   const root = dataDir()
-  if (!isAbsolute(raw)) {
+  // 渲染层传来的路径一律当敌情：绝对路径只认落在数据目录里的，
+  // 其余（旧机器路径）走 docs 段回退接回当前数据目录，接不回就拒——
+  // 这条通道的终点是 shell.openPath，直通口等于给任意文件开系统默认程序。
+  if (isAbsolute(raw)) {
+    const abs = resolve(raw)
+    if (abs.startsWith(root + sep)) return abs
+  } else {
     const abs = resolve(root, raw)
-    if (abs !== root && !abs.startsWith(root + sep)) throw new Error('单据路径不在数据目录里，已拒绝打开')
-    return abs
+    if (abs !== root && abs.startsWith(root + sep)) return abs
   }
-  if (existsSync(raw)) return raw
-  // 老数据记的是旧机器的绝对路径：从 .../docs/ 之后接回当前数据目录
   const marker = `${sep}docs${sep}`
   const i = raw.lastIndexOf(marker)
   if (i >= 0) {
     const abs = resolve(root, raw.slice(i + 1))
     if (abs.startsWith(resolve(root, 'docs') + sep)) return abs
   }
-  return raw
+  throw new Error('单据路径不在数据目录里，已拒绝打开')
 }
 
 export function listDocVersions(orderId: number): DocVersion[] {

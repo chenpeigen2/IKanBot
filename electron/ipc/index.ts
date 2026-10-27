@@ -288,11 +288,24 @@ export function registerIpc(): void {
     })
     if (res.canceled) return []
     const out: string[] = []
-    for (const src of res.filePaths) {
-      const ext = src.split('.').pop()?.toLowerCase() ?? 'jpg'
-      const name = `${randomUUID()}.${ext}`
-      copyFileSync(src, join(imagesDir(), name))
-      out.push(name)
+    try {
+      for (const src of res.filePaths) {
+        const ext = src.split('.').pop()?.toLowerCase() ?? 'jpg'
+        const name = `${randomUUID()}.${ext}`
+        copyFileSync(src, join(imagesDir(), name))
+        out.push(name)
+      }
+    } catch (e) {
+      // 半路翻车时把已拷进来的清干净：这些文件不在库里，渲染层拿不到名字，
+      // 不在这里删就会永远躺在 images/ 里，被每份备份白白背走
+      for (const name of out) {
+        try {
+          unlinkSync(join(imagesDir(), name))
+        } catch {
+          /* 删不掉就留着，别让清理盖住原始报错 */
+        }
+      }
+      throw e
     }
     return out
   })

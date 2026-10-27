@@ -1021,7 +1021,7 @@ check('按款号能搜到', samples.listSamples({ keyword: 'A002' }).length === 
 check('按客户能搜到', samples.listSamples({ keyword: 'Acme' }).length === 1)
 const salesBeforeSample = dashboard.dashboard().monthSales
 eq('打样单不进销售额', dashboard.dashboard().monthSales, salesBeforeSample)
-const sampleHtml = renderSample({ sample, settings: getSettings() })
+const sampleHtml = renderSample({ sample, settings: getSettings(), images: {} })
 check('样品单抬头是 SAMPLE ORDER', sampleHtml.includes('SAMPLE ORDER'))
 check('样品单有中文抬头', sampleHtml.includes('样品单'))
 check('样品单印了样品费行', sampleHtml.includes('样品费 Sample Fee'))
@@ -9633,6 +9633,133 @@ check(
 section('R41 备份包超限说人话（图片和存档是凭据，不叫人删）')
 const r41big = Array.from({ length: 65536 }, (_, i) => ({ name: `docs/x-${i}.txt`, data: Buffer.alloc(0) }))
 check('65536 个文件的包在入口被拦且文案给出上限', r40err(() => createZip(r41big)).includes('65535'))
+
+/* ---------------- R42 ---------------- */
+section('R42 对账单不再对挂起的抵扣说「已收回」')
+const r42C = customers.saveCustomer({ company: 'R42-STMT-CO' })
+const r42Sample = samples.saveSample({
+  customerId: r42C.id,
+  sampleDate: dAgo(5),
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: dAgo(5),
+  items: [
+    {
+      styleNo: 'R42-S1',
+      productName: '挂起抵扣对账',
+      color: 'Black',
+      size: 'M',
+      quantity: 1,
+      unitPrice: 25,
+      goodsUnitPrice: 80
+    }
+  ]
+})
+const r42Order = samples.convertSampleToOrder(r42Sample.id, { offsetSampleFee: true })
+const r42StmtOpen = (): number | undefined =>
+  money.sampleStatementRows(r42C.id).find((r) => r.sampleId === r42Sample.id)?.open
+eq('转出订单落草稿，对账单未收是全额', r42StmtOpen(), 25)
+const r42DraftCsv = dashboard.exportCsv('statement', { customerId: r42C.id })
+const r42DraftRow = parseCsv(r42DraftCsv).slice(1).find((r) => r.some((c) => c === r42Sample.sampleNo))
+check(
+  '挂起的抵扣不再印「账上已收回」（未收明明是全额）',
+  !!r42DraftRow && !r42DraftRow.some((c) => c.includes('账上已收回')),
+  r42DraftRow?.join('|') ?? '<缺行>'
+)
+check(
+  '挂起的抵扣改印「暂不生效、暂计入未收」',
+  !!r42DraftRow && r42DraftRow.some((c) => c.includes('抵扣暂不生效') && c.includes('暂计入未收')),
+  r42DraftRow?.join('|') ?? '<缺行>'
+)
+orders.setPaymentStatus(r42Order.id, 'confirmed', 'R42 客户确认，抵扣生效')
+eq('抵扣生效后未收归零', r42StmtOpen(), 0)
+const r42LiveCsv = dashboard.exportCsv('statement', { customerId: r42C.id })
+const r42LiveRow = parseCsv(r42LiveCsv).slice(1).find((r) => r.some((c) => c === r42Sample.sampleNo))
+check('抵扣生效后照旧印「账上已收回」', !!r42LiveRow && r42LiveRow.some((c) => c.includes('账上已收回')), r42LiveRow?.join('|') ?? '<缺行>')
+
+section('R42 赊销与全额单不印零数定金行')
+const r42Zero = orders.createOrder({
+  customerId: r42C.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  depositRatio: 0,
+  piNo: 'PI-R42-ZERO'
+})
+const r42Full = orders.createOrder({
+  customerId: r42C.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  depositRatio: 1,
+  piNo: 'PI-R42-FULL'
+})
+const r42Mid = orders.createOrder({
+  customerId: r42C.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  depositRatio: 0.3,
+  piNo: 'PI-R42-MID'
+})
+check(
+  '0% 定金的 PI 不印 Deposit: USD 0.00',
+  !renderPi({ order: orders.getOrder(r42Zero.id)!, settings: getSettings(), images: {} }).includes('Deposit:')
+)
+check(
+  '100% 前收的 PI 不印 Balance: USD 0.00',
+  !renderPi({ order: orders.getOrder(r42Full.id)!, settings: getSettings(), images: {} }).includes('Balance:')
+)
+const r42MidPi = renderPi({ order: orders.getOrder(r42Mid.id)!, settings: getSettings(), images: {} })
+check('30% 定金的 PI 定金/尾款两行照印', r42MidPi.includes('Deposit:') && r42MidPi.includes('Balance:'))
+
+section('R42 打样单抬头也挂公司 logo')
+const r42Settings = getSettings()
+const r42SampleDetail = samples.getSample(r42Sample.id)!
+const r42LogoSettings = { ...r42Settings, company: { ...r42Settings.company, logoFile: 'logo.png' } }
+check(
+  '传了 logo 就印 <img class="logo">（与 PI/PL/CI/报价同款）',
+  renderSample({ sample: r42SampleDetail, settings: r42LogoSettings, images: { __logo__: 'data:image/png;base64,AAA' } }).includes(
+    '<img class="logo"'
+  )
+)
+check(
+  '图片没取到就不印（不印破图）',
+  !renderSample({ sample: r42SampleDetail, settings: r42LogoSettings, images: {} }).includes('<img class="logo"')
+)
+
+section('R42 单据路径不再有绝对路径直通口')
+const r42Inside = join(dataDir(), 'docs', 'r42-inside.pdf')
+eq('数据目录内的绝对路径照常解析', docs.resolveDocPath(r42Inside), r42Inside)
+const r42Outside = join(dataDir(), '..', 'r42-outside.pdf')
+check(
+  '数据目录外的绝对路径被拒（不再能开任意文件）',
+  (() => {
+    try {
+      docs.resolveDocPath(r42Outside)
+      return false
+    } catch {
+      return true
+    }
+  })()
+)
+const r42OldMachine = `D:\\old-pc\\elsewhere\\docs\\r42-old.pdf`
+eq(
+  '老机器的绝对路径仍按 docs 段接回当前数据目录',
+  docs.resolveDocPath(r42OldMachine),
+  join(dataDir(), 'docs', 'r42-old.pdf')
+)
+check(
+  '老路径没有 docs 段也拒（不再原样放行）',
+  (() => {
+    try {
+      docs.resolveDocPath('D:\\old-pc\\elsewhere\\r42-nomarker.pdf')
+      return false
+    } catch {
+      return true
+    }
+  })()
+)
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

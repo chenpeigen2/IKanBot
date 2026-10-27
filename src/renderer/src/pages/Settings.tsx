@@ -184,8 +184,13 @@ export default function Settings() {
       )
     )
       return
-    const r = await window.api.updater.install()
-    if (!r.ok) toast(r.message ?? '安装没成功', 'error')
+    try {
+      const r = await window.api.updater.install()
+      if (!r.ok) toast(r.message ?? '安装没成功', 'error')
+    } catch (e) {
+      // 安装器被杀软/系统锁住时 quitAndInstall 会同步抛错，不接住就是「点了没反应」
+      toast((e as Error).message || '安装没成功，请稍后重试或到设置里手动检查更新', 'error')
+    }
   }
 
   const day = (k: string, v: string) => setS({ ...s, [k]: v === '' ? '' : Number(v) })

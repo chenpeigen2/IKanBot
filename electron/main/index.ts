@@ -26,10 +26,9 @@ if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore()
-      showMainWindow()
-    }
+    // 不看 mainWindow 是否还在：cmd+W 关窗后引用是 null，
+    // 这时再来一次启动实例，showMainWindow 自己会把窗口重建出来
+    showMainWindow()
   })
 }
 
@@ -213,6 +212,15 @@ app.whenReady().then(() => {
   autoBackupOnStart()
   createWindow()
   if (!shotRoute) createTray()
+  // 「每天一备」不按进程生命周期兑现：托盘常驻的用户一开几周，
+  // 每小时喊一次 autoBackupOnStart，当天已备过它自己会跳过
+  setInterval(() => {
+    try {
+      autoBackupOnStart()
+    } catch (e) {
+      console.warn('[backup] 定时备份检查失败', e)
+    }
+  }, 60 * 60 * 1000).unref()
 
   // 一键隐藏到托盘
   globalShortcut.register('CommandOrControl+Shift+H', () => {
