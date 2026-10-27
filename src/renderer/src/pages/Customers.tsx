@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Modal, useToast, money, Empty, fmtDate, PaymentTag, ShipTag, Button, LoadError, useLoadGuard } from '../ui'
+import { Modal, useToast, money, Empty, fmtDate, PaymentTag, ShipTag, Button, LoadError, PromptModal, useLoadGuard } from '../ui'
 import { localDate } from '../../../shared/date'
 import { INCOTERMS, PAYMENT_METHOD_LABEL, type PaymentMethod } from '../../../shared/types'
-import type { Customer, CustomerCreditCurrency } from '../../../shared/types'
+import type { Customer, CustomerCreditApplication, CustomerCreditCurrency, CustomerCreditRefund } from '../../../shared/types'
 
 interface Draft {
   id?: number
@@ -146,6 +146,15 @@ export default function Customers() {
     note: string
     saving: boolean
   } | null>(null)
+  /**
+   * 撤销抵扣 / 撤销退款前的那一句「为什么」。
+   * 固定话术（「客户页手动撤销」）等于没写：后端要的留痕，得由人当场敲一句。
+   */
+  const [reversePrompt, setReversePrompt] = useState<
+    | { kind: 'credit'; app: CustomerCreditApplication }
+    | { kind: 'refund'; refund: CustomerCreditRefund }
+    | null
+  >(null)
   /** 读取失败不能装成「没有客户」 */
   const [loadError, setLoadError] = useState('')
 
@@ -368,21 +377,20 @@ export default function Customers() {
     }
   }
 
-  const reverseCredit = async (app: CustomerCreditCurrency['applications'][number]) => {
-    if (!detail) return
-    if (
-      !window.confirm(
-        `撤销这笔 ${app.amount.toFixed(2)} ${app.currency} 的预收抵扣？撤销后余额回来，${app.targetNo} 的待收也跟着回来。`
-      )
-    ) {
-      return
-    }
+  /** 执行撤销：原因由弹窗收集；没撤成（余额已被用掉等）就把弹窗留着，让人改一句话再试 */
+  const doReverse = async (
+    target: { kind: 'credit'; app: CustomerCreditApplication } | { kind: 'refund'; refund: CustomerCreditRefund },
+    reason: string
+  ): Promise<boolean> => {
     try {
-      await window.api.credits.reverse(app.id, '客户页手动撤销')
-      toast('已撤销这笔预收抵扣')
-      await openDetail(detail.c)
+      if (target.kind === 'credit') await window.api.credits.reverse(target.app.id, reason)
+      else await window.api.credits.reverseRefund(target.refund.id, reason)
+      toast(target.kind === 'credit' ? '已撤销这笔预收抵扣' : '已撤销这笔退款记录，余额已恢复')
+      if (detail) await openDetail(detail.c)
+      return true
     } catch (e) {
       toast((e as Error).message, 'error')
+      return false
     }
   }
 
@@ -435,24 +443,6 @@ export default function Customers() {
     } catch (e) {
       toast((e as Error).message, 'error')
       setRefundModal((s) => (s ? { ...s, saving: false } : s))
-    }
-  }
-
-  const reverseRefund = async (refund: CustomerCreditCurrency['refunds'][number]) => {
-    if (!detail) return
-    if (
-      !window.confirm(
-        `撤销这笔 ${refund.amount.toFixed(2)} ${refund.currency} 的退款记录？只有在「水单录错、钱其实没退出去」时才这么做，撤销后余额会恢复。`
-      )
-    ) {
-      return
-    }
-    try {
-      await window.api.credits.reverseRefund(refund.id, '客户页撤销退款（登记错误）')
-      toast('已撤销这笔退款记录，余额已恢复')
-      await openDetail(detail.c)
-    } catch (e) {
-      toast((e as Error).message, 'error')
     }
   }
 
@@ -936,7 +926,7 @@ export default function Customers() {
                             <td className="faint">{a.note || '—'}</td>
                             <td className="faint">{a.actor || '—'}</td>
                             <td style={{ textAlign: 'right' }}>
-                              <Button size="sm" variant="ghost" onClick={() => void reverseCredit(a)}>
+                              <Button size="sm" variant="ghost" onClick={() => setReversePrompt({ kind: 'credit', app: a })}>
                                 撤销
                               </Button>
                             </td>
@@ -968,7 +958,7 @@ export default function Customers() {
                             <td className="faint">{f.note || '—'}</td>
                             <td className="faint">{f.actor || '—'}</td>
                             <td style={{ textAlign: 'right' }}>
-                              <Button size="sm" variant="ghost" onClick={() => void reverseRefund(f)}>
+                              <Button size="sm" variant="ghost" onClick={() => setReversePrompt({ kind: 'refund', refund: f })}>
                                 撤销
                               </Button>
                             </td>
@@ -1193,6 +1183,48 @@ export default function Customers() {
             </Button>
           </div>
         </Modal>
+      ) : null}
+
+      {reversePrompt ? (
+        <PromptModal
+          title={
+            reversePrompt.kind === 'credit'
+              ? `撤销预收抵扣 · ${reversePrompt.app.targetNo}`
+              : `撤销退款记录 · ${money(reversePrompt.refund.amount, reversePrompt.refund.currency)}`
+          }
+          label={
+            reversePrompt.kind === 'credit' ? (
+              <>
+                为什么撤销这笔 {reversePrompt.app.amount.toFixed(2)} {reversePrompt.app.currency} 的抵扣？（必填，写进操作历史）
+                <br />
+                <span className="muted">
+                  撤销后客户的余额回来，{reversePrompt.app.targetNo} 的待收也跟着回来。
+                </span>
+              </>
+            ) : (
+              <>
+                为什么撤销这笔 {reversePrompt.refund.amount.toFixed(2)} {reversePrompt.refund.currency} 的退款记录？（必填，写进操作历史）
+                <br />
+                <span className="muted">
+                  只有「水单录错、钱其实没退出去」才这么做，撤销后余额会恢复。水单号 {reversePrompt.refund.bankRef}
+                  也跟着腾出来，可以按正确的金额重登一笔。
+                </span>
+              </>
+            )
+          }
+          okText={reversePrompt.kind === 'credit' ? '撤销抵扣' : '撤销退款记录'}
+          multiline
+          onOk={async (reason) => {
+            if (!reason.trim()) {
+              toast('原因要写一句：撤销会把余额和待收一起改回去，历史里得说清为什么。', 'error')
+              return false
+            }
+            const ok = await doReverse(reversePrompt, reason.trim())
+            if (ok) setReversePrompt(null)
+            return false
+          }}
+          onClose={() => setReversePrompt(null)}
+        />
       ) : null}
 
       {split ? (

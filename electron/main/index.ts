@@ -116,6 +116,16 @@ function createWindow(): void {
         })
       })()`)
       console.log('PROBE', probe)
+      // 窗口被别的窗口挡住时，Chromium 会停发新帧，capturePage 就拿到旧画面：
+      // 弹窗明明已经在 DOM 里（探针数得出两个 .modal），图里却还是点开前的列表。
+      // 先 invalidate 逼一次重绘，再等两帧落地，拍到的才是当前这一屏。
+      mainWindow!.webContents.invalidate()
+      await mainWindow!.webContents.executeJavaScript(
+        `Promise.race([
+          new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r('frame')))),
+          new Promise((r) => setTimeout(() => r('timeout'), 1200))
+        ])`
+      )
       const img = await mainWindow!.webContents.capturePage()
       const dir = join(app.getAppPath(), 'out', 'shots')
       mkdirSync(dir, { recursive: true })

@@ -1997,6 +1997,16 @@ export function addSettlement(orderId: number, input: SettlementInput): OrderDet
     }
     const rate = Number(order.exchangeRate ?? 1)
     transact(() => {
+      // 追回来的钱和普通收款住在同一张表里，查重就得走同一道门。
+      // 少查这一次，同一张水单可以既当「追回」又当「收款」记两遍：已收翻倍、坏账冲两遍、
+      // 多出来的部分还变成能退给客户的预收——R38 在前门拦掉的，别从后门放进来。
+      try {
+        assertBankRefUnused({ orderId }, input.bankRef)
+      } catch (err) {
+        throw new Error(
+          `${(err as Error).message}\n如果是这笔追回登记重了，请到下面的核销记录里撤销——撤销会把自动登记的收款一起退掉。`
+        )
+      }
       db.run(
         `INSERT INTO payments(order_id, paid_at, amount, method, bank_ref, note, exchange_rate, created_at)
          VALUES(?,?,?,?,?,?,?,?)`,

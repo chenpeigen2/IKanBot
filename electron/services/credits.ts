@@ -202,7 +202,11 @@ export function reverseCredit(applicationId: number, reason = ''): CustomerCredi
   if (!row) throw new Error('这笔预收抵扣已经不存在了，刷新页面后再试。')
   const customerId = Number(row.customer_id)
   if (row.reversed_at) throw new Error('这笔预收抵扣已经撤销过了。')
-  const why = String(reason ?? '').trim() || '撤销客户预收抵扣'
+  const why = String(reason ?? '').trim()
+  // 撤销会把客户的余额和那张单的待收同时改回去：没有原因，历史里就只剩一个「不知道谁撤的」
+  if (!why) {
+    throw new Error('撤销预收抵扣要写原因（例如「抵错了单」「客户改主意，余额留着抵下一单」），操作历史要留痕。')
+  }
   const targetKind = String(row.target_kind ?? '') === 'sample' ? 'sample' : 'order'
   const targetId = Number(row.target_id)
   const amount = Number(row.amount ?? 0)
@@ -273,6 +277,21 @@ export function refundCredit(input: RefundCreditInput): CustomerCreditCurrency[]
   if (amount > available + 0.001) {
     throw new Error(
       `客户 ${currency} 可用预收只有 ${available.toFixed(2)}，不够退 ${amount.toFixed(2)}。`
+    )
+  }
+  // 一张出水单只退一次钱。水单号是钱已经出门的凭据，同一号记第二笔，
+  // 客户余额会被扣两遍，而银行流水那边只找得到一笔支出——对账时两头都说不清。
+  const dup = getDb().get(
+    `SELECT refund_at, amount FROM customer_refunds
+      WHERE customer_id = ? AND currency = ? AND reversed_at IS NULL AND UPPER(TRIM(bank_ref)) = UPPER(?)
+      ORDER BY id LIMIT 1`,
+    [customerId, currency, bankRef]
+  ) as { refund_at?: string; amount?: number } | null
+  if (dup) {
+    throw new Error(
+      `这个客户的 ${currency} 已经按水单号「${bankRef}」退过一次（${String(dup.refund_at ?? '')}，${Number(dup.amount ?? 0).toFixed(2)}）：` +
+        `同一张出水单不能退两次，再记一笔余额就凭空少一截。` +
+        `上次录错了请先在退款台账里撤销那条记录（撤销要写原因）再重录；确实是另一笔支出就填它自己的水单号。`
     )
   }
   const actor = getSettings().operator

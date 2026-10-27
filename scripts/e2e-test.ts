@@ -9374,6 +9374,135 @@ const r38Free = samples.saveSample({
 })
 eq('没有待收的打样单算出来是 0（界面照旧显示「—」）', r38Free.receivableBase, 0)
 
+section('R39 坏账追回的水单也只认一次（R38 前门拦过的，不许从后门进来）')
+
+const r39Cust = customers.saveCustomer({ company: 'R39-DUP-CO' })
+const r39Order = orders.createOrder({
+  customerId: r39Cust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R39-DUP'
+})
+await orders.addOrderItem(r39Order.id, { styleNo: 'R39-DUP', quantity: 10, unitPrice: 10 })
+orders.addPayment(r39Order.id, { paidAt: localDate(), amount: 40, bankRef: 'R39-SLIP' })
+orders.addSettlement(r39Order.id, { kind: 'bad_debt', amount: 60, reason: 'R39 客户失联' })
+eq('坏账挂上后待收归零', orders.getOrder(r39Order.id)!.remaining, 0)
+orders.addSettlement(r39Order.id, { kind: 'recovery', amount: 20, bankRef: 'R39-REC', reason: 'R39 追回一部分' })
+const r39Rec = orders.getOrder(r39Order.id)!
+eq('追回 20 落进收款流水：已收 60', r39Rec.paidAmount, 60)
+eq('坏账未追回只剩 40', r39Rec.badDebtOutstanding, 40)
+
+const r39DupErr = r8err(() =>
+  orders.addSettlement(r39Order.id, { kind: 'recovery', amount: 10, bankRef: 'R39-SLIP', reason: 'R39 记错水单' })
+)
+check('追回款复用普通收款的水单号被拦', r39DupErr.includes('同一张水单'), r39DupErr)
+const r39CaseErr = r8err(() =>
+  orders.addSettlement(r39Order.id, { kind: 'recovery', amount: 10, bankRef: 'r39-rec', reason: 'R39 手抄大小写' })
+)
+check('追回款复用另一笔追回的水单号也拦（大小写不算两张）', r39CaseErr.includes('同一张水单'), r39CaseErr)
+check('拦下时给出正确出口：到核销记录里撤销', r39CaseErr.includes('核销记录'), r39CaseErr)
+const r39Blocked = orders.getOrder(r39Order.id)!
+eq('拦下没有多落一笔收款', r39Blocked.payments.length, 2)
+eq('拦下后坏账没被冲两遍', r39Blocked.badDebtOutstanding, 40)
+eq('拦下后已收还是 60', r39Blocked.paidAmount, 60)
+
+// 撤销那笔追回会把自动登记的收款一起退掉（R36）：水单腾出来了，同一个号才允许重录
+const r39RecRow = orders.listSettlements(r39Order.id).find((s) => s.kind === 'recovery' && s.amount > 0)!
+check(
+  '撤销追回也要写原因',
+  r8err(() => orders.reverseSettlement(r39Order.id, r39RecRow.id, '  ')).includes('原因'),
+  r8err(() => orders.reverseSettlement(r39Order.id, r39RecRow.id, '  '))
+)
+orders.reverseSettlement(r39Order.id, r39RecRow.id, 'R39 这笔钱是客户另一张单的')
+eq('撤销追回连收款一起退', orders.getOrder(r39Order.id)!.paidAmount, 40)
+eq('撤销追回后坏账余额回来', orders.getOrder(r39Order.id)!.badDebtOutstanding, 60)
+orders.addSettlement(r39Order.id, { kind: 'recovery', amount: 20, bankRef: 'R39-REC', reason: 'R39 撤销后重录' })
+eq('撤销后同一张水单可以重新登记追回', orders.getOrder(r39Order.id)!.paidAmount, 60)
+
+section('R39 一张出水单只退一次预收')
+
+const r39RefCust = customers.saveCustomer({ company: 'R39-REFUND-CO' })
+const r39RefOrder = orders.createOrder({
+  customerId: r39RefCust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R39-REF'
+})
+await orders.addOrderItem(r39RefOrder.id, { styleNo: 'R39-REF', quantity: 1, unitPrice: 100 })
+orders.addPayment(r39RefOrder.id, { paidAt: localDate(), amount: 140, bankRef: 'R39-IN' })
+eq('多付 40 记进预收', money.customerCreditAvailable(r39RefCust.id, 'USD'), 40)
+credits.refundCredit({
+  customerId: r39RefCust.id,
+  currency: 'USD',
+  amount: 25,
+  bankRef: 'R39-OUT',
+  note: 'R39 客户多付退回'
+})
+eq('退 25 后可用 15', money.customerCreditAvailable(r39RefCust.id, 'USD'), 15)
+const r39RefDupErr = r8err(() =>
+  credits.refundCredit({ customerId: r39RefCust.id, currency: 'USD', amount: 10, bankRef: 'r39-out', note: 'R39 又退一次' })
+)
+check('同一张出水单不能退两次', r39RefDupErr.includes('不能退两次'), r39RefDupErr)
+check('拦下时给出撤销通道', r39RefDupErr.includes('撤销'), r39RefDupErr)
+eq('拦下后退款台账还是那一笔', money.refundFlowRows({ customerId: r39RefCust.id }).length, 1)
+eq('拦下后可用没被多扣', money.customerCreditAvailable(r39RefCust.id, 'USD'), 15)
+
+const r39RefundId = money.refundFlowRows({ customerId: r39RefCust.id })[0].refundId
+check(
+  '撤销退款不写原因被拦',
+  r8err(() => credits.reverseRefund(r39RefundId, '   ')).includes('原因'),
+  r8err(() => credits.reverseRefund(r39RefundId, '   '))
+)
+credits.reverseRefund(r39RefundId, 'R39 水单录错，钱没退出去')
+credits.refundCredit({
+  customerId: r39RefCust.id,
+  currency: 'USD',
+  amount: 25,
+  bankRef: 'R39-OUT',
+  note: 'R39 按正确水单重录'
+})
+eq('撤销后同一个水单号可以重录', money.customerCreditAvailable(r39RefCust.id, 'USD'), 15)
+eq('重录后台账一笔', money.refundFlowRows({ customerId: r39RefCust.id }).length, 1)
+
+section('R39 撤销预收抵扣要写真原因')
+
+const r39Open = orders.createOrder({
+  customerId: r39RefCust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R39-OPEN'
+})
+await orders.addOrderItem(r39Open.id, { styleNo: 'R39-OPEN', quantity: 1, unitPrice: 30 })
+const r39Apply = credits.applyCredit({
+  customerId: r39RefCust.id,
+  currency: 'USD',
+  targetKind: 'order',
+  targetId: r39Open.id,
+  amount: 5
+})
+const r39AppRow = r39Apply.find((c) => c.currency === 'USD')!.applications[0]
+check(
+  '空原因撤销抵扣被拦（不再自动补一句套话）',
+  r8err(() => credits.reverseCredit(r39AppRow.id, '   ')).includes('原因'),
+  r8err(() => credits.reverseCredit(r39AppRow.id, '   '))
+)
+credits.reverseCredit(r39AppRow.id, 'R39 抵错了单，客户说留着抵下一票')
+const r39RevRow = getDb().get('SELECT reversed_reason FROM credit_applications WHERE id = ?', [
+  r39AppRow.id
+]) as { reversed_reason?: string } | null
+eq('写进去的就是留痕的那句', String(r39RevRow?.reversed_reason ?? ''), 'R39 抵错了单，客户说留着抵下一票')
+check(
+  '订单操作历史里能找到这句原因',
+  (
+    getDb().all("SELECT note FROM order_events WHERE order_id = ? AND kind = 'credit_reverse'", [
+      r39Open.id
+    ]) as { note?: string }[]
+  ).some((e) => String(e.note ?? '').includes('R39 抵错了单'))
+)
+
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
 console.log(`通过 ${passed} 项，失败 ${failed} 项`)
