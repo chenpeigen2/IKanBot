@@ -19,7 +19,7 @@ import { addSamplePayment } from './samples'
 import { addDays, daysBetween, isLocalDate, localDate, localDayAfterUtc, localDayStartUtc } from '../../src/shared/date'
 import { billPartyOf, emptyParty, parseParty, patchParty, shipPartyOf, stringifyParty } from '../../src/shared/party'
 import { isBillingStatus, NON_BILLING_STATUSES } from '../../src/shared/billing'
-import { assertDocNo, assertQuantity, assertUnitPrice } from '../../src/shared/guards'
+import { assertDepositRatio, assertDocNo, assertQuantity, assertUnitPrice } from '../../src/shared/guards'
 import { PAYMENT_STATUS_LABEL, SETTLEMENT_KIND_LABEL, SHIP_STATUS_LABEL, SHIP_STATUS_ORDER } from '../../src/shared/types'
 import type {
   Currency,
@@ -604,6 +604,11 @@ export function createOrder(input: OrderInput): OrderDetail {
   }
   // 费用行同一套闸门：Infinity/NaN 过 JSON.stringify 会变 null，落库后费用按 0 算
   assertChargeAmounts(input.charges ?? [])
+  // 定金比例服务层也夹一道：UI 下拉只给 0–1，但 IPC/导入能塞进 1.5 这种数
+  assertDepositRatio(input.depositRatio ?? settings.defaultDepositRatio)
+  // 负合计守门不放在建单：建单时明细还没加，转单/报价转来的让利行（负费用）
+  // 全靠后面的明细把合计顶回正数——那边各有自己的口径守着；
+  // 货值和费用行真正同框的 updateOrder / updateOrderCharges 才拦得住、也拦得准
   const validUntil = input.validUntil ?? addDays(localDate(), settings.piValidDays)
   // 汇率锁定日期：默认记今天（本地日期）
   const rateDate = input.exchangeRateDate ?? localDate()
@@ -763,6 +768,11 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
   // 费用行（运费/保险）：传了就按传的改，没传就保持原样（不能一个字段没传就把费用清空）
   if (input.charges !== undefined) {
     assertChargeAmounts(input.charges)
+    // 让利让过头（合计为负）的单不许落库；这里带的是这次真要存进去的行（未命名行存库时会被滤掉）
+    assertOrderTotalNonNegative(
+      orderGoodsTotal(id),
+      input.charges.filter((c) => c.label.trim())
+    )
     if (!sameCharges(parseCharges(before.charges), input.charges)) {
       assertPricingEditable(id, '改费用行')
     }
@@ -837,7 +847,12 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
     ['port_of_loading', keepText('portOfLoading', 'port_of_loading')],
     ['port_of_destination', keepText('portOfDestination', 'port_of_destination')],
     ['payment_method', keepText('paymentMethod', 'payment_method') || 'tt_deposit'],
-    ['deposit_ratio', keep('depositRatio', 'deposit_ratio') ?? settings.defaultDepositRatio],
+    ['deposit_ratio', (() => {
+      // 定金比例服务层也夹一道（B7）：UI 下拉只给 0–1，走 IPC/导入能塞进 1.5
+      const v = keep('depositRatio', 'deposit_ratio') ?? settings.defaultDepositRatio
+      assertDepositRatio(v)
+      return v
+    })()],
     ['valid_until', keepDate('validUntil', 'valid_until')],
     ['expected_ship_date', keepDate('expectedShipDate', 'expected_ship_date')],
     ['expected_arrival_date', keepDate('expectedArrivalDate', 'expected_arrival_date')],
@@ -1135,6 +1150,26 @@ export function assertChargeAmounts(charges: QuotationCharge[]): void {
   })
 }
 
+/** 订单货值 = 明细行 Σ(数量×单价)；orders 表不存总金额，费用行守门要用时现算 */
+function orderGoodsTotal(orderId: number): number {
+  const row = getDb().get(
+    'SELECT COALESCE(SUM(quantity * unit_price), 0) AS g FROM order_items WHERE order_id = ?',
+    [orderId]
+  ) as { g?: number } | null
+  return Number(row?.g ?? 0)
+}
+
+/** 合计（货值 + 费用行）不许为负：负合计会被误当成客户多付，凭空生成一笔能抵别的单、能退真钱的预收 */
+export function assertOrderTotalNonNegative(goodsTotal: number, charges: QuotationCharge[]): void {  const total = goodsTotal + charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
+  if (total < -0.001) {
+    throw new Error(
+      `货值 ${goodsTotal.toFixed(2)} 加上费用行后合计是 ${total.toFixed(2)}。` +
+        `合计为负的订单会被系统当成客户多付，凭空生成一笔能抵别的单、甚至退真钱的预收。` +
+        `请把让利（负费用行）控制在货值以内，或先补足明细货值再保存。`
+    )
+  }
+}
+
 /** 只改费用行（运费/保险），其他字段一个都不动 */
 export function updateOrderCharges(orderId: number, charges: QuotationCharge[], reason = ''): OrderDetail {
   const db = getDb()
@@ -1146,6 +1181,8 @@ export function updateOrderCharges(orderId: number, charges: QuotationCharge[], 
   assertOrderWritable(orderId, '改费用行')
   assertChargeAmounts(charges)
   const clean = charges.filter((c) => c.label.trim())
+  // 让利让过头（合计为负）的单不许落库：负合计会被当成客户多付、凭空生成预收
+  assertOrderTotalNonNegative(orderGoodsTotal(orderId), clean)
   const beforeCharges = parseCharges(before.charges)
   if (!sameCharges(beforeCharges, clean)) assertPricingEditable(orderId, '改费用行')
   // 让利（负费用行）改一笔，客户该付的钱就变了：这是对外的价格让步，
@@ -1181,18 +1218,36 @@ function negativeChargesChanged(oldCharges: QuotationCharge[], newCharges: Quota
   return snap(oldCharges) !== snap(newCharges)
 }
 
-/** 费用行变更说明（人话） */
+/** 费用行变更说明（人话）。
+ * 不能按名称建 Map 比对：两张「运费」行改其中一张，Map 会互相覆盖，
+ * 留痕写成「运费 300 → 50」却没说动的是哪一张、另一张去哪了。
+ * 这里按名称分组、组内金额当多重集配对：相等的先消掉，剩下的才是真的增/删/改。 */
 function describeChargeChange(oldCharges: QuotationCharge[], newCharges: QuotationCharge[]): string[] {
   const parts: string[] = []
-  const oldMap = new Map(oldCharges.map((c) => [c.label, c.amount]))
-  const newMap = new Map(newCharges.map((c) => [c.label, c.amount]))
-  for (const [label, amt] of newMap) {
-    const old = oldMap.get(label)
-    if (old === undefined) parts.push(`新增 ${label} ${amt}`)
-    else if (Math.abs(old - amt) > 0.0001) parts.push(`${label} ${old} → ${amt}`)
-  }
-  for (const [label] of oldMap) {
-    if (!newMap.has(label)) parts.push(`删除 ${label}`)
+  const labels = [...new Set([...oldCharges, ...newCharges].map((c) => c.label))]
+  for (const label of labels) {
+    const olds = oldCharges
+      .filter((c) => c.label === label)
+      .map((c) => Number(c.amount))
+      .sort((a, b) => a - b)
+    const news = newCharges
+      .filter((c) => c.label === label)
+      .map((c) => Number(c.amount))
+      .sort((a, b) => a - b)
+    const pool = [...olds]
+    const changed: number[] = []
+    for (const amt of news) {
+      const i = pool.indexOf(amt)
+      if (i >= 0) pool.splice(i, 1)
+      else changed.push(amt)
+    }
+    // 多出来的新金额和没配掉的老金额按序配对说成「改」，两边数量一样就是纯改、多出来的是新增
+    for (const amt of changed) {
+      const old = pool.shift()
+      if (old === undefined) parts.push(`新增 ${label} ${amt}`)
+      else parts.push(`${label} ${old} → ${amt}`)
+    }
+    for (const amt of pool) parts.push(`删除 ${label} ${amt}`)
   }
   return parts
 }
@@ -2398,15 +2453,18 @@ export function addOrderPhoto(
   const db = getDb()
   // 照片挂在订单名下：作废/失效单已经不进货值和毛利，再往上面挂验货照会让留档看起来「这单还在走」
   assertOrderWritable(orderId, '上传订单照片')
-  const res = db.run(
-    'INSERT INTO order_photos(order_id, file_name, kind, note, created_at) VALUES(?,?,?,?,?)',
-    [orderId, fileName, kind, note, now()]
-  )
+  const res = transact(() => {
+    const r = db.run(
+      'INSERT INTO order_photos(order_id, file_name, kind, note, created_at) VALUES(?,?,?,?,?)',
+      [orderId, fileName, kind, note, now()]
+    )
+    logEvent(orderId, 'photo', null, null, `上传${kind === 'container' ? '柜照' : '验货照'}`)
+    return r
+  })
   const row = db.get('SELECT * FROM order_photos WHERE id = ?', [Number(res.lastInsertRowid)]) as Record<
     string,
     unknown
   >
-  logEvent(orderId, 'photo', null, null, `上传${kind === 'container' ? '柜照' : '验货照'}`)
   return mapOrderPhoto(row)
 }
 

@@ -1001,6 +1001,10 @@ interface SampleMoneyRow {
   collected: number
   /** 转单时抵进订单的钱（不是现金，但账上已经收回） */
   offsetSettled: number
+  /** 抵扣是否生效（feeStatus=offset 且转出订单在计费状态） */
+  offsetLive: boolean
+  /** 转出订单的付款状态原值；抵扣挂起时它不在计费状态 */
+  convertedStatus: string
   /** 已收回 = 实收 + 抵扣；旧「已收无流水」按全额认 */
   recovered: number
   /** 标了「已收」但一条单笔水单都没有（升级前的老记录），recovered 走的是全额兜底 */
@@ -1011,7 +1015,7 @@ interface SampleMoneyRow {
   convertedOrderNo: string
 }
 
-function sampleMoneyRows(customerId?: number): SampleMoneyRow[] {
+export function sampleMoneyRows(customerId?: number): SampleMoneyRow[] {
   const db = getDb()
   const params: (string | number)[] = []
   let where = ''
@@ -1075,6 +1079,8 @@ function sampleMoneyRows(customerId?: number): SampleMoneyRow[] {
       totalFee,
       collected,
       offsetSettled,
+      offsetLive,
+      convertedStatus,
       recovered,
       legacyPaidNoFlow,
       creditApplied: Number(r.credit_applied ?? 0),

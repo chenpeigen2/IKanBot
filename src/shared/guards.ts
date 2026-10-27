@@ -49,6 +49,21 @@ export function assertOptionalMoney(v: unknown, label: string): void {
 }
 
 /**
+ * 定金比例只许落在 0–1（0.3 = 30%）：界面下拉给不出别的值，但 IPC/导入能塞进 1.5。
+ * 超出范围 PI 会印出「定金大于合计、尾款是负数」，客户照着一张负余额的纸付款。
+ */
+export function assertDepositRatio(v: unknown): void {
+  if (v == null) return
+  const r = Number(v)
+  if (!Number.isFinite(r) || r < 0 || r > 1) {
+    throw new Error(
+      `定金比例要填 0 到 1 之间的数（0.3 = 30%），收到的是「${String(v)}」。` +
+        `超出范围的 PI 会印出定金大于合计、尾款是负数，客户按它付款就乱了。`
+    )
+  }
+}
+
+/**
  * 单号（PI 号 / 单据号）会直接当存档目录名用：只允许安全字符，杜绝 ../ 和 Windows 保留字符。
  * 存档那一步必须拦，但等到出单才拦就太晚了——单已经发给客户，纸面上的号却打不开存档目录。
  */

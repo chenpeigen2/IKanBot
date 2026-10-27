@@ -4,7 +4,6 @@ import { getSettings } from './settings'
 import {
   EXCLUDED_STATUSES,
   cashFlowRows,
-  creditAppliedForSamples,
   customerCreditBalance,
   depositDueOf,
   listOrderMoney,
@@ -12,6 +11,7 @@ import {
   receivedByMonth,
   refundFlowRows,
   refundedByMonth,
+  sampleMoneyRows,
   sampleReceivable,
   sampleStatementRows
 } from './money'
@@ -185,6 +185,11 @@ export function reminders(): Reminder[] {
     if (!raw) return null
     const d = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : localDateOf(raw)
     return dayDiff(d, today)
+  }
+  /** 时刻串换算成本地日再展示：直接 slice(0,10) 会把 UTC 时刻串的天切错（差一天的「自出运 X」） */
+  const dayOf = (v: unknown): string => {
+    const raw = String(v ?? '').trim()
+    return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : localDateOf(raw)
   }
   /** 距到期还有几天（负数 = 已逾期）；脏数据返回 null */
   const daysTo = (v: unknown): number | null => dayDiff(today, String(v ?? '').trim())
@@ -614,17 +619,17 @@ export function reminders(): Reminder[] {
       if (days === null || days < s.remindBalanceDays) continue
       const from =
         since === shipAt
-          ? `自出运 ${String(since).slice(0, 10)}`
+          ? `自出运 ${dayOf(String(since))}`
           : since === lastPaidAt
-            ? `自最后收款 ${String(lastPaidAt).slice(0, 10)}`
-            : `自建单 ${String(since).slice(0, 10)}`
+            ? `自最后收款 ${dayOf(String(lastPaidAt))}`
+            : `自建单 ${dayOf(String(since))}`
       add(
         {
           orderId: r.orderId,
           orderNo: r.orderNo,
           customerName: r.customerName,
           kind: 'balance',
-          message: `已收 ${r.paidAmount.toFixed(2)} / 待收 ${r.receivable.toFixed(2)}，尾款 ${days} 天未到账（${from}）`,
+          message: `已收 ${r.paidAmount.toFixed(2)} / 待收 ${r.receivable.toFixed(2)} ${r.currency}，尾款 ${days} 天未到账（${from}）`,
           days
         },
         'balance'
@@ -749,26 +754,25 @@ export function reminders(): Reminder[] {
   }
 
   /* 6. 打样类：钱要催，压在手里的样品更要催 */
-  const sampleRows = db.all(
-    `SELECT s.id, s.sample_no, s.sample_date, s.created_at, s.shipped_at, s.status, s.fee_status,
-            s.offset_amount, s.currency, s.exchange_rate, s.express_fee, c.company AS customer_name,
-            o.payment_status AS converted_order_status,
-            COALESCE((SELECT SUM(si.quantity * si.unit_price) FROM sample_order_items si
-                      WHERE si.sample_order_id = s.id), 0) AS sample_fee,
-            COALESCE((SELECT SUM(p.amount) FROM payments p
-                      WHERE p.sample_order_id = s.id), 0) AS collected
-     FROM sample_orders s JOIN customers c ON c.id = s.customer_id
-     LEFT JOIN orders o ON o.id = s.converted_order_id
-     WHERE s.status != 'cancelled'`
-  ) as Record<string, unknown>[]
-  // 预收抵扣过的打样费已经由客户余额覆盖：催款只催净额（与 sampleOpenRows 同一个口径）
-  const creditBySample = creditAppliedForSamples(sampleRows.map((r) => Number(r.id)))
-  for (const r of sampleRows) {
-    const sampleNo = String(r.sample_no)
-    const who = String(r.customer_name)
+  // 金额只认 sampleMoneyRows 一份底稿（待收、对账单、欠款榜同一口径），
+  // 这里只补展示字段（寄出/建单时刻、客户名），按 sampleId 合进来
+  const sampleDisplay = new Map(
+    (
+      db.all(
+        `SELECT s.id, s.shipped_at, s.created_at, c.company AS customer_name
+         FROM sample_orders s JOIN customers c ON c.id = s.customer_id`
+      ) as Record<string, unknown>[]
+    ).map((r) => [Number(r.id), r])
+  )
+  for (const m of sampleMoneyRows()) {
+    if (m.status === 'cancelled') continue
+    const disp = sampleDisplay.get(m.sampleId)
+    if (!disp) continue
+    const sampleNo = m.sampleNo
+    const who = String(disp.customer_name ?? '')
     // 样品还压在手里：客户等的是样，不是发票
-    if (String(r.status) === 'pending' && !String(r.shipped_at ?? '').trim()) {
-      const days = daysFrom(String(r.sample_date ?? '') || String(r.created_at ?? ''))
+    if (m.status === 'pending' && !String(disp.shipped_at ?? '').trim()) {
+      const days = daysFrom(m.sampleDate || String(disp.created_at ?? ''))
       if (days !== null && days >= s.remindPaymentDays) {
         add(
           {
@@ -776,7 +780,7 @@ export function reminders(): Reminder[] {
             orderNo: sampleNo,
             customerName: who,
             kind: 'sample',
-            sampleId: Number(r.id),
+            sampleId: m.sampleId,
             message: `打样单 ${sampleNo} 建了 ${days} 天还没寄出样品，客户在等`,
             days
           },
@@ -784,45 +788,28 @@ export function reminders(): Reminder[] {
         )
       }
     }
-    const feeStatus = String(r.fee_status ?? 'unpaid')
-    if (feeStatus === 'paid' || feeStatus === 'waived') continue
-    // 抵扣单：只有转出的订单还在计费状态时才算已抵；订单退回草稿/失效/作废，
-    // 样品费要重新催（与 sampleOpenRows / 对账单同一口径）
-    const convertedStatus = String(r.converted_order_status ?? '')
-    const offsetLive =
-      feeStatus === 'offset' && (!convertedStatus || isBillingStatus(convertedStatus))
-    const offsetSettled = offsetLive
-      ? Number(r.offset_amount ?? 0) > 0
-        ? Number(r.offset_amount)
-        : Number(r.sample_fee ?? 0)
-      : 0
-    if (feeStatus === 'offset' && offsetSettled > 0.001) continue
-    // 挂起中的抵扣：钱还是该收，但不能按打样费登记（服务层会拦），
-    // 提醒里直接说清下一步是把转出订单恢复成正式单
-    const offsetSuspended = feeStatus === 'offset' && !!convertedStatus && !isBillingStatus(convertedStatus)
-    // 催的是还欠的那部分：已经收了一半就只催另一半，预收抵掉的部分也不算欠
-    const owed =
-      Number(r.sample_fee ?? 0) +
-      Number(r.express_fee ?? 0) -
-      Number(r.collected ?? 0) -
-      (creditBySample.get(Number(r.id)) ?? 0) -
-      offsetSettled
+    if (m.feeStatus === 'paid' || m.feeStatus === 'waived') continue
+    // 已生效的抵扣不再催（钱进了订单）；挂起中的抵扣钱还是该收，但不能按打样费登记
+    // （服务层会拦），提醒里直接说清下一步是把转出订单恢复成正式单
+    if (m.offsetSettled > 0.001) continue
+    const offsetSuspended = m.feeStatus === 'offset' && !!m.convertedStatus && !m.offsetLive
+    // 催的是还欠的那部分：已收一半只催一半，预收抵掉的部分也不算欠（与 sampleOpenRows 同一算式）
+    const owed = m.totalFee - m.recovered - m.creditApplied
     if (owed <= 0.001) continue
-    const shippedAt = String(r.shipped_at ?? '').trim()
-    const days = daysFrom(shippedAt || String(r.sample_date ?? '') || String(r.created_at ?? ''))
+    const shippedAt = String(disp.shipped_at ?? '').trim()
+    const days = daysFrom(shippedAt || m.sampleDate || String(disp.created_at ?? ''))
     if (days === null || days < s.remindPaymentDays) continue
-    const rate = Number(r.exchange_rate ?? 0)
     add(
       {
         orderId: 0,
         orderNo: sampleNo,
         customerName: who,
         kind: 'sample',
-        sampleId: Number(r.id),
+        sampleId: m.sampleId,
         message:
-          `打样费 ${owed.toFixed(2)} ${String(r.currency || 'USD')} 未收` +
-          (rate > 0
-            ? `（折合 ${(owed * rate).toFixed(2)}），${shippedAt ? `样品寄出 ${days} 天` : `挂单 ${days} 天还没寄出`}`
+          `打样费 ${owed.toFixed(2)} ${m.currency} 未收` +
+          (m.exchangeRate > 0
+            ? `（折合 ${(owed * m.exchangeRate).toFixed(2)}），${shippedAt ? `样品寄出 ${days} 天` : `挂单 ${days} 天还没寄出`}`
             : '，且汇率未填（工作台待收里少算了这单，请补汇率）') +
           (offsetSuspended ? '；转出订单已退回草稿/失效，抵扣暂不生效，请先把订单恢复成正式单（会自动再抵）' : ''),
         days
@@ -1469,7 +1456,9 @@ function statementCsv(customerId: number, base: string): string {
       rate: f.exchangeRate,
       method: f.method,
       bankRef: f.bankRef,
-      note: f.note
+      // 台账里追回款备注带着内部话术（坏账追回：xxx）——对客户这只是一笔照常付的货款，
+      // 对账单按减免收回的说法转写；台账保留原话。
+      note: f.note.replace(/^坏账追回：/, '前期减免收回：')
     }))
     .sort((a, b) => a.date.localeCompare(b.date) || a.docNo.localeCompare(b.docNo))
 

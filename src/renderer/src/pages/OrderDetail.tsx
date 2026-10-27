@@ -1146,13 +1146,16 @@ function CiModal({
   )
   const overlap = batchId == null ? liveBatchCi.length > 0 : liveWholeCi
 
-  const chargeTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
+  // 合计只算会印上纸面的行（有名字的费用行）：预览传的就是 clean，
+  // 把没名字的行也算进合计，弹窗里的数和 CI 上的数就两套话
+  const clean = charges.filter((c) => c.label.trim())
+  const unnamedWithAmount = charges.filter((c) => !c.label.trim() && Math.abs(Number(c.amount) || 0) > 0.005)
+  const chargeTotal = clean.reduce((s, c) => s + (Number(c.amount) || 0), 0)
   const goods = sel ? sel.goods : order.totalAmount
   const feeTotal = sel ? sel.charges : chargeTotal
   const total = sel ? sel.total : order.totalAmount + chargeTotal
   const piTotal = Number(order.grandTotal ?? order.totalAmount)
   const mismatch = !sel && Math.abs(total - piTotal) > 0.005
-  const clean = charges.filter((c) => c.label.trim())
 
   // 挡住的理由要说人话：没单价也照出，报关行会按 0 申报，事后补税比退单贵
   const blocked: string[] = []
@@ -1165,6 +1168,11 @@ function CiModal({
       blocked.push(
         `箱单上的款号在订单里找不到：${sel.unknownSkus.join('、')}。没有单价不能出 CI，请先补齐订单明细或修正箱单款号。`
       )
+  }
+  if (unnamedWithAmount.length) {
+    blocked.push(
+      `${unnamedWithAmount.length} 行费用没填名字却带着金额，不会印上 CI（钱会在发票上凭空消失）——请补上费用名称，或把金额清掉`
+    )
   }
   if (overlap && !confirmOverlap) {
     blocked.push(
@@ -2603,17 +2611,17 @@ function PackingTab({
   // 每批的纸面金额：本批货值 + 按货值摊到的费用，由 money.ts 算一份。
   // 分批出运时箱单/存档上不能再挂整单的数——三批各存一次「12000」，看的人以为卖了 36000。
   const [amounts, setAmounts] = useState<Record<number, PackingAmount>>({})
-  useEffect(() => {
-    let alive = true
+  const [amountsError, setAmountsError] = useState('')
+  const loadAmounts = () => {
+    setAmountsError('')
     window.api.pl
       .amounts(order.id)
-      .then((rows) => {
-        if (alive) setAmounts(Object.fromEntries(rows.map((a) => [a.plId, a])))
-      })
-      .catch(() => undefined)
-    return () => {
-      alive = false
-    }
+      .then((rows) => setAmounts(Object.fromEntries(rows.map((a) => [a.plId, a]))))
+      .catch((e) => setAmountsError((e as Error).message))
+  }
+  useEffect(() => {
+    loadAmounts()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [order.id, order.packingLists])
 
   const doBatchPrompt = async (mode: 'void' | 'unvoid', pl: any, reason: string): Promise<boolean> => {
@@ -2663,6 +2671,14 @@ function PackingTab({
         </Button>
       </div>
 
+      {amountsError ? (
+        <div className="alert warn">
+          本批金额没读出来：{amountsError}{' '}
+          <button className="link" onClick={loadAmounts}>
+            重试
+          </button>
+        </div>
+      ) : null}
       {order.packingLists.length === 0 ? (
         <Empty text="还没有装箱单。点「新建装箱单」按 SKU 自动汇总生成。" />
       ) : (

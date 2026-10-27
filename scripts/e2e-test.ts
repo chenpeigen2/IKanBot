@@ -3082,7 +3082,7 @@ const oR6 = orders.createOrder({
   currency: 'USD',
   exchangeRate: 7.2,
   paymentMethod: 'tt_deposit',
-  depositRatio: 30,
+  depositRatio: 0.3,
   validUntil: dAgo(2)
 })
 await orders.addOrderItem(oR6.id, { styleNo: 'A001', productName: 'T恤', quantity: 10, unitPrice: 10 })
@@ -7532,7 +7532,11 @@ const r29Neg = orders.createOrder({
   piNo: 'PI-R29-NEG'
 })
 orders.addOrderItem(r29Neg.id, { styleNo: 'R29-NEG', quantity: 1, unitPrice: 10 })
-orders.updateOrderCharges(r29Neg.id, [{ label: '折让', amount: -30 }], 'R29 造一张合计为负的历史单')
+// R40 起服务层拦住负合计（updateOrderCharges 会拒），这里直插库模拟升级前的历史脏数据
+getDb().run('UPDATE orders SET charges = ? WHERE id = ?', [
+  JSON.stringify([{ label: '折让', amount: -30 }]),
+  r29Neg.id
+])
 eq('合计为负的单一分预收都不生', money.customerCreditAvailable(r29NegCust.id, 'USD'), 0)
 orders.addPayment(r29Neg.id, { paidAt: localDate(), amount: 20, bankRef: 'R29-NEG-IN' })
 eq('只认真实到账的 20', money.customerCreditAvailable(r29NegCust.id, 'USD'), 20)
@@ -9502,6 +9506,97 @@ check(
     ]) as { note?: string }[]
   ).some((e) => String(e.note ?? '').includes('R39 抵错了单'))
 )
+
+/* ---------------- R40 ---------------- */
+section('R40 定金比例与负合计：纸面上印不出来的数，服务层先拦')
+const r40err = (fn: () => unknown): string => {
+  try {
+    fn()
+    return ''
+  } catch (e) {
+    return (e as Error).message
+  }
+}
+const r40Cust = customers.saveCustomer({ company: 'R40-GUARD-CO' })
+check(
+  '客户档案默认定金比例 1.5 落库被拦',
+  r40err(() => customers.saveCustomer({ id: r40Cust.id, company: 'R40-GUARD-CO', defaultDepositRatio: 1.5 })).includes(
+    '0 到 1'
+  )
+)
+check(
+  '建单定金比例 1.5 被拦（IPC/导入能塞进来，不能只靠下拉框）',
+  r40err(() => orders.createOrder({ customerId: r40Cust.id, piNo: 'PI-R40-DEP', depositRatio: 1.5 })).includes('0 到 1')
+)
+const r40DepOk = orders.createOrder({ customerId: r40Cust.id, piNo: 'PI-R40-DEP-OK', depositRatio: 0.3, paymentStatus: 'sent' })
+eq('合法定金比例 0.3 存得进去', r40DepOk.depositRatio, 0.3)
+
+const r40Neg = orders.createOrder({ customerId: r40Cust.id, piNo: 'PI-R40-NEG', paymentStatus: 'sent' })
+await orders.addOrderItem(r40Neg.id, { styleNo: 'R40-NEG', quantity: 1, unitPrice: 100 })
+check(
+  '费用行让利超过货值（合计 -50）被拦',
+  r40err(() => orders.updateOrderCharges(r40Neg.id, [{ label: '折扣 Discount', amount: -150 }], 'R40 试探')).includes('合计')
+)
+const r40NegSaved = orders.updateOrderCharges(r40Neg.id, [{ label: '折扣 Discount', amount: -50 }], 'R40 老客让利')
+eq('让利不越线照常保存', r40NegSaved.charges.length, 1)
+check(
+  '让利留痕是「新增」不是「0 → -50」（没填过的行谈不上改）',
+  (
+    getDb().all("SELECT note FROM order_events WHERE order_id = ? AND note LIKE '%修改费用%'", [r40Neg.id]) as {
+      note?: string
+    }[]
+  ).some((e) => String(e.note ?? '').includes('新增 折扣 Discount -50'))
+)
+check(
+  '改单把费用改成负合计被拦（货值和费用同框时才拦得住）',
+  r40err(() => orders.updateOrder(r40Neg.id, { charges: [{ label: '折扣 Discount', amount: -150 }] })).includes('合计')
+)
+
+section('R40 打样待收只认服务层 owed：免收、部分收款都是一套话')
+const r40RemPrev = getSettings()
+saveSettings({ ...r40RemPrev, remindPaymentDays: 0, remindBalanceDays: 0 })
+const r40FeeCust = customers.saveCustomer({ company: 'R40-FEE-CO' })
+const r40Fee = samples.saveSample({
+  customerId: r40FeeCust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: localDate(),
+  expressFee: 20,
+  items: [{ styleNo: 'R40-FEE', productName: '部分收款', color: 'White', size: 'L', quantity: 2, unitPrice: 50 }]
+})
+samples.addSamplePayment(r40Fee.id, { paidAt: localDate(), amount: 50, method: 'T/T', bankRef: 'R40-FEE-1', note: '' })
+eq('待收 = 120 − 已收 50（owed 由服务层给出）', samples.getSample(r40Fee.id)!.owed, 70)
+check(
+  '工作台打样催款催的也是 70（同一份金额底稿）',
+  dashboard.reminders().some((r) => r.kind === 'sample' && r.sampleId === r40Fee.id && r.message.includes('打样费 70.00')),
+  JSON.stringify(dashboard.reminders().filter((r) => r.sampleId === r40Fee.id).map((r) => r.message))
+)
+const r40Waive = samples.saveSample({
+  customerId: r40FeeCust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: localDate(),
+  feeStatus: 'waived',
+  items: [{ styleNo: 'R40-WAIVE', productName: '免收样', color: 'White', size: 'L', quantity: 1, unitPrice: 30 }]
+})
+eq('免收单 owed 是 0（界面自算会把它算成还欠 30）', samples.getSample(r40Waive.id)!.owed, 0)
+check(
+  '免收单不再出现在打样费催款里（没寄出的样品提醒照发，那是另一件事）',
+  !dashboard
+    .reminders()
+    .some((r) => r.kind === 'sample' && r.sampleId === r40Waive.id && r.message.includes('打样费'))
+)
+
+section('R40 对账单不印内部话术：坏账追回按减免收回说')
+const r40StmtCust = customers.saveCustomer({ company: 'R40-STMT-CO' })
+const r40Stmt = orders.createOrder({ customerId: r40StmtCust.id, piNo: 'PI-R40-STMT', paymentStatus: 'sent' })
+await orders.addOrderItem(r40Stmt.id, { styleNo: 'R40-STMT', quantity: 1, unitPrice: 100 })
+orders.addSettlement(r40Stmt.id, { kind: 'bad_debt', amount: 40, reason: 'R40 客户失联' })
+orders.addSettlement(r40Stmt.id, { kind: 'recovery', amount: 20, bankRef: 'R40-STMT-REC', reason: 'R40 又联系上了' })
+const r40Csv = dashboard.exportCsv('statement', { customerId: r40StmtCust.id })
+check('对账单里不出现内部话术「坏账追回」', !r40Csv.includes('坏账追回'), r40Csv.split('\n').filter((l) => l.includes('追回')).join(' / '))
+check('对账单把追回说成「前期减免收回」', r40Csv.includes('前期减免收回：R40 又联系上了'))
+saveSettings(r40RemPrev)
 
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)

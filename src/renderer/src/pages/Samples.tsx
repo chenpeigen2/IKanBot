@@ -538,20 +538,9 @@ function SamplePayModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // 已生效的转单抵扣也是「已收回」，不减掉会把已抵清的样品单显示成还欠一笔
-  const offsetSettled =
-    detail.feeStatus === 'offset' && !detail.offsetSuspended
-      ? Number(detail.offsetAmount ?? 0) > 0
-        ? Number(detail.offsetAmount)
-        : Number(detail.totalFee ?? 0)
-      : 0
-  const remaining = Math.max(
-    0,
-    Number(detail.totalFee ?? 0) -
-      Number(detail.collected ?? 0) -
-      Number(detail.creditApplied ?? 0) -
-      offsetSettled
-  )
+  // 待收只认服务层的 owed：免收、老账已收、已抵清在这里都已经是 0。
+  // 原先自己拿 totalFee 减一遍，免收单会显示「还欠全额」，和服务层/工作台两套话。
+  const remaining = Number(detail.owed ?? 0)
   const convertedLive = !!detail.convertedOrderId && detail.convertedOrderStatus !== 'void'
   const canAdd =
     detail.status !== 'cancelled' &&

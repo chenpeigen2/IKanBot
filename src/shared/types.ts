@@ -939,6 +939,8 @@ export interface SampleOrderDetail extends SampleOrder {
   feeRecoveredBase: number | null
   /** 实收流水合计（原币，R25）：未收单也可能是部分收款 */
   collected: number
+  /** 待收（原币，R40）：服务层的唯一口径——已按取消/feeStatus/抵扣挂起筛过，界面只许读不许自己再减一遍 */
+  owed: number
   /** 实收流水折基准币（无汇率为 null） */
   collectedBase: number | null
   /** 用客户预收抵扣的金额（原币，R27；非现金，只冲待收） */

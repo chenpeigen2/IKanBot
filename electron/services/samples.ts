@@ -211,6 +211,9 @@ function hydrate(s: SampleOrder): SampleOrderDetail {
     collected,
     collectedBase: toBase(collected),
     creditApplied,
+    // 待收的原币权威值：收款弹窗/列表只许读这个数，不许自己再拿 totalFee 减一遍——
+    // 「已免收」「老账已收」在 owed 里已经是 0，界面自算会把它们算成还欠一笔
+    owed,
     flowCount,
     legacyPaidNoFlow,
     offsetSuspended,

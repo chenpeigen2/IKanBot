@@ -2,6 +2,7 @@ import { getDb } from '../db'
 import { mapCustomer, mapCustomerStats } from '../db/mappers'
 import { isBillingStatus, shownRemaining } from '../../src/shared/billing'
 import { EXCLUDED_STATUSES, listOrderMoney, sampleReceivable } from './money'
+import { assertDepositRatio } from '../../src/shared/guards'
 import { likeAny } from './search'
 import type { Customer, CustomerStats, StylePriceRow } from '../../src/shared/types'
 
@@ -88,6 +89,8 @@ export function saveCustomer(input: CustomerInput): Customer {
     shipZipCode: (input.shipZipCode ?? '').trim(),
     shipCountry: (input.shipCountry ?? '').trim()
   }
+  // 档案里的默认定金比例是每张新单的起点：这里混进 1.5，以后每张单的 PI 都印负尾款
+  assertDepositRatio(input.defaultDepositRatio)
   if (input.id) {
     db.run(
       `UPDATE customers SET company=?, contact=?, email=?, phone=?, country=?, address=?,
