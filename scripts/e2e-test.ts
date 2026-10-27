@@ -9598,6 +9598,42 @@ check('对账单里不出现内部话术「坏账追回」', !r40Csv.includes('�
 check('对账单把追回说成「前期减免收回」', r40Csv.includes('前期减免收回：R40 又联系上了'))
 saveSettings(r40RemPrev)
 
+/* ---------------- R41 ---------------- */
+section('R41 老账「已向客户收」不能一键改「免收」')
+const r41LegCust = customers.saveCustomer({ company: 'R41-LEGACY-CO' })
+const r41Leg = samples.saveSample({
+  customerId: r41LegCust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: localDate(),
+  items: [{ styleNo: 'R41-LEG', productName: '升级前老账', color: 'White', size: 'M', quantity: 1, unitPrice: 40 }]
+})
+getDb().run(`UPDATE sample_orders SET fee_status='paid' WHERE id=?`, [r41Leg.id])
+check(
+  'paid → waived 被拦（收过的钱不能从对账单和月报里无声消失）',
+  r40err(() => samples.saveSample({ id: r41Leg.id, feeStatus: 'waived' })).includes('免收')
+)
+eq('paid → unpaid 纠错正门照常走（拦的是流向免收，不是改错）', samples.saveSample({ id: r41Leg.id, feeStatus: 'unpaid' }).feeStatus, 'unpaid')
+
+section('R41 汇率参考值只认钉盘日期，不被无关编辑带偏')
+const r41RateCust = customers.saveCustomer({ company: 'R41-RATE-CO' })
+const r41a = orders.createOrder({ customerId: r41RateCust.id, piNo: 'PI-R41-RATE-A', currency: 'USD', paymentStatus: 'sent' })
+const r41b = orders.createOrder({ customerId: r41RateCust.id, piNo: 'PI-R41-RATE-B', currency: 'USD', paymentStatus: 'sent' })
+const r41c = orders.createOrder({ customerId: r41RateCust.id, piNo: 'PI-R41-RATE-C', currency: 'USD', paymentStatus: 'sent' })
+getDb().run(`UPDATE orders SET exchange_rate=7.25, exchange_rate_date='2099-01-01', updated_at='2026-03-01T10:00:00.000Z' WHERE id=?`, [r41a.id])
+getDb().run(`UPDATE orders SET exchange_rate=7.1, exchange_rate_date='2098-01-01', updated_at=? WHERE id=?`, [new Date().toISOString(), r41b.id])
+// r41c 刚建、updated_at 最新，但没钉过汇率（或只有哨兵值、没有钉盘日期）
+eq('参考值按钉盘日期取最近（老单补备注/改状态不再把它带偏）', orders.lastExchangeRateInfo('USD')?.rate, 7.25)
+getDb().run(`UPDATE orders SET exchange_rate=1, exchange_rate_date=NULL, updated_at=? WHERE id=?`, [new Date().toISOString(), r41a.id])
+check(
+  '最新编辑的单没钉汇率（哨兵值、无钉盘日期）时，参考值落到上一张真钉过的单，不返回哨兵也不消失',
+  orders.lastExchangeRateInfo('USD')?.rate === 7.1,
+  String(orders.lastExchangeRateInfo('USD'))
+)
+section('R41 备份包超限说人话（图片和存档是凭据，不叫人删）')
+const r41big = Array.from({ length: 65536 }, (_, i) => ({ name: `docs/x-${i}.txt`, data: Buffer.alloc(0) }))
+check('65536 个文件的包在入口被拦且文案给出上限', r40err(() => createZip(r41big)).includes('65535'))
+
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
 console.log(`通过 ${passed} 项，失败 ${failed} 项`)

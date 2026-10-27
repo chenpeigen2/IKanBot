@@ -2401,13 +2401,19 @@ export function lastExchangeRate(): number | null {
  * 按币种过滤：USD 的 7.1 抄到 EUR 单上是事故，参考值必须同币种才算数。
  */
 export function lastExchangeRateInfo(currency?: string): { rate: number; date: string } | null {
+  // 只认真钉过汇率的单、且按钉盘日期取最近：补备注/改状态都会刷 updated_at，
+  // 按 updated_at 排序会让「上次用的汇率」被一张根本没动汇率的老单带偏（甚至带成 null）
   const row = currency
     ? (getDb().get(
-        `SELECT exchange_rate, exchange_rate_date FROM orders WHERE currency = ? ORDER BY updated_at DESC, id DESC LIMIT 1`,
+        `SELECT exchange_rate, exchange_rate_date FROM orders
+         WHERE currency = ? AND exchange_rate IS NOT NULL
+         ORDER BY (exchange_rate_date IS NULL), exchange_rate_date DESC, updated_at DESC, id DESC LIMIT 1`,
         [currency]
       ) as { exchange_rate?: number; exchange_rate_date?: string | null } | null)
     : (getDb().get(
-        `SELECT exchange_rate, exchange_rate_date FROM orders ORDER BY updated_at DESC, id DESC LIMIT 1`
+        `SELECT exchange_rate, exchange_rate_date FROM orders
+         WHERE exchange_rate IS NOT NULL
+         ORDER BY (exchange_rate_date IS NULL), exchange_rate_date DESC, updated_at DESC, id DESC LIMIT 1`
       ) as { exchange_rate?: number; exchange_rate_date?: string | null } | null)
   if (!row || row.exchange_rate == null) return null
   return {

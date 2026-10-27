@@ -35,6 +35,14 @@ function dosDateTime(d: Date): { time: number; date: number } {
 }
 
 export function createZip(entries: ZipEntry[]): Buffer {
+  // ZIP 中央目录的条目数是 16 位字段：超限后 writeUInt16LE 会抛英文 RangeError，
+  // 提前拦下来把话说清。图片和单据存档是收款/退税凭据，文案不能让人去删。
+  if (entries.length > 65535) {
+    throw new Error(
+      `备份内容有 ${entries.length} 个文件，超过单个备份包 65535 的上限，备份没有生成。` +
+        `图片和单据存档都是重要凭据，请不要删除；请清理重复/废弃的附件，或联系技术支持做分卷备份。`
+    )
+  }
   const chunks: Buffer[] = []
   const central: Buffer[] = []
   let offset = 0

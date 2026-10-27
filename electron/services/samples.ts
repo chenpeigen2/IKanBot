@@ -397,6 +397,13 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
       '「已向客户收」不能手工勾：请用打样费收款里的「登记收款」按水单逐笔记，收齐后系统会自动标成已收。手勾的话这笔钱会从月报里消失。'
     )
   }
+  // 升级前手工勾「已向客户收」的老账（没有流水，上面的流水锁拦不住）不能改成「免收」：
+  // 钱当年确实收过，一改免收，对账单的已收样品费和月报回收同时消失，客户拿水单对账说不清。
+  if (feeStatus === 'waived' && String(before?.fee_status ?? '') === 'paid') {
+    throw new Error(
+      '这张打样单的样品费是「已向客户收」，客户付过钱，不能直接改成「免收」——那样这笔已收的钱会从对账单和月报里消失。如果当时记错了，先改回「未收」，再按实际情况登记收款或免收。'
+    )
+  }
   // 「已抵扣」不是能手工勾的状态：它代表样品费真的抵进了某张订单，只有转单那一步才写
   if (feeStatus === 'offset' && (!input.id || String(before?.fee_status ?? '') !== 'offset')) {
     throw new Error(

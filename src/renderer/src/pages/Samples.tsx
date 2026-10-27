@@ -407,7 +407,23 @@ export default function Samples() {
                   ? '样品费已收，转单不再抵扣'
                   : converting.feeStatus === 'waived'
                     ? '样品费已免收，转单不抵扣'
-                    : money(converting.sampleFee + (Number(converting.expressFee) || 0))}
+                    : money(
+                        Math.max(
+                          0,
+                          Number(converting.sampleFee) +
+                            (Number(converting.expressFee) || 0) -
+                            (Number(converting.collected) || 0) -
+                            (Number(converting.creditApplied) || 0)
+                        )
+                      )}
+                {converting.feeStatus !== 'paid' && converting.feeStatus !== 'waived' &&
+                (Number(converting.collected) || 0) + (Number(converting.creditApplied) || 0) > 0.001
+                  ? `（已收 ${money(Number(converting.collected) || 0)}${
+                      Number(converting.creditApplied) > 0.001
+                        ? `、预收抵 ${money(Number(converting.creditApplied))}`
+                        : ''
+                    }，只抵剩余部分）`
+                  : null}
               </span>
             </div>
             <div>
@@ -1035,7 +1051,14 @@ function SampleModal({
             onChange={(e) => setForm({ ...form, feeStatus: e.target.value as SampleFeeStatus })}
           >
             {SAMPLE_FEE_STATUS_ORDER.map((f) => (
-              <option key={f} value={f} disabled={(f === 'paid' || f === 'offset') && form.feeStatus !== f}>
+              <option
+                key={f}
+                value={f}
+                disabled={
+                  ((f === 'paid' || f === 'offset') && form.feeStatus !== f) ||
+                  (f === 'waived' && form.feeStatus === 'paid')
+                }
+              >
                 {SAMPLE_FEE_STATUS_LABEL[f]}
               </option>
             ))}

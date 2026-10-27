@@ -1,5 +1,5 @@
 import { existsSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync, renameSync, rmSync, mkdirSync } from 'fs'
-import { join, resolve, sep } from 'path'
+import { join, resolve, sep, dirname } from 'path'
 import { app, dialog } from 'electron'
 import { Database } from 'node-sqlite3-wasm'
 import { dataDir, imagesDir, backupsDir, docsDir, closeDb, openDb, getDb } from '../db'
@@ -32,6 +32,13 @@ export async function createBackup(note = ''): Promise<string> {
     renameSync(temp, target)
     pruneBackups(30)
     markBackupOk(new Date().toISOString())
+    // 快照降级过的备份能用于恢复，但不是事务一致快照：留一句在 lastBackupError 里，
+    // 工作台会挂起提示，别让人以为这份和平时的是同一种口径
+    if (snapshotFallbackReason) {
+      markBackupFail(
+        `备份已生成，但数据库快照降级为直接拷贝（${snapshotFallbackReason}）。这份备份可用于恢复，但不是事务一致快照，建议查明原因后再备一次。`
+      )
+    }
     return target
   } catch (e) {
     try {
@@ -62,23 +69,32 @@ export function collectBackupEntries(): ZipEntry[] {
  * 正在写时备出半截库，zip 能通过完整性校验，坏要等到恢复那天才暴露。
  * VACUUM INTO 失败（老 SQLite 不支持等）就退回直拷，主进程单线程下自己的事务不会拷半截。
  */
+/** 本次备份里快照是否降级过（createBackup 收尾时读它去留痕，别的地方别用） */
+let snapshotFallbackReason = ''
+
+let snapshotSeq = 0
+
 function snapshotDb(dbFile: string): Buffer {
-  const snap = `${dbFile}.backup-snapshot`
+  // 快照用一次性文件名：不必先删后建，也不会和别的备份互相踩。
+  // 目标路径拼进 SQL 字面量：数据目录在用户名带单引号的机器上也不能炸。
+  // VACUUM INTO 失败（老 SQLite 不支持、磁盘满等）就降级直拷——
+  // 主进程单线程，拷的是自己的事务边界外的静止文件，不会拷出半截；
+  // 降级原因留在 lastBackupError 里，工作台会挂提示。
+  const snap = join(dirname(dbFile), `vac-snapshot-${Date.now()}-${snapshotSeq++}`)
   try {
-    if (existsSync(snap)) unlinkSync(snap)
-    // 路径拼进 SQL 字面量：数据目录在用户名带单引号的机器上也不能炸
-    const literal = `'${dbFile.replace(/'/g, "''")}'`
+    const literal = `'${snap.replace(/'/g, "''")}'`
     getDb().exec(`VACUUM INTO ${literal}`)
     const data = readFileSync(snap)
-    return data
-  } catch {
-    return readFileSync(dbFile)
-  } finally {
     try {
-      if (existsSync(snap)) unlinkSync(snap)
+      unlinkSync(snap)
     } catch {
-      /* 临时快照删不掉不影响打包 */
+      /* 快照删不掉不影响打包，文件名唯一不会互相踩 */
     }
+    return data
+  } catch (e) {
+    snapshotFallbackReason = (e as Error).message
+    console.warn('[backup] VACUUM INTO 快照失败，本次降级为直接拷贝：', snapshotFallbackReason)
+    return readFileSync(dbFile)
   }
 }
 
