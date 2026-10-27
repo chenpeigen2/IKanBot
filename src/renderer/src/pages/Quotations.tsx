@@ -15,6 +15,7 @@ import {
   type QuotationStatus
 } from '../../../shared/types'
 import { renderQuotation, type ImageMap } from '../../../shared/documents'
+import { addDays, localDate } from '../../../shared/date'
 
 interface LineRow {
   /** 前端行身份，见 ui.tsx clientKey；提交时不带 */
@@ -936,7 +937,9 @@ function QuotationModal({
           setForm((f) => ({
             ...f,
             depositRatio: s.defaultDepositRatio ?? f.depositRatio,
-            validUntil: new Date(Date.now() + (s.piValidDays ?? 15) * 86400000).toISOString().slice(0, 10)
+            // 本地日 + N 天：原来用 toISOString().slice(0,10) 拿的是 UTC 日，
+            // UTC+8 凌晨 0~8 点开单会少一天，客户拿到的报盘比约定早 24 小时失效
+            validUntil: addDays(localDate(), s.piValidDays ?? 15)
           }))
         }
       } catch (e) {
@@ -1303,11 +1306,7 @@ function QuotationModal({
               </Button>
               <Button size="sm"
                 
-                onClick={() => {
-                  const d = new Date()
-                  d.setDate(d.getDate() + 15)
-                  setForm({ ...form, validUntil: d.toISOString().slice(0, 10) })
-                }}
+                onClick={() => setForm({ ...form, validUntil: addDays(localDate(), 15) })}
               >
                 +15天
               </Button>

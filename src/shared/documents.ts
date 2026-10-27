@@ -402,7 +402,9 @@ export function renderPi(ctx: DocContext): string {
       ).toFixed(0)}%` : ''}
       <div style="margin-top:3px">Deposit: ${fmtMoney(deposit, order.currency)}</div>
       <div>Balance: ${fmtMoney(balance, order.currency)}</div>
-      ${order.billTo?.paymentPref ? `<div style="margin-top:3px">Agreed Terms: ${esc(order.billTo.paymentPref)}</div>` : ''}
+      ${order.billTo?.paymentPref && !order.billFromProfile
+        ? `<div style="margin-top:3px">Agreed Terms: ${esc(order.billTo.paymentPref)}</div>`
+        : ''}
     </div>
     <div class="term">
       <b>Trade Terms / 贸易条款</b>
@@ -728,8 +730,8 @@ export function renderQuotation(ctx: QuotationDocContext): string {
         (1 - q.depositRatio) *
         100
       ).toFixed(0)}%` : ''}
-      ${q.billTo?.paymentPref || q.customer?.paymentPref
-        ? `<div style="margin-top:3px">Agreed Terms: ${esc(q.billTo?.paymentPref || q.customer?.paymentPref)}</div>`
+      ${q.billTo?.paymentPref && !q.billFromProfile
+        ? `<div style="margin-top:3px">Agreed Terms: ${esc(q.billTo.paymentPref)}</div>`
         : ''}
     </div>
     <div class="term">

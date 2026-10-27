@@ -509,23 +509,44 @@ export function listProductImages(productId: number): ProductImage[] {
 
 export function addProductImage(productId: number, fileName: string, isPrimary = false): ProductImage {
   const db = getDb()
-  if (isPrimary) db.run('UPDATE product_images SET is_primary = 0 WHERE product_id = ?', [productId])
-  const max = db.get('SELECT COALESCE(MAX(sort_order), 0) AS m FROM product_images WHERE product_id = ?', [
-    productId
-  ]) as { m: number }
-  const res = db.run(
-    'INSERT INTO product_images(product_id, file_name, is_primary, sort_order) VALUES(?,?,?,?)',
-    [productId, fileName, isPrimary ? 1 : 0, Number(max.m) + 1]
-  )
-  const row = db.get('SELECT * FROM product_images WHERE id = ?', [Number(res.lastInsertRowid)])
-  return mapProductImage(row as Record<string, unknown>)
+  return transact(() => {
+    // 有图就必须有一张主图：商品的第一张图无条件上位，不用界面传标志——
+    // 界面那份「是不是第一张」在批量上传时人人都是 true，最后落哪张全看谁写得晚
+    const hasAny = db.get('SELECT id FROM product_images WHERE product_id = ? LIMIT 1', [productId])
+    const primary = isPrimary || !hasAny
+    if (primary) db.run('UPDATE product_images SET is_primary = 0 WHERE product_id = ?', [productId])
+    const max = db.get('SELECT COALESCE(MAX(sort_order), 0) AS m FROM product_images WHERE product_id = ?', [
+      productId
+    ]) as { m: number }
+    const res = db.run(
+      'INSERT INTO product_images(product_id, file_name, is_primary, sort_order) VALUES(?,?,?,?)',
+      [productId, fileName, primary ? 1 : 0, Number(max.m) + 1]
+    )
+    const row = db.get('SELECT * FROM product_images WHERE id = ?', [Number(res.lastInsertRowid)])
+    if (!row) throw new Error('图片登记失败，请重试')
+    return mapProductImage(row as Record<string, unknown>)
+  })
 }
 
 export function deleteProductImage(id: number): void {
   const db = getDb()
-  const row = db.get('SELECT file_name FROM product_images WHERE id = ?', [id]) as { file_name?: string } | null
-  db.run('DELETE FROM product_images WHERE id = ?', [id])
-  if (row?.file_name) {
+  const row = db.get('SELECT product_id, file_name, is_primary FROM product_images WHERE id = ?', [id]) as
+    | { product_id?: number; file_name?: string; is_primary?: number }
+    | null
+  if (!row) return
+  transact(() => {
+    db.run('DELETE FROM product_images WHERE id = ?', [id])
+    if (Number(row.is_primary) === 1) {
+      // 主图被删不能把商品留成「有图无主图」：按顺序顺延一张接班，
+      // 否则商品卡一片空白，用户只能重新上传才能把主图找回来
+      const next = db.get(
+        'SELECT id FROM product_images WHERE product_id = ? ORDER BY sort_order, id LIMIT 1',
+        [Number(row.product_id)]
+      ) as { id?: number } | null
+      if (next) db.run('UPDATE product_images SET is_primary = 1 WHERE id = ?', [Number(next.id)])
+    }
+  })
+  if (row.file_name) {
     try {
       const p = join(imagesDir(), row.file_name)
       if (existsSync(p)) unlinkSync(p)
@@ -537,6 +558,15 @@ export function deleteProductImage(id: number): void {
 
 export function setPrimaryImage(productId: number, imageId: number): void {
   const db = getDb()
-  db.run('UPDATE product_images SET is_primary = 0 WHERE product_id = ?', [productId])
-  db.run('UPDATE product_images SET is_primary = 1 WHERE id = ? AND product_id = ?', [imageId, productId])
+  transact(() => {
+    // 先点中新的，再撤其余的：目标图不属于这个商品（列表没刷新、图已被删）时，
+    // 旧写法会把原主图撤干净后设空——商品从此没有主图，而且一声不吭
+    const res = db.run('UPDATE product_images SET is_primary = 1 WHERE id = ? AND product_id = ?', [
+      imageId,
+      productId
+    ])
+    if (Number(res.changes) !== 1)
+      throw new Error('这张图已不在该商品下（可能刚被删掉），主图没有改动，请刷新图片列表后重试')
+    db.run('UPDATE product_images SET is_primary = 0 WHERE product_id = ? AND id <> ?', [productId, imageId])
+  })
 }

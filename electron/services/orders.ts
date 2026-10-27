@@ -481,7 +481,8 @@ function hydrate(order: Order, row?: Record<string, unknown>): OrderDetail {
     | null
   const liveCustomer = customerRow ? mapCustomer(customerRow) : null
   // 抬头优先用单子上钉死的快照；升级前的老单子没有快照，回退客户档案（保持原行为）
-  const billTo = parseParty(row?.bill_to_json) ?? billPartyOf(liveCustomer)
+  const fromDoc = parseParty(row?.bill_to_json)
+  const billTo = fromDoc ?? billPartyOf(liveCustomer)
   const shipTo = parseParty(row?.ship_to_json) ?? shipPartyOf(liveCustomer)
   const items = (
     db.all('SELECT * FROM order_items WHERE order_id = ? ORDER BY style_no, color, size, id', [order.id]) as Record<
@@ -536,6 +537,7 @@ function hydrate(order: Order, row?: Record<string, unknown>): OrderDetail {
     ...order,
     customer: liveCustomer,
     billTo,
+    billFromProfile: !fromDoc,
     shipTo,
     items,
     payments,
@@ -2215,6 +2217,10 @@ export function setPaymentStatus(orderId: number, next: PaymentStatus, note = ''
     // 失效单改回计费状态：预收来源从「全部到账」收回成「只有多收的部分」，
     // 已经抵出去的钱可能就多于客户实际多付的了
     if (isBillingStatus(next)) assertCreditSolvent(cur.customer_id)
+    // 退出应收口径期间（失效/草稿）recompute 直接返回，钱到了状态也不动：
+    // 回到计费状态必须按账重算一次，否则一张早已收齐的单恢复后还顶着「已确认」，
+    // 工作台继续催款、报表把它算进待收，要等下一笔流水进来才自己纠正
+    if (isBillingStatus(next) && !isBillingStatus(cur.payment_status)) recomputePaymentStatus(orderId)
   })
   return getOrder(orderId)!
 }
@@ -2351,10 +2357,23 @@ export function deleteOrderPhoto(orderId: number, photoId: number): void {
     unknown
   > | null
   if (!row) return
-  db.run('DELETE FROM order_photos WHERE id = ? AND order_id = ?', [photoId, orderId])
-  // 文件也一起清掉（文件名是上传时唯一命名的）：只删 DB 行会把 images 目录越滚越大，
-  // 备份还把这些孤儿一张不落地打包。删不掉不挡主流程，与商品图同口径。
   const fileName = String(row.file_name ?? '')
+  // 删记录和留痕一起成败：以前 DELETE 成功了、logEvent 抛错，纸上这张照存在过、
+  // 库里却没有了，日后争议查不到是谁删的
+  transact(() => {
+    db.run('DELETE FROM order_photos WHERE id = ? AND order_id = ?', [photoId, orderId])
+    // 验货照是出货争议时的证据，删掉必须留痕：谁、什么时候、删的是哪一张
+    logEvent(
+      orderId,
+      'photo',
+      null,
+      null,
+      `删除${String(row.kind) === 'container' ? '柜照' : '验货照'}${row.note ? `（${String(row.note)}）` : ''}`
+    )
+  })
+  // 文件在事务提交之后再删：回滚时记录还在，不能先把实物证据毁了。
+  // 文件名是上传时唯一命名的：只删 DB 行会把 images 目录越滚越大，
+  // 备份还把这些孤儿一张不落地打包。删不掉不挡主流程，与商品图同口径。
   if (fileName) {
     try {
       const p = join(imagesDir(), basename(fileName))
@@ -2363,12 +2382,4 @@ export function deleteOrderPhoto(orderId: number, photoId: number): void {
       /* 文件已被手工移走：记录已清，不挡主流程 */
     }
   }
-  // 验货照是出货争议时的证据，删掉必须留痕：谁、什么时候、删的是哪一张
-  logEvent(
-    orderId,
-    'photo',
-    null,
-    null,
-    `删除${String(row.kind) === 'container' ? '柜照' : '验货照'}${row.note ? `（${String(row.note)}）` : ''}`
-  )
 }

@@ -685,7 +685,9 @@ export function convertSampleToOrder(
       portOfDestination: customerDefaults.portDestination,
       paymentMethod: (customerDefaults.paymentMethod || 'tt_deposit') as any,
       depositRatio: customerDefaults.depositRatio ?? 0.3,
-      note: s.note ? `由打样单 ${s.sampleNo} 转成；${s.note}` : `由打样单 ${s.sampleNo} 转成`,
+      // 订单备注会原样印到 PI/CI 上：只留「由打样单 X 转成」这句凭据，
+      // 打样单里的自由文本（改版说明、内部提醒）进历史，不跟纸走到客户手里
+      note: `由打样单 ${s.sampleNo} 转成`,
       charges: charges as any,
       paymentStatus: opts.paymentStatus ?? 'draft'
     })
@@ -744,7 +746,7 @@ export function convertSampleToOrder(
       null,
       `由打样单 ${s.sampleNo} 转成订单，${
         offsetTotal > 0 ? `样品费及快递费 ${offsetTotal.toFixed(2)} 抵扣` : '样品费未抵扣'
-      }`
+      }${s.note ? `；打样单备注：${s.note}` : ''}`
     )
     return getOrder(order.id)!
   })

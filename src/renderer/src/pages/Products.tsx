@@ -207,7 +207,9 @@ export default function Products() {
     const failed: string[] = []
     for (const f of files) {
       try {
-        await window.api.products.addImage(draft.id, f, isFirst)
+        // 一次批次里只有第一张成功入库的图争主图：把循环外算好的 isFirst 发给每张，
+        // 等于每张都把前一张挤下去，最后当主图的是上传最慢的那张
+        await window.api.products.addImage(draft.id, f, isFirst && ok === 0)
         ok++
       } catch {
         failed.push(f)

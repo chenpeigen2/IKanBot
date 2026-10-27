@@ -337,6 +337,11 @@ export interface OrderDetail extends Order {
    * 建单时钉死；改客户档案不影响这张单。老数据没快照时回退客户档案当前值。
    */
   billTo: PartySnapshot
+  /**
+   * billTo 是从客户档案现取的（升级前的老单没有快照），不是这张单钉死的那份。
+   * 纸面上「Agreed Terms」是客户当年认过的话：这种回退值不许替客户认。
+   */
+  billFromProfile: boolean
   /** 收货抬头快照（PL 印这个；客户没填收货地址时等于买方抬头） */
   shipTo: PartySnapshot
 }
@@ -536,8 +541,10 @@ export interface Quotation {
 /** 报价单 + 展开 */
 export interface QuotationDetail extends Quotation {
   customer: Customer | null
-  /** 报价单发出时的买方抬头快照；老数据没有快照时回退客户档案 */
+  /** 报价单发出时的买方抬头快照；纸面上的 Agreed Terms 只认这一份，没有就不印 */
   billTo: PartySnapshot | null
+  /** billTo 是从客户档案现取的（升级前的老报价没有快照）：档案偏好不是客户认过的条款，纸面不印 */
+  billFromProfile: boolean
   items: QuotationItem[]
   totalAmount: number
   totalQuantity: number

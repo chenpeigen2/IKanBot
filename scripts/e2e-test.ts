@@ -2180,10 +2180,13 @@ eq('首批还没出运', sumA.shippedQuantity, 0)
 eq('还有 1 个批次没出运', sumA.unshippedBatches, 1)
 eq('订单上缓存的出货状态回写成备货中', orders.getOrder(shipOrder.id)!.shipStatus, 'preparing')
 
+// 实际开船日是尾款催款的主钟，R35 起不许填未来：这里按「60/59 天前开走」写
+const shipEtd = localDate(new Date(Date.now() - 60 * 86400000))
+const shipAtd = localDate(new Date(Date.now() - 59 * 86400000))
 packing.updatePackingListInfo(shipOrder.id, shipPlA.id, {
   vessel: 'EVER GIVEN V.001',
-  etdDate: '2026-11-01',
-  atdDate: '2026-11-02',
+  etdDate: shipEtd,
+  atdDate: shipAtd,
   etaDate: '2026-12-01',
   sealNo: 'SEAL-1',
   blNo: 'BL-1',
@@ -2195,7 +2198,7 @@ eq('已出运件数 = 首批 40 件', sumB.shippedQuantity, 40)
 eq('订单缓存也变成部分出运', orders.getOrder(shipOrder.id)!.shipStatus, 'partial_shipped')
 const plA = packing.listPackingLists(shipOrder.id)[0]
 eq('批次船名航次存住了', plA.vessel, 'EVER GIVEN V.001')
-eq('批次 ETD/ATD/ETA 存住了', [plA.etdDate, plA.atdDate, plA.etaDate], ['2026-11-01', '2026-11-02', '2026-12-01'])
+eq('批次 ETD/ATD/ETA 存住了', [plA.etdDate, plA.atdDate, plA.etaDate], [shipEtd, shipAtd, '2026-12-01'])
 eq('批次封条号/提单号存住了', [plA.sealNo, plA.blNo], ['SEAL-1', 'BL-1'])
 
 let manualAfterBatchErr = ''
@@ -2392,7 +2395,7 @@ eq('老批次补上状态后，整单才由批次汇总', shipmentSummary(mixedO
 const shipOrderFull = orders.getOrder(shipOrder.id)!
 const plPaperBatch = renderPl({ order: shipOrderFull, settings: getSettings(), images: {} }, packing.listPackingLists(shipOrder.id)[0])
 check('PL 纸面用批次的船名航次', plPaperBatch.includes('EVER GIVEN V.001'), plPaperBatch)
-check('PL 纸面用批次的 ETD', plPaperBatch.includes('2026-11-01'))
+check('PL 纸面用批次的 ETD', plPaperBatch.includes(shipEtd))
 check('PL 纸面用批次的封条号', plPaperBatch.includes('SEAL-1'))
 check('PL 纸面没有串成订单级船期', !plPaperBatch.includes('ORDER VESSEL V.9'))
 const ciPaperOrder = renderCi({ order: shipOrderFull, settings: getSettings(), images: {} })
@@ -8379,6 +8382,262 @@ eq(
 check(
   '打样收齐后从待收底稿里消失（不会被错当成另一张同号的订单）',
   !money.customerOpenRows(r34SpCust.id).some((r) => r.kind === 'sample' && r.docId === r34SpSample.id)
+)
+
+section('R35 报价版本的时间：补出来的那一版不许写「今天」')
+
+const r35C = customers.saveCustomer({ company: 'R35-PAPER-CO', paymentPref: '见票 30 天 D/P' })
+const r35Q = quotations.saveQuotation({
+  customerId: r35C.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: localDate(),
+  items: [{ styleNo: 'R35-A', quantity: 2, unitPrice: 10 }]
+})
+eq('新建即冻住第 1 版', quotations.listQuotationVersions(r35Q.id).length, 1)
+// 模拟升级前建的老报价：单子还在、版本存档没有、落笔在 90 天前
+const r35OldTs = new Date(Date.now() - 90 * 86400000).toISOString()
+getDb().run('DELETE FROM quotation_versions WHERE quotation_id = ?', [r35Q.id])
+getDb().run('UPDATE quotations SET created_at = ?, updated_at = ? WHERE id = ?', [r35OldTs, r35OldTs, r35Q.id])
+const r35Backfill = quotations.listQuotationVersions(r35Q.id)
+eq('只是打开版本历史就会把这一版补出来', r35Backfill.length, 1)
+eq('补出来的这一版写的是单子自己的日子', r35Backfill[0].createdAt, r35OldTs)
+check(
+  '不写成浏览当天（几个月前发出去的纸，历史里不该挂着「今天」）',
+  !r35Backfill[0].createdAt.startsWith(localDate()),
+  r35Backfill[0].createdAt
+)
+quotations.saveQuotation({
+  id: r35Q.id,
+  customerId: r35C.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: localDate(),
+  items: [{ styleNo: 'R35-A', quantity: 2, unitPrice: 11 }]
+})
+const r35Vers = quotations.listQuotationVersions(r35Q.id)
+eq('改了价，第 1 版的时间也不会被这次编辑顶掉', r35Vers.find((v) => v.revision === 1)!.createdAt, r35OldTs)
+check('新冻的第 2 版写在本次保存的当下', r35Vers.find((v) => v.revision === 2)!.createdAt.startsWith(localDate()))
+
+section('R35 报价有效期默认值按本地日')
+
+const r35Q2 = quotations.saveQuotation({
+  customerId: r35C.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: localDate(),
+  items: [{ styleNo: 'R35-B', quantity: 1, unitPrice: 5 }]
+})
+eq('没填有效期 = 本地今天 + 约定的锁价天数', r35Q2.validUntil, addDays(localDate(), getSettings().piValidDays))
+eq('跨月加天数落在本地日（UTC 日在凌晨 0~8 点会少一天）', addDays('2026-10-31', 15), '2026-11-15')
+
+section('R35 实际开船 / 签收不许填到未来')
+
+const r35O = orders.createOrder({
+  customerId: r35C.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R35-SHIP'
+})
+await orders.addOrderItem(r35O.id, { styleNo: 'R35-SH', color: 'Navy', size: 'L', quantity: 40, unitPrice: 5 })
+const r35Pl = packing.createPackingList({
+  orderId: r35O.id,
+  containerNo: 'CONT-R35',
+  lines: [{ boxNo: 'NO.1', styleNo: 'R35-SH', color: 'Navy', size: 'L', quantity: 40 }]
+})
+const r35Future = localDate(new Date(Date.now() + 30 * 86400000))
+const r35AtdErr = r8err(() =>
+  packing.updatePackingListInfo(r35O.id, r35Pl[0].id, { shipStatus: 'shipped', atdDate: r35Future })
+)
+check('实际开船填未来被拦', r35AtdErr.includes('实际开船日') && r35AtdErr.includes('未来'), r35AtdErr)
+check('报错讲清后果：尾款提醒会从此不再出现', r35AtdErr.includes('尾款提醒'), r35AtdErr)
+const r35DelErr = r8err(() =>
+  packing.updatePackingListInfo(r35O.id, r35Pl[0].id, { shipStatus: 'delivered', deliveredDate: r35Future })
+)
+check('签收日期填未来同样被拦', r35DelErr.includes('签收日期'), r35DelErr)
+check('被拦的两次一笔没写（不留半截）', !packing.listPackingLists(r35O.id)[0].atdDate)
+// 预计类日期本来就是排未来，不能一起拦死
+packing.updatePackingListInfo(r35O.id, r35Pl[0].id, { etdDate: r35Future, etaDate: r35Future })
+const r35PlAfter = packing.listPackingLists(r35O.id)[0]
+eq('预计开船 / 预计到港仍允许未来', [r35PlAfter.etdDate, r35PlAfter.etaDate], [r35Future, r35Future])
+packing.updatePackingListInfo(r35O.id, r35Pl[0].id, { shipStatus: 'shipped', atdDate: localDate() })
+eq('实际开船填今天照常放行', packing.listPackingLists(r35O.id)[0].atdDate, localDate())
+
+section('R35 商品主图：有图就必须恰好有一张主图')
+
+const r35P = products.saveProduct({
+  styleNo: 'R35-IMG',
+  name: '主图不变量',
+  composition: '100% Cotton',
+  sizes: ['M'],
+  colors: ['Black']
+})
+products.addProductImage(r35P.id, 'R35-1.jpg')
+products.addProductImage(r35P.id, 'R35-2.jpg')
+products.addProductImage(r35P.id, 'R35-3.jpg')
+const r35Imgs = () => products.listProductImages(r35P.id)
+const r35Primary = (): string => r35Imgs().filter((i) => i.isPrimary === 1).map((i) => i.fileName).join('|')
+eq('三张都没勾主图，也恰好有一张主图', r35Imgs().filter((i) => i.isPrimary === 1).length, 1)
+eq('主图是第一张上传的（界面提示就是这么说的）', r35Primary(), 'R35-1.jpg')
+const r35GhostErr = r8err(() => products.setPrimaryImage(r35P.id, 9_999_999))
+check('指到一张不属于这个商品的图会报错', r35GhostErr.includes('主图没有改动'), r35GhostErr)
+eq('报错后原主图还在（没被撤成空白）', r35Primary(), 'R35-1.jpg')
+const r35Img3 = r35Imgs().find((i) => i.fileName === 'R35-3.jpg')!
+products.setPrimaryImage(r35P.id, r35Img3.id)
+eq('换主图后仍然只有一张', r35Imgs().filter((i) => i.isPrimary === 1).length, 1)
+eq('新主图是被点那张', r35Primary(), 'R35-3.jpg')
+products.deleteProductImage(r35Img3.id)
+eq('删掉主图立刻有人接班', r35Primary(), 'R35-1.jpg')
+eq('主图删了，另外两张还在', r35Imgs().length, 2)
+for (const img of r35Imgs()) products.deleteProductImage(img.id)
+eq('全部删光不报错，也不留孤儿主图', r35Imgs().length, 0)
+
+section('R35 删验货照：记录和留痕一起成败')
+
+const r35PhOrder = orders.createOrder({
+  customerId: r35C.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R35-PHOTO'
+})
+const r35Photo = orders.addOrderPhoto(r35PhOrder.id, 'r35-inspect.jpg', 'inspection', '尾期验货')
+orders.deleteOrderPhoto(r35PhOrder.id, r35Photo.id)
+eq('照片记录删掉了', orders.listOrderPhotos(r35PhOrder.id).length, 0)
+check(
+  '删除这件事在订单历史里查得到',
+  orders.listEvents(r35PhOrder.id).some((e) => e.kind === 'photo' && e.note.includes('删除验货照')),
+  JSON.stringify(orders.listEvents(r35PhOrder.id).filter((e) => e.kind === 'photo'))
+)
+orders.deleteOrderPhoto(r35PhOrder.id, 9_999_999)
+eq(
+  '删一张不存在的照片不会多留一条痕',
+  orders.listEvents(r35PhOrder.id).filter((e) => e.kind === 'photo' && e.note.includes('删除')).length,
+  1
+)
+
+section('R35 失效单回到计费状态要按账重算')
+
+const r35Exp = orders.createOrder({
+  customerId: r35C.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R35-EXP'
+})
+await orders.addOrderItem(r35Exp.id, { styleNo: 'R35-E', quantity: 10, unitPrice: 10 })
+orders.addPayment(r35Exp.id, { paidAt: localDate(), amount: 100, method: 'T/T', bankRef: 'R35-EXP-PAY' })
+eq('收齐自动到已结清', orders.getOrder(r35Exp.id)!.paymentStatus, 'settled')
+orders.setPaymentStatus(r35Exp.id, 'expired')
+eq('挂成失效后退出应收口径', orders.getOrder(r35Exp.id)!.paymentStatus, 'expired')
+eq('改回计费状态时按账重算：钱早就收齐了', orders.setPaymentStatus(r35Exp.id, 'confirmed').paymentStatus, 'settled')
+check(
+  '重算留下自动流转的痕',
+  orders.listEvents(r35Exp.id).some((e) => e.kind === 'status_auto' && e.toStatus === 'settled')
+)
+const r35Exp2 = orders.createOrder({
+  customerId: r35C.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R35-EXP2'
+})
+await orders.addOrderItem(r35Exp2.id, { styleNo: 'R35-E2', quantity: 10, unitPrice: 10 })
+orders.setPaymentStatus(r35Exp2.id, 'expired')
+eq('一分钱没收的单恢复后还是已确认（重算不乱升）', orders.setPaymentStatus(r35Exp2.id, 'confirmed').paymentStatus, 'confirmed')
+eq('不乱加自动流转的历史', orders.listEvents(r35Exp2.id).filter((e) => e.kind === 'status_auto').length, 0)
+
+section('R35 对账单：让利说「为您减免」，不替客户算坏账')
+
+const r35B = customers.saveCustomer({ company: 'R35-STMT-CO' })
+const r35Bo = orders.createOrder({
+  customerId: r35B.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R35-STMT'
+})
+await orders.addOrderItem(r35Bo.id, { styleNo: 'R35-BD', quantity: 10, unitPrice: 100 })
+orders.addPayment(r35Bo.id, { paidAt: localDate(), amount: 600, method: 'T/T', bankRef: 'R35-BD-PAY' })
+orders.addSettlement(r35Bo.id, {
+  kind: 'bad_debt',
+  amount: 400,
+  at: localDate(),
+  reason: '客户破产',
+  evidence: '破产公告 R35'
+})
+const r35Stmt = JSON.stringify(parseCsv(dashboard.exportCsv('statement', { customerId: r35B.id })))
+check('对账单说得出这笔钱已经不必付了', r35Stmt.includes('已为您减免'), r35Stmt)
+check('不再对客户讲「坏账核销」这种内部话术', !r35Stmt.includes('坏账'), r35Stmt)
+const r35Ledger = recOf(dashboard.exportCsv('orders'), '订单号', r35Bo.orderNo)!
+eq(
+  '老板的台账照旧记坏账核销（发给客户的纸 ≠ 内部账）',
+  Number(r35Ledger.row[r35Ledger.head.indexOf('坏账核销(原币)')]),
+  400
+)
+eq('台账的付款方式写中文（和收款状态列一个待遇）', r35Ledger.row[r35Ledger.head.indexOf('付款方式')], 'T/T 定金')
+check('台账里不再有 tt_deposit 这种裸码', !dashboard.exportCsv('orders').includes('tt_deposit'))
+
+section('R35 来源单据的自由文本不再爬上发给客户的纸')
+
+const r35NoteQ = quotations.saveQuotation({
+  customerId: r35C.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: localDate(),
+  note: '内部：这版先按让步价报，客户问起再说',
+  items: [{ styleNo: 'R35-N', quantity: 1, unitPrice: 50 }]
+})
+const r35NoteOrder = quotations.convertToOrder(r35NoteQ.id)
+eq('订单备注只留转单凭据句', r35NoteOrder.note, `由报价单 ${r35NoteQ.qNo} 第 1 版转成`)
+const r35NotePi = renderPi({ order: orders.getOrder(r35NoteOrder.id)!, settings: getSettings(), images: {} })
+check('报价单里的内部话术没印到 PI 上', !r35NotePi.includes('客户问起再说'))
+check(
+  '但这句在订单操作历史里查得到',
+  orders
+    .listEvents(r35NoteOrder.id)
+    .some((e) => e.kind === 'quotation_convert' && e.note.includes('客户问起再说')),
+  JSON.stringify(orders.listEvents(r35NoteOrder.id).filter((e) => e.kind === 'quotation_convert'))
+)
+const r35Sample = samples.saveSample({
+  customerId: r35C.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: localDate(),
+  note: '内部：这版颜色客户还没点头',
+  items: [{ styleNo: 'R35-SP', quantity: 1, unitPrice: 20, goodsUnitPrice: 30 }]
+})
+const r35SpOrder = samples.convertSampleToOrder(r35Sample.id)
+eq('打样转单也只留凭据句', r35SpOrder.note, `由打样单 ${r35Sample.sampleNo} 转成`)
+check(
+  '打样单的内部备注落在订单历史里',
+  orders.listEvents(r35SpOrder.id).some((e) => e.kind === 'sample_convert' && e.note.includes('还没点头'))
+)
+check(
+  '不在 PI 上',
+  !renderPi({ order: orders.getOrder(r35SpOrder.id)!, settings: getSettings(), images: {} }).includes('还没点头')
+)
+
+section('R35 档案里的付款条款不替客户认')
+
+const r35AgPi = renderPi({ order: orders.getOrder(r35NoteOrder.id)!, settings: getSettings(), images: {} })
+check(
+  '建单时抬头已钉快照：纸上印的是这张单认过的话',
+  r35AgPi.includes('Agreed Terms') && r35AgPi.includes('见票 30 天')
+)
+// 抹掉快照 = 升级前的老单（这一列当年还没落地，读出来是空串）：
+// 以前纸面会回退去读客户档案，事后改档案就等于替客户认一条新条款
+getDb().run("UPDATE orders SET bill_to_json = '' WHERE id = ?", [r35NoteOrder.id])
+const r35OldPi = renderPi({ order: orders.getOrder(r35NoteOrder.id)!, settings: getSettings(), images: {} })
+check('老单没有快照时 PI 不再印 Agreed Terms', !r35OldPi.includes('Agreed Terms'), r35OldPi.slice(0, 200))
+eq('但系统知道这一句是档案现取的', orders.getOrder(r35NoteOrder.id)!.billFromProfile, true)
+getDb().run("UPDATE quotations SET bill_to_json = '' WHERE id = ?", [r35NoteQ.id])
+check(
+  '报价纸面同理',
+  !renderQuotation({ quotation: quotations.getQuotation(r35NoteQ.id)!, settings: getSettings(), images: {} }).includes(
+    'Agreed Terms'
+  )
 )
 
 /* ---------------- 汇总 ---------------- */

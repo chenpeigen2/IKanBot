@@ -1086,7 +1086,9 @@ function ordersCsv(rows: OrderMoneyRow[], base: string, filter?: OrderExportFilt
       r.incoterm,
       r.portOfLoading,
       r.portOfDestination,
-      r.paymentMethod,
+      // 台账给人看的列一律写中文：同一张表里收款状态、出货状态都是标签，
+      // 唯独付款方式留着 tt_deposit 这种裸码，老板在 Excel 里筛「T/T 定金」筛不出来
+      PAYMENT_METHOD_LABEL[r.paymentMethod as keyof typeof PAYMENT_METHOD_LABEL] ?? r.paymentMethod,
       r.customerPo,
       r.expectedShipDate ?? '',
       localDateOf(r.createdAt),
@@ -1368,7 +1370,9 @@ function statementCsv(customerId: number, base: string): string {
       if (r.paidAmount > 0.001) notes.push(`实收 ${money2(r.paidAmount)} 已计入客户预收结余`)
     }
     if (r.negativeCharges < -0.001) notes.push(`含折让/抵扣 ${money2(r.negativeCharges)}（已计入单据金额）`)
-    if (r.netWrittenOff > 0.001) notes.push(`其中已让利（短款/坏账核销）${money2(r.netWrittenOff)}`)
+    // 对账单客户会拿去跟自己的水单核：这张表开头就写明不含坏账这类内部数字，
+    // 那就不该在备注里冒出「坏账核销」——那是我们的账，对客户只是一笔不必付的减免
+    if (r.netWrittenOff > 0.001) notes.push(`其中已为您减免 ${money2(r.netWrittenOff)}，无需支付`)
     if (creditUsed > 0.001) notes.push(`其中预收抵扣 ${money2(creditUsed)}（非现金，从客户预收余额冲减）`)
     if (open > 0.001 && rate <= 0) notes.push('汇率未填，未折算')
     if (prepaid > 0.001) notes.push(`实收比单据多 ${money2(prepaid)}（预收结余）`)

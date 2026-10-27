@@ -100,11 +100,13 @@ function hydrate(q: Quotation, row?: Record<string, unknown>): QuotationDetail {
   })
   const liveCustomer = mapCustomerLocal(customerRow)
   // 抬头：有快照用快照，老报价单（升级前存的）沿用客户档案当前值
-  const billTo = parseParty(row?.bill_to_json) ?? (liveCustomer ? billPartyOf(liveCustomer) : null)
+  const fromDoc = parseParty(row?.bill_to_json)
+  const billTo = fromDoc ?? (liveCustomer ? billPartyOf(liveCustomer) : null)
   return {
     ...q,
     customer: liveCustomer,
     billTo,
+    billFromProfile: !fromDoc,
     items,
     totalAmount: m.goodsValue,
     totalQuantity: m.totalQuantity,
@@ -137,7 +139,7 @@ export interface QuotationSnapshot {
 }
 
 /** 把报价单当前内容冻结成某一版（同一版只存一次，不覆盖） */
-function freezeQuotationVersion(qId: number, revision: number): void {
+function freezeQuotationVersion(qId: number, revision: number, at?: string): void {
   const db = getDb()
   const row = db.get('SELECT * FROM quotations WHERE id = ?', [qId]) as Record<string, unknown> | null
   if (!row) return
@@ -188,7 +190,7 @@ function freezeQuotationVersion(qId: number, revision: number): void {
   db.run(
     `INSERT OR IGNORE INTO quotation_versions(quotation_id, revision, snapshot_json, goods_total, grand_total, created_at)
      VALUES(?,?,?,?,?,?)`,
-    [qId, revision, JSON.stringify(snap), goodsTotal, grandTotal, now()]
+    [qId, revision, JSON.stringify(snap), goodsTotal, grandTotal, at ?? now()]
   )
 }
 
@@ -196,7 +198,13 @@ function freezeQuotationVersion(qId: number, revision: number): void {
 function ensureQuotationVersion(qId: number, revision: number): void {
   const db = getDb()
   const has = db.get('SELECT id FROM quotation_versions WHERE quotation_id = ? LIMIT 1', [qId])
-  if (!has) freezeQuotationVersion(qId, revision)
+  if (has) return
+  // 补档发生在只读路径（打开版本历史、转单前核对）：拿 now() 会把「升级前的那一版」
+  // 标成浏览的那一天，几个月前发出去的报价在历史里变成「第 1 版 · 今天」。用单子自己的时间
+  const own = db.get('SELECT created_at, updated_at FROM quotations WHERE id = ?', [qId]) as
+    | { created_at?: string; updated_at?: string }
+    | null
+  freezeQuotationVersion(qId, revision, String(own?.updated_at ?? own?.created_at ?? '') || now())
 }
 
 export function listQuotationVersions(id: number): QuotationVersionSummary[] {
@@ -400,7 +408,9 @@ function saveQuotationInner(input: QuotationInput): QuotationDetail {
     if (termBits.length) changeNote = changeNote ? `${changeNote}；${termBits.join('；')}` : termBits.join('；')
 
     // 改之前先把当前版冻结：客户手里那张纸必须能原样找回来
-    freezeQuotationVersion(qId, Number(before.revision ?? 1))
+    // 时间用上一版的落笔时刻（updated_at），不是这次编辑的时刻——否则历史里第 N 版
+    // 会显示成「我改它的那一天」，看不出这一版本来挂了多久
+    freezeQuotationVersion(qId, Number(before.revision ?? 1), String(before.updated_at ?? '') || now())
 
     const nextCustomerId = input.customerId ?? Number(before.customer_id)
     const billJson = billForQuotation(nextCustomerId, input, before)
@@ -503,7 +513,8 @@ function saveQuotationInner(input: QuotationInput): QuotationDetail {
       ]
     )
   }
-  freezeQuotationVersion(qId, revision)
+  // 这一版的落笔时间与单子本身的 updated_at 对齐，版本历史与「最后修改」不打架
+  freezeQuotationVersion(qId, revision, ts)
   logQuotationEvent(qId, input.id ? 'update' : 'create', changeNote || (input.id ? '修改报价单' : '新建报价单'))
   // 状态单独记一条：谁把这张报价发出去的、什么时候，历史里都要查得到
   if (input.id && status !== oldStatus) {
@@ -773,7 +784,9 @@ export function convertToOrder(
       charges: snap.charges,
       // 抬头按报价那一版带走（老存档没有就沿用客户档案）
       billTo: snap.billTo,
-      note: [`由报价单 ${snap.qNo} 第 ${targetRevision} 版转成`, snap.note].filter(Boolean).join('；'),
+      // 订单备注原样印在 PI/CI 的 Remarks 框里：只留「由报价单 X 第 N 版转成」这句凭据，
+      // 报价单上的自由文本进订单历史，不跟着纸走到客户手里
+      note: `由报价单 ${snap.qNo} 第 ${targetRevision} 版转成`,
       // 转订单的落点状态：PI 已发 = 待确认（sent），否则草稿
       paymentStatus: opts.paymentStatus ?? 'sent'
     })
@@ -841,6 +854,9 @@ export function convertToOrder(
         (targetRevision !== Number(q.revision ?? 1)
           ? `；当前最新第 ${q.revision} 版合计 ${currentGrand.toFixed(2)}，差额 ${diff.toFixed(2)}`
           : '') +
+        // 报价单上的自由文本不再跟着订单备注印上 PI/CI，改在这里留痕：
+        // 业务员翻订单历史仍然查得到那一版写了什么
+        (snap.note ? `；报价单备注：${snap.note}` : '') +
         (overrideNote ? `；${overrideNote}` : '')
     )
     logQuotationEvent(

@@ -573,8 +573,13 @@ export default function OrderDetail() {
                 </div>
                 {order.billTo?.paymentPref ? (
                   <div>
-                    <span className="k">客户付款条款</span>
-                    <span className="v">{order.billTo.paymentPref}</span>
+                    <span className="k">{order.billFromProfile ? '档案付款条款' : '客户付款条款'}</span>
+                    <span className="v">
+                      {order.billTo.paymentPref}
+                      {/* 升级前的老单没有抬头快照，这句是从客户档案现取的：档案后来改了它就跟着改，
+                          不能替客户认，所以纸上不印——界面上要说清楚，别让人以为漏印了 */}
+                      {order.billFromProfile ? <span className="muted">（取自客户档案，这张单的 PI 上不印）</span> : ''}
+                    </span>
                   </div>
                 ) : null}
                 <div>
