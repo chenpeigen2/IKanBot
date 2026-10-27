@@ -184,6 +184,7 @@ export function mapQuotation(r: Row): Quotation {
     convertedOrderId: optNum(r.converted_order_id),
     exchangeRateDate: optStr(r.exchange_rate_date),
     revision: num(r.revision),
+    sentAt: optStr(r.sent_at),
     createdAt: str(r.created_at),
     updatedAt: str(r.updated_at)
   }

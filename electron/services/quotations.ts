@@ -99,6 +99,16 @@ function hydrate(q: Quotation, row?: Record<string, unknown>): QuotationDetail {
     depositRatio: q.depositRatio
   })
   const liveCustomer = mapCustomerLocal(customerRow)
+  // 转出的订单作废了没有：作废的单不再是活凭据，报价可以改价重转（与转单口径一致）
+  const convertedOrderStatus = q.convertedOrderId
+    ? String(
+        (
+          db.get('SELECT payment_status FROM orders WHERE id = ?', [q.convertedOrderId]) as {
+            payment_status?: string
+          } | null
+        )?.payment_status ?? ''
+      )
+    : ''
   // 抬头：有快照用快照，老报价单（升级前存的）沿用客户档案当前值
   const fromDoc = parseParty(row?.bill_to_json)
   const billTo = fromDoc ?? (liveCustomer ? billPartyOf(liveCustomer) : null)
@@ -111,7 +121,8 @@ function hydrate(q: Quotation, row?: Record<string, unknown>): QuotationDetail {
     totalAmount: m.goodsValue,
     totalQuantity: m.totalQuantity,
     chargesTotal: m.chargesTotal,
-    grandTotal: m.grandTotal
+    grandTotal: m.grandTotal,
+    convertedOrderStatus
   }
 }
 
@@ -355,14 +366,18 @@ function saveQuotationInner(input: QuotationInput): QuotationDetail {
     const before = db.get('SELECT * FROM quotations WHERE id = ?', [qId]) as Record<string, unknown> | null
     if (!before) throw new Error('报价单不存在')
     // 已转订单的报价单是那单的原始报价凭据：价格、明细、费用事后一改，
-    // 订单和报价单就对不上了，客户拿两份纸来问谁也说不清
+    // 订单和报价单就对不上了，客户拿两份纸来问谁也说不清。
+    // 例外：转出的订单已经作废——那张单不再是活凭据，锁死报价只会逼人另建一张同号单
     if (before.converted_order_id) {
-      const o = db.get('SELECT order_no FROM orders WHERE id = ?', [Number(before.converted_order_id)]) as
-        | { order_no?: string }
-        | null
-      throw new Error(
-        `报价单 ${before.q_no} 已经转成订单 ${o?.order_no ?? ''}，是那单的原始报价凭据，不能再改。要改价格请直接改订单。`
-      )
+      const o = db.get('SELECT order_no, payment_status FROM orders WHERE id = ?', [
+        Number(before.converted_order_id)
+      ]) as { order_no?: string; payment_status?: string } | null
+      if (o?.payment_status !== 'void') {
+        throw new Error(
+          `报价单 ${before.q_no} 已经转成订单 ${o?.order_no ?? ''}，是那单的原始报价凭据，不能再改。要改价格请直接改订单；` +
+            `那张订单确实作废了之后，这里就能改价重转。`
+        )
+      }
     }
     const oldItems = (
       db.all('SELECT style_no, color, size, quantity, unit_price FROM quotation_items WHERE quotation_id = ? ORDER BY id', [
@@ -622,12 +637,13 @@ export function deleteQuotation(id: number): void {
       `报价单 ${q.q_no} 已经有 ${docCount} 份单据存档，删了就连同发过客户的报价 PDF 一起查不到了。不要这张报价，请把「状态」改成「已失效」——记录和存档都留着。`
     )
   }
-  // N31：已转成订单的报价单是那单的原始报价凭据，删了以后订单操作历史里只剩一个查不到的编号
+  // N31：已转成订单的报价单是那单的原始报价凭据，删了以后订单操作历史里只剩一个查不到的编号。
+  // 转出的订单已作废时不拦：那张单已经不在账上，留着这张报价反而挡住重开一单。
   if (q.converted_order_id) {
-    const o = db.get('SELECT order_no FROM orders WHERE id = ?', [Number(q.converted_order_id)]) as
-      | { order_no?: string }
+    const o = db.get('SELECT order_no, payment_status FROM orders WHERE id = ?', [Number(q.converted_order_id)]) as
+      | { order_no?: string; payment_status?: string }
       | null
-    if (o?.order_no) {
+    if (o?.order_no && o.payment_status !== 'void') {
       throw new Error(
         `报价单 ${q.q_no} 已经转成订单 ${o.order_no}，删了以后就查不到原始报价了。\n` +
           `要作废请把「状态」改成「已失效」，报价记录和版本存档都保留。`
@@ -657,18 +673,21 @@ export function updateQuotationMeta(
     | null
   if (!cur) throw new Error('报价单不存在')
   // 已转单的报价，成交与否已经由订单定案：再改成「已失效/失败」，同一个客户同一票货
-  // 会在报表里既算成交又算流失，订单的原始报价也成了无主凭据
+  // 会在报表里既算成交又算流失，订单的原始报价也成了无主凭据。
+  // 转出的订单已作废则不再有「定案」可言，放开让人改（对齐转单/编辑的口径）
   if (cur.converted_order_id) {
     const changed =
       (meta.status !== undefined && meta.status !== cur.status) ||
       (meta.result !== undefined && meta.result !== cur.result)
     if (changed) {
-      const o = db.get('SELECT order_no FROM orders WHERE id = ?', [Number(cur.converted_order_id)]) as
-        | { order_no?: string }
+      const o = db.get('SELECT order_no, payment_status FROM orders WHERE id = ?', [Number(cur.converted_order_id)]) as
+        | { order_no?: string; payment_status?: string }
         | null
-      throw new Error(
-        `报价单已经转成订单 ${o?.order_no ?? ''}，状态和结果不能再改：这票货的成交与否已经由订单决定。要调整请直接改订单。`
-      )
+      if (o?.payment_status !== 'void') {
+        throw new Error(
+          `报价单已经转成订单 ${o?.order_no ?? ''}，状态和结果不能再改：这票货的成交与否已经由订单决定。要调整请直接改订单。`
+        )
+      }
     }
   }
   const ts = now()
@@ -679,12 +698,14 @@ export function updateQuotationMeta(
   const sentAt = status === 'sent' && statusChanged ? ts : cur.sent_at ?? null
   const confirmedAt =
     status === 'confirmed' ? (cur.status === 'confirmed' ? cur.confirmed_at ?? null : ts) : null
-  db.run('UPDATE quotations SET status=?, result=?, sent_at=?, confirmed_at=?, updated_at=? WHERE id=?', [
+  // 只改结果不动「最后修改」：纸面一个字都没变。列表上的「发后改过」是从
+  // updated_at > sent_at 派生的，勾一下成交/失败就跟着喊「待重发」，等于教人别信这个标记
+  db.run('UPDATE quotations SET status=?, result=?, sent_at=?, confirmed_at=?, updated_at=COALESCE(?, updated_at) WHERE id=?', [
     status,
     meta.result ?? cur.result,
     sentAt,
     confirmedAt,
-    ts,
+    statusChanged ? ts : null,
     id
   ])
   const parts: string[] = []

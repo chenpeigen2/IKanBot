@@ -10,6 +10,7 @@ import {
   type Currency,
   type Incoterm,
   type PaymentMethod,
+  type Quotation,
   type QuotationCharge,
   type QuotationResult,
   type QuotationStatus
@@ -38,6 +39,16 @@ function quoteResultTag(result: string): string {
   if (result === 'won') return 'green'
   if (result === 'lost') return 'grey'
   return 'amber'
+}
+
+/** 已经转成订单的报价单是那单的原始凭据：只有那单作废了才重新放开编辑/删除 */
+function quoteEditable(q: { convertedOrderId: number | null; convertedOrderStatus?: string }): boolean {
+  return !q.convertedOrderId || q.convertedOrderStatus === 'void'
+}
+
+/** 发出之后又改存过：客户手上那份可能还是旧价，需要再发一版 */
+function staleAfterSend(q: Quotation): boolean {
+  return q.status === 'sent' && !!q.sentAt && q.updatedAt > q.sentAt
 }
 
 export default function Quotations() {
@@ -229,6 +240,11 @@ export default function Quotations() {
                           {/* R4-S5：列表页状态列一律只读 tag（和旁边「结果」列形态一致）。
                               改状态的入口没堵：点这一行打开报价单详情弹窗，里面还是下拉框。 */}
                           <QuotationStatusTag status={q.status} />
+                          {staleAfterSend(q) ? (
+                            <div className="faint" title={`${fmtDateTime(q.sentAt ?? '')} 发出之后又改存过：客户手上那份可能还是旧价`}>
+                              <span className="tag amber">待重发</span>
+                            </div>
+                          ) : null}
                         </td>
                         <td>
                           {/* R2-P3：结果列改成只读标签（原来也是下拉框，和旁边「状态」下拉同屏两种形态）。
@@ -253,10 +269,10 @@ export default function Quotations() {
                           )}
                           <ActionMenu
                             items={[
-                              // 已转订单的报价单是原始凭据，不再提供编辑入口（后端也会拦）
-                              ...(q.convertedOrderId
-                                ? []
-                                : [
+                              // 已转订单的报价单是原始凭据，不再提供编辑入口（后端也会拦）；
+                              // 转出的订单作废了就不再有凭据可言，重新放开
+                              ...(quoteEditable(q)
+                                ? [
                                     {
                                       text: '编辑报价单',
                                       onClick: () => {
@@ -264,7 +280,8 @@ export default function Quotations() {
                                         setEditing(q)
                                       }
                                     }
-                                  ]),
+                                  ]
+                                : []),
                               { text: '删除', danger: true, onClick: () => void remove(q) }
                             ]}
                           />
@@ -581,7 +598,7 @@ function QuotationDetailModal({
             <Button  onClick={onClose}>
               关闭
             </Button>
-            {!quotation.convertedOrderId && (
+            {quoteEditable(quotation) && (
               <Button  onClick={() => onEdit(quotation)}>
                 编辑
               </Button>
@@ -668,6 +685,16 @@ function QuotationDetailModal({
 
         {quotation.customer?.paymentPref ? (
           <div className="alert info">客户档案里的付款条款：{quotation.customer.paymentPref}</div>
+        ) : null}
+
+        {staleAfterSend(quotation) ? (
+          <div className="alert warn">
+            这张报价在 {fmtDateTime(quotation.sentAt ?? '')} 发出之后又改过：客户手上那份可能还是旧价，改完请重发一版。
+          </div>
+        ) : null}
+
+        {quotation.convertedOrderStatus === 'void' ? (
+          <div className="alert info">转出的订单已作废，这张报价不再锁着：可以直接改价重转。</div>
         ) : null}
 
         <div className="table-wrap">

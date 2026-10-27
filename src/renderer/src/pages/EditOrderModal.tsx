@@ -509,7 +509,7 @@ export default function EditOrderModal({
       </div>
 
       <div className="field">
-        <label>备注（会打印在 PI 上）</label>
+        <label>备注（会原样印在 PI / CI 的 Remarks 上）</label>
         <textarea
           rows={3}
           value={form.note}

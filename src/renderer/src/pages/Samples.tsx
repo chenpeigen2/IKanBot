@@ -214,7 +214,7 @@ export default function Samples() {
                         <td className="num nowrap">{moneyOrDash(s.expressFeeBase, baseCurrency)}</td>
                         <td className="num nowrap">{moneyOrDash(s.netAdvanceBase, baseCurrency)}</td>
                         <td className="num">
-                          {s.feeStatus === 'unpaid' && s.totalFee > 0 ? (
+                          {s.feeStatus === 'unpaid' && s.totalFee > 0 && !s.creditSettled ? (
                             s.rateMissing ? (
                               <span className="tag amber" title="汇率未填，工作台待收里少算了这单，请编辑补上">⚠ 汇率未填</span>
                             ) : (
@@ -230,7 +230,13 @@ export default function Samples() {
                           <SampleStatusTag status={s.status} />
                         </td>
                         <td>
-                          <SampleFeeTag status={s.feeStatus} />
+                          {s.creditSettled ? (
+                            <span className="tag green" title="客户预收已经把这单抵清：不是现金到账，待收为 0">
+                              已抵清
+                            </span>
+                          ) : (
+                            <SampleFeeTag status={s.feeStatus} />
+                          )}
                           {s.legacyPaidNoFlow ? (
                             <div className="faint" title="升级前只改了收款标记，没有流水；月报里没有这笔">
                               旧记录·无流水
@@ -625,6 +631,9 @@ function SamplePayModal({
         <div className="alert info">
           样品费已经抵扣到订单里了：这不是现金，不会出现在收款流水和月报里（订单的负费用行已经记过一次）。
         </div>
+      ) : null}
+      {detail.creditSettled ? (
+        <div className="alert info">客户预收已经把这张单抵清了（不是现金到账），这笔样品费不用再等。</div>
       ) : null}
       {detail.offsetSuspended ? (
         <div className="alert warn">

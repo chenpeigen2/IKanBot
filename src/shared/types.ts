@@ -534,6 +534,8 @@ export interface Quotation {
   exchangeRateDate: string | null
   /** 改过几版（每次编辑 +1） */
   revision: number
+  /** 第一次/最近一次「发出」的时间（改价重发才刷新；改备注、补结果都不动） */
+  sentAt: string | null
   createdAt: string
   updatedAt: string
 }
@@ -550,6 +552,8 @@ export interface QuotationDetail extends Quotation {
   totalQuantity: number
   chargesTotal: number
   grandTotal: number
+  /** 转出的订单状态（'' = 没转单）；作废的单不再锁住报价，可以改价重转 */
+  convertedOrderStatus: string
 }
 
 /** 收款流水：要么挂订单，要么挂打样单，绝不同时挂两边 */
@@ -951,6 +955,8 @@ export interface SampleOrderDetail extends SampleOrder {
   receivableBase: number
   /** 汇率未填但有应收（危险：工作台会少算，要提示补） */
   rateMissing: boolean
+  /** 客户预收已把这单抵清（待收为 0；fee_status 仍是 unpaid——抵扣不是现金） */
+  creditSettled: boolean
 }
 
 /** 按 SKU 汇总 */

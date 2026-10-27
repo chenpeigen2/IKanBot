@@ -418,6 +418,10 @@ export function registerIpc(): void {
     if (payload.kind === 'ci' && payload.orderId != null) {
       docsSvc.assertCiNoOverlap(Number(payload.orderId), payload.docNo, payload.confirmOverlap === true)
     }
+    // 漏传金额不能按 0 存：批次 CI 的金额是本批凭据，钉成 0 以后对账只剩一张 0 元的纸
+    if (payload.kind === 'ci' && payload.amount == null) {
+      throw new Error('这张 CI 没带金额，不能存档：存档金额是事后对账的依据，不能按 0 记。请关掉预览重新打开再存。')
+    }
     const pdf = await htmlToPdf(payload.html, payload.docNo)
     const saved = docsSvc.saveDocFile({
       pdf,

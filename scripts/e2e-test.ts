@@ -8930,6 +8930,213 @@ check(
   Number((getDb().get('SELECT COUNT(*) AS n FROM orders') as { n: number }).n) > 0
 )
 
+/* ---------------- R37 ---------------- */
+
+section('R37 批次 CI 不再和整单应收对金额')
+
+const r37CiCust = customers.saveCustomer({ company: 'R37-CI-CO' })
+const r37CiOrder = orders.createOrder({
+  customerId: r37CiCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R37-CI'
+})
+await orders.addOrderItem(r37CiOrder.id, { styleNo: 'R37-CI', quantity: 20, unitPrice: 10 })
+const r37CiPl = packing.createPackingList({
+  orderId: r37CiOrder.id,
+  containerNo: 'CONT-R37-A',
+  lines: [{ boxNo: 'R37-1', styleNo: 'R37-CI', quantity: 10 }]
+})[0]
+const r37CiBatchAmt = money.packingAmounts(r37CiOrder.id).find((b) => b.plId === r37CiPl.id)!
+// 批次 CI 记的是本批货值（半单），拿它跟整单应收比必然"差一半"
+docs.saveDocFile({
+  pdf: Buffer.from('%PDF-1.4 r37 batch'),
+  docNo: ciNoOf('PI-R37-CI', r37CiPl.plNo),
+  kind: 'ci',
+  orderId: r37CiOrder.id,
+  amount: r37CiBatchAmt.total
+})
+check(
+  '分批出 CI 不再凭空写一条「金额相差」',
+  !orders.listEvents(r37CiOrder.id).some((e) => e.kind === 'doc_amount_diff'),
+  JSON.stringify(orders.listEvents(r37CiOrder.id).filter((e) => e.kind === 'doc_amount_diff'))
+)
+docs.saveDocFile({
+  pdf: Buffer.from('%PDF-1.4 r37 whole'),
+  docNo: ciNoOf('PI-R37-CI'),
+  kind: 'ci',
+  orderId: r37CiOrder.id,
+  amount: 190,
+  confirmOverlap: true
+})
+check(
+  '整单 CI 与应收对不上，照样留痕',
+  orders.listEvents(r37CiOrder.id).some((e) => e.kind === 'doc_amount_diff' && e.note.includes('相差'))
+)
+check(
+  '存档金额是乱码就拒收（不再静默记成 0）',
+  r8err(() =>
+    docs.saveDocFile({
+      pdf: Buffer.from('%PDF-1.4 r37 nan'),
+      docNo: ciNoOf('PI-R37-CI'),
+      kind: 'ci',
+      orderId: r37CiOrder.id,
+      amount: Number.NaN,
+      confirmOverlap: true
+    })
+  ).includes('有效金额')
+)
+check(
+  '存档金额是负数也拒收',
+  r8err(() =>
+    docs.saveDocFile({
+      pdf: Buffer.from('%PDF-1.4 r37 neg'),
+      docNo: ciNoOf('PI-R37-CI', r37CiPl.plNo),
+      kind: 'ci',
+      orderId: r37CiOrder.id,
+      amount: -1
+    })
+  ).includes('有效金额')
+)
+eq(
+  '被拒的两版没有留下存档',
+  docs.listDocVersions(r37CiOrder.id).filter((d) => d.kind === 'ci').length,
+  2
+)
+
+section('R37 打样费用与汇率不许是乱码或负数')
+
+const r37SmpCust = customers.saveCustomer({ company: 'R37-FEE-CO' })
+const r37Smp = samples.saveSample({
+  customerId: r37SmpCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  sampleDate: localDate(),
+  items: [{ styleNo: 'R37-FEE', quantity: 1, unitPrice: 10 }]
+})
+const r37SmpItems = [{ styleNo: 'R37-FEE', quantity: 1, unitPrice: 10 }]
+check(
+  '快递费填负数当场拦下',
+  r8err(() =>
+    samples.saveSample({ id: r37Smp.id, customerId: r37SmpCust.id, expressFee: -5, items: r37SmpItems })
+  ).includes('快递费')
+)
+check(
+  '快递费是乱码当场拦下',
+  r8err(() =>
+    samples.saveSample({ id: r37Smp.id, customerId: r37SmpCust.id, expressFee: Number.NaN, items: r37SmpItems })
+  ).includes('快递费')
+)
+check(
+  '汇率是乱码当场拦下',
+  r8err(() =>
+    samples.saveSample({ id: r37Smp.id, customerId: r37SmpCust.id, exchangeRate: Number.NaN, items: r37SmpItems })
+  ).includes('汇率')
+)
+eq('被拦之后快递费还是 0', samples.getSample(r37Smp.id)!.expressFee, 0)
+eq('被拦之后汇率还是 7', samples.getSample(r37Smp.id)!.exchangeRate, 7)
+
+section('R37 预收抵清的样品费显示「已抵清」而不是「未收」')
+
+const r37CrCust = customers.saveCustomer({ company: 'R37-CREDIT-CO' })
+const r37CrSrc = orders.createOrder({
+  customerId: r37CrCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R37-CR'
+})
+await orders.addOrderItem(r37CrSrc.id, { styleNo: 'R37-CR', quantity: 1, unitPrice: 10 })
+orders.addPayment(r37CrSrc.id, { paidAt: localDate(), amount: 30, method: 'T/T', bankRef: 'R37-CR-PAY' })
+const r37CrSmp = samples.saveSample({
+  customerId: r37CrCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: localDate(),
+  items: [{ styleNo: 'R37-CRS', quantity: 1, unitPrice: 15 }]
+})
+eq('抵之前不算抵清', samples.getSample(r37CrSmp.id)!.creditSettled, false)
+credits.applyCredit({
+  customerId: r37CrCust.id,
+  currency: 'USD',
+  targetKind: 'sample',
+  targetId: r37CrSmp.id,
+  amount: 15
+})
+const r37CrAfter = samples.getSample(r37CrSmp.id)!
+eq('抵清后待收归零', r37CrAfter.receivableBase, 0)
+eq('fee_status 仍由流水推导为 unpaid（抵扣不是现金）', r37CrAfter.feeStatus, 'unpaid')
+eq('界面据此显示「已抵清」', r37CrAfter.creditSettled, true)
+
+section('R37 报价：转出的订单作废后不再锁死，发后改过看得见')
+
+const r37QCust = customers.saveCustomer({ company: 'R37-QUOTE-CO' })
+const r37Q = quotations.saveQuotation({
+  customerId: r37QCust.id,
+  currency: 'USD',
+  exchangeRate: 7.2,
+  exchangeRateDate: localDate(),
+  incoterm: 'FOB',
+  portOfLoading: 'Ningbo',
+  portOfDestination: 'Hamburg',
+  paymentMethod: 'tt_deposit',
+  depositRatio: 0.3,
+  items: [{ styleNo: 'R37Q', quantity: 10, unitPrice: 10 }]
+})
+const r37QOrder = quotations.convertToOrder(r37Q.id)
+eq(
+  '报价单带出转出订单的状态（界面据此决定还能不能编辑）',
+  quotations.getQuotation(r37Q.id)!.convertedOrderStatus,
+  r37QOrder.paymentStatus
+)
+check(
+  '订单还活着：改价仍被拦',
+  r8err(() =>
+    quotations.saveQuotation({
+      id: r37Q.id,
+      customerId: r37QCust.id,
+      exchangeRate: 7.2,
+      items: [{ styleNo: 'R37Q', quantity: 10, unitPrice: 11 }]
+    })
+  ).includes('原始报价凭据')
+)
+orders.voidOrder(r37QOrder.id, 'R37 客户改款')
+eq('订单作废后状态看得见', quotations.getQuotation(r37Q.id)!.convertedOrderStatus, 'void')
+const r37QEdit = quotations.saveQuotation({
+  id: r37Q.id,
+  customerId: r37QCust.id,
+  exchangeRate: 7.2,
+  items: [{ styleNo: 'R37Q', quantity: 10, unitPrice: 11 }]
+})
+eq('作废之后报价可以改价（不再逼人另建一张）', r37QEdit.items[0].unitPrice, 11)
+quotations.updateQuotationMeta(r37Q.id, { result: 'lost' })
+eq('作废之后结果也能改', quotations.getQuotation(r37Q.id)!.result, 'lost')
+
+// 「发后改过」= status=sent 且 updated_at > sent_at：只改结果绝不能把时钟推走
+getDb().run(
+  "UPDATE quotations SET status = 'sent', sent_at = '2026-01-01T00:00:00.000Z', updated_at = '2026-02-01T00:00:00.000Z' WHERE id = ?",
+  [r37Q.id]
+)
+const r37QMetaOnly = quotations.updateQuotationMeta(r37Q.id, { result: 'won' })
+eq('只改结果不动「最后修改」（否则「待重发」天天误报）', r37QMetaOnly.updatedAt, '2026-02-01T00:00:00.000Z')
+const r37QStatus = quotations.updateQuotationMeta(r37Q.id, { status: 'draft' })
+check('改状态照常刷新「最后修改」', r37QStatus.updatedAt > '2026-02-01T00:00:00.000Z')
+const r37QResend = quotations.updateQuotationMeta(r37Q.id, { status: 'sent' })
+eq('重发那一刻两条时间对齐（不该一发出去就标待重发）', r37QResend.updatedAt, r37QResend.sentAt)
+getDb().run("UPDATE quotations SET sent_at = '2026-01-01T00:00:00.000Z' WHERE id = ?", [r37Q.id])
+const r37QAgain = quotations.saveQuotation({
+  id: r37Q.id,
+  customerId: r37QCust.id,
+  exchangeRate: 7.2,
+  items: [{ styleNo: 'R37Q', quantity: 10, unitPrice: 12 }]
+})
+check(
+  '发后改存一版：最后修改晚于发出时间（界面标「待重发」）',
+  (r37QAgain.updatedAt ?? '') > (r37QAgain.sentAt ?? ''),
+  `${r37QAgain.sentAt} / ${r37QAgain.updatedAt}`
+)
+
 /* ---------------- 汇总 ---------------- */
 console.log(`\n${'='.repeat(46)}`)
 console.log(`通过 ${passed} 项，失败 ${failed} 项`)

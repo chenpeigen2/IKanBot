@@ -10,7 +10,7 @@ import { getDb, nextNo, transact } from '../db'
 import { mapCustomer, mapPayment } from '../db/mappers'
 import { assertLocalDate, localDate } from '../../src/shared/date'
 import { isBillingStatus } from '../../src/shared/billing'
-import { assertQuantity, assertUnitPrice } from '../../src/shared/guards'
+import { assertQuantity, assertUnitPrice, assertOptionalMoney } from '../../src/shared/guards'
 import { getSettings } from './settings'
 import { createOrder, getOrder, assertSkuListUnique, assertPaymentInput } from './orders'
 import { logEvent } from './events'
@@ -192,6 +192,9 @@ function hydrate(s: SampleOrder): SampleOrderDetail {
       ? Math.max(0, totalFee - recoveredFee - creditApplied)
       : 0
   const rateMissing = owed > 0 && !hasRate
+  // 预收把这张单抵清了：fee_status 是「由流水推导」的列（抵扣不是现金，不能写成 paid），
+  // 但待收已经是 0——界面必须说「已抵清」，不能挂着「未收」假装还有钱没到
+  const creditSettled = !cancelled && s.feeStatus === 'unpaid' && creditApplied > 0.001 && owed <= 0.001
   return {
     ...s,
     customer: customerRow ? (mapCustomer(customerRow) as Customer) : null,
@@ -213,7 +216,8 @@ function hydrate(s: SampleOrder): SampleOrderDetail {
     offsetSuspended,
     // 待收（N23）：owed 已按 feeStatus / 取消筛过，这里只管折基准币
     receivableBase: rateMissing ? 0 : owed * rate,
-    rateMissing
+    rateMissing,
+    creditSettled
   }
 }
 
@@ -311,6 +315,15 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
   const expressFee = keepNum('expressFee', 'express_fee')
   const feeStatus = (keep('feeStatus', 'fee_status') ?? 'unpaid') as SampleFeeStatus
   const exchangeRate = keepNum('exchangeRate', 'exchange_rate')
+  // 快递费是公司垫付、向客户收回的钱：负数会把净垫与应收一起算反，
+  // 乱码会整列变成 NaN；服务层拦（IPC 任何调用方都能打）
+  assertOptionalMoney(expressFee, '快递费')
+  // 汇率必须是真的数：0 表示还没填，负数/NaN 会让待收和净垫一起失真
+  if (!Number.isFinite(exchangeRate) || exchangeRate < 0) {
+    throw new Error(
+      `汇率「${String(keep('exchangeRate', 'exchange_rate'))}」不是有效汇率：请填大于 0 的数字（还没定就先留空）`
+    )
+  }
   // N23：未收的打样费要进工作台待收款，折算必须有汇率——没有就不许存（跟订单一个规矩）
   if (feeStatus === 'unpaid' && sampleFee + expressFee > 0 && exchangeRate <= 0) {
     throw new Error('这张打样单还有应收没结（样品费+快递费），请先按今天钉盘的汇率填上汇率')

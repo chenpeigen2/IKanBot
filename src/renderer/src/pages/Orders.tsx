@@ -785,7 +785,8 @@ function CreateOrderModal({
       </div>
 
       <div className="field">
-        <label>备注（给工厂的要求等）</label>
+        {/* 这一栏不是内部备注：PI/CI 纸面的 Remarks 原样印它，写工厂的要求请写在商品明细/装箱单上 */}
+        <label>备注（会原样印在 PI / CI 的 Remarks 上）</label>
         <textarea
           rows={2}
           value={form.note}

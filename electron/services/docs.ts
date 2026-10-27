@@ -174,6 +174,13 @@ export function saveDocFile(input: {
 }): { filePath: string; absolutePath: string; version: number } {
   const docNo = assertDocNo(input.docNo)
   const kind = assertDocKind(input.kind)
+  // 存档金额是事后对账的依据：NaN/负数直接拒收，不能静默落成 0
+  if (input.amount != null) {
+    const amt = Number(input.amount)
+    if (!Number.isFinite(amt) || amt < 0) {
+      throw new Error(`存档金额「${String(input.amount)}」不是有效金额，不能存这一版。请关掉预览重新打开再存。`)
+    }
+  }
   const version = nextVersion(docNo, kind)
   if (input.expectedVersion != null && Number(input.expectedVersion) !== version) {
     throw new Error(
@@ -226,18 +233,27 @@ export function saveDocFile(input: {
         filePath
       })
       // CI 金额与应收口径的差异留痕：报关调价是设计允许的（理由写在纸面上），
-      // 收款仍按订单口径——但差异必须留在账上，事后对账才知道这不是录错
+      // 收款仍按订单口径——但差异必须留在账上，事后对账才知道这不是录错。
+      // 只比「整单 CI」（单号就是 PI 号）：批次 CI 记的是本批货值，拿它跟整单应收比，
+      // 每出一批就凭空写一条「金额不符」，真正的差异反而被噪声埋掉。
       if (kind === 'ci' && input.orderId != null && input.amount != null) {
-        const diff = Number(input.amount) - orderGrandTotal(input.orderId)
-        if (Math.abs(diff) > 0.005) {
-          logEvent(
-            input.orderId,
-            'doc_amount_diff',
-            null,
-            null,
-            `CI 存档 ${docNo} 第 ${version} 版金额 ${Number(input.amount).toFixed(2)} 与订单应收 ` +
-              `${orderGrandTotal(input.orderId).toFixed(2)} 相差 ${diff.toFixed(2)}；收款仍按订单口径，差异理由应写在纸面上`
-          )
+        const orderRow = getDb().get('SELECT pi_no FROM orders WHERE id = ?', [input.orderId]) as
+          | { pi_no?: string }
+          | null
+        const piNo = String(orderRow?.pi_no ?? '').trim()
+        if (piNo && docNo === ciNoOf(piNo)) {
+          const grand = orderGrandTotal(input.orderId)
+          const diff = Number(input.amount) - grand
+          if (Math.abs(diff) > 0.005) {
+            logEvent(
+              input.orderId,
+              'doc_amount_diff',
+              null,
+              null,
+              `CI 存档 ${docNo} 第 ${version} 版金额 ${Number(input.amount).toFixed(2)} 与订单应收 ` +
+                `${grand.toFixed(2)} 相差 ${diff.toFixed(2)}；收款仍按订单口径，差异理由应写在纸面上`
+            )
+          }
         }
       }
     })

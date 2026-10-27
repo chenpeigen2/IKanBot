@@ -137,7 +137,9 @@ export default function Reports() {
             <div className="stat-value">{money(totals.received, cur)}</div>
             {/* 退款是钱流出，没有从收款里减掉：说破差异，老板才不至于拿这张表去对银行流水时对不上 */}
             <div className="stat-hint">
-              {totals.refundCount ? `按到账月合计 · 不含退给客户的 ${totals.refundCount} 笔` : '按到账月合计'}
+              {totals.refundCount
+                ? `按到账月合计 · 含打样费实收 · 不含退给客户的 ${totals.refundCount} 笔`
+                : '按到账月合计 · 含打样费实收'}
             </div>
           </div>
           <div className="stat">
