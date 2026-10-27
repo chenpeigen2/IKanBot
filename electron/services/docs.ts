@@ -7,6 +7,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'path'
 import { dataDir, docsDir, getDb, transact } from '../db'
 import { logEvent } from './events'
 import { computeOrderMoney, parseCharges } from './money'
+import { assertDocNo } from '../../src/shared/guards'
 import { ciNoOf, latestAmountPerDocNo } from '../../src/shared/documents'
 import type { DocKind } from '../../src/shared/types'
 
@@ -26,8 +27,6 @@ export interface DocVersion {
 }
 
 const DOC_KINDS: DocKind[] = ['pi', 'pl', 'ci', 'quotation']
-/** 单号会直接当目录名用：只允许安全字符，杜绝 ../ 和 Windows 保留字符 */
-const SAFE_DOC_NO = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/
 
 /** 订单应收口径（货值 + 费用行）：喂给 computeOrderMoney 单一真源，不在这里另写聚合 */
 function orderGrandTotal(orderId: number): number {
@@ -49,16 +48,6 @@ function orderGrandTotal(orderId: number): number {
 
 function now(): string {
   return new Date().toISOString()
-}
-
-export function assertDocNo(docNo: unknown): string {
-  const v = String(docNo ?? '').trim()
-  if (!SAFE_DOC_NO.test(v)) {
-    throw new Error(
-      `单据号「${v || '(空)'}」不能用来建存档目录：只能用字母、数字、点、下划线、短横线，且不能以符号开头。请先把单号改成正常编号。`
-    )
-  }
-  return v
 }
 
 export function assertDocKind(kind: unknown): DocKind {

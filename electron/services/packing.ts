@@ -4,7 +4,7 @@ import { getSettings } from './settings'
 import { logEvent } from './events'
 import { applyShipStatus } from './shipping'
 import { assertOrderWritable } from './orders'
-import { localDate, isLocalDate } from '../../src/shared/date'
+import { localDate, assertLocalDate } from '../../src/shared/date'
 import { ciNoOf } from '../../src/shared/documents'
 import { assertQuantity as assertQtyRule } from '../../src/shared/guards'
 import { SHIP_STATUS_LABEL, SHIP_STATUS_ORDER } from '../../src/shared/types'
@@ -436,21 +436,6 @@ export interface PackingListInfoInput {
   deliveredDate?: string | null
 }
 
-/** 日期字段要么留空，要么是 2026-10-05 这种本地日期；脏日期会把归月和催单时钟一起带错 */
-function assertDate(v: string | null | undefined, label: string, noFuture = false): void {
-  if (v === undefined || v === null || v === '') return
-  if (!isLocalDate(v)) {
-    throw new Error(`${label}「${v}」不是合法日期，请用 2026-10-05 这种写法（或留空）`)
-  }
-  // 「实际开船」「签收」记的是已经发生的事，而且尾款催款的主钟就从这天起算：
-  // 手滑填成明年，days 变负数，这张单的尾款提醒会从此一声不吭，界面也不会解释
-  if (noFuture && String(v) > localDate()) {
-    throw new Error(
-      `${label}「${v}」还在未来——这一项记的是已经发生的事，尾款催款也从它起算；填成未来的日子，这张单的尾款提醒会从此不再出现`
-    )
-  }
-}
-
 /** 编辑批次信息：柜号/船名/船期/封条/提单号 + 出运状态 + 实收数量 + 单据日期 */
 export function updatePackingListInfo(
   orderId: number,
@@ -470,12 +455,22 @@ export function updatePackingListInfo(
   if (patch.shipStatus !== undefined && !SHIP_STATUS_ORDER.includes(patch.shipStatus)) {
     throw new Error('这个出货状态不能手工选，请选择「未备货 / 备货中 / 已包装 / 已出运 / 已清关 / 已签收」')
   }
-  assertDate(patch.etdDate, 'ETD')
+  assertLocalDate(patch.etdDate, 'ETD')
   // 预计可以排到未来，实际开船与签收不行：它们是催尾款的主钟
-  assertDate(patch.atdDate, '实际开船日', true)
-  assertDate(patch.etaDate, 'ETA')
-  assertDate(patch.docDate, '单据日期')
-  assertDate(patch.deliveredDate, '签收日期', true)
+  assertLocalDate(
+    patch.atdDate,
+    '实际开船日',
+    true,
+    '这一项记的是已经发生的事，尾款催款也从它起算；填成未来的日子，这张单的尾款提醒会从此不再出现'
+  )
+  assertLocalDate(patch.etaDate, 'ETA')
+  assertLocalDate(patch.docDate, '单据日期')
+  assertLocalDate(
+    patch.deliveredDate,
+    '签收日期',
+    true,
+    '这一项记的是已经发生的事，尾款催款也从它起算；填成未来的日子，这张单的尾款提醒会从此不再出现'
+  )
 
   const curStatus = cur.ship_status == null ? null : (String(cur.ship_status) as BatchShipStatus)
   const nextStatus = patch.shipStatus !== undefined ? patch.shipStatus : curStatus

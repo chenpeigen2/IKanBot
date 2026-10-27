@@ -8,7 +8,7 @@
  */
 import { getDb, nextNo, transact } from '../db'
 import { mapCustomer, mapPayment } from '../db/mappers'
-import { localDate } from '../../src/shared/date'
+import { assertLocalDate, localDate } from '../../src/shared/date'
 import { isBillingStatus } from '../../src/shared/billing'
 import { assertQuantity, assertUnitPrice } from '../../src/shared/guards'
 import { getSettings } from './settings'
@@ -285,6 +285,11 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
   })
   // 源头拦同款两行：不拦的话转单时脏明细会原样流进订单，把 CI 金额算乱
   if (itemsProvided) assertSkuListUnique(items, '打样单')
+  // 三个日期都只记已经发生的事：催款时钟拿寄出日（没寄就退回打样日）当起点，
+  // 填成未来 days 变负数，样品费提醒会从此一声不吭，待收却还挂着
+  assertLocalDate(input.sampleDate, '打样日期', true)
+  assertLocalDate(input.shippedAt, '寄出日期', true)
+  assertLocalDate(input.receivedAt, '收到日期', true)
   // 漏传 items ≠ 清空：只改快递单号的编辑不能把样品行和样品费一起抹掉
   const storedFee = before
     ? Number(

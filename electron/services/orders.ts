@@ -19,7 +19,7 @@ import { addSamplePayment } from './samples'
 import { addDays, daysBetween, isLocalDate, localDate, localDayAfterUtc, localDayStartUtc } from '../../src/shared/date'
 import { billPartyOf, emptyParty, parseParty, patchParty, shipPartyOf, stringifyParty } from '../../src/shared/party'
 import { isBillingStatus, NON_BILLING_STATUSES } from '../../src/shared/billing'
-import { assertQuantity, assertUnitPrice } from '../../src/shared/guards'
+import { assertDocNo, assertQuantity, assertUnitPrice } from '../../src/shared/guards'
 import { PAYMENT_STATUS_LABEL, SETTLEMENT_KIND_LABEL, SHIP_STATUS_LABEL, SHIP_STATUS_ORDER } from '../../src/shared/types'
 import type {
   Currency,
@@ -617,7 +617,10 @@ export function createOrder(input: OrderInput): OrderDetail {
   // 单没建成、号已烧掉，SO/PI 是客户对账凭据，凭空跳号对不上水单
   const orderId = transact(() => {
     const orderNo = nextNo('SO')
-    const piNo = input.piNo?.trim() || nextNo('PI')
+    const typedPiNo = input.piNo?.trim() ?? ''
+    // PI 号会当存档目录名和纸面编号用：带 / 或 .. 的号建单时看着正常，
+    // 等第一次出 PI 才在存档那一步被拦下——那时单已经发给客户了
+    const piNo = typedPiNo ? assertDocNo(typedPiNo, 'PI 号') : nextNo('PI')
     // 单号是凭据：手工指定的 PI 号不能跟别的订单撞号（与打样单号同一条规矩，N-3）。
     // 查重放在事务里，查完到写入之间没有别人能插一张同号的单进来。
     if (input.piNo?.trim() && piNoTaken(input.piNo.trim())) throw piDupErr(piNo)
@@ -676,7 +679,11 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
   // 单号是凭据：编辑时把 PI 号改成别人的号要拦住（改成自己的号不算重号）
   const oldPiNo = String(before.pi_no ?? '').trim()
   const newPiNo = input.piNo === undefined ? oldPiNo : String(input.piNo).trim()
-  if (newPiNo && newPiNo !== oldPiNo && piNoTaken(newPiNo, id)) throw piDupErr(newPiNo)
+  if (newPiNo && newPiNo !== oldPiNo) {
+    // 只在真改了号时校验：老单里已经存着的怪号不挡住别的字段保存
+    assertDocNo(newPiNo, 'PI 号')
+    if (piNoTaken(newPiNo, id)) throw piDupErr(newPiNo)
+  }
   // 已经开出去的 PI 号要被报关、要被对账，清空等于把凭据抹了还不留话
   if (oldPiNo && !newPiNo)
     throw new Error(`PI 号 ${oldPiNo} 已经写在这张单上，不能清空——确实不要这个号请作废这张单后重开。`)
@@ -1112,13 +1119,20 @@ export function deleteOrder(id: number): void {
  * 落库后费用行看着在、金额却按 0 算，CI/PI 合计和应收会静默少掉一笔。
  */
 export function assertChargeAmounts(charges: QuotationCharge[]): void {
-  for (const c of charges) {
+  charges.forEach((c, idx) => {
     const amount = Number(c.amount)
     if (!Number.isFinite(amount)) {
       const who = String(c.label ?? '').trim() || '未命名费用'
       throw new Error(`费用「${who}」的金额不是有效数字（${String(c.amount)}），请填一个金额再保存。`)
     }
-  }
+    // 名称为空的行保存时会被 filter 掉：金额都填了还让它整行消失，
+    // 用户看到「已保存」、纸面和待收里却少了这笔钱——宁可在保存时拦住
+    if (!String(c.label ?? '').trim() && Math.abs(amount) > 0.001) {
+      throw new Error(
+        `第 ${idx + 1} 行费用填了 ${amount.toFixed(2)} 却没有名称——保存时这一行会被当成空行丢掉，这笔钱不会进 PI/CI，也不算进待收。请补个名称（例如“运费”）再保存。`
+      )
+    }
+  })
 }
 
 /** 只改费用行（运费/保险），其他字段一个都不动 */
@@ -1825,7 +1839,7 @@ export function deletePayment(orderId: number, paymentId: number, reason = ''): 
     const kind = String(usedBy.kind ?? '')
     throw new Error(
       kind === 'recovery'
-        ? `这笔收款是坏账追回时自动登记的（${String(usedBy.at ?? '')}，${Number(usedBy.amount ?? 0).toFixed(2)}），和核销台账绑在一起，不能删除。如果要退汇，请单独登记一笔反向收款并写明原因。`
+        ? `这笔收款是坏账追回时自动登记的（${String(usedBy.at ?? '')}，${Number(usedBy.amount ?? 0).toFixed(2)}），和核销台账绑在一起，不能单独删除。记错了请到下面的核销记录里撤销这次追回——那会把自动登记的收款一起退掉。`
         : `这笔收款已经用于核销（${String(usedBy.at ?? '')}，${Number(usedBy.amount ?? 0).toFixed(2)}），不能直接删除：删了核销台账会指向一条不存在的流水。请先撤销对应的核销记录，再删收款。`
     )
   }
@@ -2019,9 +2033,6 @@ export function reverseSettlement(orderId: number, settlementId: number, reason 
   assertOrderWritable(orderId, '撤销核销')
   const kind = String(row.kind) as SettlementKind
   const amount = Number(row.amount ?? 0)
-  if (kind === 'recovery') {
-    throw new Error('追回款是实际到账的钱，不能撤销核销；如果要退汇，请单独登记一笔反向收款并写明原因。')
-  }
   if (amount <= 0) throw new Error('这条是撤销记录，不能再撤销一次。')
   const reversed = db.get('SELECT id FROM order_settlements WHERE reverses_id = ?', [settlementId])
   if (reversed) throw new Error('这笔核销已经撤销过了，刷新页面就能看到。')
@@ -2032,7 +2043,14 @@ export function reverseSettlement(orderId: number, settlementId: number, reason 
     (db.get('SELECT customer_id FROM orders WHERE id = ?', [orderId]) as { customer_id?: number } | null)
       ?.customer_id ?? 0
   )
+  // 追回登记的是「一笔自动收款 + 一条核销」，两行绑在一起：
+  // 只追加负数核销，钱还留在现金流和坏账抵扣里；只删收款，核销就指向一条不存在的流水。
+  // 记错客户/金额时这是唯一能退回原状的出口，两条必须同一个事务一起动。
+  const payId = Number(row.payment_id ?? 0)
   transact(() => {
+    if (kind === 'recovery' && payId) {
+      db.run('DELETE FROM payments WHERE id = ? AND order_id = ?', [payId, orderId])
+    }
     db.run(
       `INSERT INTO order_settlements(order_id, kind, amount, reason, evidence, reverses_id, payment_id, at, created_at)
        VALUES(?,?,?,?,?,?,?,?,?)`,
@@ -2043,7 +2061,7 @@ export function reverseSettlement(orderId: number, settlementId: number, reason 
       'settlement_reverse',
       null,
       null,
-      `撤销${label} ${amount.toFixed(2)} 原因：${why}`
+      `撤销${label} ${amount.toFixed(2)}${kind === 'recovery' && payId ? '（同时删除自动登记的收款）' : ''} 原因：${why}`
     )
     recomputePaymentStatus(orderId)
     // 撤销核销会把这单的「多收」残差缩小：客户账上已抵/已退的钱不能被架空

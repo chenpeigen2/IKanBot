@@ -47,6 +47,29 @@ export function addDays(dateStr: string, days: number): string {
   return localDate(base)
 }
 
+/**
+ * 日期字段守门：要么留空，要么是合法的本地日期。
+ *
+ * noFuture 用于「记录已经发生的事」的字段（实际开船、签收、收款、寄样）：
+ * 它们同时是提醒时钟的起点，填成未来会让倒计时变负数，对应提醒从此不再出现。
+ * futureHint 让调用方点名具体是哪条提醒会消失（尾款 / 样品费），
+ * 一句「相关提醒」太虚，用户不知道坏在哪儿。
+ */
+export function assertLocalDate(
+  v: string | null | undefined,
+  label: string,
+  noFuture = false,
+  futureHint = '这一项记的是已经发生的事，填成未来的日子，相关提醒会从此不再出现'
+): void {
+  if (v === undefined || v === null || v === '') return
+  if (!isLocalDate(v)) {
+    throw new Error(`${label}「${v}」不是合法日期，请用 2026-10-05 这种写法（或留空）`)
+  }
+  if (noFuture && String(v) > localDate()) {
+    throw new Error(`${label}「${v}」还在未来——${futureHint}`)
+  }
+}
+
 /** 两个本地日期相差天数（b - a） */
 export function daysBetween(a: string, b: string): number {
   const ta = new Date(a + 'T00:00:00').getTime()

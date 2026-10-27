@@ -780,6 +780,7 @@ export interface CiBatchOptions {
   vessel?: string
   etdDate?: string
   blNo?: string
+  sealNo?: string
 }
 
 export interface CiOptions {
@@ -861,6 +862,9 @@ export function renderCi(ctx: DocContext, opts: CiOptions = {}): string {
   const etd = batch ? batch.etdDate || order.etdDate : order.etdDate
   const containerNo = batch?.containerNo || ''
   const blNo = batch?.blNo || ''
+  // 封条号与 PL 同一套回退：本批填了用本批的，没填才退回订单级。
+  // 批次 CI 上印订单级的封条，在「每批一柜」时就是个错号
+  const sealNo = batch ? batch.sealNo || order.sealNo : order.sealNo
 
   return `<!doctype html><html><head><meta charset="utf-8"><style>${PRINT_CSS}</style></head><body>
 <div class="page">
@@ -948,7 +952,7 @@ export function renderCi(ctx: DocContext, opts: CiOptions = {}): string {
       ${vessel ? `<div style="margin-top:3px">Vessel/Voyage: ${esc(vessel)}</div>` : ''}
       ${etd ? `<div>ETD: ${esc(etd)}</div>` : ''}
       ${blNo ? `<div>B/L No.: ${esc(blNo)}</div>` : ''}
-      ${order.sealNo ? `<div>Seal No.: ${esc(order.sealNo)}</div>` : ''}
+      ${sealNo ? `<div>Seal No.: ${esc(sealNo)}</div>` : ''}
     </div>
     <div class="term">
       <b>Amount / 金额</b>

@@ -265,7 +265,8 @@ export default function OrderDetail() {
           containerNo: pl.containerNo ?? undefined,
           vessel: pl.vessel ?? undefined,
           etdDate: pl.etdDate ?? undefined,
-          blNo: pl.blNo ?? undefined
+          blNo: pl.blNo ?? undefined,
+          sealNo: pl.sealNo ?? undefined
         }
         title = `CI ${docNo}（批次 ${pl.plNo}）`
       }
@@ -2322,7 +2323,7 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
                       <td>{s.reason}</td>
                       <td className="faint">{s.evidence || '—'}</td>
                       <td className="right">
-                        {s.amount > 0 && s.kind !== 'recovery' && !reversedIds.has(s.id) ? (
+                        {s.amount > 0 && !reversedIds.has(s.id) ? (
                           <Button
                             variant="danger"
                             size="sm"
@@ -2470,7 +2471,9 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
           }
         >
           <p>
-            撤销不会删原记录，而是在台账里追加一条负数。待收和收款状态会自动重算，原因会写进操作历史。
+            {reverseTarget.kind === 'recovery'
+              ? '撤销追回会同时删掉那笔自动登记的收款（钱从本月回款里退出），并在台账里追加一条负数追回记录；原记录保留。'
+              : '撤销不会删原记录，而是在台账里追加一条负数。待收和收款状态会自动重算，原因会写进操作历史。'}
           </p>
           <div className="field">
             <label>撤销原因 *</label>

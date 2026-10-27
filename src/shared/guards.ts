@@ -47,3 +47,19 @@ export function assertOptionalMoney(v: unknown, label: string): void {
   if (!Number.isFinite(n)) throw new Error(`${label}「${String(v)}」不是数字，请填金额或留空`)
   if (n < 0) throw new Error(`${label}不能是负数（${n}）`)
 }
+
+/**
+ * 单号（PI 号 / 单据号）会直接当存档目录名用：只允许安全字符，杜绝 ../ 和 Windows 保留字符。
+ * 存档那一步必须拦，但等到出单才拦就太晚了——单已经发给客户，纸面上的号却打不开存档目录。
+ */
+const SAFE_DOC_NO = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/
+
+export function assertDocNo(docNo: unknown, label = '单据号'): string {
+  const v = String(docNo ?? '').trim()
+  if (!SAFE_DOC_NO.test(v)) {
+    throw new Error(
+      `${label}「${v || '(空)'}」不能用来建存档目录：只能用字母、数字、点、下划线、短横线，且不能以符号开头。请先把单号改成正常编号。`
+    )
+  }
+  return v
+}

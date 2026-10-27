@@ -755,7 +755,9 @@ check(
 section('催尾款提醒')
 const balSettings = getSettings()
 saveSettings({ ...balSettings, remindBalanceDays: 0 })
-const balOrder = orders.createOrder({ customerId: c2.id, currency: 'USD', exchangeRate: 7.2 })
+// 定金按 30% 算：这一节测的是「定金收齐了、尾款没着落」的尾款提醒；
+// 用默认比例（这轮前面已被改成 40%）会让定金本身就没收齐，R36 起尾款提醒会被压住
+const balOrder = orders.createOrder({ customerId: c2.id, currency: 'USD', exchangeRate: 7.2, depositRatio: 0.3 })
 await orders.addOrderItem(balOrder.id, { styleNo: 'B1', productName: 'x', quantity: 100, unitPrice: 10 })
 orders.setPaymentStatus(balOrder.id, 'confirmed')
 await orders.addPayment(balOrder.id, { paidAt: '2026-03-01', amount: 300, method: 'T/T', bankRef: 'BAL001' })
@@ -2679,14 +2681,22 @@ try {
   r2Err = (e as Error).message
 }
 check('追回不能超过坏账余额', r2Err.includes('超过'), r2Err)
+// 追回登记的是「一笔自动收款 + 一条核销」，两行绑在一起。R36 起可以撤销：
+// 记错客户/金额时，这是唯一能把账退回原状的出口——只追加负数核销会让那笔钱
+// 继续躺在现金流里；只删收款则核销指向一条不存在的流水。要么一起退，要么都别动。
 const recoveryRow = orders.listSettlements(wo.id).find((s) => s.kind === 'recovery')!
-r2Err = ''
-try {
-  orders.reverseSettlement(wo.id, recoveryRow.id, '退汇')
-} catch (e) {
-  r2Err = (e as Error).message
-}
-check('实际到账的追回款不能撤销', r2Err.includes('不能撤销'), r2Err)
+woNow = orders.reverseSettlement(wo.id, recoveryRow.id, '水单录错，钱其实没到')
+eq('撤销追回后坏账余额回到 360', woNow.badDebtOutstanding, 360)
+eq('撤销追回同时退掉自动登记的收款', woNow.payments.filter((p) => p.bankRef === 'R2REC').length, 0)
+eq('追回款从已收里退出', woNow.paidAmount, 700)
+check(
+  '追回款也从本月回款里退出（现金流和台账是同一笔钱）',
+  Math.abs(dashboard.dashboard().monthReceived - recvBeforeRecovery) < 0.01,
+  `before=${recvBeforeRecovery} after=${dashboard.dashboard().monthReceived}`
+)
+const recRev = orders.listSettlements(wo.id).find((s) => s.reversesId === recoveryRow.id)!
+eq('撤销是追加一条负数追回，不删原记录', recRev.amount, -200)
+eq('撤销追回不破坏结清状态（短款 + 坏账仍然收口）', woNow.paymentStatus, 'settled')
 
 const rev = orders.createOrder({ customerId: cR2.id, currency: 'USD', exchangeRate: 7 })
 orders.setPaymentStatus(rev.id, 'confirmed')
@@ -4768,7 +4778,8 @@ function ciBatchOf(order: any, pl: any): any {
     containerNo: pl.containerNo || undefined,
     vessel: pl.vessel || undefined,
     etdDate: pl.etdDate || undefined,
-    blNo: pl.blNo || undefined
+    blNo: pl.blNo || undefined,
+    sealNo: pl.sealNo || undefined
   }
 }
 
@@ -5347,8 +5358,8 @@ orders.addSettlement(r16Rec.id, { kind: 'bad_debt', amount: 50, reason: 'R16 客
 orders.addSettlement(r16Rec.id, { kind: 'recovery', amount: 20, reason: 'R16 追回', paidAt: '2026-10-21' })
 const r16RecPay = orders.getOrder(r16Rec.id)!.payments[0]
 check(
-  '追回款删不掉，提示改走反向收款',
-  r8err(() => orders.deletePayment(r16Rec.id, r16RecPay.id, '想删')).includes('反向收款')
+  '追回款不能单独删（要先撤销这次追回，两行一起退）',
+  r8err(() => orders.deletePayment(r16Rec.id, r16RecPay.id, '想删')).includes('撤销这次追回')
 )
 eq('被拒后追回款还在', orders.getOrder(r16Rec.id)!.payments.length, 1)
 
@@ -7454,7 +7465,11 @@ const r28DepositRem = dashboard
   .reminders()
   .find((r) => r.kind === 'payment' && r.orderId === r28DTarget.id && r.message.includes('定金'))
 check('定金提醒还在（客户确认了但没收齐）', !!r28DepositRem, JSON.stringify(dashboard.reminders().map((r) => r.message)))
-check('定金提醒扣掉预收抵掉的 10，只催 20', !!r28DepositRem && r28DepositRem.message.includes('定金 20.00'), r28DepositRem?.message)
+check(
+  '定金提醒扣掉预收抵掉的 10，只催 20',
+  !!r28DepositRem && r28DepositRem.message.includes('定金还差 20.00'),
+  r28DepositRem?.message
+)
 
 // —— 抵扣入参守门：对象类型和未来日期
 check(
@@ -7999,7 +8014,14 @@ section('R32 尾款时钟：分批小额付款不再把催款提醒清零')
 const r32BalSettings = getSettings()
 saveSettings({ ...r32BalSettings, remindBalanceDays: 7 })
 
-const r32Ship = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+// 定金 10%（= 100）刚好等于下面那笔收款：定金收齐了，才谈得上「尾款」时钟
+const r32Ship = orders.createOrder({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  depositRatio: 0.1
+})
 await orders.addOrderItem(r32Ship.id, { styleNo: 'R32-BAL', quantity: 100, unitPrice: 10 })
 orders.setShipStatus(r32Ship.id, 'shipped', 'R32 尾款时钟')
 const r32ShipEv = getDb().get(
@@ -8014,7 +8036,13 @@ check('出运 30 天、昨天刚收一小笔，仍然催尾款', !!r32BalRem, JS
 eq('天数按出运起算，不被最后收款清零', r32BalRem?.days, 30)
 check('文案说清是从哪天起算的', (r32BalRem?.message ?? '').includes('自出运'), r32BalRem?.message)
 
-const r32Idle = orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
+const r32Idle = orders.createOrder({
+  customerId: c1.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  depositRatio: 0.1
+})
 await orders.addOrderItem(r32Idle.id, { styleNo: 'R32-IDLE', quantity: 100, unitPrice: 10 })
 await orders.addPayment(r32Idle.id, { paidAt: dAgo(1), amount: 100, method: 'T/T', bankRef: 'R32-P2' })
 check(
@@ -8638,6 +8666,268 @@ check(
   !renderQuotation({ quotation: quotations.getQuotation(r35NoteQ.id)!, settings: getSettings(), images: {} }).includes(
     'Agreed Terms'
   )
+)
+
+/* ---------------- R36：填进去的，得真算数 ---------------- */
+
+section('R36 批次 CI 印本批的封条号')
+
+const r36SealCust = customers.saveCustomer({ company: 'R36-SEAL-CO' })
+const r36SealOrder = orders.createOrder({
+  customerId: r36SealCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R36-SEAL',
+  sealNo: 'SEAL-ORDER'
+})
+await orders.addOrderItem(r36SealOrder.id, { styleNo: 'R36-SEAL', quantity: 20, unitPrice: 10 })
+const r36PlA = packing.createPackingList({
+  orderId: r36SealOrder.id,
+  containerNo: 'CONT-R36-A',
+  lines: [{ boxNo: 'R36-1', styleNo: 'R36-SEAL', quantity: 10 }]
+})[0]
+packing.updatePackingListInfo(r36SealOrder.id, r36PlA.id, { sealNo: 'SEAL-BATCH-A' })
+// createPackingList 返回的是这张单的全部批次（按号排序），[0] 永远是第一批；
+// 第二批要靠柜号认领，否则两版 CI 都拿第一批去渲，等于没测回退
+packing.createPackingList({
+  orderId: r36SealOrder.id,
+  containerNo: 'CONT-R36-B',
+  lines: [{ boxNo: 'R36-2', styleNo: 'R36-SEAL', quantity: 10 }]
+})
+const r36PlB = packing.listPackingLists(r36SealOrder.id).find((p) => p.containerNo === 'CONT-R36-B')!
+const r36SealFull = orders.getOrder(r36SealOrder.id)!
+const r36PaperA = renderCi(
+  { order: r36SealFull, settings: getSettings(), images: {} },
+  { batch: ciBatchOf(r36SealFull, r36SealFull.packingLists.find((p) => p.id === r36PlA.id)!) }
+)
+const r36PaperB = renderCi(
+  { order: r36SealFull, settings: getSettings(), images: {} },
+  { batch: ciBatchOf(r36SealFull, r36SealFull.packingLists.find((p) => p.id === r36PlB.id)!) }
+)
+check('批次 CI 印本批的封条号', r36PaperA.includes('Seal No.: SEAL-BATCH-A'), r36PaperA.slice(0, 300))
+check(
+  '不拿订单级的封条顶上去（每批一柜一封条，错号会让海关和客户对不上柜）',
+  !r36PaperA.includes('SEAL-ORDER'),
+  r36PaperA.slice(0, 300)
+)
+check('本批没填封条时才退回订单级（与 PL 同一套回退）', r36PaperB.includes('Seal No.: SEAL-ORDER'), r36PaperB.slice(0, 300))
+const r36WholePaper = renderCi({ order: r36SealFull, settings: getSettings(), images: {} })
+check('整单 CI 仍印订单级封条', r36WholePaper.includes('Seal No.: SEAL-ORDER'))
+
+section('R36 PI 号在保存时就验：坏号不许等到出单才炸')
+
+const r36PiCust = customers.saveCustomer({ company: 'R36-PI-CO' })
+const r36BadPiErr = r8err(() =>
+  orders.createOrder({ customerId: r36PiCust.id, currency: 'USD', exchangeRate: 7, piNo: 'PI/R36/001' })
+)
+check('带斜杠的 PI 号建单就被拦下', r36BadPiErr.includes('PI 号') && r36BadPiErr.includes('存档目录'), r36BadPiErr)
+check('说清哪些字符能用', r36BadPiErr.includes('字母、数字'), r36BadPiErr)
+const r36PiOrder = orders.createOrder({
+  customerId: r36PiCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  piNo: 'PI-R36-VALID'
+})
+eq('正常 PI 号照常建单', r36PiOrder.piNo, 'PI-R36-VALID')
+check(
+  '改成坏号也被拦（同一个校验，不另写一份）',
+  r8err(() => orders.updateOrder(r36PiOrder.id, { customerId: r36PiCust.id, piNo: '..\\R36' })).includes('PI 号')
+)
+eq('被拦后 PI 号没变', orders.getOrder(r36PiOrder.id)!.piNo, 'PI-R36-VALID')
+// 老单里可能已经躺着升级前的怪号：没改它就照常能保存别的字段
+getDb().run('UPDATE orders SET pi_no = ? WHERE id = ?', ['LEGACY/R36', r36PiOrder.id])
+const r36LegacySaved = orders.updateOrder(r36PiOrder.id, { customerId: r36PiCust.id, note: 'R36 老号不动也能保存' })
+eq('没改的老 PI 号不挡住其他字段保存', r36LegacySaved.note, 'R36 老号不动也能保存')
+eq('老号原样保留', r36LegacySaved.piNo, 'LEGACY/R36')
+
+section('R36 打样日期只记已经发生的事')
+
+const r36SmpCust = customers.saveCustomer({ company: 'R36-SAMPLE-CO' })
+const r36FutureDay = localDate(new Date(Date.now() + 5 * 86400000))
+const r36SmpItem = [{ styleNo: 'R36-SMP', quantity: 1, unitPrice: 5 }]
+const r36SmpBad = r8err(() =>
+  samples.saveSample({
+    customerId: r36SmpCust.id,
+    sampleDate: r36FutureDay,
+    currency: 'USD',
+    exchangeRate: 7,
+    items: r36SmpItem
+  })
+)
+check('打样日期填未来被拦', r36SmpBad.includes('打样日期') && r36SmpBad.includes('未来'), r36SmpBad)
+check('报错讲清后果：样品费提醒会从此不响', r36SmpBad.includes('提醒'), r36SmpBad)
+check(
+  '寄出日期填未来同样被拦',
+  r8err(() =>
+    samples.saveSample({
+      customerId: r36SmpCust.id,
+      shippedAt: r36FutureDay,
+      currency: 'USD',
+      exchangeRate: 7,
+      items: r36SmpItem
+    })
+  ).includes('寄出日期')
+)
+check(
+  '收到日期填未来同样被拦',
+  r8err(() =>
+    samples.saveSample({
+      customerId: r36SmpCust.id,
+      receivedAt: r36FutureDay,
+      currency: 'USD',
+      exchangeRate: 7,
+      items: r36SmpItem
+    })
+  ).includes('收到日期')
+)
+check(
+  '格式不对的日期也拒，并给出正确写法',
+  r8err(() =>
+    samples.saveSample({
+      customerId: r36SmpCust.id,
+      sampleDate: '2026-13-01',
+      currency: 'USD',
+      exchangeRate: 7,
+      items: r36SmpItem
+    })
+  ).includes('不是合法日期')
+)
+const r36SmpOk = samples.saveSample({
+  customerId: r36SmpCust.id,
+  sampleDate: dAgo(3),
+  shippedAt: dAgo(2),
+  receivedAt: dAgo(1),
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: dAgo(3),
+  items: r36SmpItem
+})
+eq('真实发生过的日期照常放行', [r36SmpOk.sampleDate, r36SmpOk.shippedAt, r36SmpOk.receivedAt], [
+  dAgo(3),
+  dAgo(2),
+  dAgo(1)
+])
+
+section('R36 费用行填了钱就得有名称')
+
+const r36ChargeCust = customers.saveCustomer({ company: 'R36-CHARGE-CO' })
+const r36BlankChargeErr = r8err(() =>
+  orders.createOrder({
+    customerId: r36ChargeCust.id,
+    currency: 'USD',
+    exchangeRate: 7,
+    charges: [{ label: '   ', amount: 50 }]
+  })
+)
+check('没名称却填了金额的费用行保存时被拦', r36BlankChargeErr.includes('没有名称'), r36BlankChargeErr)
+check('说清这笔钱会去哪（不进 PI/CI，也不算进待收）', r36BlankChargeErr.includes('待收'), r36BlankChargeErr)
+check(
+  '报价单同一个闸门（共用一份校验，不各写各的）',
+  r8err(() =>
+    quotations.saveQuotation({
+      customerId: r36ChargeCust.id,
+      currency: 'USD',
+      exchangeRate: 7,
+      charges: [{ label: '', amount: 12 }],
+      items: [{ styleNo: 'R36-QC', quantity: 1, unitPrice: 10 }]
+    })
+  ).includes('没有名称')
+)
+const r36ZeroBlankOk = orders.createOrder({
+  customerId: r36ChargeCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  charges: [{ label: '', amount: 0 }]
+})
+eq('金额真是 0 的空行照常丢弃（那是没填，不是丢钱）', r36ZeroBlankOk.charges.length, 0)
+
+section('R36 定金没收齐时只催定金，不喊尾款')
+
+const r36RemPrev = getSettings()
+saveSettings({ ...r36RemPrev, remindPaymentDays: 0, remindBalanceDays: 0 })
+const r36DepCust = customers.saveCustomer({ company: 'R36-DEPOSIT-CO' })
+const r36DepOrder = orders.createOrder({
+  customerId: r36DepCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  depositRatio: 0.3
+})
+await orders.addOrderItem(r36DepOrder.id, { styleNo: 'R36-DEP', quantity: 100, unitPrice: 10 })
+await orders.addPayment(r36DepOrder.id, { paidAt: localDate(), amount: 100, method: 'T/T', bankRef: 'R36-DEP-1' })
+eq('只收到 1/3 定金 → 状态是部分收款', orders.getOrder(r36DepOrder.id)!.paymentStatus, 'partial')
+const r36Rems = (): ReturnType<typeof dashboard.reminders> =>
+  dashboard.reminders().filter((r) => r.orderId === r36DepOrder.id)
+const r36DepRem = r36Rems().find((r) => r.kind === 'payment')
+check('部分收款也催定金（以前状态一跳 partial，这条提醒就没了）', !!r36DepRem, JSON.stringify(r36Rems()))
+check(
+  '说清已收多少、还差多少',
+  (r36DepRem?.message ?? '').includes('定金还差 200.00') && (r36DepRem?.message ?? '').includes('已收 100.00'),
+  r36DepRem?.message
+)
+check('定金没收齐时不喊尾款（同一笔钱不给两个名分）', !r36Rems().some((r) => r.kind === 'balance'), JSON.stringify(r36Rems()))
+await orders.addPayment(r36DepOrder.id, { paidAt: localDate(), amount: 200, method: 'T/T', bankRef: 'R36-DEP-2' })
+eq('定金收齐 → 已收款', orders.getOrder(r36DepOrder.id)!.paymentStatus, 'paid')
+check(
+  '定金收齐后才轮到尾款',
+  r36Rems().some((r) => r.kind === 'balance' && r.message.includes('尾款')),
+  JSON.stringify(r36Rems())
+)
+check('这时不再催定金', !r36Rems().some((r) => r.kind === 'payment'), JSON.stringify(r36Rems()))
+saveSettings(r36RemPrev)
+
+section('R36 恢复中途失败：附件和数据库一起退回原样')
+
+// 恢复开始时先把旧附件挪到 holding；旧代码在这里就把 holding 删了，
+// 库一旦换不进去，图库和存档已经回不来，提示却还说「原来的数据还能继续用」
+fs.mkdirSync(imagesDir(), { recursive: true })
+fs.mkdirSync(docsDir(), { recursive: true })
+fs.writeFileSync(join(imagesDir(), 'r36-before.png'), 'old-img')
+fs.writeFileSync(join(docsDir(), 'r36-before.pdf'), 'old-doc')
+const r36ConflictZip = join(backupsDir(), 'ikanbot-20260105000000-r36-conflict.zip')
+fs.writeFileSync(
+  r36ConflictZip,
+  createZip([
+    { name: 'ikanbot.db', data: r9dbBytes },
+    { name: 'images/r36-keep.png', data: Buffer.from('new-img') },
+    // 同一路径既当文件又当目录：铺 docs 时必然失败，用来看「半路翻车」怎么收场
+    { name: 'docs/r36-conflict', data: Buffer.from('x') },
+    { name: 'docs/r36-conflict/inner.pdf', data: Buffer.from('x') }
+  ])
+)
+const r36RestoreErr = await r9errA(() => restoreBackup(r36ConflictZip))
+check('失败提示明说附件也已经退回去了', r36RestoreErr.includes('退回恢复前的样子'), r36RestoreErr)
+check(
+  '不再只说「数据库没有被替换」（图片和存档同样动过）',
+  !r36RestoreErr.includes('数据库没有被替换'),
+  r36RestoreErr
+)
+eq('原来的图片还在', fs.existsSync(join(imagesDir(), 'r36-before.png')), true)
+eq('备份里的新图片没有留下', fs.existsSync(join(imagesDir(), 'r36-keep.png')), false)
+eq('原来的单据存档还在', fs.existsSync(join(docsDir(), 'r36-before.pdf')), true)
+eq('铺了半截的存档目录没有留下', fs.existsSync(join(docsDir(), 'r36-conflict')), false)
+eq(
+  '没有留下 .pre-restore 临时目录',
+  fs.readdirSync(dataDir()).filter((f) => f.includes('.pre-restore-')),
+  []
+)
+check(
+  '失败后库照常可用（不是把用户留在打不开任何页面的壳里）',
+  Number((getDb().get('SELECT COUNT(*) AS n FROM orders') as { n: number }).n) > 0
+)
+
+// 连临时库文件都写不下去（盘上已经有个同名目录）：这一步还没动任何东西，也要如实说
+const r36DbTemp = join(dataDir(), 'ikanbot.db.restoring')
+fs.mkdirSync(r36DbTemp, { recursive: true })
+const r36ValidZip = await createBackup('r36-probe')
+const r36BeforeSwapErr = await r9errA(() => restoreBackup(r36ValidZip))
+check('一步都没动时也明说数据原样', r36BeforeSwapErr.includes('退回恢复前的样子'), r36BeforeSwapErr)
+eq('数据库文件还在', fs.existsSync(join(dataDir(), 'ikanbot.db')), true)
+fs.rmSync(r36DbTemp, { recursive: true, force: true })
+check(
+  '清理后库仍然可用',
+  Number((getDb().get('SELECT COUNT(*) AS n FROM orders') as { n: number }).n) > 0
 )
 
 /* ---------------- 汇总 ---------------- */

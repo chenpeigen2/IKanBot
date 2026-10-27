@@ -144,9 +144,10 @@ export function dashboard(): DashboardStats {
 /**
  * 待办提醒规则（一张单一条事一条，宁重复催不可漏催）：
  *  1. PI 已发出超过 N 天未确认 → 催确认（按真正转入「待确认」的那天起算）
- *  2. 客户已确认超过 N 天，定金仍未收够 → 催定金
+ *  2. 客户已确认超过 N 天，定金仍未收够 → 催定金（「部分收款」也算：定金可能只到了一半）
  *  3. 出货类：批次 ETD / 整单 ETD / 截关日 / 工厂交期 / 预计出货日各盯各的（不合并，责任人不同）
- *  4. 尾款类：收过钱但没收齐；以及「货已出运却一分未收」（赊销 / L/C / 全款后付）
+ *  4. 尾款类：收过钱但没收齐；以及「货已出运却一分未收」（赊销 / L/C / 全款后付）。
+ *     定金还没收齐的单不喊尾款——那时欠的钱就是定金，只该有一条「催定金」
  *  5. 到期类：PI 有效期、报价单发出没回音与报价过期
  *  6. 打样类：打样费未收 + 样品压在手里迟迟没寄出
  *  7. 待修类：日期格式不对、汇率看着不像真的、开了船没提单号、批次没标状态、整单没有任何交期
@@ -231,25 +232,37 @@ export function reminders(): Reminder[] {
   }
 
   /* 2. 催定金：客户确认了，定金却没着落 */
+  /**
+   * 定金还差多少（预收抵扣也算已收）：两个催款循环共用，免得各写一份口径。
+   * 定金没收齐时「尾款」还不存在——这时候的欠款就是定金本身。
+   */
+  const depositDueOf = (r: (typeof moneyRows)[number]): number =>
+    r.depositAmount > 0
+      ? Math.max(0, Math.min(r.receivable, r.depositAmount - r.paidAmount - r.creditApplied))
+      : 0
+
   for (const r of moneyRows) {
-    if (r.paymentStatus !== 'confirmed' || r.depositAmount <= 0) continue
+    // confirmed = 一分没收，partial = 收了一部分；两种都是「定金还没收齐」。
+    // 以前只催 confirmed：客户打完一半定金、状态自动跳成「部分收款」后，这条提醒就消失了
+    if ((r.paymentStatus !== 'confirmed' && r.paymentStatus !== 'partial') || r.depositAmount <= 0) continue
     // 预收抵扣也是已经收到的钱：抵过一部分，定金就只剩差额要催
-    const depositDue = Math.max(
-      0,
-      Math.min(r.receivable, r.depositAmount - r.paidAmount - r.creditApplied)
-    )
+    const depositDue = depositDueOf(r)
     if (depositDue <= 0.001) continue
     const row = orderById.get(r.orderId)
     if (!row) continue
     const days = daysFrom(clockOf(r.orderId, 'confirmed', String(row.created_at)))
     if (days === null || days < s.remindPaymentDays) continue
+    const received = Math.max(0, r.depositAmount - depositDue)
     add(
       {
         orderId: r.orderId,
         orderNo: r.orderNo,
         customerName: r.customerName,
         kind: 'payment',
-        message: `客户已确认 ${days} 天，定金 ${depositDue.toFixed(2)} ${r.currency} 未到账`,
+        message:
+          received > 0.001
+            ? `客户已确认 ${days} 天，定金还差 ${depositDue.toFixed(2)} ${r.currency} 未到账（已收 ${received.toFixed(2)}）`
+            : `客户已确认 ${days} 天，定金 ${depositDue.toFixed(2)} ${r.currency} 未到账`,
         days
       },
       'deposit'
@@ -579,6 +592,9 @@ export function reminders(): Reminder[] {
     const row = orderById.get(r.orderId)
     if (!row) continue
     if (r.paidAmount > 0) {
+      // 定金都还没收齐时，欠的钱就是定金，不是尾款：上面那条「催定金」才说得对。
+      // 这里再喊一条「尾款 N 天未到账」，等于同一笔钱两个名分，还把真该催的定金淹掉
+      if (depositDueOf(r) > 0.001) continue
       // 尾款的主钟只认「货出去了多久」：分批小额付款会把「最后收款日」一路往后推，
       // 结果最该催的客户永远不出现在提醒里。没收过货的单仍按最后收款日算（定金还在谈）。
       const shipped = ['shipped', 'cleared', 'delivered', 'partial_shipped'].includes(String(row.ship_status))

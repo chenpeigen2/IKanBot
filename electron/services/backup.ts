@@ -186,13 +186,30 @@ function inspectRestoredDb(dbData: Buffer, stamp: string): void {
   }
 }
 
-/** 把一个目录整体换成备份里的内容（备份里没有的就当已删） */
-function replaceDir(dir: string, prefix: string, entries: ZipEntry[], stamp: string): void {
+/** 一次附件目录替换的现场：换库失败时要靠它穿回原样 */
+interface DirSwap {
+  dir: string
+  holding: string
+  /** 旧内容被挪去了 holding（原来的目录非空） */
+  moved: boolean
+  /** 恢复前这个目录本来就在（哪怕是空的） */
+  existed: boolean
+}
+
+/**
+ * 把一个目录整体换成备份里的内容（备份里没有的就当已删）。
+ *
+ * 旧内容只挪进 holding，不在这里删：库还没换，换库那一步失败时这两份旧图/旧存档
+ * 还得穿回去。旧目录的清理交给 dropHolding，等整套替换确认成功再做。
+ */
+function replaceDir(dir: string, prefix: string, entries: ZipEntry[], stamp: string): DirSwap {
   const mine = `${prefix}/`
   const wanted = entries.filter((e) => e.name.startsWith(mine))
   const holding = `${dir}.pre-restore-${stamp}`
+  const existed = existsSync(dir)
+  const moved = existed && readdirSync(dir).length > 0
   if (existsSync(holding)) rmSync(holding, { recursive: true, force: true })
-  if (existsSync(dir) && readdirSync(dir).length > 0) {
+  if (moved) {
     // 先整体挪走再铺新的：直接删的话，铺到一半崩了就是两头空
     renameSync(dir, holding)
   }
@@ -208,10 +225,27 @@ function replaceDir(dir: string, prefix: string, entries: ZipEntry[], stamp: str
   } catch (e) {
     // 铺坏了就原路退回去，别让用户的图库和存档停在半套状态
     rmSync(dir, { recursive: true, force: true })
-    if (existsSync(holding)) renameSync(holding, dir)
+    if (moved) renameSync(holding, dir)
     throw e
   }
-  if (existsSync(holding)) rmSync(holding, { recursive: true, force: true })
+  return { dir, holding, moved, existed }
+}
+
+/** 换库失败时把附件目录穿回恢复前的样子（原来没有的目录就让它消失） */
+function undoReplace(swap: DirSwap): void {
+  rmSync(swap.dir, { recursive: true, force: true })
+  if (swap.moved) renameSync(swap.holding, swap.dir)
+  else if (swap.existed) mkdirSync(swap.dir, { recursive: true })
+}
+
+/** 整套恢复成功后，旧附件目录才真正可以扔了 */
+function dropHolding(swap: DirSwap): void {
+  if (!swap.moved || !existsSync(swap.holding)) return
+  try {
+    rmSync(swap.holding, { recursive: true, force: true })
+  } catch {
+    /* 旧目录删不掉不影响新数据，下次恢复会先清掉同名 holding */
+  }
 }
 
 /** 备份包里的文件清单摘要：恢复确认框上要让人看一眼「这是哪天、有几单」的包 */
@@ -363,12 +397,13 @@ export async function restoreBackup(rawPath: string): Promise<{ restarted: boole
 
   const stamp = `${Date.now()}`
   const dbTemp = `${dbFile}.restoring`
+  const swaps: DirSwap[] = []
   try {
     writeFileSync(dbTemp, dbEntry.data)
     // 图片和存档先换，库最后换：两个附件目录铺坏了还能用旧库继续干活；
     // 反过来（库先换）中途失败就是「新库配旧图片」，业务数字和凭据来自两个时间点。
-    replaceDir(imagesDir(), 'images', entries, stamp)
-    replaceDir(docsDir(), 'docs', entries, stamp)
+    swaps.push(replaceDir(imagesDir(), 'images', entries, stamp))
+    swaps.push(replaceDir(docsDir(), 'docs', entries, stamp))
     renameSync(dbTemp, dbFile)
   } catch (e) {
     try {
@@ -376,15 +411,32 @@ export async function restoreBackup(rawPath: string): Promise<{ restarted: boole
     } catch {
       /* 临时文件删不掉不影响原库 */
     }
-    // closeDb 之后 getDb 会抛「尚未初始化」；库里还没被换掉，重新挂上原库，
+    // 附件目录已经换过就得先穿回去：旧库配着备份里的图和存档，也是两个时间点拼起来的账。
+    // 以前这里把旧目录在 replaceDir 里就删了，换库一失败图片和存档就回不来。
+    let intact = true
+    for (const swap of [...swaps].reverse()) {
+      try {
+        undoReplace(swap)
+      } catch {
+        intact = false
+      }
+    }
+    // closeDb 之后 getDb 会抛「尚未初始化」；重新挂上原库，
     // 让程序还能继续用，而不是把用户留在一个打不开任何页面的壳里。
     try {
       openDb()
     } catch {
       /* 原库也打不开就只能交给上层重启 */
     }
-    throw new Error(`恢复中途失败：${(e as Error).message}。数据库没有被替换，原来的数据还能继续用；请检查磁盘空间后重试。`)
+    throw new Error(
+      intact
+        ? `恢复中途失败：${(e as Error).message}。数据库、图片和单据存档都已经退回恢复前的样子，原来的数据还能继续用；请检查磁盘空间后重试。`
+        : `恢复中途失败：${(e as Error).message}。原来的数据库还在，但有附件目录没能退回去，可能停在半旧半新的状态。请先到「数据备份」立即备份一份当前数据，再联系技术支持。`
+    )
   }
+
+  // 库、图片、存档三样都换成功了，旧附件目录才可以扔
+  swaps.forEach(dropHolding)
 
   // 数据已经换干净了，但内存里的库句柄、设置缓存全是旧的——只能重开一次
   app.relaunch()
