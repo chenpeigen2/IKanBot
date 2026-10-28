@@ -65,7 +65,7 @@ openDb()
 
 /* ---------------- 商品 ---------------- */
 section('商品库')
-const p1 = products.saveProduct({
+const p1 = await products.saveProduct({
   styleNo: 'A001',
   name: '纯棉圆领T恤',
   composition: '100% Cotton / 纯棉',
@@ -78,7 +78,7 @@ eq('尺码表', p1.sizes, ['S', 'M', 'L'])
 eq('颜色表', p1.colors, ['Black', 'White'])
 eq('成本价', p1.costPrice, 5.5)
 
-const p2 = products.saveProduct({
+const p2 = await products.saveProduct({
   styleNo: 'A002',
   name: '涤纶 Polo 衫',
   composition: '95% Polyester 5% Spandex',
@@ -88,10 +88,10 @@ const p2 = products.saveProduct({
 })
 check('新增第二个商品', p2.id > 0)
 
-eq('按款号搜索', products.listProducts('A001').length, 1)
-check('关键词模糊搜索', products.listProducts('棉').length === 1)
+eq('按款号搜索', (await products.listProducts('A001')).length, 1)
+check('关键词模糊搜索', (await products.listProducts('棉')).length === 1)
 
-const copied = products.copyProduct(p1.id, 'A001-BLACK')
+const copied = await products.copyProduct(p1.id, 'A001-BLACK')
 eq('复制款号保留尺码表', copied.sizes, ['S', 'M', 'L'])
 eq('复制款号新编号', copied.styleNo, 'A001-BLACK')
 
@@ -830,7 +830,7 @@ check('明细台账不含草稿订单的款号', !csvItems.includes('DRAFT-1'))
 
 /* ---------------- 商品库：净重与箱规 ---------------- */
 section('商品库单件净重与箱规')
-const p3 = products.saveProduct({
+const p3 = await products.saveProduct({
   styleNo: 'A003',
   name: '带箱规的款',
   costPrice: 5,
@@ -3000,20 +3000,20 @@ eq('同名对照查得到几条', (await customers.sameNameCustomers('Acme Fashi
 section('R5 停用而不是删除：单据要能原样重印')
 let styleErr = ''
 try {
-  products.saveProduct({ styleNo: 'a001', name: '撞号的款', sizes: [], colors: [] })
+  await products.saveProduct({ styleNo: 'a001', name: '撞号的款', sizes: [], colors: [] })
 } catch (e) {
   styleErr = (e as Error).message
 }
 check('款号大小写撞号被拦（一个号只能有一条档案）', styleErr.includes('已经存在'), styleErr)
-const refDel = products.deleteProduct(p1.id)
+const refDel = await products.deleteProduct(p1.id)
 check('被历史单据引用的款不真删，只做停用', refDel.deactivated)
 check('停用的话术讲清为什么不能删', refDel.message.includes('重印'), refDel.message)
-check('停用后建单下拉不再带出', !products.listProducts().some((p) => p.id === p1.id))
-eq('但按款号仍找得回来，历史单据照印', products.findProductByStyleNo('A001')?.id, p1.id)
-check('引用计数说得出挂在几个订单行上', products.productReferenceCount(p1.id).orders > 0)
-const backOn = products.setProductActive(p1.id, 1)
+check('停用后建单下拉不再带出', !(await products.listProducts()).some((p) => p.id === p1.id))
+eq('但按款号仍找得回来，历史单据照印', (await products.findProductByStyleNo('A001'))?.id, p1.id)
+check('引用计数说得出挂在几个订单行上', (await products.productReferenceCount(p1.id)).orders > 0)
+const backOn = await products.setProductActive(p1.id, 1)
 check('需要时能再启用', backOn.active === 1)
-check('再启用后回到建单下拉', products.listProducts().some((p) => p.id === p1.id))
+check('再启用后回到建单下拉', (await products.listProducts()).some((p) => p.id === p1.id))
 
 const cStop = await customers.saveCustomer({ company: 'Bymark AB', contact: 'Sofia', country: 'Sweden' })
 await customers.setCustomerActive(cStop.id, 0)
@@ -3029,10 +3029,10 @@ const csvText = [
   'b101,库里已有的款,100% Polyester,,,,,,,,,',
   ',这一行没有款号,100% Cotton,,,,,,,,'
 ].join('\n')
-const imp1 = products.importProductsCsv(csvText, 'skip')
+const imp1 = await products.importProductsCsv(csvText, 'skip')
 eq('导入新增 1 款', imp1.created, 1)
 eq('撞号的和没款号的一共跳过 2 行', imp1.skipped, 2)
-const b101 = products.findProductByStyleNo('B101')!
+const b101 = (await products.findProductByStyleNo('B101'))!
 eq('引号里的逗号不算分列', b101.name, '羊毛混纺外套, 男款')
 eq('成本价里的 ¥ 会被抹掉', b101.costPrice, 88)
 eq('尺码按空格拆开', b101.sizes, ['S', 'M', 'L'])
@@ -3041,7 +3041,7 @@ eq('箱规 60×40×50 拆成三个数', [b101.boxLength, b101.boxWidth, b101.box
 eq('工厂进了档案', b101.factory, '雅戈尔')
 eq('工厂货号进了档案', b101.factoryNo, 'YY-88')
 check('没款号的行逐行说明原因', imp1.errors.some((e) => e.includes('没有款号')), JSON.stringify(imp1.errors))
-const c900 = products.saveProduct({
+const c900 = await products.saveProduct({
   styleNo: 'C900',
   name: '旧名字',
   composition: '100% Cotton',
@@ -3049,22 +3049,22 @@ const c900 = products.saveProduct({
   sizes: [],
   colors: []
 })
-const impSkip = products.importProductsCsv(
+const impSkip = await products.importProductsCsv(
   [products.CSV_TEMPLATE_HEADER, 'C900,覆盖模式才会改,,,,,,,,,,'].join('\n'),
   'skip'
 )
-eq('默认「跳过已有」不动老档案', products.getProduct(c900.id)?.name, '旧名字')
+eq('默认「跳过已有」不动老档案', (await products.getProduct(c900.id))?.name, '旧名字')
 eq('跳过模式不计更新', impSkip.updated, 0)
-const impOver = products.importProductsCsv(
+const impOver = await products.importProductsCsv(
   [products.CSV_TEMPLATE_HEADER, 'C900,覆盖后的新名字,80% Wool,,,¥ 12,,,,,,,,,'].join('\n'),
   'overwrite'
 )
 eq('覆盖模式更新 1 条', impOver.updated, 1)
-eq('覆盖后档案真的变了', products.getProduct(c900.id)?.name, '覆盖后的新名字')
-eq('覆盖时成本也按 ¥ 解析', products.getProduct(c900.id)?.costPrice, 12)
+eq('覆盖后档案真的变了', (await products.getProduct(c900.id))?.name, '覆盖后的新名字')
+eq('覆盖时成本也按 ¥ 解析', (await products.getProduct(c900.id))?.costPrice, 12)
 let csvErr = ''
 try {
-  products.importProductsCsv('编号,品名\nX1,abc\n', 'skip')
+  await products.importProductsCsv('编号,品名\nX1,abc\n', 'skip')
 } catch (e) {
   csvErr = (e as Error).message
 }
@@ -7957,18 +7957,18 @@ eq('一份都没有就是 null', pickCsvDecode([]), null)
 // 模板现在带 BOM（Excel 双击不乱码），用户填完原样导回来时 BOM 不能挡住表头
 const r31Rows = products.parseCsvRows(`${CSV_BOM}${products.CSV_TEMPLATE_HEADER}\nR31-BOM,带BOM的款`)
 eq('parseCsvRows 会摘掉 BOM', r31Rows[0][0], '款号')
-const r31Imp = products.importProductsCsv(
+const r31Imp = await products.importProductsCsv(
   `${CSV_BOM}${products.CSV_TEMPLATE_HEADER}\nR31-BOM,带BOM的款,100% Cotton,,,,,,,`,
   'skip'
 )
 eq('带 BOM 的 CSV 正常导入 1 款', r31Imp.created, 1)
-const r31P = products.findProductByStyleNo('R31-BOM')
+const r31P = await products.findProductByStyleNo('R31-BOM')
 check('导入后款号没有夹着 BOM', r31P?.styleNo === 'R31-BOM', String(r31P?.styleNo))
-if (r31P) products.deleteProduct(r31P.id)
+if (r31P) await products.deleteProduct(r31P.id)
 
 let r31Err = ''
 try {
-  products.importProductsCsv('Êý¾Ý,Æ·Ãû\nA001,1\n', 'skip')
+  await products.importProductsCsv('Êý¾Ý,Æ·Ãû\nA001,1\n', 'skip')
 } catch (e) {
   r31Err = (e as Error).message
 }
@@ -8247,7 +8247,7 @@ eq('基准币待收 = 待收 × 汇率', Number(r34OpenRow![r34Head.indexOf(`待
 
 section('R34 覆盖导入：CSV 表头里没有的列不许抹平档案')
 
-products.saveProduct({
+await products.saveProduct({
   styleNo: 'R34-IMP',
   name: '原品名',
   composition: '100% Cotton',
@@ -8262,9 +8262,9 @@ products.saveProduct({
   factory: '原工厂',
   factoryNo: 'F-1'
 })
-const r34Imp1 = products.importProductsCsv('款号,品名,成本价\nR34-IMP,改过的品名,25\n', 'overwrite')
+const r34Imp1 = await products.importProductsCsv('款号,品名,成本价\nR34-IMP,改过的品名,25\n', 'overwrite')
 eq('覆盖导入报出更新 1 款', r34Imp1.updated, 1)
-const r34Keep = products.findProductByStyleNo('R34-IMP')!
+const r34Keep = (await products.findProductByStyleNo('R34-IMP'))!
 eq('表头里有的列照改（成本价）', r34Keep.costPrice, 25)
 eq('表头里有的列照改（品名）', r34Keep.name, '改过的品名')
 eq('表头里没有的尺码保留', r34Keep.sizes, ['M', 'L'])
@@ -8274,10 +8274,17 @@ eq('表头里没有的工厂货号保留', r34Keep.factoryNo, 'F-1')
 eq('表头里没有的箱规保留', [r34Keep.boxLength, r34Keep.boxWidth, r34Keep.boxHeight], [60, 40, 50])
 eq('表头里没有的单件净重保留', r34Keep.unitNetWeight, 0.7)
 eq('表头里没有的每箱件数保留', r34Keep.boxPieces, 20)
-products.importProductsCsv('款号,尺码\nR34-IMP,\n', 'overwrite')
-eq('表头里有这一列、格子空着 = 仍按明确清空', products.findProductByStyleNo('R34-IMP')!.sizes, [])
-products.importProductsCsv('款号,箱规\nR34-IMP,50×30×20\n', 'overwrite')
-eq('箱规列在表头里就按新值覆盖', [products.findProductByStyleNo('R34-IMP')!.boxLength, products.findProductByStyleNo('R34-IMP')!.boxWidth], [50, 30])
+await products.importProductsCsv('款号,尺码\nR34-IMP,\n', 'overwrite')
+eq('表头里有这一列、格子空着 = 仍按明确清空', (await products.findProductByStyleNo('R34-IMP'))!.sizes, [])
+await products.importProductsCsv('款号,箱规\nR34-IMP,50×30×20\n', 'overwrite')
+eq(
+  '箱规列在表头里就按新值覆盖',
+  [
+    (await products.findProductByStyleNo('R34-IMP'))!.boxLength,
+    (await products.findProductByStyleNo('R34-IMP'))!.boxWidth
+  ],
+  [50, 30]
+)
 
 section('R34 CI 重叠闸门：同一个号只认最新一版')
 
@@ -8497,32 +8504,43 @@ eq('实际开船填今天照常放行', packing.listPackingLists(r35O.id)[0].atd
 
 section('R35 商品主图：有图就必须恰好有一张主图')
 
-const r35P = products.saveProduct({
+const r35P = await products.saveProduct({
   styleNo: 'R35-IMG',
   name: '主图不变量',
   composition: '100% Cotton',
   sizes: ['M'],
   colors: ['Black']
 })
-products.addProductImage(r35P.id, 'R35-1.jpg')
-products.addProductImage(r35P.id, 'R35-2.jpg')
-products.addProductImage(r35P.id, 'R35-3.jpg')
+await products.addProductImage(r35P.id, 'R35-1.jpg')
+await products.addProductImage(r35P.id, 'R35-2.jpg')
+await products.addProductImage(r35P.id, 'R35-3.jpg')
 const r35Imgs = () => products.listProductImages(r35P.id)
-const r35Primary = (): string => r35Imgs().filter((i) => i.isPrimary === 1).map((i) => i.fileName).join('|')
-eq('三张都没勾主图，也恰好有一张主图', r35Imgs().filter((i) => i.isPrimary === 1).length, 1)
-eq('主图是第一张上传的（界面提示就是这么说的）', r35Primary(), 'R35-1.jpg')
-const r35GhostErr = r8err(() => products.setPrimaryImage(r35P.id, 9_999_999))
+const r35Primary = async (): Promise<string> =>
+  (await r35Imgs())
+    .filter((i) => i.isPrimary === 1)
+    .map((i) => i.fileName)
+    .join('|')
+eq('三张都没勾主图，也恰好有一张主图', (await r35Imgs()).filter((i) => i.isPrimary === 1).length, 1)
+eq('主图是第一张上传的（界面提示就是这么说的）', await r35Primary(), 'R35-1.jpg')
+const r35GhostErr = await (async (): Promise<string> => {
+  try {
+    await products.setPrimaryImage(r35P.id, 9_999_999)
+    return ''
+  } catch (e) {
+    return (e as Error).message
+  }
+})()
 check('指到一张不属于这个商品的图会报错', r35GhostErr.includes('主图没有改动'), r35GhostErr)
-eq('报错后原主图还在（没被撤成空白）', r35Primary(), 'R35-1.jpg')
-const r35Img3 = r35Imgs().find((i) => i.fileName === 'R35-3.jpg')!
-products.setPrimaryImage(r35P.id, r35Img3.id)
-eq('换主图后仍然只有一张', r35Imgs().filter((i) => i.isPrimary === 1).length, 1)
-eq('新主图是被点那张', r35Primary(), 'R35-3.jpg')
-products.deleteProductImage(r35Img3.id)
-eq('删掉主图立刻有人接班', r35Primary(), 'R35-1.jpg')
-eq('主图删了，另外两张还在', r35Imgs().length, 2)
-for (const img of r35Imgs()) products.deleteProductImage(img.id)
-eq('全部删光不报错，也不留孤儿主图', r35Imgs().length, 0)
+eq('报错后原主图还在（没被撤成空白）', await r35Primary(), 'R35-1.jpg')
+const r35Img3 = (await r35Imgs()).find((i) => i.fileName === 'R35-3.jpg')!
+await products.setPrimaryImage(r35P.id, r35Img3.id)
+eq('换主图后仍然只有一张', (await r35Imgs()).filter((i) => i.isPrimary === 1).length, 1)
+eq('新主图是被点那张', await r35Primary(), 'R35-3.jpg')
+await products.deleteProductImage(r35Img3.id)
+eq('删掉主图立刻有人接班', await r35Primary(), 'R35-1.jpg')
+eq('主图删了，另外两张还在', (await r35Imgs()).length, 2)
+for (const img of await r35Imgs()) await products.deleteProductImage(img.id)
+eq('全部删光不报错，也不留孤儿主图', (await r35Imgs()).length, 0)
 
 section('R35 删验货照：记录和留痕一起成败')
 

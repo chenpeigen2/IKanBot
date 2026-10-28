@@ -20,8 +20,15 @@ import { EXPORT_FILE_NAME } from '../../src/shared/types'
 import type { ExportKind, OrderExportFilter } from '../../src/shared/types'
 import { localDate } from '../../src/shared/date'
 import { registerUpdaterIpc } from '../services/updater'
-import { getConnection, saveConnection, envLocked } from '../mode'
-import { probeRemote, remoteChannelCount } from '../remote/client'
+import { getConnection, saveConnection, envLocked, isRemoteMode } from '../mode'
+import {
+  probeRemote,
+  remoteChannelCount,
+  remoteDiscardImages,
+  remoteImageBase,
+  remoteReadImage,
+  remoteUploadImage
+} from '../remote/client'
 import { handle, registeredChannels } from './handle'
 import { copyFileSync } from 'fs'
 import { randomUUID } from 'crypto'
@@ -309,6 +316,24 @@ export function registerIpc(): void {
       filters: [{ name: '图片', extensions: ['jpg', 'jpeg', 'png', 'webp', 'gif'] }]
     })
     if (res.canceled) return []
+    // 远端模式：图要跟库在一起，直接传到后端，本机不留副本
+    if (isRemoteMode()) {
+      const uploaded: string[] = []
+      try {
+        for (const src of res.filePaths) {
+          uploaded.push(await remoteUploadImage(basename(src), readFileSync(src)))
+        }
+      } catch (e) {
+        // 半路翻车：已经传上去的必须撤掉，否则后端目录里留一堆没人登记的孤儿图
+        try {
+          await remoteDiscardImages(uploaded)
+        } catch {
+          /* 清理失败不盖住原始报错 */
+        }
+        throw e
+      }
+      return uploaded
+    }
     const out: string[] = []
     try {
       for (const src of res.filePaths) {
@@ -359,16 +384,25 @@ export function registerIpc(): void {
     if (!p.startsWith(dir + sep)) return null
     return existsSync(p) ? p : null
   }
-  handle('images:url', (fileName: string) => {
+  handle('images:url', async (fileName: string): Promise<string> => {
+    // 远端模式图在后端：直接给 HTTP 地址，<img src> 自己能取
+    if (isRemoteMode()) {
+      const name = basename(String(fileName ?? ''))
+      return name ? `${remoteImageBase()}/${encodeURIComponent(name)}` : ''
+    }
     const p = safeImage(fileName)
     if (!p) return ''
     return pathToFileURL(p).href
   })
-  handle('images:discard', (names: unknown): void => {
+  handle('images:discard', async (names: unknown): Promise<void> => {
+    const list = (Array.isArray(names) ? names : []).filter((n): n is string => typeof n === 'string')
     // 批量上传中途失败：当次已拷进图片目录、但没登记进库的文件必须清掉，
     // 否则备份会把孤儿一张不落地打包，磁盘占用永久放大
-    for (const n of Array.isArray(names) ? names : []) {
-      if (typeof n !== 'string') continue
+    if (isRemoteMode()) {
+      await remoteDiscardImages(list)
+      return
+    }
+    for (const n of list) {
       const p = safeImage(n)
       if (!p) continue
       try {
@@ -379,15 +413,15 @@ export function registerIpc(): void {
     }
   })
   ipcMain.on('images:baseDir', (e) => {
-    e.returnValue = imagesDir()
+    // 远端模式下返回 HTTP 基地址，renderer 的 imageUrl() 按 http 前缀直接拼
+    e.returnValue = isRemoteMode() ? remoteImageBase() : imagesDir()
   })
-  handle('images:readDataUrl', (fileName: string): string => {
-    const p = safeImage(fileName)
-    if (!p) return ''
-    const ext = p.split('.').pop()?.toLowerCase() ?? 'jpg'
-    // SVG 也得按自己的 MIME 进来：一律当 jpeg 会让纸面 logo 直接空白
-    const mime =
-      ext === 'png'
+  handle('images:readDataUrl', async (fileName: string): Promise<string> => {
+    const name = basename(String(fileName ?? ''))
+    const mimeOf = (n: string): string => {
+      const ext = n.split('.').pop()?.toLowerCase() ?? 'jpg'
+      // SVG 也得按自己的 MIME 进来：一律当 jpeg 会让纸面 logo 直接空白
+      return ext === 'png'
         ? 'image/png'
         : ext === 'webp'
           ? 'image/webp'
@@ -396,8 +430,15 @@ export function registerIpc(): void {
             : ext === 'svg'
               ? 'image/svg+xml'
               : 'image/jpeg'
-    const buf = readFileSync(p)
-    return `data:${mime};base64,${buf.toString('base64')}`
+    }
+    if (isRemoteMode() && name) {
+      // 商品图在后端；公司 Logo 还在本机的设置里，后端没有就回退本机目录
+      const remote = await remoteReadImage(name)
+      if (remote) return `data:${mimeOf(name)};base64,${remote.toString('base64')}`
+    }
+    const p = safeImage(fileName)
+    if (!p) return ''
+    return `data:${mimeOf(p)};base64,${readFileSync(p).toString('base64')}`
   })
 
   /* ---- 备份 / 导出 ---- */

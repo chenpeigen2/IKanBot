@@ -30,7 +30,7 @@ async function main() {
   db.exec('DELETE FROM product_images')
 
   // 商品
-  const tshirt = products.saveProduct({
+  const tshirt = await products.saveProduct({
     styleNo: 'TS-001',
     name: '纯棉圆领短袖T恤',
     composition: '100% Cotton / 纯棉',
@@ -41,7 +41,7 @@ async function main() {
     sizes: ['S', 'M', 'L', 'XL'],
     colors: ['Black', 'White', 'Navy']
   })
-  const polo = products.saveProduct({
+  const polo = await products.saveProduct({
     styleNo: 'PL-002',
     name: '涤纶珠地POLO衫',
     composition: '95% Polyester 5% Spandex / 涤纶氨纶',
@@ -52,7 +52,7 @@ async function main() {
     sizes: ['M', 'L', 'XL'],
     colors: ['Navy', 'Red']
   })
-  const shirt = products.saveProduct({
+  const shirt = await products.saveProduct({
     styleNo: 'SH-003',
     name: '牛津纺商务长袖衬衫',
     composition: '100% Cotton Oxford / 牛津纺纯棉',
@@ -71,10 +71,10 @@ async function main() {
     'SH-003': 'seed-sh003.png'
   }
   for (const [styleNo, file] of Object.entries(sampleImages)) {
-    const p = products.listProducts(styleNo).find((x) => x.styleNo === styleNo)
+    const p = (await products.listProducts(styleNo)).find((x) => x.styleNo === styleNo)
     if (!p) continue
     if (!existsSync(join((await import('../electron/db')).imagesDir(), file))) continue
-    products.addProductImage(p.id, file, true)
+    await products.addProductImage(p.id, file, true)
   }
 
   // 客户
@@ -293,7 +293,7 @@ async function main() {
   const settings = getSettings()
   const images: Record<string, string> = {}
   for (const p of [tshirt, polo, shirt]) {
-    const imgs = products.listProductImages(p.id)
+    const imgs = await products.listProductImages(p.id)
     const primary = imgs.find((i) => i.isPrimary) ?? imgs[0]
     if (!primary) continue
     const f = join((await import('../electron/db')).imagesDir(), primary.fileName)

@@ -16,6 +16,7 @@ import type { Db } from '../src/db/types'
 async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'ikan-e2e-'))
   process.env['IKAN_SQLITE_FILE'] = join(dir, 'e2e.db')
+  process.env['IKAN_IMAGES_DIR'] = join(dir, 'images')
   delete process.env['IKAN_DB']
 
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile()
@@ -38,7 +39,10 @@ async function main(): Promise<void> {
     const meta = await http.get('/api')
     const routes: string[] = meta.body.routes ?? []
     check('GET /api 自描述已接接口', routes.includes('POST /api/customers/list') && routes.includes('GET /healthz'))
-    check('路由数与控制器一致（8 个）', routes.length === 8)
+    check(
+      '路由数与控制器一致（23 个：客户 6 + 商品 12 + 图片 3 + 自带 2）',
+      routes.length === 23
+    )
 
     console.log('客户域')
     const empty = await http.post('/api/customers/list').send({})
@@ -158,6 +162,106 @@ async function main(): Promise<void> {
       )
     )
     check('并发六个请求互不串数据（全 200）', parallel.every((r) => r.status === 200))
+
+    console.log('商品域')
+    const pEmpty = await http.post('/api/products/list').send({})
+    check('空库出空商品列表', pEmpty.status === 200 && Array.isArray(pEmpty.body) && pEmpty.body.length === 0)
+
+    const pSave = await http.post('/api/products/save').send({
+      input: { styleNo: 'API-1', name: '接口款', composition: '100% Cotton', sizes: ['M', 'L'], colors: ['Black'] }
+    })
+    check(
+      '新建商品返回落库后的档案',
+      pSave.status === 200 && pSave.body.styleNo === 'API-1' && pSave.body.sizes.length === 2
+    )
+    const pid = pSave.body.id as number
+
+    const pDup = await http
+      .post('/api/products/save')
+      .send({ input: { styleNo: 'api-1', name: '撞号', composition: '', sizes: [], colors: [] } })
+    check(
+      '款号大小写撞号拒收（原句说清后果）',
+      pDup.status === 400 && String(pDup.body.error.message).includes('已经存在')
+    )
+
+    const pMissing = await http.post('/api/products/get').send({ id: 999999 })
+    check('查不存在的商品说「商品不存在」', pMissing.status === 404 && pMissing.body.error.message === '商品不存在')
+
+    const pNeg = await http
+      .post('/api/products/save')
+      .send({ input: { styleNo: 'API-NEG', name: '负数', composition: '', sizes: [], colors: [], costPrice: -1 } })
+    check(
+      '成本价负数拒收（守门文案原样透出）',
+      pNeg.status === 400 && String(pNeg.body.error.message).includes('不能是负数')
+    )
+
+    const pCopy = await http.post('/api/products/copy').send({ id: pid, newStyleNo: 'API-1-COPY' })
+    check(
+      '复制款号保留尺码表',
+      pCopy.status === 200 && pCopy.body.styleNo === 'API-1-COPY' && pCopy.body.sizes.length === 2
+    )
+
+    const img = await http.post('/api/products/addImage').send({ productId: pid, fileName: 'probe.png' })
+    check('第一张图自动上主位', img.status === 200 && img.body.isPrimary === 1)
+    const imgs = await http.post('/api/products/images').send({ productId: pid })
+    check('图片列表按主图优先', imgs.status === 200 && imgs.body.length === 1)
+
+    const imgNoName = await http.post('/api/products/addImage').send({ productId: pid, fileName: '   ' })
+    check('空图片文件名拒收', imgNoName.status === 400)
+
+    const ghostImg = await http.post('/api/products/setPrimary').send({ productId: pid, imageId: 999999 })
+    check(
+      '指到不属于该商品的图报错（原句）',
+      ghostImg.status === 400 && String(ghostImg.body.error.message).includes('主图没有改动')
+    )
+
+    check('删图片登记不报错', (await http.post('/api/products/delImage').send({ id: img.body.id })).status === 200)
+    const refs = await http.post('/api/products/referenceCount').send({ id: pid })
+    check(
+      '引用计数三项齐全',
+      refs.status === 200 && refs.body.orders === 0 && refs.body.quotations === 0 && refs.body.samples === 0
+    )
+
+    const pImp = await http
+      .post('/api/products/importCsv')
+      .send({ text: '款号,品名\nAPI-CSV,导入款\n', mode: 'skip' })
+    check('CSV 导入走同一份解析（表头别名都认）', pImp.status === 200 && pImp.body.created === 1)
+
+    const pDel = await http.post('/api/products/delete').send({ id: pid })
+    check('没引用的商品可以真删', pDel.status === 200 && pDel.body.deactivated === false)
+
+    console.log('图片文件')
+    const png = Buffer.from('89504e470d0a1a0a', 'hex')
+    const up = await http
+      .post('/api/files/upload?name=probe.png')
+      .set('content-type', 'application/octet-stream')
+      .send(png)
+    check('上传图片返回后端生成的文件名', up.status === 200 && /\.png$/.test(String(up.body.fileName)))
+    const storedName = String(up.body.fileName)
+
+    const fetched = await http.get(`/api/files/images/${storedName}`)
+    check(
+      '按文件名取回图片（类型与缓存头都对）',
+      fetched.status === 200 && String(fetched.headers['content-type']).includes('image/png')
+    )
+    check('不存在的图 404', (await http.get('/api/files/images/nope.png')).status === 404)
+
+    const badExt = await http
+      .post('/api/files/upload?name=probe.exe')
+      .set('content-type', 'application/octet-stream')
+      .send(png)
+    check(
+      '非图片扩展名拒收（说清只接哪几种）',
+      badExt.status === 400 && String(badExt.body.error.message).includes('只接')
+    )
+    check(
+      '目录穿越读不到目录外的文件',
+      (await http.get('/api/files/images/..%2F..%2Fpackage.json')).status === 404
+    )
+
+    const disc = await http.post('/api/files/discard').send({ names: [storedName, 'nope.png'] })
+    check('丢弃图片只删存在的那张', disc.status === 200 && disc.body.removed === 1)
+    check('删完再取确实没了', (await http.get(`/api/files/images/${storedName}`)).status === 404)
 
     console.log('错误体')
     const unknown = await http.post('/api/no-such-route').send({})

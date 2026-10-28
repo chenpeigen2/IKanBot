@@ -20,6 +20,12 @@ const LOCAL_ONLY = [
   'settings:'
 ]
 
+/**
+ * 只在远端模式也走本机的单个通道：本身不碰数据，没必要为它多一趟网络。
+ * （products:csvTemplate 只是返回表头常量。）
+ */
+const LOCAL_ONLY_CHANNELS = new Set(['products:csvTemplate'])
+
 /** 注册过的通道名：设置页要报「已搬到后端几个」，不能靠手抄的数字 */
 const registered = new Set<string>()
 
@@ -43,7 +49,11 @@ export function handle<T>(channel: string, fn: (...args: any[]) => T | Promise<T
   registered.add(channel)
   ipcMain.handle(channel, async (_e, ...args) => {
     try {
-      if (isRemoteMode() && !LOCAL_ONLY.some((p) => channel.startsWith(p))) {
+      if (
+        isRemoteMode() &&
+        !LOCAL_ONLY_CHANNELS.has(channel) &&
+        !LOCAL_ONLY.some((p) => channel.startsWith(p))
+      ) {
         if (!isRemoteChannel(channel)) {
           throw new Error(
             `「${channel}」这个功能还没搬到后端，现在只有本机版。\n` +

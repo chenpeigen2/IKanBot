@@ -21,7 +21,19 @@ export const REMOTE_ROUTES: Record<string, RouteSpec> = {
   'customers:save': { path: '/api/customers/save', args: ['input'] },
   'customers:delete': { path: '/api/customers/delete', args: ['id'] },
   'customers:setActive': { path: '/api/customers/setActive', args: ['id', 'active'] },
-  'customers:sameName': { path: '/api/customers/sameName', args: ['company', 'selfId'] }
+  'customers:sameName': { path: '/api/customers/sameName', args: ['company', 'selfId'] },
+  'products:list': { path: '/api/products/list', args: ['keyword', 'includeInactive'] },
+  'products:get': { path: '/api/products/get', args: ['id'] },
+  'products:save': { path: '/api/products/save', args: ['input'] },
+  'products:delete': { path: '/api/products/delete', args: ['id'] },
+  'products:copy': { path: '/api/products/copy', args: ['id', 'newStyleNo'] },
+  'products:images': { path: '/api/products/images', args: ['productId'] },
+  'products:addImage': { path: '/api/products/addImage', args: ['productId', 'fileName', 'isPrimary'] },
+  'products:delImage': { path: '/api/products/delImage', args: ['id'] },
+  'products:setPrimary': { path: '/api/products/setPrimary', args: ['productId', 'imageId'] },
+  'products:setActive': { path: '/api/products/setActive', args: ['id', 'active'] },
+  'products:referenceCount': { path: '/api/products/referenceCount', args: ['id'] },
+  'products:importCsv': { path: '/api/products/importCsv', args: ['text', 'mode'] }
 }
 
 export function isRemoteChannel(channel: string): boolean {
@@ -34,39 +46,35 @@ export function remoteChannelCount(): number {
 
 /** 一句话说清覆盖到哪儿：设置页和远端模式的报错都用这一句 */
 export function coverageWords(): string {
-  return `后端目前只接了客户档案（${remoteChannelCount()} 个接口）`
+  return `后端目前只接了客户档案和商品（${remoteChannelCount()} 个接口）`
 }
 
 interface ErrorBody {
   error?: { message?: string }
 }
 
-export async function remoteCall(channel: string, args: unknown[]): Promise<unknown> {
-  const spec = REMOTE_ROUTES[channel]
-  if (!spec) throw new Error(`「${channel}」没有登记后端路由`)
+function explainFetchError(e: unknown, remoteUrl: string, timeoutMs: number): Error {
+  const msg = (e as Error).message || ''
+  const why = /timeout|abort/i.test(msg) ? `等了 ${Math.round(timeoutMs / 1000)} 秒没有回应` : msg
+  return new Error(
+    `连不上后端 ${remoteUrl}（${why}）。\n` +
+      `确认后端已启动、地址写对了没有——都在「设置 · 数据来源」。` +
+      `后端没起来时，可以先把数据来源切回「本机」。`
+  )
+}
+
+/** 发请求并把「连不上」翻成人话；HTTP 状态交给调用方判 */
+async function fetchRemote(path: string, init: RequestInit, timeoutMs = 20000): Promise<Response> {
   const { remoteUrl } = getConnection()
-  const body: Record<string, unknown> = {}
-  spec.args.forEach((name, i) => {
-    if (i < args.length) body[name] = args[i]
-  })
-  let res: Response
   try {
-    res = await fetch(`${remoteUrl}${spec.path}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-      // 超时不能无限等：后端机器掉线时 fetch 会一直挂着，界面就永远转圈
-      signal: AbortSignal.timeout(20000)
-    })
+    // 超时不能无限等：后端机器掉线时 fetch 会一直挂着，界面就永远转圈
+    return await fetch(`${remoteUrl}${path}`, { ...init, signal: AbortSignal.timeout(timeoutMs) })
   } catch (e) {
-    const msg = (e as Error).message || ''
-    const why = /timeout|abort/i.test(msg) ? '等了 20 秒没有回应' : msg
-    throw new Error(
-      `连不上后端 ${remoteUrl}（${why}）。\n` +
-        `确认后端已启动、地址写对了没有——都在「设置 · 数据来源」。` +
-        `后端没起来时，可以先把数据来源切回「本机」。`
-    )
+    throw explainFetchError(e, remoteUrl, timeoutMs)
   }
+}
+
+async function readJson(res: Response): Promise<unknown> {
   const text = await res.text()
   let data: unknown = null
   try {
@@ -75,10 +83,66 @@ export async function remoteCall(channel: string, args: unknown[]): Promise<unkn
     throw new Error(`后端返回的不是 JSON（HTTP ${res.status}）：${text.slice(0, 200)}`)
   }
   const err = (data as ErrorBody | null)?.error?.message
-  if (!res.ok || err) {
-    throw new Error(err || `后端出错（HTTP ${res.status}）`)
-  }
+  if (!res.ok || err) throw new Error(err || `后端出错（HTTP ${res.status}）`)
   return data
+}
+
+export async function remoteCall(channel: string, args: unknown[]): Promise<unknown> {
+  const spec = REMOTE_ROUTES[channel]
+  if (!spec) throw new Error(`「${channel}」没有登记后端路由`)
+  const body: Record<string, unknown> = {}
+  spec.args.forEach((name, i) => {
+    if (i < args.length) body[name] = args[i]
+  })
+  const res = await fetchRemote(spec.path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+  return readJson(res)
+}
+
+/* ---------------- 图片文件 ---------------- */
+
+/** 远端模式下商品图的基地址：<img src> 直接用它拼文件名 */
+export function remoteImageBase(): string {
+  return `${getConnection().remoteUrl}/api/files/images`
+}
+
+/** 上传一张图片，返回后端生成的文件名（桌面端只拿这个名字登记进库） */
+export async function remoteUploadImage(originalName: string, bytes: Buffer): Promise<string> {
+  const res = await fetchRemote(
+    `/api/files/upload?name=${encodeURIComponent(originalName)}`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: bytes
+    },
+    // 大图走慢网络时 20 秒不够，单独给宽一点
+    60000
+  )
+  const data = (await readJson(res)) as { fileName?: unknown } | null
+  const name = String(data?.fileName ?? '')
+  if (!name) throw new Error('后端没有返回图片文件名，上传可能没成功')
+  return name
+}
+
+export async function remoteDiscardImages(names: string[]): Promise<void> {
+  if (names.length === 0) return
+  const res = await fetchRemote('/api/files/discard', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ names })
+  })
+  await readJson(res)
+}
+
+/** 取图片字节；后端没有这张图时返回 null（公司 Logo 这类还在本机，由调用方回退） */
+export async function remoteReadImage(name: string): Promise<Buffer | null> {
+  const res = await fetchRemote(`/api/files/images/${encodeURIComponent(name)}`, { method: 'GET' })
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`后端取图失败（HTTP ${res.status}）`)
+  return Buffer.from(await res.arrayBuffer())
 }
 
 export interface RemoteProbe {

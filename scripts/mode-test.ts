@@ -4,8 +4,8 @@
  * 三层：
  *  1) 连接配置（纯函数）——默认值、环境变量钉住、地址校验；
  *  2) 转发与探活——真起一个假后端，看参数怎么翻成请求体、错误体怎么还原成中文原句；
- *  3) 真后端对拍——起 server/dist 的 NestJS 进程，经真实 IPC handler 调 6 个客户通道，
- *     再切回本机确认两边各是各的数据；没搬的通道必须当场报错。
+ *  3) 真后端对拍——起 server/dist 的 NestJS 进程，经真实 IPC handler 调客户与商品通道
+ *     （含图片上传/取回），再切回本机确认两边各是各的数据；没搬的通道必须当场报错。
  *
  * 运行：npm run test:mode（会先构建 server/dist）
  */
@@ -23,7 +23,13 @@ import {
   resolveConnection,
   envLocked
 } from '../electron/mode'
-import { probeRemote, remoteCall, REMOTE_ROUTES } from '../electron/remote/client'
+import {
+  probeRemote,
+  remoteCall,
+  remoteImageBase,
+  remoteUploadImage,
+  REMOTE_ROUTES
+} from '../electron/remote/client'
 
 const root = mkdtempSync(join(tmpdir(), 'ikan-mode-'))
 process.env['IKAN_DATA_DIR'] = join(root, 'data')
@@ -211,7 +217,12 @@ async function main(): Promise<void> {
     const serverUrl = `http://127.0.0.1:${port}`
     const logs: string[] = []
     child = spawn(process.execPath, [serverMain], {
-      env: { ...process.env, IKAN_SQLITE_FILE: join(root, 'server.db'), IKAN_PORT: String(port) },
+      env: {
+        ...process.env,
+        IKAN_SQLITE_FILE: join(root, 'server.db'),
+        IKAN_IMAGES_DIR: join(root, 'server-images'),
+        IKAN_PORT: String(port)
+      },
       stdio: ['ignore', 'pipe', 'pipe']
     })
     child.stdout?.on('data', (d) => logs.push(String(d)))
@@ -221,9 +232,12 @@ async function main(): Promise<void> {
 
     openDb()
     registerIpc()
-    check('IPC 通道都挂上了（客户 6 个 + 分母那一批）', stub.__handlers.has('customers:list') && stub.__handlers.has('mode:get'))
+    check(
+      'IPC 通道都挂上了（客户 6 个 + 商品 12 个 + 分母那一批）',
+      stub.__handlers.has('customers:list') && stub.__handlers.has('products:list') && stub.__handlers.has('mode:get')
+    )
 
-    // 本机先落一个只有本机才有的客户
+    // 本机先落一个只有本机才有的客户和商品
     saveConnection({ mode: 'local' })
     const localSeed = await ipc('customers:save', { company: 'Local Only Co', country: 'CN' })
     check('本机模式：新建客户走本机库', localSeed.ok === true && (localSeed as any).data.id > 0)
@@ -232,6 +246,14 @@ async function main(): Promise<void> {
       '本机模式：重名话术照旧',
       !localDup.ok && (localDup as any).error.includes('同一个客户建两份')
     )
+    const localProd = await ipc('products:save', {
+      styleNo: 'LOCAL-ONLY-1',
+      name: '只在本机的款',
+      composition: '100% Cotton',
+      sizes: ['M'],
+      colors: ['Black']
+    })
+    check('本机模式：新建商品走本机库', localProd.ok === true && (localProd as any).data.styleNo === 'LOCAL-ONLY-1')
 
     // 切到后端：同一批通道，数据换了一整套
     const conn = saveConnection({ mode: 'remote', remoteUrl: serverUrl })
@@ -239,8 +261,8 @@ async function main(): Promise<void> {
 
     const state = await ipc('mode:get')
     check(
-      `覆盖率口径：6 / 118（实得 ${(state as any).data?.covered} / ${(state as any).data?.total}）`,
-      state.ok && (state as any).data.covered === 6 && (state as any).data.total === 118
+      `覆盖率口径：18 / 118（实得 ${(state as any).data?.covered} / ${(state as any).data?.total}）`,
+      state.ok && (state as any).data.covered === 18 && (state as any).data.total === 118
     )
     const probe = await ipc('mode:test')
     check('设置页的「测试连接」走真后端', probe.ok && (probe as any).data.ok === true)
@@ -287,6 +309,74 @@ async function main(): Promise<void> {
     const withInactive = await ipc('customers:list', '', true)
     check('后端模式：能主动把停用的调出来', withInactive.ok && (withInactive as any).data.some((c: any) => c.id === remoteId))
 
+    // 商品：同一批通道换成后端那份库
+    const remoteProducts = await ipc('products:list', '')
+    check(
+      '后端那份是空库：看不到本机刚建的商品（两边各是各的）',
+      remoteProducts.ok && (remoteProducts as any).data.length === 0
+    )
+    const remoteProd = await ipc('products:save', {
+      styleNo: 'REMOTE-1',
+      name: '后端款',
+      composition: '100% Cotton',
+      sizes: ['M', 'L'],
+      colors: ['Black'],
+      costPrice: 9.9
+    })
+    check('后端模式：商品落库到后端', remoteProd.ok && (remoteProd as any).data.styleNo === 'REMOTE-1')
+    const remoteProdId = (remoteProd as any).data.id as number
+    const remoteProdDup = await ipc('products:save', {
+      styleNo: 'remote-1',
+      name: '撞号',
+      composition: '',
+      sizes: [],
+      colors: []
+    })
+    check(
+      '后端模式：款号撞号守门与原句一致',
+      !remoteProdDup.ok &&
+        (remoteProdDup as any).error.includes('已经存在') &&
+        (remoteProdDup as any).error.includes('复制')
+    )
+    const remoteProdMiss = await ipc('products:get', 999999)
+    check(
+      '后端模式：查不存在的商品说「商品不存在」',
+      !remoteProdMiss.ok && (remoteProdMiss as any).error === '商品不存在'
+    )
+    const remoteCopy = await ipc('products:copy', remoteProdId, 'REMOTE-1-COPY')
+    check(
+      '后端模式：复制款号保留尺码表',
+      remoteCopy.ok && (remoteCopy as any).data.sizes.length === 2
+    )
+
+    // 图片：传上去 → 登记 → 地址/纸面取图 —— 库搬了图没搬，商品卡就是一片空白
+    const storedName = await remoteUploadImage('probe.png', Buffer.from('89504e470d0a1a0a', 'hex'))
+    const addedImg = await ipc('products:addImage', remoteProdId, storedName)
+    check('后端模式：图片登记进后端库（首张自动上位）', addedImg.ok && (addedImg as any).data.isPrimary === 1)
+    const imgUrl = await ipc('images:url', storedName)
+    check(
+      '后端模式：图片地址指回后端',
+      imgUrl.ok && String((imgUrl as any).data).startsWith(`${serverUrl}/api/files/images/`)
+    )
+    check('后端模式：图片基地址是后端的 HTTP 目录', remoteImageBase() === `${serverUrl}/api/files/images`)
+    const dataUrl = await ipc('images:readDataUrl', storedName)
+    check(
+      '后端模式：纸面用图能取成 data URL',
+      dataUrl.ok && String((dataUrl as any).data).startsWith('data:image/png;base64,')
+    )
+    const imgRows = await ipc('products:images', remoteProdId)
+    check('后端模式：能列出刚登记的图', imgRows.ok && (imgRows as any).data.length === 1)
+    await ipc('products:delImage', (imgRows as any).data[0].id)
+    const afterDel = await ipc('images:readDataUrl', storedName)
+    check(
+      '后端模式：删图后文件也清了（纸面取图回空，再回退本机也找不到）',
+      afterDel.ok && (afterDel as any).data === ''
+    )
+
+    // 不碰数据的通道没必要绕一趟网络
+    const tpl = await ipc('products:csvTemplate')
+    check('远端模式下 CSV 模板仍走本机（不白跑一趟网络）', tpl.ok && String((tpl as any).data).includes('款号'))
+
     const unMigrated = await ipc('orders:list', {})
     check(
       '没搬的通道当场报错（含去哪切回本机）',
@@ -311,6 +401,18 @@ async function main(): Promise<void> {
 
     const remoteAgain = await remoteCall('customers:get', [remoteId])
     check('后端数据仍在后端（不是被搬走）', (remoteAgain as any)?.company === 'Remote Only Co')
+    const remoteProdAgain = await remoteCall('products:get', [remoteProdId])
+    check('后端商品也仍在后端', (remoteProdAgain as any)?.styleNo === 'REMOTE-1')
+
+    const backProducts = await ipc('products:list', '')
+    check(
+      '切回本机：本机商品还在',
+      backProducts.ok && (backProducts as any).data.some((p: any) => p.styleNo === 'LOCAL-ONLY-1')
+    )
+    check(
+      '切回本机：后端那份商品不会混进来',
+      backProducts.ok && !(backProducts as any).data.some((p: any) => p.styleNo === 'REMOTE-1')
+    )
 
     console.log(`\n${'='.repeat(46)}`)
     console.log(`双模式通过 ${passed} 项`)

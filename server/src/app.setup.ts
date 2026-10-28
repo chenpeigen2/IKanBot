@@ -11,6 +11,9 @@ export async function configureApp(app: NestExpressApplication): Promise<void> {
   app.useGlobalFilters(app.get(AllExceptionsFilter))
   // 订单带明细/照片元数据时体积不小，默认 100kb 会把正常保存挡在门外
   app.useBodyParser('json', { limit: '4mb' })
+  // 商品图片原样二进制上传：照片动辄几 MB，走 base64 会白涨三分之一。
+  // 只接 application/octet-stream，其余请求仍由上面的 JSON 解析器处理。
+  app.useBodyParser('raw', { limit: '20mb', type: 'application/octet-stream' })
   // 完全不带请求体的 POST（`curl -X POST …/list`、某些客户端不发明 Content-Length）时
   // express 5 给的是 undefined，控制器一读 body['keyword'] 就 TypeError → 500。
   // 空对象在这里补上：路由一律按「字段缺省」处理，不因少个 {} 就报服务器内部错误。

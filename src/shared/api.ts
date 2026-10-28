@@ -227,7 +227,7 @@ export interface IKanApi {
     importLogo(): Promise<string>
     url(fileName: string): Promise<string>
     readDataUrl(fileName: string): Promise<string>
-    /** 图片目录绝对路径（同步），渲染进程直接拼 file:// URL */
+    /** 图片基地址（同步）：本机是目录绝对路径，后端模式是 http(s) 图片目录 */
     baseDir(): string
   }
   backup: {

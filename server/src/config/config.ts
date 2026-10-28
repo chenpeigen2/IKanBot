@@ -4,6 +4,11 @@ export type DbKind = 'sqlite' | 'mysql'
 
 export interface ServerConfig {
   port: number
+  /**
+   * 商品图片目录。桌面端图片在 userData/images，后端必须有自己的那份：
+   * 库搬过来了、图没搬，商品卡就是一片空白。
+   */
+  imagesDir: string
   db:
     | { kind: 'sqlite'; file: string }
     | {
@@ -25,6 +30,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
     throw new Error(`IKAN_PORT 不是合法端口：${String(env['IKAN_PORT'])}`)
   }
+  // 后端图片目录不能跟着桌面端走：两边各存各的，各自的备份各自带走
+  const imagesDir = env['IKAN_IMAGES_DIR'] ?? join(process.cwd(), '.tmp', 'images')
   const mysqlHost = env['IKAN_MYSQL_HOST']
   const db: ServerConfig['db'] =
     env['IKAN_DB'] === 'mysql' && mysqlHost
@@ -37,5 +44,5 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
           database: env['IKAN_MYSQL_DATABASE'] ?? 'ikanbot'
         }
       : { kind: 'sqlite', file: env['IKAN_SQLITE_FILE'] ?? join(process.cwd(), '.tmp', 'ikanbot.db') }
-  return { port, db }
+  return { port, db, imagesDir }
 }

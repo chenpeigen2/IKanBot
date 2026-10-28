@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { SqliteDb } from '../src/db/sqlite'
 import { migrate } from '../src/db/migrate'
 import { customersCore } from '../../core/customers'
+import { productsCore } from '../../core/products'
 import { loadConfig } from '../src/config/config'
 import { LATEST_DB_VERSION } from '../../electron/db/schema'
 
@@ -121,6 +122,67 @@ async function main(): Promise<void> {
       blocked = (e as Error).message
     }
     check('挂着订单的客户删不掉，并说清有几张单', blocked.includes('1 个订单') && blocked.includes('停用'))
+
+    console.log('商品域 SQL')
+    const pc = productsCore(db)
+    const prod = await pc.save({
+      styleNo: 'T-100',
+      name: '纯棉T恤',
+      composition: '100% Cotton',
+      sizes: ['M', 'L'],
+      colors: ['Black']
+    })
+    check('商品入库并归一款号与尺码', prod.styleNo === 'T-100' && prod.sizes.join(',') === 'M,L')
+    let dupStyle = ''
+    try {
+      await pc.save({ styleNo: ' t-100 ', name: '撞号', composition: '', sizes: [], colors: [] })
+    } catch (e) {
+      dupStyle = (e as Error).message
+    }
+    check('款号大小写撞号被拦（原句带后果说明）', dupStyle.includes('已经存在') && dupStyle.includes('复制'))
+
+    const firstImg = await pc.addImage(prod.id, 'a.jpg')
+    await pc.addImage(prod.id, 'b.jpg')
+    check('第一张图自动上位成主图', firstImg.isPrimary === 1)
+    const imgs = await pc.listImages(prod.id)
+    check('有图就恰好一张主图', imgs.filter((i) => i.isPrimary === 1).length === 1)
+    const filesAfterDelete = (await pc.removeImage(firstImg.id)).files
+    check('删主图把文件名交回给调用方清文件', filesAfterDelete.length === 1 && filesAfterDelete[0] === 'a.jpg')
+    const afterDelete = await pc.listImages(prod.id)
+    check('删掉主图立刻顺延一张，不留有图无主图', afterDelete.length === 1 && afterDelete[0]?.isPrimary === 1)
+
+    await db.run(`INSERT INTO orders(order_no, customer_id, created_at, updated_at) VALUES('SO-P1', ?, '', '')`, [
+      id
+    ])
+    const orderId = Number((await db.get(`SELECT id FROM orders WHERE order_no = 'SO-P1'`))?.['id'])
+    await db.run(`INSERT INTO order_items(order_id, product_id, style_no) VALUES(?, ?, 'T-100')`, [
+      orderId,
+      prod.id
+    ])
+    const ref = await pc.referenceCount(prod.id)
+    check('引用计数数得出订单行', ref.orders === 1 && ref.quotations === 0)
+    const delUsed = await pc.remove(prod.id)
+    check(
+      '有引用的商品只做停用（不删图）',
+      delUsed.deactivated && delUsed.files.length === 0 && (await pc.get(prod.id))?.active === 0
+    )
+
+    const spare = await pc.save({ styleNo: 'T-200', name: '没引用', composition: '', sizes: [], colors: [] })
+    await pc.addImage(spare.id, 'c.jpg')
+    const delFree = await pc.remove(spare.id)
+    check(
+      '没引用的商品连图片一起清，文件名单交回',
+      !delFree.deactivated && delFree.files.length === 1 && delFree.files[0] === 'c.jpg'
+    )
+    check('商品真的没了，图片登记也跟着清', (await pc.get(spare.id)) === null && (await pc.listImages(spare.id)).length === 0)
+
+    await pc.importCsv('款号,品名,尺码\nT-300,导入款,M L\n', 'skip')
+    const imp = await pc.importCsv('款号,品名\nT-300,改名\n', 'overwrite')
+    const t300 = await pc.findByStyleNo('T-300')
+    check(
+      'CSV 覆盖导入：表头里没有的列保留（尺码没被抹平）',
+      imp.updated === 1 && t300?.name === '改名' && t300?.sizes.join(',') === 'M,L'
+    )
 
     console.log('并发与幂等')
     await Promise.all(

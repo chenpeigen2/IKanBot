@@ -119,6 +119,17 @@
   服务端 58 项冒烟、桌面 e2e 1831 项、双模式 44 项全绿。
   下一刀按依赖顺序挑**无外部依赖**的域（商品 → 设置/事件 → money/单据簇），
   每个域落一层就在 `REMOTE_ROUTES` 加路由，覆盖率自动跟着走。
+- **M1 第二刀（2026-10-28，商品域 + 图片搬运）**：`core/products.ts` 收拢商品的全部 SQL 与守门
+  （款号去重、复制、覆盖导入、图片主图接替、删商品先看有无订单引用），core 不碰文件系统——
+  `remove()` / `removeImage()` 只回 `files: string[]`，两边各自删自己图片目录里的文件。
+  后端新增 `ProductsModule`（12 条路由）与 `FilesModule`：图片走**二进制直传**（`application/octet-stream` +
+  `?name=`，服务端给 UUID 文件名，20 MB 上限）而不是 base64 JSON——体积少三分之一，也不挤 4 MB 的 JSON 上限；
+  取图走 `GET /api/files/images/:name`（一年 immutable 缓存头），服务端目录由 `IKAN_IMAGES_DIR` 指定。
+  桌面这边图片四个通道随模式分流：`images:url` 回 HTTP 地址、`images:readDataUrl` 先从服务端取字节
+  （Logo 这类本机文件 404 后回落本机）、`images:discard` 转发到服务端的丢弃接口；
+  `products:csvTemplate` 是纯常量，登记进 `LOCAL_ONLY_CHANNELS`，不为它白跑一趟网络。
+  渲染层的 `imageUrl.ts` 去掉基地址缓存（设置里切模式不重载页面，缓存必须先读后算）。
+  覆盖 **18 / 118**（客户 6 + 商品 12），服务端冒烟 58 项、桌面 e2e 1831 项、双模式 60 项全绿。
 
 ## 四、事务与并发
 
