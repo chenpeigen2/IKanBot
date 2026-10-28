@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, statSync, rmdirSync, renameSync } from 'fs'
 import { join } from 'path'
 import { app } from 'electron'
 import { LATEST_DB_VERSION, MIGRATIONS } from './schema'
+import type { Db, Row } from '../../core/db'
 
 let db: Database | null = null
 
@@ -193,5 +194,55 @@ export function closeDb(): void {
   if (db) {
     db.close()
     db = null
+  }
+}
+
+/**
+ * 给 core/ 用的异步门面：同一个连接、同一套事务语义，只是把同步驱动包成「立刻兑现的 Promise」。
+ *
+ * 为什么不直接 new 一个 SqliteDb：同一份文件开两个连接，写操作会互相抢锁
+ * （node-sqlite3-wasm 还是「建锁目录」那种排他锁），是 database is locked 的经典来源。
+ * 也不另抄一份 SQL——core/customers.ts 等实现只认 Db 接口，本机与后端跑的是同一段代码。
+ */
+export const coreDb: Db = {
+  kind: 'sqlite',
+  async get(sql, params = []) {
+    return (getDb().get(sql, params as never) ?? undefined) as Row | undefined
+  },
+  async all(sql, params = []) {
+    return getDb().all(sql, params as never) as Row[]
+  },
+  async run(sql, params = []) {
+    const r = getDb().run(sql, params as never) as { lastInsertRowid?: number; changes?: number }
+    return { lastInsertRowid: Number(r?.lastInsertRowid ?? 0), changes: Number(r?.changes ?? 0) }
+  },
+  async exec(sql) {
+    getDb().exec(sql)
+  },
+  // 与上面的 transact 共用 txDepth：两条路混用时 SAVEPOINT 标签也不能撞
+  async transact<T>(fn: () => Promise<T>): Promise<T> {
+    const database = getDb()
+    const top = !database.inTransaction
+    const tag = `tx_${txDepth}`
+    txDepth++
+    try {
+      database.exec(top ? 'BEGIN' : `SAVEPOINT ${tag}`)
+      const result = await fn()
+      database.exec(top ? 'COMMIT' : `RELEASE SAVEPOINT ${tag}`)
+      return result
+    } catch (e) {
+      if (top) {
+        if (database.inTransaction) database.exec('ROLLBACK')
+      } else {
+        database.exec(`ROLLBACK TO SAVEPOINT ${tag}`)
+        database.exec(`RELEASE SAVEPOINT ${tag}`)
+      }
+      throw e
+    } finally {
+      txDepth--
+    }
+  },
+  async close() {
+    closeDb()
   }
 }

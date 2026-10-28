@@ -1,6 +1,7 @@
 import { BadRequestException, Catch, Injectable, type ExceptionFilter, type ArgumentsHost } from '@nestjs/common'
 import type { Request, Response } from 'express'
 import { RoutesService } from '../meta/routes.service'
+import { BizError } from '../../../core/errors'
 
 /**
  * 所有错误一律 { error: { message } }，message 是中文原句——
@@ -34,6 +35,10 @@ export class AllExceptionsFilter implements ExceptionFilter {
       // Nest 会把 body-parser 的解析失败包成 BadRequestException（原 err.type 丢了），
       // 只剩一句英文的 "Expected property name ... in JSON"——这句不能原样弹给用户
       message = looksLikeJsonError(own) ? '请求体不是合法 JSON' : own || message
+    } else if (exception instanceof BizError) {
+      // core/ 里抛的业务错误：message 本就是给用户看的中文原句，status 由它自己定（400/404）
+      status = exception.status
+      message = exception.message
     } else if (isHttp(exception)) {
       status = exception.getStatus()
       message = textOf(exception) ?? defaultText(status)

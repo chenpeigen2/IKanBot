@@ -18,6 +18,7 @@
   "include": [
     "src/**/*.ts",
     "test/**/*.ts",
+    "../core/*.ts",
     "../src/shared/*.ts",
     "../electron/db/schema.ts",
     "../electron/db/mappers.ts",

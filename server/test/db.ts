@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SqliteDb } from '../src/db/sqlite'
 import { migrate } from '../src/db/migrate'
-import { CustomersRepository } from '../src/customers/customers.repository'
+import { customersCore } from '../../core/customers'
 import { loadConfig } from '../src/config/config'
 import { LATEST_DB_VERSION } from '../../electron/db/schema'
 
@@ -90,32 +90,37 @@ async function main(): Promise<void> {
     )
 
     console.log('客户域 SQL')
-    const repo = new CustomersRepository(db)
+    const core = customersCore(db)
     await db.run(`UPDATE customers SET active = 0 WHERE company = 'OuterC'`)
-    const active = await repo.list('', false)
+    const active = await core.list('', false)
     check('默认只出启用客户', active.some((c) => c.company === 'OuterA') && !active.some((c) => c.company === 'OuterC'))
-    const all = await repo.list('', true)
+    const all = await core.list('', true)
     check('includeInactive 含停用客户', all.some((c) => c.company === 'OuterC'))
-    const hit = await repo.list('outer', false)
+    const hit = await core.list('outer', false)
     check('关键词命中（大小写不敏感）', hit.length === 1 && hit[0]?.company === 'OuterA')
-    const id = await repo.insert({ company: 'Acme', country: 'US' }, new Date().toISOString())
-    const got = await repo.get(id)
+    const id = (await core.save({ company: 'Acme', country: 'US' })).id
+    const got = await core.get(id)
     check('插入后按 id 取回（mapCustomer 与桌面端同一份）', got?.company === 'Acme' && got?.country === 'US')
-    check('同名查重忽略大小写与首尾空格', (await repo.sameName('  acme ')).length === 1)
+    check('同名查重忽略大小写与首尾空格', (await core.sameName('  acme ')).length === 1)
 
-    await repo.insert({ company: '100% Cotton Ltd' }, new Date().toISOString())
-    await repo.insert({ company: '100X Cotton Ltd' }, new Date().toISOString())
-    const pct = await repo.list('100%', false)
+    await core.save({ company: '100% Cotton Ltd' })
+    await core.save({ company: '100X Cotton Ltd' })
+    const pct = await core.list('100%', false)
     check(
       'LIKE 转义：% 按字面找，不漏成通配符',
       pct.length === 1 && pct[0]?.company === '100% Cotton Ltd'
     )
-    const under = await repo.list('100_', false)
+    const under = await core.list('100_', false)
     check('LIKE 转义：_ 也不当单字符通配', under.length === 0)
 
     await db.run(`INSERT INTO orders(order_no, customer_id, created_at, updated_at) VALUES('SO-T1', ?, '', '')`, [id])
-    const refs = await repo.refCounts(id)
-    check('引用计数认订单', refs.orders === 1 && refs.quotations === 0 && refs.samples === 0)
+    let blocked = ''
+    try {
+      await core.remove(id)
+    } catch (e) {
+      blocked = (e as Error).message
+    }
+    check('挂着订单的客户删不掉，并说清有几张单', blocked.includes('1 个订单') && blocked.includes('停用'))
 
     console.log('并发与幂等')
     await Promise.all(

@@ -78,7 +78,7 @@ async function main() {
   }
 
   // 客户
-  const c1 = customers.saveCustomer({
+  const c1 = await customers.saveCustomer({
     company: 'Acme Fashion GmbH',
     contact: 'Michael Schmidt',
     attn: 'Mr. Schmidt',
@@ -90,7 +90,7 @@ async function main() {
     paymentPref: 'T/T 30% 定金，70% 见提单副本',
     note: '要求所有款式左胸印 Logo，色牢度 4 级以上。'
   })
-  const c2 = customers.saveCustomer({
+  const c2 = await customers.saveCustomer({
     company: 'Nordic Wear AB',
     contact: 'Anna Lindqvist',
     attn: 'Ms. Lindqvist',

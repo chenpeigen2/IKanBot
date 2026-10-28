@@ -110,6 +110,15 @@
   因此 M1 的主干就是**把 service 层逐域异步化**（函数加 `async`、`getDb()` 换成注入的 `Db`）。
   这是机械改动但覆盖面广（约 1.2 万行 service），本地 SQLite 用同步 API 包成 Promise 即可，桌面行为不变。
   **不做**「为后端另写一份同步/异步服务」——两份业务逻辑必然漂移。
+- **M1 已开工（2026-10-28，客户域）**：新建顶层 `core/`——`core/db.ts`（`Db`/`Row`/`RunResult` 唯一定义）、
+  `core/errors.ts`（`BizError(message, status)`：桌面只认 message，后端按 status 落 400/404）、
+  `core/customers.ts`（列表/取/存/停用/删/同名/历史成交价，一份 SQL 一份守门）。
+  桌面这边 `electron/db` 新增 `coreDb` 适配器（**同一个连接**、共享 SAVEPOINT 深度），
+  `electron/services/customers.ts` 只剩聚合统计与订单摘要（它们还吃同步的 `money.ts`）；
+  后端侧删掉了 `customers.repository.ts`，`CustomersService` 直接把 Nest 的 `Db` 交给 core。
+  服务端 58 项冒烟、桌面 e2e 1831 项、双模式 44 项全绿。
+  下一刀按依赖顺序挑**无外部依赖**的域（商品 → 设置/事件 → money/单据簇），
+  每个域落一层就在 `REMOTE_ROUTES` 加路由，覆盖率自动跟着走。
 
 ## 四、事务与并发
 

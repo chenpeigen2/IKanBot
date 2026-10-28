@@ -97,7 +97,7 @@ eq('复制款号新编号', copied.styleNo, 'A001-BLACK')
 
 /* ---------------- 客户 ---------------- */
 section('客户')
-const c1 = customers.saveCustomer({
+const c1 = await customers.saveCustomer({
   company: 'Acme Fashion GmbH',
   contact: 'Mr. Wang',
   email: 'wang@acme.de',
@@ -109,9 +109,9 @@ const c1 = customers.saveCustomer({
   paymentPref: 'T/T 30%'
 })
 check('新增客户', c1.id > 0)
-check('按公司名搜索', customers.listCustomers('Acme').length === 1)
+check('按公司名搜索', (await customers.listCustomers('Acme')).length === 1)
 
-const c2 = customers.saveCustomer({
+const c2 = await customers.saveCustomer({
   company: 'Nordic Wear AB',
   contact: 'Anna Lindqvist',
   attn: 'Ms. Lindqvist',
@@ -552,18 +552,18 @@ check('未转订单的报价单可以删', quotations.getQuotation(qDelOk.id) ==
 // N32：有订单/报价/打样单的客户删不掉，报错要人话（不许 FOREIGN KEY 英文裸奔）
 let cDelErr = ''
 try {
-  customers.deleteCustomer(c1.id) // c1 有订单、报价、打样单
+  await customers.deleteCustomer(c1.id) // c1 有订单、报价、打样单
 } catch (e) {
   cDelErr = (e as Error).message
 }
 check('有记录的客户删不掉', cDelErr.includes('不能删'), cDelErr)
 check('报错是中文人话不是英文数据库错误', !cDelErr.includes('FOREIGN KEY'), cDelErr)
 check('报错里说明了有几个订单', /\d+ 个订单/.test(cDelErr), cDelErr)
-check('拦截后客户还在', customers.getCustomer(c1.id) !== null)
+check('拦截后客户还在', (await customers.getCustomer(c1.id)) !== null)
 // 负向对照：没有任何记录的客户可以真删
-const cEmpty = customers.saveCustomer({ company: 'DELETE-ME-TEST' })
-customers.deleteCustomer(cEmpty.id)
-check('无记录的客户可以删', customers.getCustomer(cEmpty.id) === null)
+const cEmpty = await customers.saveCustomer({ company: 'DELETE-ME-TEST' })
+await customers.deleteCustomer(cEmpty.id)
+check('无记录的客户可以删', (await customers.getCustomer(cEmpty.id)) === null)
 
 /* ---------------- 报价单：可以改，改完报价号不变 ---------------- */
 section('报价单可编辑（同号 + 留痕）')
@@ -2547,7 +2547,7 @@ check(
  * ============================================================ */
 section('核销与坏账：短款让利、坏账、追回、撤销与全站口径')
 
-const cR2 = customers.saveCustomer({
+const cR2 = await customers.saveCustomer({
   company: 'R2 Credit Co',
   contact: 'Credit Desk',
   country: 'United States',
@@ -2841,7 +2841,7 @@ check('PL 全部填了实测毛重后不再标 (est.)', !plManual.includes('(est
 
 /* ---------------- R5 客户与商品：抬头快照 / 成本币种 / 停用不删 ---------------- */
 section('R5 单据抬头：钉在这一张单上的快照')
-const cSnap = customers.saveCustomer({
+const cSnap = await customers.saveCustomer({
   company: 'Snapshot Trading Co.',
   contact: 'Mr. Snap',
   email: 'snap@snapshot.com',
@@ -2881,7 +2881,7 @@ check('PL 印收货仓而不是买方办公室', snapPlHtml.includes('Weteringwe
 check('PL 收货人取档案里的 shipAttn', snapPlHtml.includes('WH-Breda'))
 
 // 建完单才改档案：已经发出去的单据不能被人 retrospectively 改掉
-customers.saveCustomer({ ...cSnap, address: '换了三次门牌', paymentPref: 'D/P 见票 60 天' })
+await customers.saveCustomer({ ...cSnap, address: '换了三次门牌', paymentPref: 'D/P 见票 60 天' })
 const snapPiAfter = renderPi({ order: orders.getOrder(snapOrder.id)!, settings: getSettings(), images: {} })
 check('改了档案，已开的 PI 仍印当初的地址', snapPiAfter.includes('Keizersgracht 100'))
 check('已开的 PI 不会跟着新条款走', !snapPiAfter.includes('D/P 见票'))
@@ -2897,7 +2897,7 @@ check('没提到的字段保持快照原值', afterParty.billTo?.company === 'Sn
 check('收货抬头只补邮编', afterParty.shipTo?.zipCode === '4845AB')
 const partyEvent = orders.listEvents(snapOrder.id).find((e) => e.kind === 'party_update')
 check('改抬头留痕并写清改了哪项', (partyEvent?.note ?? '').includes('地址'), partyEvent?.note ?? '')
-check('改抬头不碰客户档案', customers.getCustomer(cSnap.id)?.address === '换了三次门牌')
+check('改抬头不碰客户档案', (await customers.getCustomer(cSnap.id))?.address === '换了三次门牌')
 
 section('R5 报价单抬头快照，转单原样带过去')
 const qSnap = quotations.saveQuotation({
@@ -2928,7 +2928,7 @@ const qSnap2 = quotations.saveQuotation({
 check('报价单抬头单独覆盖某个字段', qSnap2.billTo?.attn === '这一单单独的收件人')
 check('覆盖一个字段不能把别的抹掉', (qSnap2.billTo?.company ?? '') === 'Snapshot Trading Co.')
 // 转单之前档案又改了一次：转出来的订单必须沿用报价单当初钉住的抬头
-customers.saveCustomer({ ...cSnap, address: '第四次改的地址' })
+await customers.saveCustomer({ ...cSnap, address: '第四次改的地址' })
 const snapConverted = quotations.convertToOrder(qSnap2.id)
 check('转单沿用报价单钉住的地址', (snapConverted.billTo?.address ?? '') === '换了三次门牌')
 check('转单不拿档案最新地址', (snapConverted.billTo?.address ?? '') !== '第四次改的地址')
@@ -2966,11 +2966,11 @@ check(
 )
 
 section('R5 历史成交价：报价前先看这客户上次什么价')
-const priceRows = customers.stylePriceHistory({ customerId: c1.id })
+const priceRows = await customers.stylePriceHistory({ customerId: c1.id })
 check('能列出这个客户的历史成交价', priceRows.length > 0)
 check('历史成交价都带币种', priceRows.every((r) => !!r.lastCurrency))
-check('按客户过滤就不会混进别人', customers.stylePriceHistory({ customerId: c2.id }).every((r) => r.customerCompany === c2.company))
-const a001Rows = customers.stylePriceHistory({ styleNo: 'a001' })
+check('按客户过滤就不会混进别人', (await customers.stylePriceHistory({ customerId: c2.id })).every((r) => r.customerCompany === c2.company))
+const a001Rows = await customers.stylePriceHistory({ styleNo: 'a001' })
 check('按款号过滤忽略大小写', a001Rows.length > 0 && a001Rows.every((r) => r.styleNo.toUpperCase() === 'A001'))
 check('同款同色合并成一条并累计次数', a001Rows.reduce((s, r) => s + r.times, 0) >= a001Rows.length)
 // 草稿 / 作废单还没成交，不能污染「上次成交价」
@@ -2978,24 +2978,24 @@ const draftPriceOrder = orders.createOrder({ customerId: c1.id, currency: 'USD',
 orders.addOrderItem(draftPriceOrder.id, { styleNo: 'ZZ999', productName: '没成交的草稿款', quantity: 1, unitPrice: 99.99 })
 check(
   '草稿单的报价不进历史成交价',
-  !customers.stylePriceHistory({ styleNo: 'ZZ999' }).some((r) => r.lastUnitPrice === 99.99)
+  !(await customers.stylePriceHistory({ styleNo: 'ZZ999' })).some((r) => r.lastUnitPrice === 99.99)
 )
 
 section('R5 同名客户：提醒但不硬拦')
 let dupErr = ''
 try {
-  customers.saveCustomer({ company: 'Acme Fashion GmbH' })
+  await customers.saveCustomer({ company: 'Acme Fashion GmbH' })
 } catch (e) {
   dupErr = (e as Error).message
 }
 check('同名客户先拦一道并说清后果', dupErr.includes('同名'), dupErr)
-const dupOk = customers.saveCustomer({
+const dupOk = await customers.saveCustomer({
   company: 'acme fashion gmbh ',
   contact: '第二个采购办',
   allowDuplicate: true
 })
 check('确认是两家不同的公司就能存', dupOk.id > 0)
-eq('同名对照查得到几条', customers.sameNameCustomers('Acme Fashion GmbH').length, 2)
+eq('同名对照查得到几条', (await customers.sameNameCustomers('Acme Fashion GmbH')).length, 2)
 
 section('R5 停用而不是删除：单据要能原样重印')
 let styleErr = ''
@@ -3015,12 +3015,12 @@ const backOn = products.setProductActive(p1.id, 1)
 check('需要时能再启用', backOn.active === 1)
 check('再启用后回到建单下拉', products.listProducts().some((p) => p.id === p1.id))
 
-const cStop = customers.saveCustomer({ company: 'Bymark AB', contact: 'Sofia', country: 'Sweden' })
-customers.setCustomerActive(cStop.id, 0)
-check('停用的客户不在建单下拉里', !customers.listCustomers('Bymark').some((c) => c.id === cStop.id))
-check('勾选「显示已停用」还能看到', customers.listCustomers('Bymark', true).some((c) => c.id === cStop.id))
-eq('停用不影响按编号取档案', customers.getCustomer(cStop.id)?.company, 'Bymark AB')
-customers.setCustomerActive(cStop.id, 1)
+const cStop = await customers.saveCustomer({ company: 'Bymark AB', contact: 'Sofia', country: 'Sweden' })
+await customers.setCustomerActive(cStop.id, 0)
+check('停用的客户不在建单下拉里', !(await customers.listCustomers('Bymark')).some((c) => c.id === cStop.id))
+check('勾选「显示已停用」还能看到', (await customers.listCustomers('Bymark', true)).some((c) => c.id === cStop.id))
+eq('停用不影响按编号取档案', (await customers.getCustomer(cStop.id))?.company, 'Bymark AB')
+await customers.setCustomerActive(cStop.id, 1)
 
 section('R5 商品 CSV 导入：Excel 另存为 CSV 就能进库')
 const csvText = [
@@ -3076,7 +3076,7 @@ const sR6 = getSettings()
 saveSettings({ ...sR6, remindConfirmDays: 7, remindPaymentDays: 10, remindBalanceDays: 15, remindShipDays: 3 })
 const dAgo = (n: number): string => localDate(new Date(Date.now() - n * 86400000))
 const dAgoIso = (n: number): string => new Date(Date.now() - n * 86400000).toISOString()
-const cR6 = customers.saveCustomer({ company: 'R6 Clock GmbH', country: 'DE' })
+const cR6 = await customers.saveCustomer({ company: 'R6 Clock GmbH', country: 'DE' })
 const oR6 = orders.createOrder({
   customerId: cR6.id,
   currency: 'USD',
@@ -3337,7 +3337,7 @@ const recOf = (csv: string, colName: string, val: string): { head: string[]; row
   return row ? { head, row } : null
 }
 
-const cWild = customers.saveCustomer({ company: 'Acme, "Head" Office\nHamburg', country: 'DE' })
+const cWild = await customers.saveCustomer({ company: 'Acme, "Head" Office\nHamburg', country: 'DE' })
 const oWild = orders.createOrder({ customerId: cWild.id, currency: 'USD', exchangeRate: 7.2 })
 await orders.addOrderItem(oWild.id, { styleNo: 'A001', productName: 'T, 恤', quantity: 10, unitPrice: 10, unitCost: 6 })
 orders.setPaymentStatus(oWild.id, 'confirmed')
@@ -3360,7 +3360,7 @@ check(
   JSON.stringify(wildLedger?.row[wildLedger?.head.indexOf('锁汇日期') ?? 0])
 )
 
-const cEvil = customers.saveCustomer({ company: '=HYPERLINK("http://evil","点我")', country: 'CN' })
+const cEvil = await customers.saveCustomer({ company: '=HYPERLINK("http://evil","点我")', country: 'CN' })
 const oEvil = orders.createOrder({ customerId: cEvil.id, currency: 'USD', exchangeRate: 7.2 })
 // 草稿单已经不进订单台账了（R7 口径），要试转义就得把它变成正式单
 orders.setPaymentStatus(oEvil.id, 'confirmed')
@@ -4590,7 +4590,7 @@ section('R12 守门：收款状态白名单 / 箱号查重')
  * 第 13 轮：口径与守门（R13）
  * ============================================================ */
 section('R13 导出口径：页面筛出几张，Excel 就是几张')
-const cR13 = customers.saveCustomer({ company: 'R13 Export Co', contact: 'Export Desk', country: 'Germany' })
+const cR13 = await customers.saveCustomer({ company: 'R13 Export Co', contact: 'Export Desk', country: 'Germany' })
 const r13Ledger = orders.createOrder({
   customerId: cR13.id,
   currency: 'USD',
@@ -5186,7 +5186,7 @@ eq('作废单的收款还在', orders.getOrder(r15VoidOps.id)!.payments.length, 
 eq('作废单的核销还在', orders.listSettlements(r15VoidOps.id).length, 1)
 
 section('R15 欠款榜：只打过样、没下过单的客户也在榜上')
-const r15SampleOnly = customers.saveCustomer({ company: 'R15-ONLY-SAMPLE' })
+const r15SampleOnly = await customers.saveCustomer({ company: 'R15-ONLY-SAMPLE' })
 samples.saveSample({
   customerId: r15SampleOnly.id,
   expressFee: 5,
@@ -5205,7 +5205,7 @@ check(
 )
 
 section('R15 已收的打样费不再抵扣一次')
-const r15PaidCust = customers.saveCustomer({ company: 'R15-PAID-SAMPLE' })
+const r15PaidCust = await customers.saveCustomer({ company: 'R15-PAID-SAMPLE' })
 const r15PaidSample = samples.saveSample({
   customerId: r15PaidCust.id,
   expressFee: 5,
@@ -5219,7 +5219,7 @@ samples.addSamplePayment(r15PaidSample.id, { paidAt: localDate(), amount: r15Pai
 const r15PaidOrder = samples.convertSampleToOrder(r15PaidSample.id, { offsetSampleFee: true, paymentStatus: 'draft' })
 eq('已收的打样费不再生成抵扣行', r15PaidOrder.charges.length, 0)
 eq('已收标记不被改成下单抵扣', samples.getSample(r15PaidSample.id)!.feeStatus, 'paid')
-const r15WaivedCust = customers.saveCustomer({ company: 'R15-WAIVED-SAMPLE' })
+const r15WaivedCust = await customers.saveCustomer({ company: 'R15-WAIVED-SAMPLE' })
 const r15WaivedSample = samples.saveSample({
   customerId: r15WaivedCust.id,
   expressFee: 5,
@@ -5236,7 +5236,7 @@ eq('已免收标记不被改成下单抵扣', samples.getSample(r15WaivedSample.
 section('R15 老「下单抵扣」记录不按新口径倒推')
 // R15 之前只抵了样品费，offset_amount 没有记录（0）：读取时按旧口径只算样品费，
 // 不能拿「样品费+快递费」硬套，否则老单会被算成多收回一笔从不存在的钱
-const r15LegacyCust = customers.saveCustomer({ company: 'R15-LEGACY-OFFSET' })
+const r15LegacyCust = await customers.saveCustomer({ company: 'R15-LEGACY-OFFSET' })
 const r15Legacy = samples.saveSample({
   customerId: r15LegacyCust.id,
   expressFee: 5,
@@ -5388,8 +5388,8 @@ packing.voidPackingList(r16AllVoid.id, r16V2.id, 'R16 第二批也没走')
 eq('全部批次作废后回落到未备货，不挂已发货', orders.getOrder(r16AllVoid.id)!.shipStatus, 'not_prepared')
 
 section('R16 打样转单后客户、收款状态锁定；漏传明细不再清空')
-const r16CustA = customers.saveCustomer({ company: 'R16-SAMPLE-A' })
-const r16CustB = customers.saveCustomer({ company: 'R16-SAMPLE-B' })
+const r16CustA = await customers.saveCustomer({ company: 'R16-SAMPLE-A' })
+const r16CustB = await customers.saveCustomer({ company: 'R16-SAMPLE-B' })
 const r16Sample = samples.saveSample({
   customerId: r16CustA.id,
   expressFee: 5,
@@ -5520,7 +5520,7 @@ eq('作废后从本月完成里退出', dashboard.dashboard().completedThisMonth
 
 section('R17 欠款榜：未结单数只数还欠钱的单')
 
-const r17BoardCustomer = customers.saveCustomer({ company: 'R17 欠款榜口径' })
+const r17BoardCustomer = await customers.saveCustomer({ company: 'R17 欠款榜口径' })
 const r17BoardPaid = orders.createOrder({
   customerId: r17BoardCustomer.id,
   currency: 'USD',
@@ -5663,7 +5663,7 @@ eq('作废整单 CI 后批次可以开票，不再重叠', docs.assertCiNoOverla
 
 section('R18 订单作废：打样抵扣回退为未收，不再悬空')
 
-const r18OffCust = customers.saveCustomer({ company: 'R18-OFFSET-BACK' })
+const r18OffCust = await customers.saveCustomer({ company: 'R18-OFFSET-BACK' })
 const r18OffSample = samples.saveSample({
   customerId: r18OffCust.id,
   expressFee: 5,
@@ -6098,7 +6098,7 @@ eq('报价挂到了新单上', quotations.getQuotation(r22Q.id)!.convertedOrderI
 // ④ 应收账龄 + 客户对账单导出（收款对账动线的缩水版）
 section('R22 应收账龄与客户对账单')
 
-const r22C = customers.saveCustomer({
+const r22C = await customers.saveCustomer({
   company: 'R22 Aging Trading Co',
   contact: 'Lily',
   email: 'lily@r22.com',
@@ -6127,7 +6127,7 @@ check(
 // ⑤ R23 拆分收款：一笔水单拆到多张单，整批一个事务
 section('R23 水单拆分收款：整批落账、整批回滚')
 
-const r23C = customers.saveCustomer({
+const r23C = await customers.saveCustomer({
   company: 'R23 Remittance Co',
   contact: 'Nina',
   email: 'nina@r23.com',
@@ -6238,7 +6238,7 @@ check('订单备注不带有效期重置话术', !r23ExpFresh.note.includes('重
 // ⑧ R24 打样与报价的应收守门（先修口径，再谈把打样费落进流水）
 section('R24 打样守门：转单锁状态、抵扣只认转单、应收不清不许删')
 
-const r24C = customers.saveCustomer({
+const r24C = await customers.saveCustomer({
   company: 'R24 Sample Gate Co',
   contact: 'Otto',
   email: 'otto@r24.com',
@@ -6405,7 +6405,7 @@ check(
 
 section('R25 打样费收款：实收落流水，抵扣绝不落')
 
-const r25C = customers.saveCustomer({ company: 'R25-SAMPLE-FLOW' })
+const r25C = await customers.saveCustomer({ company: 'R25-SAMPLE-FLOW' })
 const r25Month = localDate().slice(0, 7)
 const monthOfR25 = () => money.receivedByMonth().find((m) => m.month === r25Month)?.amount ?? 0
 
@@ -6638,7 +6638,7 @@ samples.deleteSample(r25Legacy.id)
 section('R26 客户对账单：订单 + 打样 + 逐笔收款，一张表对得清')
 
 const r26Base = getSettings().baseCurrency
-const r26C = customers.saveCustomer({
+const r26C = await customers.saveCustomer({
   company: 'R26 Statement Co',
   contact: 'Olga',
   email: 'olga@r26.com',
@@ -6816,18 +6816,17 @@ eq('表尾合计 = 订单 360 + 打样 72（汇率未填的单不瞎折）', r26
 
 const r26File = dashboard.statementFileName(r26C.id)
 check('对账单文件名带客户名与截止日', r26File.includes('R26 Statement Co') && r26File.includes(localDate()), r26File)
+const r26Empty = await customers.saveCustomer({ company: 'R26 Empty Co' })
 check(
   '没有单据的客户导出被拦下（不是给一张空表）',
-  r8err(() => dashboard.exportCsv('statement', { customerId: customers.saveCustomer({ company: 'R26 Empty Co' }).id })).includes(
-    '没有可对账'
-  )
+  r8err(() => dashboard.exportCsv('statement', { customerId: r26Empty.id })).includes('没有可对账')
 )
 
 /* ---------------- R27 客户预收余额与负费用并账 ---------------- */
 section('R27 客户预收：多收 / 作废余款 / 取消单实收是同一份余额，抵扣不落现金')
 
 const r27Base = getSettings().baseCurrency
-const r27C = customers.saveCustomer({
+const r27C = await customers.saveCustomer({
   company: 'R27 Credit Co',
   contact: 'Ada',
   email: 'ada@r27.com',
@@ -6838,7 +6837,7 @@ const r27C = customers.saveCustomer({
   attn: '',
   paymentPref: ''
 })
-const r27Other = customers.saveCustomer({
+const r27Other = await customers.saveCustomer({
   company: 'R27 Other Co',
   contact: '',
   email: '',
@@ -7146,7 +7145,7 @@ eq('拦下后流水原样还在', orders.getOrder(r27Over.id)!.payments.length, 
 /* ---------------- R28 客户预收出口与来源守门 ---------------- */
 section('R28 客户预收一本账：退还正门、来源守门、草稿闸门、催款与台账同一口径')
 
-const r28C = customers.saveCustomer({
+const r28C = await customers.saveCustomer({
   company: 'R28 Refund Co',
   contact: '',
   email: '',
@@ -7157,7 +7156,7 @@ const r28C = customers.saveCustomer({
   attn: '',
   paymentPref: ''
 })
-const r28Other = customers.saveCustomer({
+const r28Other = await customers.saveCustomer({
   company: 'R28 Other Co',
   contact: '',
   email: '',
@@ -7383,7 +7382,7 @@ const r28ListRow = orders.listOrderRows({ keyword: orders.getOrder(r28B.id)!.ord
 eq('订单列表行带预收抵扣 30', r28ListRow.creditApplied, 30)
 
 // —— 催打样费认抵扣：抵清后不再催
-const r28R = customers.saveCustomer({
+const r28R = await customers.saveCustomer({
   company: 'R28 Remind Co',
   contact: '',
   email: '',
@@ -7424,7 +7423,7 @@ check(
 )
 
 // —— 催定金认抵扣：定金 30 抵掉 10，只催剩下的 20
-const r28D = customers.saveCustomer({
+const r28D = await customers.saveCustomer({
   company: 'R28 Deposit Co',
   contact: '',
   email: '',
@@ -7501,7 +7500,7 @@ check(
 section('R29 余额只来自真钱：转单抵扣随订单状态派生，有账不许换客户')
 
 // —— 转单抵扣超过货值：宁可不转，也不造负数合计（负数合计会被当成客户多付）
-const r29GuardCust = customers.saveCustomer({ company: 'R29-GUARD-CO' })
+const r29GuardCust = await customers.saveCustomer({ company: 'R29-GUARD-CO' })
 const r29GuardSample = samples.saveSample({
   customerId: r29GuardCust.id,
   sampleDate: dAgo(3),
@@ -7523,7 +7522,7 @@ eq('拦下后没有转出订单', r29GuardAfter.convertedOrderId, null)
 eq('拦下后客户没有凭空多出预收', money.customerCreditAvailable(r29GuardCust.id, 'USD'), 0)
 
 // —— 历史负数合计单：只有真到账的钱才算预收
-const r29NegCust = customers.saveCustomer({ company: 'R29-NEG-CO' })
+const r29NegCust = await customers.saveCustomer({ company: 'R29-NEG-CO' })
 const r29Neg = orders.createOrder({
   customerId: r29NegCust.id,
   currency: 'USD',
@@ -7554,7 +7553,7 @@ check(
 )
 
 // —— 打样抵扣随转出订单状态派生：草稿/失效期间回到待收，恢复后自动再抵
-const r29OffCust = customers.saveCustomer({ company: 'R29-OFFSET-CO' })
+const r29OffCust = await customers.saveCustomer({ company: 'R29-OFFSET-CO' })
 const r29OffSample = samples.saveSample({
   customerId: r29OffCust.id,
   sampleDate: dAgo(30),
@@ -7622,8 +7621,8 @@ check(
 )
 
 // —— 有账的单不能换客户：钱和凭据都挂在原客户名下
-const r29A = customers.saveCustomer({ company: 'R29-CHANGE-A' })
-const r29B = customers.saveCustomer({ company: 'R29-CHANGE-B' })
+const r29A = await customers.saveCustomer({ company: 'R29-CHANGE-A' })
+const r29B = await customers.saveCustomer({ company: 'R29-CHANGE-B' })
 const r29Pay = orders.createOrder({
   customerId: r29A.id,
   currency: 'USD',
@@ -7642,7 +7641,7 @@ eq('拦下后订单客户没变', orders.getOrder(r29Pay.id)!.customerId, r29A.i
 eq('拦下后预收仍在 A 名下', money.customerCreditAvailable(r29A.id, 'USD'), 20)
 eq('拦下后 B 名下没有串过去的钱', money.customerCreditAvailable(r29B.id, 'USD'), 0)
 
-const r29ConvCust = customers.saveCustomer({ company: 'R29-CONV-CO' })
+const r29ConvCust = await customers.saveCustomer({ company: 'R29-CONV-CO' })
 const r29ConvSample = samples.saveSample({
   customerId: r29ConvCust.id,
   sampleDate: dAgo(5),
@@ -7659,7 +7658,7 @@ check(
   r8err(() => orders.updateOrder(r29ConvOrder.id, { customerId: r29B.id })).includes('换客户')
 )
 
-const r29DocCust = customers.saveCustomer({ company: 'R29-DOC-CO' })
+const r29DocCust = await customers.saveCustomer({ company: 'R29-DOC-CO' })
 const r29Doc = orders.createOrder({
   customerId: r29DocCust.id,
   currency: 'USD',
@@ -7680,7 +7679,7 @@ check(
 )
 eq('拦下后状态还是客户已确认', orders.getOrder(r29Doc.id)!.paymentStatus, 'confirmed')
 
-const r29PlCust = customers.saveCustomer({ company: 'R29-PL-CO' })
+const r29PlCust = await customers.saveCustomer({ company: 'R29-PL-CO' })
 const r29PlOrder = orders.createOrder({
   customerId: r29PlCust.id,
   currency: 'USD',
@@ -7709,7 +7708,7 @@ eq('拦下后转单还是 PI 已发', orders.getOrder(r29ConvOrder.id)!.paymentS
 section('R30 退款出账与坏账/抵扣不双算')
 
 // —— 退款补进收款台账：原币负数、基准币空着不猜
-const r30Cust = customers.saveCustomer({ company: 'R30-REFUND-CO' })
+const r30Cust = await customers.saveCustomer({ company: 'R30-REFUND-CO' })
 const r30A = orders.createOrder({
   customerId: r30Cust.id,
   currency: 'USD',
@@ -7751,7 +7750,7 @@ check('撤销的退款也从收款台账消失', !dashboard.exportCsv('payments'
 eq('撤销后预收回到 40', money.customerCreditAvailable(r30Cust.id, 'USD'), 40)
 
 // —— 坏账没追回：普通收款和预收抵扣都不许再走一遍
-const r30DebtCust = customers.saveCustomer({ company: 'R30-DEBT-CO' })
+const r30DebtCust = await customers.saveCustomer({ company: 'R30-DEBT-CO' })
 const r30Debt = orders.createOrder({
   customerId: r30DebtCust.id,
   currency: 'USD',
@@ -7793,7 +7792,7 @@ check(
 eq('拦下后预收还是 30', money.customerCreditAvailable(r30DebtCust.id, 'USD'), 30)
 
 // —— 挂起中的转单抵扣：不能再拿预收抵第二次，提醒指回订单状态
-const r30SuspCust = customers.saveCustomer({ company: 'R30-SUSP-CO' })
+const r30SuspCust = await customers.saveCustomer({ company: 'R30-SUSP-CO' })
 const r30SuspSrc = orders.createOrder({
   customerId: r30SuspCust.id,
   currency: 'USD',
@@ -7843,7 +7842,7 @@ check(
 )
 
 // —— 欠款榜第五处口径：只有挂起抵扣打样单的客户也要上榜
-const r30OnlyCust = customers.saveCustomer({ company: 'R30-SAMPLE-ONLY' })
+const r30OnlyCust = await customers.saveCustomer({ company: 'R30-SAMPLE-ONLY' })
 const r30OnlySample = samples.saveSample({
   customerId: r30OnlyCust.id,
   sampleDate: dAgo(10),
@@ -7870,7 +7869,7 @@ check(
 )
 
 // —— 对账单币种小计补上预收抵扣（非现金那部分也要勾得出来）
-const r30StmtCust = customers.saveCustomer({ company: 'R30-STMT-CO' })
+const r30StmtCust = await customers.saveCustomer({ company: 'R30-STMT-CO' })
 const r30StmtSrc = orders.createOrder({
   customerId: r30StmtCust.id,
   currency: 'USD',
@@ -8074,7 +8073,7 @@ eq(
 
 section('R33 收款状态改成原来那个值：什么都不许发生')
 
-const r33Cust = customers.saveCustomer({ company: 'R33-CALM-CO' })
+const r33Cust = await customers.saveCustomer({ company: 'R33-CALM-CO' })
 const r33Order = orders.createOrder({
   customerId: r33Cust.id,
   currency: 'USD',
@@ -8104,7 +8103,7 @@ eq('草稿单重复存草稿仍是草稿', r33DraftAgain.paymentStatus, 'draft')
 
 section('R33 多批过 ETA：同一笔欠款只喊一遍')
 
-const r33RemCust = customers.saveCustomer({ company: 'R33-ETA-CO' })
+const r33RemCust = await customers.saveCustomer({ company: 'R33-ETA-CO' })
 const r33EtaOrder = orders.createOrder({
   customerId: r33RemCust.id,
   currency: 'USD',
@@ -8125,7 +8124,7 @@ check('天数取最久那批（催款先后排得出来）', r33BalRem[0]?.days,
 section('R33 核销准入 = 计费口径：一个集合，不各自手写三个状态')
 
 for (const st of ['draft', 'expired', 'void'] as const) {
-  const c = customers.saveCustomer({ company: `R33-SETTLE-${st}` })
+  const c = await customers.saveCustomer({ company: `R33-SETTLE-${st}` })
   const o = orders.createOrder({ customerId: c.id, currency: 'USD', exchangeRate: 7.2, paymentStatus: 'confirmed' })
   await orders.addOrderItem(o.id, { styleNo: 'R33-S', quantity: 1, unitPrice: 100 })
   // 作废/失效的正门另有凭据核对，这里只验「非计费状态进不了核销」这道门，直接落库模拟历史脏数据
@@ -8139,7 +8138,7 @@ for (const st of ['draft', 'expired', 'void'] as const) {
 
 section('R33 上单条款只认计费状态：草稿/失效/作废不能作为报价默认')
 
-const r33TermCust = customers.saveCustomer({ company: 'R33-TERMS-CO' })
+const r33TermCust = await customers.saveCustomer({ company: 'R33-TERMS-CO' })
 const r33TermOld = orders.createOrder({
   customerId: r33TermCust.id,
   currency: 'USD',
@@ -8162,7 +8161,7 @@ eq('港口也来自正式单', r33Terms?.portOfLoading, 'SHANGHAI')
 
 section('R33 对账单：没有单笔水单的已收要说破，但用客户看得懂的话')
 
-const r33StmtCust = customers.saveCustomer({ company: 'R33-STMT-CO' })
+const r33StmtCust = await customers.saveCustomer({ company: 'R33-STMT-CO' })
 const r33StmtOrder = orders.createOrder({
   customerId: r33StmtCust.id,
   currency: 'USD',
@@ -8190,7 +8189,7 @@ check('币种合计行单列「其中 30.00 未单独列水单」', !!r33TotalLi
 
 section('R33 月报：退款笔数另列，不减进「收款」')
 
-const r33RefCust = customers.saveCustomer({ company: 'R33-REFUND-CO' })
+const r33RefCust = await customers.saveCustomer({ company: 'R33-REFUND-CO' })
 const r33RefSrc = orders.createOrder({
   customerId: r33RefCust.id,
   currency: 'USD',
@@ -8217,7 +8216,7 @@ check('月度汇总导出多出退款两列且不改变收款列', dashboard.exp
 section('R34 台账导出的「待收」= 屏幕上那一列')
 
 const r34Base = getSettings().baseCurrency
-const r34ExpCust = customers.saveCustomer({ company: 'R34-EXPORT-CO' })
+const r34ExpCust = await customers.saveCustomer({ company: 'R34-EXPORT-CO' })
 const r34Void = orders.createOrder({
   customerId: r34ExpCust.id,
   currency: 'USD',
@@ -8356,7 +8355,7 @@ saveSettings(r34ShipSettings)
 
 section('R34 打样抵扣挂起：闸门不开，但报错指着正门')
 
-const r34OffCust = customers.saveCustomer({ company: 'R34-OFFSET-CO' })
+const r34OffCust = await customers.saveCustomer({ company: 'R34-OFFSET-CO' })
 const r34OffSample = samples.saveSample({
   customerId: r34OffCust.id,
   currency: 'USD',
@@ -8377,7 +8376,7 @@ check('不是一句「登记在订单上」把人赶进死胡同', r34OffErr.inc
 
 section('R34 一笔水单拆到订单与打样：两种单据各归各的账')
 
-const r34SpCust = customers.saveCustomer({ company: 'R34-SPLIT-CO' })
+const r34SpCust = await customers.saveCustomer({ company: 'R34-SPLIT-CO' })
 const r34SpOrder = orders.createOrder({
   customerId: r34SpCust.id,
   currency: 'USD',
@@ -8418,7 +8417,7 @@ check(
 
 section('R35 报价版本的时间：补出来的那一版不许写「今天」')
 
-const r35C = customers.saveCustomer({ company: 'R35-PAPER-CO', paymentPref: '见票 30 天 D/P' })
+const r35C = await customers.saveCustomer({ company: 'R35-PAPER-CO', paymentPref: '见票 30 天 D/P' })
 const r35Q = quotations.saveQuotation({
   customerId: r35C.id,
   currency: 'USD',
@@ -8582,7 +8581,7 @@ eq('不乱加自动流转的历史', orders.listEvents(r35Exp2.id).filter((e) =>
 
 section('R35 对账单：让利说「为您减免」，不替客户算坏账')
 
-const r35B = customers.saveCustomer({ company: 'R35-STMT-CO' })
+const r35B = await customers.saveCustomer({ company: 'R35-STMT-CO' })
 const r35Bo = orders.createOrder({
   customerId: r35B.id,
   currency: 'USD',
@@ -8676,7 +8675,7 @@ check(
 
 section('R36 批次 CI 印本批的封条号')
 
-const r36SealCust = customers.saveCustomer({ company: 'R36-SEAL-CO' })
+const r36SealCust = await customers.saveCustomer({ company: 'R36-SEAL-CO' })
 const r36SealOrder = orders.createOrder({
   customerId: r36SealCust.id,
   currency: 'USD',
@@ -8721,7 +8720,7 @@ check('整单 CI 仍印订单级封条', r36WholePaper.includes('Seal No.: SEAL-
 
 section('R36 PI 号在保存时就验：坏号不许等到出单才炸')
 
-const r36PiCust = customers.saveCustomer({ company: 'R36-PI-CO' })
+const r36PiCust = await customers.saveCustomer({ company: 'R36-PI-CO' })
 const r36BadPiErr = r8err(() =>
   orders.createOrder({ customerId: r36PiCust.id, currency: 'USD', exchangeRate: 7, piNo: 'PI/R36/001' })
 )
@@ -8747,7 +8746,7 @@ eq('老号原样保留', r36LegacySaved.piNo, 'LEGACY/R36')
 
 section('R36 打样日期只记已经发生的事')
 
-const r36SmpCust = customers.saveCustomer({ company: 'R36-SAMPLE-CO' })
+const r36SmpCust = await customers.saveCustomer({ company: 'R36-SAMPLE-CO' })
 const r36FutureDay = localDate(new Date(Date.now() + 5 * 86400000))
 const r36SmpItem = [{ styleNo: 'R36-SMP', quantity: 1, unitPrice: 5 }]
 const r36SmpBad = r8err(() =>
@@ -8815,7 +8814,7 @@ eq('真实发生过的日期照常放行', [r36SmpOk.sampleDate, r36SmpOk.shippe
 
 section('R36 费用行填了钱就得有名称')
 
-const r36ChargeCust = customers.saveCustomer({ company: 'R36-CHARGE-CO' })
+const r36ChargeCust = await customers.saveCustomer({ company: 'R36-CHARGE-CO' })
 const r36BlankChargeErr = r8err(() =>
   orders.createOrder({
     customerId: r36ChargeCust.id,
@@ -8850,7 +8849,7 @@ section('R36 定金没收齐时只催定金，不喊尾款')
 
 const r36RemPrev = getSettings()
 saveSettings({ ...r36RemPrev, remindPaymentDays: 0, remindBalanceDays: 0 })
-const r36DepCust = customers.saveCustomer({ company: 'R36-DEPOSIT-CO' })
+const r36DepCust = await customers.saveCustomer({ company: 'R36-DEPOSIT-CO' })
 const r36DepOrder = orders.createOrder({
   customerId: r36DepCust.id,
   currency: 'USD',
@@ -8938,7 +8937,7 @@ check(
 
 section('R37 批次 CI 不再和整单应收对金额')
 
-const r37CiCust = customers.saveCustomer({ company: 'R37-CI-CO' })
+const r37CiCust = await customers.saveCustomer({ company: 'R37-CI-CO' })
 const r37CiOrder = orders.createOrder({
   customerId: r37CiCust.id,
   currency: 'USD',
@@ -9011,7 +9010,7 @@ eq(
 
 section('R37 打样费用与汇率不许是乱码或负数')
 
-const r37SmpCust = customers.saveCustomer({ company: 'R37-FEE-CO' })
+const r37SmpCust = await customers.saveCustomer({ company: 'R37-FEE-CO' })
 const r37Smp = samples.saveSample({
   customerId: r37SmpCust.id,
   currency: 'USD',
@@ -9043,7 +9042,7 @@ eq('被拦之后汇率还是 7', samples.getSample(r37Smp.id)!.exchangeRate, 7)
 
 section('R37 预收抵清的样品费显示「已抵清」而不是「未收」')
 
-const r37CrCust = customers.saveCustomer({ company: 'R37-CREDIT-CO' })
+const r37CrCust = await customers.saveCustomer({ company: 'R37-CREDIT-CO' })
 const r37CrSrc = orders.createOrder({
   customerId: r37CrCust.id,
   currency: 'USD',
@@ -9075,7 +9074,7 @@ eq('界面据此显示「已抵清」', r37CrAfter.creditSettled, true)
 
 section('R37 报价：转出的订单作废后不再锁死，发后改过看得见')
 
-const r37QCust = customers.saveCustomer({ company: 'R37-QUOTE-CO' })
+const r37QCust = await customers.saveCustomer({ company: 'R37-QUOTE-CO' })
 const r37Q = quotations.saveQuotation({
   customerId: r37QCust.id,
   currency: 'USD',
@@ -9145,7 +9144,7 @@ check(
 
 section('R38 同一张水单不能在同一张单上记两次')
 
-const r38SlipCust = customers.saveCustomer({ company: 'R38-SLIP-CO' })
+const r38SlipCust = await customers.saveCustomer({ company: 'R38-SLIP-CO' })
 const r38SlipA = orders.createOrder({
   customerId: r38SlipCust.id,
   currency: 'USD',
@@ -9229,7 +9228,7 @@ section('R38 定金差把已核销的钱算进去，尾款提醒不再被永久�
 const r38RemPrev = getSettings()
 saveSettings({ ...r38RemPrev, remindPaymentDays: 0, remindBalanceDays: 0 })
 const r38DepBefore = dashboard.dashboard()
-const r38DepCust = customers.saveCustomer({ company: 'R38-DEPOSIT-CO' })
+const r38DepCust = await customers.saveCustomer({ company: 'R38-DEPOSIT-CO' })
 const r38MakeDep = async (styleNo: string): Promise<number> => {
   const o = orders.createOrder({
     customerId: r38DepCust.id,
@@ -9301,7 +9300,7 @@ saveSettings(r38RemPrev)
 
 section('R38 打样入口：成本、收款状态、款号各行其位')
 
-const r38GuardCust = customers.saveCustomer({ company: 'R38-GUARD-CO' })
+const r38GuardCust = await customers.saveCustomer({ company: 'R38-GUARD-CO' })
 const r38GuardBase = {
   customerId: r38GuardCust.id,
   currency: 'USD',
@@ -9349,7 +9348,7 @@ eq('这一张单正常存下来了', r38GuardCount(), 1)
 
 section('R38 打样列表待收与工作台同一口径')
 
-const r38OffCust = customers.saveCustomer({ company: 'R38-OFFSET-CO' })
+const r38OffCust = await customers.saveCustomer({ company: 'R38-OFFSET-CO' })
 const r38Off = samples.saveSample({
   customerId: r38OffCust.id,
   sampleDate: dAgo(20),
@@ -9380,7 +9379,7 @@ eq('没有待收的打样单算出来是 0（界面照旧显示「—」）', r3
 
 section('R39 坏账追回的水单也只认一次（R38 前门拦过的，不许从后门进来）')
 
-const r39Cust = customers.saveCustomer({ company: 'R39-DUP-CO' })
+const r39Cust = await customers.saveCustomer({ company: 'R39-DUP-CO' })
 const r39Order = orders.createOrder({
   customerId: r39Cust.id,
   currency: 'USD',
@@ -9426,7 +9425,7 @@ eq('撤销后同一张水单可以重新登记追回', orders.getOrder(r39Order.
 
 section('R39 一张出水单只退一次预收')
 
-const r39RefCust = customers.saveCustomer({ company: 'R39-REFUND-CO' })
+const r39RefCust = await customers.saveCustomer({ company: 'R39-REFUND-CO' })
 const r39RefOrder = orders.createOrder({
   customerId: r39RefCust.id,
   currency: 'USD',
@@ -9517,13 +9516,16 @@ const r40err = (fn: () => unknown): string => {
     return (e as Error).message
   }
 }
-const r40Cust = customers.saveCustomer({ company: 'R40-GUARD-CO' })
-check(
-  '客户档案默认定金比例 1.5 落库被拦',
-  r40err(() => customers.saveCustomer({ id: r40Cust.id, company: 'R40-GUARD-CO', defaultDepositRatio: 1.5 })).includes(
-    '0 到 1'
-  )
-)
+const r40Cust = await customers.saveCustomer({ company: 'R40-GUARD-CO' })
+const r40RatioErr = await (async (): Promise<string> => {
+  try {
+    await customers.saveCustomer({ id: r40Cust.id, company: 'R40-GUARD-CO', defaultDepositRatio: 1.5 })
+    return ''
+  } catch (e) {
+    return (e as Error).message
+  }
+})()
+check('客户档案默认定金比例 1.5 落库被拦', r40RatioErr.includes('0 到 1'))
 check(
   '建单定金比例 1.5 被拦（IPC/导入能塞进来，不能只靠下拉框）',
   r40err(() => orders.createOrder({ customerId: r40Cust.id, piNo: 'PI-R40-DEP', depositRatio: 1.5 })).includes('0 到 1')
@@ -9555,7 +9557,7 @@ check(
 section('R40 打样待收只认服务层 owed：免收、部分收款都是一套话')
 const r40RemPrev = getSettings()
 saveSettings({ ...r40RemPrev, remindPaymentDays: 0, remindBalanceDays: 0 })
-const r40FeeCust = customers.saveCustomer({ company: 'R40-FEE-CO' })
+const r40FeeCust = await customers.saveCustomer({ company: 'R40-FEE-CO' })
 const r40Fee = samples.saveSample({
   customerId: r40FeeCust.id,
   currency: 'USD',
@@ -9588,7 +9590,7 @@ check(
 )
 
 section('R40 对账单不印内部话术：坏账追回按减免收回说')
-const r40StmtCust = customers.saveCustomer({ company: 'R40-STMT-CO' })
+const r40StmtCust = await customers.saveCustomer({ company: 'R40-STMT-CO' })
 const r40Stmt = orders.createOrder({ customerId: r40StmtCust.id, piNo: 'PI-R40-STMT', paymentStatus: 'sent' })
 await orders.addOrderItem(r40Stmt.id, { styleNo: 'R40-STMT', quantity: 1, unitPrice: 100 })
 orders.addSettlement(r40Stmt.id, { kind: 'bad_debt', amount: 40, reason: 'R40 客户失联' })
@@ -9600,7 +9602,7 @@ saveSettings(r40RemPrev)
 
 /* ---------------- R41 ---------------- */
 section('R41 老账「已向客户收」不能一键改「免收」')
-const r41LegCust = customers.saveCustomer({ company: 'R41-LEGACY-CO' })
+const r41LegCust = await customers.saveCustomer({ company: 'R41-LEGACY-CO' })
 const r41Leg = samples.saveSample({
   customerId: r41LegCust.id,
   currency: 'USD',
@@ -9616,7 +9618,7 @@ check(
 eq('paid → unpaid 纠错正门照常走（拦的是流向免收，不是改错）', samples.saveSample({ id: r41Leg.id, feeStatus: 'unpaid' }).feeStatus, 'unpaid')
 
 section('R41 汇率参考值只认钉盘日期，不被无关编辑带偏')
-const r41RateCust = customers.saveCustomer({ company: 'R41-RATE-CO' })
+const r41RateCust = await customers.saveCustomer({ company: 'R41-RATE-CO' })
 const r41a = orders.createOrder({ customerId: r41RateCust.id, piNo: 'PI-R41-RATE-A', currency: 'USD', paymentStatus: 'sent' })
 const r41b = orders.createOrder({ customerId: r41RateCust.id, piNo: 'PI-R41-RATE-B', currency: 'USD', paymentStatus: 'sent' })
 const r41c = orders.createOrder({ customerId: r41RateCust.id, piNo: 'PI-R41-RATE-C', currency: 'USD', paymentStatus: 'sent' })
@@ -9636,7 +9638,7 @@ check('65536 个文件的包在入口被拦且文案给出上限', r40err(() => 
 
 /* ---------------- R42 ---------------- */
 section('R42 对账单不再对挂起的抵扣说「已收回」')
-const r42C = customers.saveCustomer({ company: 'R42-STMT-CO' })
+const r42C = await customers.saveCustomer({ company: 'R42-STMT-CO' })
 const r42Sample = samples.saveSample({
   customerId: r42C.id,
   sampleDate: dAgo(5),
