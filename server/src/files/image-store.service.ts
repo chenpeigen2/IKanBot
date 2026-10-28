@@ -2,7 +2,7 @@ import { Inject, Injectable } from '@nestjs/common'
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, extname, join, resolve, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { BizError } from '../../../core/errors'
+import { BizError } from '../../../src/shared/errors'
 import { CONFIG } from '../config/config.module'
 import type { ServerConfig } from '../config/config'
 

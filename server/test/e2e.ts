@@ -8,10 +8,11 @@ import { AppModule } from '../src/app.module'
 import { configureApp } from '../src/app.setup'
 import { DB } from '../src/db/db.module'
 import type { Db } from '../src/db/types'
+import { localDate } from '../../src/shared/date'
 
 /**
  * HTTP 面冒烟：跑的就是线上那套 AppModule + configureApp（不另搭一条测试路径）。
- * 覆盖健康检查、接口自描述、客户域正门与三道守门、以及错误体文案。
+ * 覆盖健康检查、接口自描述、客户/商品/设置/金额各域正门，以及单据簇（订单/报价/打样/装箱/工作台/导出）。
  */
 async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'ikan-e2e-'))
@@ -40,8 +41,8 @@ async function main(): Promise<void> {
     const routes: string[] = meta.body.routes ?? []
     check('GET /api 自描述已接接口', routes.includes('POST /api/customers/list') && routes.includes('GET /healthz'))
     check(
-      '路由数与控制器一致（30 个：客户 6 + 商品 12 + 图片 3 + 设置 3 + 金额只读 4 + 自带 2）',
-      routes.length === 30
+      '路由数与控制器一致（93 个：前 30 + 订单 30 + 报价 8 + 打样 8 + 预收 4 + 装箱 9 + 工作台 2 + 月报 1 + 导出 1）',
+      routes.length === 93
     )
 
     console.log('客户域')
@@ -385,6 +386,259 @@ async function main(): Promise<void> {
       '金额接口的编号守门：不是正整数当场说清',
       badCustomer.status === 400 && String(badCustomer.body.error.message).includes('客户编号')
     )
+
+    console.log('订单域')
+    const ordCust = await http.post('/api/customers/save').send({ input: { company: 'Order Co' } })
+    const ocid = Number(ordCust.body.id)
+    const oCreate = await http
+      .post('/api/orders/create')
+      .send({ input: { customerId: ocid, currency: 'USD', exchangeRate: 7.2, exchangeRateDate: localDate() } })
+    check(
+      '建单自动烧单号并回完整档案',
+      oCreate.status === 200 && /^SO\d/.test(String(oCreate.body.orderNo)) && oCreate.body.customerId === ocid
+    )
+    const oid = Number(oCreate.body.id)
+
+    const oItems = await http
+      .post('/api/orders/addItems')
+      .send({ orderId: oid, items: [{ styleNo: 'OC-1', quantity: 10, unitPrice: 5 }] })
+    check(
+      '批量加明细一次落库（货值 50）',
+      oItems.status === 200 && oItems.body.items.length === 1 && oItems.body.totalAmount === 50
+    )
+
+    const oList = await http.post('/api/orders/list').send({ filter: { customerId: ocid } })
+    check(
+      '订单列表按客户筛得到这一张',
+      oList.status === 200 && oList.body.total === 1 && oList.body.rows[0].id === oid
+    )
+
+    const oGet = await http.post('/api/orders/get').send({ id: oid })
+    check('查单带回明细与空收款', oGet.status === 200 && oGet.body.items.length === 1 && oGet.body.payments.length === 0)
+    const oMissing = await http.post('/api/orders/get').send({ id: 999999 })
+    check('查不存在的单回空体（桌面读成 null，按「没找到」处理）', oMissing.status === 200 && oMissing.text === '')
+
+    const skus = await http.post('/api/orders/summarizeSkus').send({ orderId: oid })
+    check('SKU 汇总按款色码合计', skus.status === 200 && skus.body.length === 1 && skus.body[0].quantity === 10)
+
+    const oShipBad = await http
+      .post('/api/orders/setShipStatus')
+      .send({ orderId: oid, status: 'partial_shipped' })
+    check(
+      '「部分出运」不能手工设：说要到装箱单里推进',
+      oShipBad.status === 400 && String(oShipBad.body.error.message).includes('装箱单')
+    )
+    const oShip = await http.post('/api/orders/setShipStatus').send({ orderId: oid, status: 'preparing', note: '开始备货' })
+    check('合法出货状态落库', oShip.status === 200 && oShip.body.shipStatus === 'preparing')
+
+    const draftPay = await http
+      .post('/api/orders/addPayment')
+      .send({ orderId: oid, p: { paidAt: localDate(), amount: 10 } })
+    check(
+      '草稿单登记收款被拦（说清这笔钱会从月报消失）',
+      draftPay.status === 400 && String(draftPay.body.error.message).includes('草稿')
+    )
+
+    const oStatus = await http
+      .post('/api/orders/setPaymentStatus')
+      .send({ orderId: oid, status: 'sent', note: 'PI 已发' })
+    check('收款状态推到「已发出」', oStatus.status === 200 && oStatus.body.paymentStatus === 'sent')
+    const oBadStatus = await http.post('/api/orders/setPaymentStatus').send({ orderId: oid, status: 'nope' })
+    check(
+      '不存在的收款状态说清有哪些可选',
+      oBadStatus.status === 400 && String(oBadStatus.body.error.message).includes('不是收款状态')
+    )
+
+    const oPay = await http
+      .post('/api/orders/addPayment')
+      .send({ orderId: oid, p: { paidAt: localDate(), amount: 10, method: 'tt' } })
+    check(
+      '登记收款后已收 10、待收 40',
+      oPay.status === 200 && oPay.body.paidAmount === 10 && oPay.body.remaining === 40
+    )
+    const paymentId = Number(oPay.body.payments[0].id)
+
+    const oBadPay = await http
+      .post('/api/orders/addPayment')
+      .send({ orderId: oid, p: { paidAt: localDate(), amount: 0 } })
+    check('收款金额为 0 拒收（不留空流水）', oBadPay.status === 400)
+
+    const oEvents = await http.post('/api/orders/events').send({ orderId: oid })
+    check('操作历史里建单/出货/收款都留下了', oEvents.status === 200 && oEvents.body.length >= 3)
+
+    const ports = await http.post('/api/orders/ports').send({})
+    check(
+      '港口清单两类都在',
+      ports.status === 200 && Array.isArray(ports.body.loading) && Array.isArray(ports.body.destination)
+    )
+
+    const chargeBad = await http.post('/api/orders/updateCharges').send({ id: oid, charges: 'oops', reason: '' })
+    check('费用行不是列表当场拒收', chargeBad.status === 400)
+    const batchBad = await http.post('/api/orders/batchAddPayments').send({ entries: 'oops' })
+    check('批量收款不是列表当场拒收', batchBad.status === 400)
+
+    const settle = await http.post('/api/orders/listSettlements').send({ orderId: oid })
+    check('核销记录空表', settle.status === 200 && settle.body.length === 0)
+    const rateInfo = await http.post('/api/orders/lastExchangeRateInfo').send({ currency: 'USD' })
+    check('最近一次 USD 汇率报得出来', rateInfo.status === 200 && rateInfo.body.rate === 7.2)
+
+    const oDelPay = await http.post('/api/orders/deletePayment').send({ orderId: oid, paymentId, reason: '录错了' })
+    check(
+      '删收款写原因后待收回到 50',
+      oDelPay.status === 200 && oDelPay.body.paidAmount === 0 && oDelPay.body.remaining === 50
+    )
+
+    const shotUp = await http
+      .post('/api/files/upload?name=inspection.png')
+      .set('content-type', 'application/octet-stream')
+      .send(png)
+    const shotName = String(shotUp.body.fileName)
+    const photo = await http
+      .post('/api/orders/addPhoto')
+      .send({ orderId: oid, fileName: shotName, kind: 'inspection', note: '验货照' })
+    check('照片登记回 id 与类型', photo.status === 200 && Number(photo.body.id) > 0 && photo.body.kind === 'inspection')
+    check('照片列表能取回', (await http.post('/api/orders/photos').send({ orderId: oid })).body.length === 1)
+    await http.post('/api/orders/delPhoto').send({ orderId: oid, photoId: photo.body.id })
+    check('删照片记录时实物文件一并清掉', (await http.get(`/api/files/images/${shotName}`)).status === 404)
+
+    console.log('报价域')
+    const qSave = await http.post('/api/quotations/save').send({
+      input: {
+        customerId: ocid,
+        currency: 'USD',
+        exchangeRate: 7.2,
+        exchangeRateDate: localDate(),
+        items: [{ styleNo: 'QC-1', quantity: 4, unitPrice: 6 }]
+      }
+    })
+    check('报价单保存回单号与明细', qSave.status === 200 && /^Q\d/.test(String(qSave.body.qNo)) && qSave.body.items.length === 1)
+    const qid = Number(qSave.body.id)
+
+    const qList = await http.post('/api/quotations/list').send({})
+    check('报价列表能搜到刚存的', qList.status === 200 && qList.body.some((q: { id: number }) => q.id === qid))
+
+    const qVersions = await http.post('/api/quotations/versions').send({ id: qid })
+    check('版本存档至少一版（转单靠它取快照）', qVersions.status === 200 && qVersions.body.length >= 1)
+
+    const qConvert = await http.post('/api/quotations/convert').send({ id: qid })
+    check(
+      '报价转订单：金额与行数照搬',
+      qConvert.status === 200 && qConvert.body.grandTotal === 24 && qConvert.body.items.length === 1
+    )
+    const qDelete = await http.post('/api/quotations/delete').send({ id: qid })
+    check(
+      '已转单的报价删不掉（说要保留原始报价）',
+      qDelete.status === 400 && String(qDelete.body.error.message).includes('原始报价')
+    )
+
+    console.log('打样域')
+    const sSave = await http.post('/api/samples/save').send({
+      input: {
+        customerId: ocid,
+        currency: 'USD',
+        exchangeRate: 7.2,
+        exchangeRateDate: localDate(),
+        sampleDate: localDate(),
+        items: [{ styleNo: 'SM-1', quantity: 2, unitPrice: 10, goodsUnitPrice: 8 }]
+      }
+    })
+    check('打样单保存回样品费 20', sSave.status === 200 && sSave.body.sampleFee === 20)
+    const sid = Number(sSave.body.id)
+
+    check('新单收款流水为空', (await http.post('/api/samples/listPayments').send({ id: sid })).body.length === 0)
+    const sPay = await http
+      .post('/api/samples/addPayment')
+      .send({ id: sid, p: { paidAt: localDate(), amount: 5, method: 'tt' } })
+    check('登记样品费收款 5', sPay.status === 200 && sPay.body.collected === 5)
+    check('收款流水列得出来', (await http.post('/api/samples/listPayments').send({ id: sid })).body.length === 1)
+
+    const sConvert = await http.post('/api/samples/convert').send({ id: sid, opts: { paymentStatus: 'sent' } })
+    check('打样转订单：大货单价 8 × 2 = 16', sConvert.status === 200 && sConvert.body.grandTotal === 16)
+    const sGet = await http.post('/api/samples/get').send({ id: sid })
+    check('转单后的打样单记得转到了哪张单', sGet.status === 200 && Number(sGet.body.convertedOrderId) > 0)
+
+    console.log('预收与退款')
+    const cApply = await http.post('/api/credits/apply').send({
+      input: { customerId: ocid, currency: 'USD', targetKind: 'order', targetId: oid, amount: 10 }
+    })
+    check(
+      '没有预收就抵扣：说清可用余额是 0',
+      cApply.status === 400 && String(cApply.body.error.message).includes('可用预收')
+    )
+    const cRefund = await http.post('/api/credits/refund').send({
+      input: { customerId: ocid, currency: 'USD', amount: 5, bankRef: 'TT-1', note: '多付退回' }
+    })
+    check('没有预收可退：按余额拦下', cRefund.status === 400 && String(cRefund.body.error.message).includes('不够退'))
+    const cNoRef = await http.post('/api/credits/refund').send({
+      input: { customerId: ocid, currency: 'USD', amount: 5, bankRef: '  ', note: '多付退回' }
+    })
+    check('退款不填水单号拒收（钱出门要有凭据）', cNoRef.status === 400 && String(cNoRef.body.error.message).includes('水单号'))
+    const cRev = await http.post('/api/credits/reverse').send({ applicationId: 999999, reason: '抵错了单' })
+    check('撤销不存在的抵扣说清楚', cRev.status === 400 && String(cRev.body.error.message).includes('不存在'))
+    const cRevRef = await http.post('/api/credits/reverseRefund').send({ refundId: 999999, reason: '水单录错' })
+    check('撤销不存在的退款说清楚', cRevRef.status === 400 && String(cRevRef.body.error.message).includes('不存在'))
+
+    console.log('装箱域')
+    check('新单还没有批次', (await http.post('/api/pl/list').send({ orderId: oid })).body.length === 0)
+    const plCreate = await http.post('/api/pl/create').send({
+      input: { orderId: oid, containerNo: 'TCLU1', lines: [{ boxNo: '1', styleNo: 'OC-1', quantity: 5 }] }
+    })
+    check(
+      '建批次：一箱五件',
+      plCreate.status === 200 && plCreate.body.length === 1 && plCreate.body[0].lines[0].quantity === 5
+    )
+    const plId = Number(plCreate.body[0].id)
+    const plLineId = Number(plCreate.body[0].lines[0].id)
+
+    const plInfo = await http
+      .post('/api/pl/updateInfo')
+      .send({ orderId: oid, plId, patch: { vessel: 'MV TEST', etdDate: localDate() } })
+    check('改批次信息落库', plInfo.status === 200 && plInfo.body[0].vessel === 'MV TEST')
+
+    const plLine = await http
+      .post('/api/pl/updateLine')
+      .send({ orderId: oid, plId, lineId: plLineId, patch: { quantity: 4 } })
+    check('改箱内数量落库', plLine.status === 200 && plLine.body[0].lines[0].quantity === 4)
+
+    const plVoidNoReason = await http.post('/api/pl/void').send({ orderId: oid, plId, reason: '  ' })
+    check(
+      '作废批次必须写原因',
+      plVoidNoReason.status === 400 && String(plVoidNoReason.body.error.message).includes('原因')
+    )
+    const plVoid = await http.post('/api/pl/void').send({ orderId: oid, plId, reason: '订舱取消' })
+    check('作废后标记留档（不再参与汇总）', plVoid.status === 200 && plVoid.body[0].voidedAt !== null)
+    const plUnvoid = await http.post('/api/pl/unvoid').send({ orderId: oid, plId, reason: '重新订舱' })
+    check('撤销作废后回到活批次', plUnvoid.status === 200 && plUnvoid.body[0].voidedAt === null)
+
+    const plDel = await http.post('/api/pl/delete').send({ orderId: oid, plId })
+    check('没出过 CI 的批次可以删', plDel.status === 200 && plDel.body.length === 0)
+
+    console.log('工作台与报表')
+    const stats = await http.post('/api/dashboard/stats').send({})
+    check(
+      '工作台数字有来源：在做的单与本月新单都 ≥ 1',
+      stats.status === 200 && stats.body.activeOrders >= 1 && stats.body.monthNewOrders >= 1
+    )
+    const reminders = await http.post('/api/dashboard/reminders').send({})
+    check('提醒是列表（没到期就是空）', reminders.status === 200 && Array.isArray(reminders.body))
+    const monthly = await http.post('/api/report/monthly').send({})
+    check('月报按月归集出至少一行', monthly.status === 200 && monthly.body.length >= 1)
+
+    console.log('导出')
+    const exOrders = await http.post('/api/export/csv').send({ kind: 'orders' })
+    check(
+      '订单台账 CSV 由后端算好（带单号，文件名带日期）',
+      exOrders.status === 200 &&
+        String(exOrders.body.csv).includes(String(qConvert.body.orderNo)) &&
+        /\.csv$/.test(String(exOrders.body.fileName))
+    )
+    const exStmt = await http.post('/api/export/csv').send({ kind: 'statement', filter: { customerId: ocid } })
+    check(
+      '对账单文件名带客户名（两处各拼一次迟早不一致）',
+      exStmt.status === 200 && String(exStmt.body.fileName).includes('Order Co')
+    )
+    const exBad = await http.post('/api/export/csv').send({ kind: 'nope' })
+    check('未知导出类型说清只接哪几种', exBad.status === 400 && String(exBad.body.error.message).includes('只接'))
 
     console.log('错误体')
     const unknown = await http.post('/api/no-such-route').send({})

@@ -5,6 +5,8 @@
  * 注意：不要用 toISOString().slice(0,10)，那是 UTC 日期，
  * 在 UTC+8 的凌晨 0~8 点会比本地日期少一天。
  */
+import { bizError } from './errors'
+
 
 export function localDate(d: Date = new Date()): string {
   const y = d.getFullYear()
@@ -63,10 +65,10 @@ export function assertLocalDate(
 ): void {
   if (v === undefined || v === null || v === '') return
   if (!isLocalDate(v)) {
-    throw new Error(`${label}「${v}」不是合法日期，请用 2026-10-05 这种写法（或留空）`)
+    throw bizError(`${label}「${v}」不是合法日期，请用 2026-10-05 这种写法（或留空）`)
   }
   if (noFuture && String(v) > localDate()) {
-    throw new Error(`${label}「${v}」还在未来——${futureHint}`)
+    throw bizError(`${label}「${v}」还在未来——${futureHint}`)
   }
 }
 

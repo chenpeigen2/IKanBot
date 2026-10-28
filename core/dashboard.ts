@@ -7,6 +7,7 @@
  *
  * 按需懒建 money / orders 工厂，拿到的是同一个连接。
  */
+import { bizError } from '../src/shared/errors'
 import type { Db } from './db'
 import { mapDashboard, mapMonthlyReport } from '../electron/db/mappers'
 import { settingsCore } from './settings'
@@ -1023,13 +1024,13 @@ export function dashboardCore(db: Db) {
         return paymentsCsv(base)
       case 'statement': {
         const customerId = Number(filter?.customerId ?? 0)
-        if (!customerId) throw new Error('导出对账单必须指定客户。')
+        if (!customerId) throw bizError('导出对账单必须指定客户。')
         return statementCsv(customerId, base)
       }
       default: {
         // 加了新 kind 却忘了在这里分支：让编译器在这里叫，别让它静默掉进收款分支
         const never: never = kind
-        throw new Error(`不支持的导出类型：${String(never)}`)
+        throw bizError(`不支持的导出类型：${String(never)}`)
       }
     }
   }
@@ -1328,7 +1329,7 @@ export function dashboardCore(db: Db) {
     const samples = await money.sampleStatementRows(customerId)
     const flows = await money.cashFlowRows({ customerId })
     if (orders.length === 0 && samples.length === 0 && flows.length === 0) {
-      throw new Error('这家客户还没有订单或打样单，没有可对账的内容。')
+      throw bizError('这家客户还没有订单或打样单，没有可对账的内容。')
     }
 
     type StatementRow = {
@@ -1626,3 +1627,6 @@ export function dashboardCore(db: Db) {
     toCsv
   }
 }
+
+/** 工作台/报表/导出门面类型 */
+export type DashboardCore = ReturnType<typeof dashboardCore>

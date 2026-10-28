@@ -188,13 +188,12 @@ export default function Settings() {
 
           {source.mode === 'remote' ? (
             <div className="alert warn">
-              现在是<strong>后端模式</strong>：客户档案、商品、系统设置与待收账目读写后端那份数据（已搬到后端{' '}
-              {source.covered} / {source.total} 个接口）。订单、打样、报价、单据这些还没搬，点了会当场报错，绝不会悄悄改本机那一份。
-              要干正经活，先切回本机。
+              现在是<strong>后端模式</strong>：客户、商品、设置、订单、报价、打样、装箱、预收与报表都读写后端那份数据（已搬到后端{' '}
+              {source.covered} / {source.total} 个接口）。单据存档、备份、打印仍在本机；客户统计这类还没搬的点了会当场报错，绝不会悄悄改本机那一份。
             </div>
           ) : (
             <div className="hint">
-              后端目前接好了 {source.covered} / {source.total} 个接口（客户档案、商品、系统设置、待收账目）。其余功能搬完之前，后端模式只适合试接口。
+              后端已接好 {source.covered} / {source.total} 个接口（客户、商品、设置、订单、报价、打样、装箱、预收、工作台与报表）。其余功能搬完之前，后端模式只适合试接口。
             </div>
           )}
         </>

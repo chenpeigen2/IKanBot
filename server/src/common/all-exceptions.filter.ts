@@ -1,7 +1,7 @@
 import { BadRequestException, Catch, Injectable, type ExceptionFilter, type ArgumentsHost } from '@nestjs/common'
 import type { Request, Response } from 'express'
 import { RoutesService } from '../meta/routes.service'
-import { BizError } from '../../../core/errors'
+import { BizError } from '../../../src/shared/errors'
 
 /**
  * 所有错误一律 { error: { message } }，message 是中文原句——

@@ -25,6 +25,7 @@ import {
   probeRemote,
   remoteChannelCount,
   remoteDiscardImages,
+  remoteExportCsv,
   remoteImageBase,
   remoteReadImage,
   remoteUploadImage
@@ -461,17 +462,23 @@ export function registerIpc(): void {
   })
   handle('export:csv', async (kind: ExportKind, filter?: OrderExportFilter) => {
     const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
-    // 先算再弹框：对账单没有内容时要在用户挑路径之前就拦住，别让人选完文件才看到报错
-    const csv = await dashboard.exportCsv(kind, filter)
-    // 文件名带上导出当天：两张台账撞在一起时，得能看出哪份是哪一次刷的数；
-    // 对账单还要带客户名，同一天导两家不能同名
-    const name =
-      kind === 'statement' && filter?.customerId
-        ? await dashboard.statementFileName(filter.customerId)
-        : EXPORT_FILE_NAME[kind].replace(/\.csv$/, `_${localDate()}.csv`)
+    // 先算再弹框：对账单没有内容时要在用户挑路径之前就拦住，别让人选完文件才看到报错。
+    // 远端模式下台账在后端：CSV 由后端那份账算出来，本机只负责另存——
+    // 这里读本机库等于导出一张空表（export: 前缀是本机独有，转发器不会代劳）。
+    const { csv, fileName } = isRemoteMode()
+      ? await remoteExportCsv(kind, filter)
+      : {
+          csv: await dashboard.exportCsv(kind, filter),
+          // 文件名带上导出当天：两张台账撞在一起时，得能看出哪份是哪一次刷的数；
+          // 对账单还要带客户名，同一天导两家不能同名
+          fileName:
+            kind === 'statement' && filter?.customerId
+              ? await dashboard.statementFileName(filter.customerId)
+              : EXPORT_FILE_NAME[kind].replace(/\.csv$/, `_${localDate()}.csv`)
+        }
     const res = await dialog.showSaveDialog(win, {
       title: '导出 Excel(CSV)',
-      defaultPath: name,
+      defaultPath: fileName,
       filters: [{ name: 'CSV', extensions: ['csv'] }]
     })
     if (res.canceled || !res.filePath) return ''

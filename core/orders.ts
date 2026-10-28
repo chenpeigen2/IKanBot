@@ -8,6 +8,7 @@
  * 与 credits / samples 互相调用（转单、抵扣、回退），这里按需懒建对方的工厂，
  * 避免模块初始化时互相等——两边拿到的永远是同一个连接。
  */
+import { bizError, notFound } from '../src/shared/errors'
 import type { Db } from './db'
 import { nextNo } from './next-no'
 import { logEvent } from './events'
@@ -186,14 +187,14 @@ export function ordersCore(db: Db) {
     const o = await db.get('SELECT order_no, payment_status FROM orders WHERE id = ?', [orderId]) as
       | { order_no?: string; payment_status?: string }
       | null
-    if (!o) throw new Error('订单不存在')
+    if (!o) throw notFound('订单不存在')
     const no = String(o.order_no ?? '')
     const status = String(o.payment_status ?? '')
     if (status === 'void') {
-      throw new Error(`订单 ${no} 已作废，不能再${action}：作废单只是留档，要接着做生意请按新单重开。`)
+      throw bizError(`订单 ${no} 已作废，不能再${action}：作废单只是留档，要接着做生意请按新单重开。`)
     }
     if (status === 'expired') {
-      throw new Error(`订单 ${no} 已失效，不能再${action}：先把收款状态改回「客户已确认」，再继续。`)
+      throw bizError(`订单 ${no} 已失效，不能再${action}：先把收款状态改回「客户已确认」，再继续。`)
     }
   }
 
@@ -210,7 +211,7 @@ export function ordersCore(db: Db) {
     ) as { v?: number | null } | null
     const ver = Number(row?.v ?? 0)
     if (ver > 0) {
-      throw new Error(
+      throw bizError(
         `这张单已经出过 CI（第 ${ver} 版存档），不能再${action}：批次金额是按当前单价和费用行算的，改了会和已经发出去的 CI 对不上。确实改错了价，先作废那一版 CI 存档（写明原因），改完重出正确的一版。`
       )
     }
@@ -361,13 +362,13 @@ export function ordersCore(db: Db) {
     }
     if (filter.from) {
       const gte = localDayStartUtc(filter.from)
-      if (!gte) throw new Error('开始日期要填完整（例如 2026-10-01）。')
+      if (!gte) throw bizError('开始日期要填完整（例如 2026-10-01）。')
       where.push('o.created_at >= ?')
       params.push(gte)
     }
     if (filter.to) {
       const lt = localDayAfterUtc(filter.to)
-      if (!lt) throw new Error('结束日期要填完整（例如 2026-10-31）。')
+      if (!lt) throw bizError('结束日期要填完整（例如 2026-10-31）。')
       where.push('o.created_at < ?')
       params.push(lt)
     }
@@ -637,7 +638,7 @@ export function ordersCore(db: Db) {
   }
 
   function piDupErr(no: string): Error {
-    return new Error(
+    return bizError(
       `PI 号 ${no} 已经存在（可能恢复过备份或手工导过数据）。单号是凭据，不能两张单共用一个号——请在「PI号」里换一个号再保存。`
     )
   }
@@ -649,7 +650,7 @@ export function ordersCore(db: Db) {
   ): Promise<{ bill: string; ship: string }> {
     const row = await db.get('SELECT * FROM customers WHERE id = ?', [customerId]) as Record<string, unknown> | null
     const c = row ? mapCustomer(row) : null
-    if (!c) throw new Error(`客户编号 ${customerId} 不存在，不能建单`)
+    if (!c) throw bizError(`客户编号 ${customerId} 不存在，不能建单`)
     return {
       bill: stringifyParty(patchParty(billPartyOf(c), patch.billTo)),
       ship: stringifyParty(patchParty(shipPartyOf(c), patch.shipTo))
@@ -662,7 +663,7 @@ export function ordersCore(db: Db) {
     // 建单与改单同一套汇率闸门：显式传了 0/负数/NaN 一律拦下——这种单会从待收、销售、毛利里静默消失。
     // 没传不拦：草稿单默认 1，正是「汇率待修」提醒认的哨兵值
     if (input.exchangeRate !== undefined && !(Number(input.exchangeRate) > 0)) {
-      throw new Error('汇率必须填大于 0 的数。0 或空值会让这张单从待收和毛利里消失，请按今天钉盘的汇率填。')
+      throw bizError('汇率必须填大于 0 的数。0 或空值会让这张单从待收和毛利里消失，请按今天钉盘的汇率填。')
     }
     // 费用行同一套闸门：Infinity/NaN 过 JSON.stringify 会变 null，落库后费用按 0 算
     assertChargeAmounts(input.charges ?? [])
@@ -740,7 +741,7 @@ export function ordersCore(db: Db) {
   async function updateOrder(id: number, input: OrderInput): Promise<OrderDetail> {
     const ts = now()
     const before = await db.get('SELECT * FROM orders WHERE id = ?', [id]) as Record<string, unknown> | null
-    if (!before) throw new Error('订单不存在')
+    if (!before) throw notFound('订单不存在')
     await assertOrderWritable(id, '改这张单')
     // 单号是凭据：编辑时把 PI 号改成别人的号要拦住（改成自己的号不算重号）
     const oldPiNo = String(before.pi_no ?? '').trim()
@@ -752,12 +753,12 @@ export function ordersCore(db: Db) {
     }
     // 已经开出去的 PI 号要被报关、要被对账，清空等于把凭据抹了还不留话
     if (oldPiNo && !newPiNo)
-      throw new Error(`PI 号 ${oldPiNo} 已经写在这张单上，不能清空——确实不要这个号请作废这张单后重开。`)
+      throw bizError(`PI 号 ${oldPiNo} 已经写在这张单上，不能清空——确实不要这个号请作废这张单后重开。`)
 
     // 汇率是锁定的凭据：清空或填 0 不许悄悄落成 1——
     // 1 会让整单金额按错汇率折算，四张单据、报表、待收全跟着错
     const newRate = Number(input.exchangeRate ?? before.exchange_rate)
-    if (!(newRate > 0)) throw new Error('汇率必须大于 0，清空汇率不能保存')
+    if (!(newRate > 0)) throw bizError('汇率必须大于 0，清空汇率不能保存')
     const oldRate = Number(before.exchange_rate)
     const newCurrency = (input.currency ?? String(before.currency ?? 'USD')) as Currency
     const oldCurrency = String(before.currency ?? 'USD') as Currency
@@ -779,7 +780,7 @@ export function ordersCore(db: Db) {
     )
     // PI 号印在已经发出去的单据上，CI 号又是由 PI 号派生的：改了号，重印的纸和客户手里那张对不上
     if (newPiNo !== oldPiNo && docCount > 0) {
-      throw new Error(
+      throw bizError(
         `这张单已经有 ${docCount} 份单据存档，PI 号 ${oldPiNo} 印在纸面上、CI 号也由它派生，不能再改。确实要换号，请作废这张单后按新单重开。`
       )
     }
@@ -794,7 +795,7 @@ export function ordersCore(db: Db) {
         docCount > 0
           ? `${docCount} 份单据存档（纸面上印着 1 ${oldCurrency} = ${oldRate}）`
           : `${settleCount} 笔核销`
-      throw new Error(
+      throw bizError(
         `这张单已经有 ${why}，汇率不能再改：改了会和已经发出去的纸面、已经核定的账对不上。确实要按新汇率重算，请作废这张单后按新单重开。`
       )
     }
@@ -804,20 +805,20 @@ export function ordersCore(db: Db) {
       const released =
         String(before.payment_status ?? '') !== 'draft' || docCount > 0 || plCount > 0
       if (itemCount > 0 && released) {
-        throw new Error(
+        throw bizError(
           `这张单已经有 ${itemCount} 行明细，而且已经对外发过（不是草稿），不能改币种——单价都是按 ${oldCurrency} 记的，100 ${oldCurrency} 会被当成 100 ${newCurrency}。确实要换币种，请作废这张单后按新单重开。`
         )
       }
       // 收款是按原币登记的凭据：改币种会让历史收款、银行流水和客户对账全部错位
       if (payCount > 0 || settleCount > 0) {
         const what = payCount > 0 ? `${payCount} 笔收款` : `${settleCount} 笔核销`
-        throw new Error(
+        throw bizError(
           `这张单已经登记了 ${what}，不能改币种——历史金额都是按 ${oldCurrency} 记的，改了会和银行流水、核销记录对不上。确实要换币种，请作废这张单后按正确币种重开。`
         )
       }
       // 没改汇率就换币种，等于把 USD 的 7.1 套在 EUR 上，报表和毛利全错
       if (newRate === oldRate) {
-        throw new Error(
+        throw bizError(
           `币种从 ${oldCurrency} 换成 ${newCurrency}，汇率不能沿用原来的 ${oldRate}；请按 ${newCurrency} 重新填写汇率再保存。`
         )
       }
@@ -875,7 +876,7 @@ export function ordersCore(db: Db) {
         ]
           .filter(Boolean)
           .join('、')
-        throw new Error(
+        throw bizError(
           `这张单已经有 ${what}，不能换客户：这些账和凭据都挂在原客户名下，换过去会让两边的对账单和银行流水对不上。` +
             `确实要换客户，请先撤销这些记录，或作废这张单按新客户重开。`
         )
@@ -957,7 +958,7 @@ export function ordersCore(db: Db) {
     patch: { billTo?: Partial<PartySnapshot>; shipTo?: Partial<PartySnapshot> }
   ): Promise<OrderDetail> {
     const row = await db.get('SELECT * FROM orders WHERE id = ?', [orderId]) as Record<string, unknown> | null
-    if (!row) throw new Error('订单不存在')
+    if (!row) throw notFound('订单不存在')
     await assertOrderWritable(orderId, '改抬头')
     const customerRow = await db.get('SELECT * FROM customers WHERE id = ?', [Number(row.customer_id)]) as
       | Record<string, unknown>
@@ -1075,7 +1076,7 @@ export function ordersCore(db: Db) {
     const cur = await db.get('SELECT order_no, payment_status FROM orders WHERE id = ?', [id]) as
       | { order_no: string; payment_status: string }
       | null
-    if (!cur) throw new Error('订单不存在')
+    if (!cur) throw notFound('订单不存在')
     if (cur.payment_status === 'void') return (await getOrder(id))!
     // 凭据核对闸门：PI/CI 已发到客户手里、批次已出运的单不能一键作废——
     // 作废后系统退出应收口径，但客户手里的纸面凭据不会消失，报关/收汇在途的钱会和系统脱节。
@@ -1092,7 +1093,7 @@ export function ordersCore(db: Db) {
       const parts: string[] = []
       if (docCount > 0) parts.push(`${docCount} 版单据存档（PI/CI 可能已发到客户手里）`)
       if (plCount > 0) parts.push(`${plCount} 批箱单`)
-      throw new Error(
+      throw bizError(
         `这张订单还有 ${parts.join(' 和 ')}。作废后系统不再认账，但这些纸面凭据不会消失，` +
           `报关/收汇在途的钱会和系统脱节。请先核对这些凭据的处理，在作废确认框里勾选「凭据已核对」再作废。`
       )
@@ -1159,14 +1160,14 @@ export function ordersCore(db: Db) {
        FROM orders o WHERE o.id = ?`,
       [id]
     ) as Record<string, unknown> | null
-    if (!row) throw new Error('订单不存在')
+    if (!row) throw notFound('订单不存在')
     const orderNo = String(row.order_no ?? '')
     if (String(row.payment_status ?? '') === 'void') {
-      throw new Error(`订单 ${orderNo} 已经作废，作废单是留档凭据，不能删除；要重新做生意请按新单重开。`)
+      throw bizError(`订单 ${orderNo} 已经作废，作废单是留档凭据，不能删除；要重新做生意请按新单重开。`)
     }
     // 预收抵扣记在这张单上：删单会让这笔余额「用到哪儿去了」失去凭据
     if (await creditsOf().hasActiveCredit('order', id)) {
-      throw new Error(
+      throw bizError(
         `订单 ${orderNo} 上还有未撤销的客户预收抵扣，不能删：删了这笔余额用到哪儿就查不到了。请先在客户页撤销抵扣，再删单。`
       )
     }
@@ -1180,7 +1181,7 @@ export function ordersCore(db: Db) {
     if (cnt('photo_cnt')) bits.push(`${cnt('photo_cnt')} 张照片`)
     if (cnt('sample_cnt')) bits.push(`由它转出的 ${cnt('sample_cnt')} 张打样单`)
     if (bits.length > 0) {
-      throw new Error(
+      throw bizError(
         `订单 ${orderNo} 已经有 ${bits.join('、')}，不能直接删（删了这些凭据和操作历史会一起没有）。请用「作废」：记录全留，只是不再计入销售额和待收款。`
       )
     }
@@ -1196,12 +1197,12 @@ export function ordersCore(db: Db) {
       const amount = Number(c.amount)
       if (!Number.isFinite(amount)) {
         const who = String(c.label ?? '').trim() || '未命名费用'
-        throw new Error(`费用「${who}」的金额不是有效数字（${String(c.amount)}），请填一个金额再保存。`)
+        throw bizError(`费用「${who}」的金额不是有效数字（${String(c.amount)}），请填一个金额再保存。`)
       }
       // 名称为空的行保存时会被 filter 掉：金额都填了还让它整行消失，
       // 用户看到「已保存」、纸面和待收里却少了这笔钱——宁可在保存时拦住
       if (!String(c.label ?? '').trim() && Math.abs(amount) > 0.001) {
-        throw new Error(
+        throw bizError(
           `第 ${idx + 1} 行费用填了 ${amount.toFixed(2)} 却没有名称——保存时这一行会被当成空行丢掉，这笔钱不会进 PI/CI，也不算进待收。请补个名称（例如“运费”）再保存。`
         )
       }
@@ -1220,7 +1221,7 @@ export function ordersCore(db: Db) {
   /** 合计（货值 + 费用行）不许为负：负合计会被误当成客户多付，凭空生成一笔能抵别的单、能退真钱的预收 */
   function assertOrderTotalNonNegative(goodsTotal: number, charges: QuotationCharge[]): void {  const total = goodsTotal + charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
     if (total < -0.001) {
-      throw new Error(
+      throw bizError(
         `货值 ${goodsTotal.toFixed(2)} 加上费用行后合计是 ${total.toFixed(2)}。` +
           `合计为负的订单会被系统当成客户多付，凭空生成一笔能抵别的单、甚至退真钱的预收。` +
           `请把让利（负费用行）控制在货值以内，或先补足明细货值再保存。`
@@ -1238,7 +1239,7 @@ export function ordersCore(db: Db) {
       string,
       unknown
     > | null
-    if (!before) throw new Error('订单不存在')
+    if (!before) throw notFound('订单不存在')
     await assertOrderWritable(orderId, '改费用行')
     assertChargeAmounts(charges)
     const clean = charges.filter((c) => c.label.trim())
@@ -1250,7 +1251,7 @@ export function ordersCore(db: Db) {
     // 不写原因的话日后只看到应收少了一块，没人说得清是谁答应的、为什么
     const reasonText = String(reason ?? '').trim()
     if (negativeChargesChanged(beforeCharges, clean) && !reasonText) {
-      throw new Error(
+      throw bizError(
         '这次改的是让利（负费用行），它会直接改变客户该付多少。请写明原因（例如「老客户运费对折」「补上次多收的 20」），这句话会记进订单操作历史。'
       )
     }
@@ -1350,7 +1351,7 @@ export function ordersCore(db: Db) {
     )
     if (!row) return
     const label = [sku.styleNo || '未填款号', sku.color, sku.size].filter(Boolean).join(' / ')
-    throw new Error(
+    throw bizError(
       `款号 ${label} 已经有明细了。同一款只能有一行：两行不同单价会按数量加权，把已经发出去的 CI 金额算乱。请直接改那一行的数量或单价。`
     )
   }
@@ -1372,7 +1373,7 @@ export function ordersCore(db: Db) {
       const sku = `${styleNo}\u0000${color}\u0000${size}`
       if (seen.has(sku)) {
         const label = [styleNo, color, size].filter(Boolean).join(' / ')
-        throw new Error(
+        throw bizError(
           `${where}里款号 ${label} 出现了两行。同一款只能有一行：转成订单后两行不同单价会按数量加权，把 CI 金额算乱。请在${where}里把同款合并成一行（数量相加、单价用客户确认的那一个）。`
         )
       }
@@ -1388,7 +1389,7 @@ export function ordersCore(db: Db) {
     const packed = await packedQty(orderId, sku)
     if (packed <= 0) return
     const label = [sku.styleNo || '未填款号', sku.color, sku.size].filter(Boolean).join(' / ')
-    throw new Error(
+    throw bizError(
       `款号 ${label} 已经装了 ${packed} 件箱，不能再新加一行：这一批的 CI 金额是按当时明细的单价算的，补一行同款会让纸面金额对不上。要补货请改对应箱明细，或按新批次装。`
     )
   }
@@ -1470,7 +1471,7 @@ export function ordersCore(db: Db) {
   ): Promise<void> {
     const packed = await packedQty(orderId, sku)
     if (packed > 0) {
-      throw new Error(
+      throw bizError(
         `款号 ${sku.styleNo} ${sku.color}/${sku.size} 已经装了 ${packed} 件箱，订单数量不能改到 ${packed} 件以下；请先到「装箱单」里改小或删掉对应箱明细（已出运的批次要先把状态改回「已包装」）。`
       )
     }
@@ -1489,7 +1490,7 @@ export function ordersCore(db: Db) {
     const cur = await db.get('SELECT * FROM order_items WHERE id = ? AND order_id = ?', [itemId, orderId]) as
       | Record<string, unknown>
       | null
-    if (!cur) throw new Error('订单行不存在')
+    if (!cur) throw notFound('订单行不存在')
     const curSku = {
       styleNo: String(cur.style_no ?? ''),
       color: String(cur.color ?? ''),
@@ -1503,7 +1504,7 @@ export function ordersCore(db: Db) {
     const skuChanged = nextSku.styleNo !== curSku.styleNo || nextSku.color !== curSku.color || nextSku.size !== curSku.size
     const packed = await packedQty(orderId, curSku)
     if (skuChanged && packed > 0) {
-      throw new Error(
+      throw bizError(
         `款号 ${curSku.styleNo} ${curSku.color}/${curSku.size} 已经装了 ${packed} 件箱，不能直接换款号/颜色/尺码；请先到「装箱单」里处理这一款的箱明细（已出运的批次要先把状态改回「已包装」）。`
       )
     }
@@ -1596,14 +1597,14 @@ export function ordersCore(db: Db) {
     const cur = await db.get('SELECT * FROM order_items WHERE id = ? AND order_id = ?', [itemId, orderId]) as
       | Record<string, unknown>
       | null
-    if (!cur) throw new Error('订单行不存在')
+    if (!cur) throw notFound('订单行不存在')
     const packed = await packedQty(orderId, {
       styleNo: String(cur.style_no ?? ''),
       color: String(cur.color ?? ''),
       size: String(cur.size ?? '')
     })
     if (packed > 0) {
-      throw new Error(
+      throw bizError(
         `款号 ${String(cur.style_no)} ${String(cur.color)}/${String(cur.size)} 已经装了 ${packed} 件箱，不能直接删这一行；请先到「装箱单」里删掉对应箱明细（已出运的批次要先把状态改回「已包装」）。`
       )
     }
@@ -1646,7 +1647,7 @@ export function ordersCore(db: Db) {
       )?.qty ?? 0
     )
     if (packed > 0) {
-      throw new Error(
+      throw bizError(
         `这张单已经装了 ${packed} 件箱，不能整体替换明细；请逐行调整，或先到「装箱单」里处理箱明细（已出运的批次要先把状态改回「已包装」）。`
       )
     }
@@ -1659,7 +1660,7 @@ export function ordersCore(db: Db) {
       const key = [it.styleNo, it.color ?? '', it.size ?? ''].join('|')
       const first = seenSku.get(key)
       if (first !== undefined) {
-        throw new Error(
+        throw bizError(
           `${who} 和第 ${first} 行是同一个 款号/颜色/尺码。同一款只能有一行：两行不同单价会按数量加权，把批次货值算乱。请合并数量后重试。`
         )
       }
@@ -1735,15 +1736,15 @@ export function ordersCore(db: Db) {
     const paidAt = String(p.paidAt ?? '').trim()
     // 空日期会让这笔钱从「本月收款」和月报里消失，只剩订单上的已收能看见
     if (!isLocalDate(paidAt)) {
-      throw new Error('收款日期要填完整（例如 2026-10-24）。空日期的收款不会进本月收款和月报。')
+      throw bizError('收款日期要填完整（例如 2026-10-24）。空日期的收款不会进本月收款和月报。')
     }
     // 钱不可能在未来到账：填成明年会把「本月到账」和账期催款一起带偏
     if (paidAt > localDate()) {
-      throw new Error(`收款日期 ${paidAt} 还没到。请填银行水单上的实际到账日，最晚是今天（${localDate()}）。`)
+      throw bizError(`收款日期 ${paidAt} 还没到。请填银行水单上的实际到账日，最晚是今天（${localDate()}）。`)
     }
     const amount = Number(p.amount)
     if (!Number.isFinite(amount) || amount <= 0) {
-      throw new Error('收款金额必须是大于 0 的数。')
+      throw bizError('收款金额必须是大于 0 的数。')
     }
     return { paidAt, amount }
   }
@@ -1771,7 +1772,7 @@ export function ordersCore(db: Db) {
       [docId, ref]
     ) as { paid_at?: string; amount?: number } | null
     if (!dup) return
-    throw new Error(
+    throw bizError(
       `这张单上已经登记过流水号「${ref}」的收款（${String(dup.paid_at ?? '')}，${Number(dup.amount ?? 0).toFixed(2)}）：` +
         `同一张水单不能记两次，再记一次会让已收翻倍、凭空多出可退的预收。` +
         `如果这笔钱要拆到别的单，请用「水单拆分收款」；如果上次录错了，请先撤销原记录再重录；确实没有流水号就留空。`
@@ -1786,12 +1787,12 @@ export function ordersCore(db: Db) {
     const cur = await db.get('SELECT order_no, payment_status, currency FROM orders WHERE id = ?', [orderId]) as
       | { order_no?: string; payment_status?: string; currency?: string }
       | null
-    if (!cur) throw new Error('订单不存在')
+    if (!cur) throw notFound('订单不存在')
     const curStatus = String(cur.payment_status ?? '')
     const isVoided = curStatus === 'void'
     if (curStatus === 'void') {
       if (!String(p.note ?? '').trim()) {
-        throw new Error(`订单 ${String(cur.order_no ?? '')} 已作废：作废单的回款必须写明来路（备注里写清楚，例如“取消单客户退回的定金”），操作历史要能对上银行流水。`)
+        throw bizError(`订单 ${String(cur.order_no ?? '')} 已作废：作废单的回款必须写明来路（备注里写清楚，例如“取消单客户退回的定金”），操作历史要能对上银行流水。`)
       }
     } else {
       await assertOrderWritable(orderId, '登记收款')
@@ -1799,7 +1800,7 @@ export function ordersCore(db: Db) {
     // 草稿不进现金流（month_received / 月报 / 月度汇总都排除草稿），
     // 在草稿上登记收款，这笔钱会从所有到账报表里消失——先把状态推到「已发出」再收钱
     if (curStatus === 'draft') {
-      throw new Error(
+      throw bizError(
         `订单 ${String(cur.order_no ?? '')} 还是草稿：草稿不进现金流，登记了也不会出现在「本月到账」和月报里。请先把收款状态改成「已发出」或「已确认」，再登记收款。`
       )
     }
@@ -1811,13 +1812,13 @@ export function ordersCore(db: Db) {
       // 坏账已经从待收里拿掉过一次：再按普通收款记，同一笔钱会同时被算成
       // 「坏账损失」和「客户多付」，凭空铸出可退的预收。钱到账请走「坏账追回」。
       if (detail.badDebtOutstanding > 0.001) {
-        throw new Error(
+        throw bizError(
           `这张单还有 ${detail.badDebtOutstanding.toFixed(2)} ${String(cur.currency ?? '')} 坏账没追回：` +
             `钱到账请走「坏账追回」登记，不能按普通收款记——否则同一笔欠款会同时算坏账损失和客户多付。`
         )
       }
       if (detail.creditApplied > 0.001 && amount > detail.remaining + 0.001) {
-        throw new Error(
+        throw bizError(
           `这张单已经有 ${detail.creditApplied.toFixed(2)} ${String(cur.currency ?? '')} 是客户预收抵掉的，现金待收只剩 ${detail.remaining.toFixed(2)}：再收 ${amount.toFixed(2)} 就重复收了。多出来的钱请登记到别的单上。`
         )
       }
@@ -1860,21 +1861,21 @@ export function ordersCore(db: Db) {
    * R25：打样单的样品费也接进同一笔水单（客户一笔钱同时付订单和打样费是常事）。
    */
   async function batchAddPayments(entries: BatchPaymentEntry[]): Promise<(OrderDetail | SampleOrderDetail)[]> {
-    if (!entries.length) throw new Error('没有要登记的收款：至少选一张单填金额。')
+    if (!entries.length) throw bizError('没有要登记的收款：至少选一张单填金额。')
     const bankRef = String(entries[0].bankRef ?? '').trim()
     if (!bankRef) {
-      throw new Error('拆分收款必须填银行流水号：这是同一笔水单拆到多张单的凭据，对账时靠它把几笔收款归成一组。')
+      throw bizError('拆分收款必须填银行流水号：这是同一笔水单拆到多张单的凭据，对账时靠它把几笔收款归成一组。')
     }
     for (let i = 0; i < entries.length; i++) {
       const e = entries[i]
       if (String(e.bankRef ?? '').trim() !== bankRef) {
-        throw new Error(`第 ${i + 1} 笔的流水号和第一笔不一致。拆分收款整批共用同一个流水号，不同的水单请分开登记。`)
+        throw bizError(`第 ${i + 1} 笔的流水号和第一笔不一致。拆分收款整批共用同一个流水号，不同的水单请分开登记。`)
       }
       if ((e.orderId == null) === (e.sampleOrderId == null)) {
-        throw new Error(`第 ${i + 1} 笔没有指定单据：订单和打样单必须二选一。`)
+        throw bizError(`第 ${i + 1} 笔没有指定单据：订单和打样单必须二选一。`)
       }
       if (!Number.isFinite(Number(e.amount)) || Number(e.amount) <= 0) {
-        throw new Error(`第 ${i + 1} 笔收款金额必须是大于 0 的数。`)
+        throw bizError(`第 ${i + 1} 笔收款金额必须是大于 0 的数。`)
       }
     }
     const results: (OrderDetail | SampleOrderDetail)[] = []
@@ -1916,7 +1917,7 @@ export function ordersCore(db: Db) {
                   | { order_no?: string }
                   | null)?.order_no ?? `#${e.orderId}`
               )
-          throw new Error(`第 ${i + 1} 笔（${isSample ? '打样单' : '订单'} ${no}）没登进去，整批已回滚：${(err as Error).message}`)
+          throw bizError(`第 ${i + 1} 笔（${isSample ? '打样单' : '订单'} ${no}）没登进去，整批已回滚：${(err as Error).message}`)
         }
       }
     })
@@ -1930,7 +1931,7 @@ export function ordersCore(db: Db) {
       [paymentId]
     ) as { sample_no?: string } | null
     if (sampleRow) {
-      throw new Error(
+      throw bizError(
         `这笔收款是打样单 ${String(sampleRow.sample_no ?? '')} 的样品费流水，要在打样单的「打样费收款」里撤销（撤销要写原因）。`
       )
     }
@@ -1940,7 +1941,7 @@ export function ordersCore(db: Db) {
        WHERE p.id = ? AND p.order_id = ?`,
       [paymentId, orderId]
     ) as Record<string, unknown> | null
-    if (!row) throw new Error('这条收款记录已经不存在了，刷新页面后再试。')
+    if (!row) throw bizError('这条收款记录已经不存在了，刷新页面后再试。')
     // 作废单只许更正「作废之后」登记的回款（录错了不删就成死账）；
     // 作废前的流水是留档凭据，跟客户手里的 PI/CI 对着账，不许改写。原因必填（下方统一校验）。
     const delStatus = String(
@@ -1956,7 +1957,7 @@ export function ordersCore(db: Db) {
       )
       const created = String(row.created_at ?? '')
       if (!voidedAt || !created || created <= voidedAt) {
-        throw new Error(
+        throw bizError(
           '订单已作废：作废前的收款是留档凭据（和客户手里的 PI/CI 对着账），不能再改写。只有作废后登记的回款才允许更正。'
         )
       }
@@ -1970,7 +1971,7 @@ export function ordersCore(db: Db) {
     ) as { kind?: string; amount?: number; at?: string } | null
     if (usedBy) {
       const kind = String(usedBy.kind ?? '')
-      throw new Error(
+      throw bizError(
         kind === 'recovery'
           ? `这笔收款是坏账追回时自动登记的（${String(usedBy.at ?? '')}，${Number(usedBy.amount ?? 0).toFixed(2)}），和核销台账绑在一起，不能单独删除。记错了请到下面的核销记录里撤销这次追回——那会把自动登记的收款一起退掉。`
           : `这笔收款已经用于核销（${String(usedBy.at ?? '')}，${Number(usedBy.amount ?? 0).toFixed(2)}），不能直接删除：删了核销台账会指向一条不存在的流水。请先撤销对应的核销记录，再删收款。`
@@ -1979,7 +1980,7 @@ export function ordersCore(db: Db) {
     const why = String(reason ?? '').trim()
     // 删掉的是钱到账的凭据，操作历史必须能回答「删了多少钱、哪一天、哪笔流水、为什么」
     if (!why) {
-      throw new Error('删除收款要写原因（例如“金额录错”“客户退汇”），操作历史里要留痕。')
+      throw bizError('删除收款要写原因（例如“金额录错”“客户退汇”），操作历史里要留痕。')
     }
     const amount = Number(row.amount ?? 0)
     const currency = String(row.currency ?? '')
@@ -2042,22 +2043,22 @@ export function ordersCore(db: Db) {
    */
   async function addSettlement(orderId: number, input: SettlementInput): Promise<OrderDetail> {
     const order = await getOrder(orderId)
-    if (!order) throw new Error('订单不存在')
+    if (!order) throw notFound('订单不存在')
     // 核销准入就是「要不要向客户收钱」这条口径：以后加免催状态只改 billing.ts 一处
     if (!isBillingStatus(order.paymentStatus)) {
-      throw new Error('草稿、已失效、已作废的订单不能做核销或坏账。先把订单状态改成正式单，再处理欠款。')
+      throw bizError('草稿、已失效、已作废的订单不能做核销或坏账。先把订单状态改成正式单，再处理欠款。')
     }
     const kind = input.kind
     if (kind !== 'shortage' && kind !== 'bad_debt' && kind !== 'recovery') {
-      throw new Error('核销类型不对，只能是短款核销、坏账或坏账追回。')
+      throw bizError('核销类型不对，只能是短款核销、坏账或坏账追回。')
     }
     const reason = String(input.reason ?? '').trim()
-    if (!reason) throw new Error('核销 / 坏账要写原因（例如“银行扣费”“客户破产”），操作历史要留痕。')
+    if (!reason) throw bizError('核销 / 坏账要写原因（例如“银行扣费”“客户破产”），操作历史要留痕。')
     const at = String(input.at ?? '').trim() || localDate()
-    if (!isLocalDate(at)) throw new Error('核销日期要填完整（例如 2026-10-24）。')
+    if (!isLocalDate(at)) throw bizError('核销日期要填完整（例如 2026-10-24）。')
     // 核销/追回和收款同一口径：钱不会在未来发生，填成未来会把月报和状态一起带偏
     if (at > localDate()) {
-      throw new Error(`核销日期 ${at} 还没到。请填实际发生的日期，最晚是今天（${localDate()}）。`)
+      throw bizError(`核销日期 ${at} 还没到。请填实际发生的日期，最晚是今天（${localDate()}）。`)
     }
     const evidence = String(input.evidence ?? '').trim()
 
@@ -2067,19 +2068,19 @@ export function ordersCore(db: Db) {
 
     if (kind === 'recovery') {
       if (badDebtOutstanding <= 0.001) {
-        throw new Error('这张单没有尚未追回的坏账，不能登记追回款；钱到账请走「记录收款」。')
+        throw bizError('这张单没有尚未追回的坏账，不能登记追回款；钱到账请走「记录收款」。')
       }
       const amount = Number(input.amount)
-      if (!Number.isFinite(amount) || amount <= 0) throw new Error('追回金额必须是大于 0 的数。')
+      if (!Number.isFinite(amount) || amount <= 0) throw bizError('追回金额必须是大于 0 的数。')
       if (amount > badDebtOutstanding + 0.001) {
-        throw new Error(
+        throw bizError(
           `追回金额 ${amount.toFixed(2)} 超过了尚未追回的坏账 ${badDebtOutstanding.toFixed(2)}；超出的部分请按普通收款登记。`
         )
       }
       const paidAt = String(input.paidAt ?? '').trim() || at
-      if (!isLocalDate(paidAt)) throw new Error('追回款的到账日期要填完整（例如 2026-10-24）。')
+      if (!isLocalDate(paidAt)) throw bizError('追回款的到账日期要填完整（例如 2026-10-24）。')
       if (paidAt > localDate()) {
-        throw new Error(
+        throw bizError(
           `追回款的到账日期 ${paidAt} 还没到。请填银行水单上的实际到账日，最晚是今天（${localDate()}）。`
         )
       }
@@ -2091,7 +2092,7 @@ export function ordersCore(db: Db) {
         try {
           await assertBankRefUnused({ orderId }, input.bankRef)
         } catch (err) {
-          throw new Error(
+          throw bizError(
             `${(err as Error).message}\n如果是这笔追回登记重了，请到下面的核销记录里撤销——撤销会把自动登记的收款一起退掉。`
           )
         }
@@ -2122,13 +2123,13 @@ export function ordersCore(db: Db) {
 
     const outstanding = order.remaining
     if (outstanding <= 0.001) {
-      throw new Error('这张单已经没有待收了，不能核销。多收的钱请核对收款记录，不要用核销来平账。')
+      throw bizError('这张单已经没有待收了，不能核销。多收的钱请核对收款记录，不要用核销来平账。')
     }
     // 只有完全不填才按当前待收全额；填 0 或负数必须拦住，不能悄悄变成全额核销
     const amount = input.amount == null ? outstanding : Number(input.amount)
-    if (!Number.isFinite(amount) || amount <= 0) throw new Error('核销金额必须是大于 0 的数。')
+    if (!Number.isFinite(amount) || amount <= 0) throw bizError('核销金额必须是大于 0 的数。')
     if (amount > outstanding + 0.001) {
-      throw new Error(
+      throw bizError(
         `核销金额 ${amount.toFixed(2)} 超过了当前待收 ${outstanding.toFixed(2)}；核销不能把单子做成多收。`
       )
     }
@@ -2161,16 +2162,16 @@ export function ordersCore(db: Db) {
       settlementId,
       orderId
     ]) as Record<string, unknown> | null
-    if (!row) throw new Error('这条核销记录已经不存在了，刷新页面后再试。')
+    if (!row) throw bizError('这条核销记录已经不存在了，刷新页面后再试。')
     // 作废/失效单是留档凭据：撤销核销会改它的待收与坏账，不能再动
     await assertOrderWritable(orderId, '撤销核销')
     const kind = String(row.kind) as SettlementKind
     const amount = Number(row.amount ?? 0)
-    if (amount <= 0) throw new Error('这条是撤销记录，不能再撤销一次。')
+    if (amount <= 0) throw bizError('这条是撤销记录，不能再撤销一次。')
     const reversed = await db.get('SELECT id FROM order_settlements WHERE reverses_id = ?', [settlementId])
-    if (reversed) throw new Error('这笔核销已经撤销过了，刷新页面就能看到。')
+    if (reversed) throw bizError('这笔核销已经撤销过了，刷新页面就能看到。')
     const why = String(reason ?? '').trim()
-    if (!why) throw new Error('撤销核销要写原因，操作历史要留痕。')
+    if (!why) throw bizError('撤销核销要写原因，操作历史要留痕。')
     const label = SETTLEMENT_KIND_LABEL[kind] ?? kind
     const customerId = Number(
       (await db.get('SELECT customer_id FROM orders WHERE id = ?', [orderId]) as { customer_id?: number } | null)
@@ -2220,7 +2221,7 @@ export function ordersCore(db: Db) {
    */
   async function recomputePaymentStatus(orderId: number): Promise<PaymentStatus> {
     const order = await db.get('SELECT * FROM orders WHERE id = ?', [orderId]) as Record<string, unknown> | null
-    if (!order) throw new Error('订单不存在')
+    if (!order) throw notFound('订单不存在')
     const status = String(order.payment_status) as PaymentStatus
     // 草稿 / 已失效 / 已作废 不参与自动流转
     if (status === 'draft' || status === 'expired' || status === 'void') return status
@@ -2262,18 +2263,18 @@ export function ordersCore(db: Db) {
     const cur = await db.get('SELECT ship_status FROM orders WHERE id = ?', [orderId]) as
       | { ship_status: string }
       | null
-    if (!cur) throw new Error('订单不存在')
+    if (!cur) throw notFound('订单不存在')
     await assertOrderWritable(orderId, '改出货状态')
     // 手工状态只能用这一份枚举：把「部分出运」这种派生值钉在订单上，
     // 没有批次兜底时它就永久挂着，列表和导出会显示一个本不该出现在手工位的状态
     if (!(SHIP_STATUS_ORDER as string[]).includes(next)) {
-      throw new Error(
+      throw bizError(
         `出货状态「${next}」不能手工设置——「部分出运」只由装箱单批次汇总得出，要让它变就得到「装箱单」里推进对应批次`
       )
     }
     // 有批次之后，整单状态只能由批次汇总，手改会跟批次打架（比如尾批还在厂里却标已签收）
     if (await isShipStatusDerived(db, orderId)) {
-      throw new Error(
+      throw bizError(
         `这张单的出货状态由装箱单批次汇总（当前：${SHIP_STATUS_LABEL[cur.ship_status as ShipStatus] ?? cur.ship_status}）。请到「装箱单」里改对应批次的出运状态，整单状态会自动跟着变。`
       )
     }
@@ -2291,20 +2292,20 @@ export function ordersCore(db: Db) {
     // 与出货状态同一套守门：非法值一旦入库，这单就从待收、月报、催款里静默消失
     if (!(next in PAYMENT_STATUS_LABEL)) {
       const allowed = Object.values(PAYMENT_STATUS_LABEL).join(' / ')
-      throw new Error(`「${String(next)}」不是收款状态，请选择：${allowed}`)
+      throw bizError(`「${String(next)}」不是收款状态，请选择：${allowed}`)
     }
     const cur = await db.get('SELECT payment_status, customer_id FROM orders WHERE id = ?', [orderId]) as
       | { payment_status: string; customer_id: number }
       | null
-    if (!cur) throw new Error('订单不存在')
+    if (!cur) throw notFound('订单不存在')
     // 作废是留档终态：从这里改回 confirmed 就等于把一张已取消的单偷偷塞回台账和应收
     if (cur.payment_status === 'void' && next !== 'void') {
-      throw new Error('这张单已作废，不能改回收款状态：作废是留档终态，要接着做生意请按新单重开。')
+      throw bizError('这张单已作废，不能改回收款状态：作废是留档终态，要接着做生意请按新单重开。')
     }
     // 手工下拉不许直接改成「已作废」：那会绕过作废弹窗的凭据核对、作废留痕和打样抵扣回退。
     // 作废只能走「⋯ → 作废此单」，在凭据清单前勾了「凭据已核对」再作废。
     if (next === 'void') {
-      throw new Error(
+      throw bizError(
         '收款状态下拉不能直接改成「已作废」：作废要先核对客户手里的 PI/CI 凭据。请到「⋯」菜单里走「作废此单」。'
       )
     }
@@ -2350,7 +2351,7 @@ export function ordersCore(db: Db) {
         ]
           .filter(Boolean)
           .join('、')
-        throw new Error(
+        throw bizError(
           `这张单已经有 ${what}，不能退回草稿：草稿不进应收和现金流，这些账会从系统里消失，纸面凭据却还在客户手里。确实不要这单，请走「⋯ → 作废此单」。`
         )
       }
@@ -2582,3 +2583,6 @@ export function ordersCore(db: Db) {
     deleteOrderPhoto
   }
 }
+
+/** 订单域的完整门面类型（后端服务注入自己的 Db 后得到同一形状） */
+export type OrdersCore = ReturnType<typeof ordersCore>

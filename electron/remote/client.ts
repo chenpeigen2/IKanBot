@@ -37,10 +37,78 @@ export const REMOTE_ROUTES: Record<string, RouteSpec> = {
   'settings:get': { path: '/api/settings/get', args: [] },
   'settings:save': { path: '/api/settings/save', args: ['input'] },
   'settings:baseLocked': { path: '/api/settings/baseLocked', args: [] },
+
+  'orders:list': { path: '/api/orders/list', args: ['filter'] },
+  'orders:get': { path: '/api/orders/get', args: ['id'] },
+  'orders:create': { path: '/api/orders/create', args: ['input'] },
+  'orders:update': { path: '/api/orders/update', args: ['id', 'input'] },
+  'orders:setParties': { path: '/api/orders/setParties', args: ['id', 'patch'] },
+  'orders:updateCharges': { path: '/api/orders/updateCharges', args: ['id', 'charges', 'reason'] },
+  'orders:delete': { path: '/api/orders/delete', args: ['id'] },
+  'orders:void': { path: '/api/orders/void', args: ['id', 'reason', 'opts'] },
+  'orders:addItem': { path: '/api/orders/addItem', args: ['orderId', 'item'] },
+  'orders:updateItem': { path: '/api/orders/updateItem', args: ['orderId', 'itemId', 'patch'] },
+  'orders:addItems': { path: '/api/orders/addItems', args: ['orderId', 'items'] },
+  'orders:removeItem': { path: '/api/orders/removeItem', args: ['orderId', 'itemId'] },
+  'orders:replaceItems': { path: '/api/orders/replaceItems', args: ['orderId', 'items'] },
+  'orders:summarizeSkus': { path: '/api/orders/summarizeSkus', args: ['orderId'] },
+  'orders:addPayment': { path: '/api/orders/addPayment', args: ['orderId', 'p'] },
+  'orders:batchAddPayments': { path: '/api/orders/batchAddPayments', args: ['entries'] },
+  'orders:deletePayment': { path: '/api/orders/deletePayment', args: ['orderId', 'paymentId', 'reason'] },
+  'orders:listSettlements': { path: '/api/orders/listSettlements', args: ['orderId'] },
+  'orders:addSettlement': { path: '/api/orders/addSettlement', args: ['orderId', 'input'] },
+  'orders:reverseSettlement': { path: '/api/orders/reverseSettlement', args: ['orderId', 'settlementId', 'reason'] },
+  'orders:setShipStatus': { path: '/api/orders/setShipStatus', args: ['orderId', 'status', 'note'] },
+  'orders:setPaymentStatus': { path: '/api/orders/setPaymentStatus', args: ['orderId', 'status', 'note'] },
+  'orders:events': { path: '/api/orders/events', args: ['orderId'] },
+  'orders:ports': { path: '/api/orders/ports', args: [] },
+  'orders:lastTerms': { path: '/api/orders/lastTerms', args: ['customerId'] },
+  'orders:lastExchangeRate': { path: '/api/orders/lastExchangeRate', args: [] },
+  'orders:lastExchangeRateInfo': { path: '/api/orders/lastExchangeRateInfo', args: ['currency'] },
+  'orders:photos': { path: '/api/orders/photos', args: ['orderId'] },
+  'orders:addPhoto': { path: '/api/orders/addPhoto', args: ['orderId', 'fileName', 'kind', 'note'] },
+  'orders:delPhoto': { path: '/api/orders/delPhoto', args: ['orderId', 'photoId'] },
+
+  'quotations:list': { path: '/api/quotations/list', args: ['filter'] },
+  'quotations:get': { path: '/api/quotations/get', args: ['id'] },
+  'quotations:save': { path: '/api/quotations/save', args: ['input'] },
+  'quotations:delete': { path: '/api/quotations/delete', args: ['id'] },
+  'quotations:updateMeta': { path: '/api/quotations/updateMeta', args: ['id', 'meta'] },
+  'quotations:events': { path: '/api/quotations/events', args: ['id'] },
+  'quotations:convert': { path: '/api/quotations/convert', args: ['id', 'opts'] },
+  'quotations:versions': { path: '/api/quotations/versions', args: ['id'] },
+
+  'samples:list': { path: '/api/samples/list', args: ['filter'] },
+  'samples:get': { path: '/api/samples/get', args: ['id'] },
+  'samples:save': { path: '/api/samples/save', args: ['input'] },
+  'samples:delete': { path: '/api/samples/delete', args: ['id'] },
+  'samples:convert': { path: '/api/samples/convert', args: ['id', 'opts'] },
+  'samples:listPayments': { path: '/api/samples/listPayments', args: ['id'] },
+  'samples:addPayment': { path: '/api/samples/addPayment', args: ['id', 'p'] },
+  'samples:deletePayment': { path: '/api/samples/deletePayment', args: ['id', 'paymentId', 'reason'] },
+
+  'pl:list': { path: '/api/pl/list', args: ['orderId'] },
+  'pl:create': { path: '/api/pl/create', args: ['input'] },
+  'pl:delete': { path: '/api/pl/delete', args: ['orderId', 'plId'] },
+  'pl:updateInfo': { path: '/api/pl/updateInfo', args: ['orderId', 'plId', 'patch'] },
+  'pl:updateLine': { path: '/api/pl/updateLine', args: ['orderId', 'plId', 'lineId', 'patch'] },
+  'pl:addLine': { path: '/api/pl/addLine', args: ['orderId', 'plId', 'line'] },
+  'pl:deleteLine': { path: '/api/pl/deleteLine', args: ['orderId', 'plId', 'lineId'] },
+  'pl:void': { path: '/api/pl/void', args: ['orderId', 'plId', 'reason'] },
+  'pl:unvoid': { path: '/api/pl/unvoid', args: ['orderId', 'plId', 'reason'] },
+  'pl:amounts': { path: '/api/pl/amounts', args: ['orderId'] },
+
+  'dashboard:stats': { path: '/api/dashboard/stats', args: [] },
+  'dashboard:reminders': { path: '/api/dashboard/reminders', args: [] },
+  'report:monthly': { path: '/api/report/monthly', args: [] },
   'report:receivables': { path: '/api/report/receivables', args: [] },
   'report:customerOrderRows': { path: '/api/report/customerOrderRows', args: ['customerId'] },
+
   'credits:balance': { path: '/api/credits/balance', args: ['customerId'] },
-  'pl:amounts': { path: '/api/pl/amounts', args: ['orderId'] }
+  'credits:apply': { path: '/api/credits/apply', args: ['input'] },
+  'credits:reverse': { path: '/api/credits/reverse', args: ['applicationId', 'reason'] },
+  'credits:refund': { path: '/api/credits/refund', args: ['input'] },
+  'credits:reverseRefund': { path: '/api/credits/reverseRefund', args: ['refundId', 'reason'] }
 }
 
 export function isRemoteChannel(channel: string): boolean {
@@ -53,7 +121,7 @@ export function remoteChannelCount(): number {
 
 /** 一句话说清覆盖到哪儿：设置页和远端模式的报错都用这一句 */
 export function coverageWords(): string {
-  return `后端目前只接了客户档案、商品、系统设置和待收金额（${remoteChannelCount()} 个接口）`
+  return `后端目前接了客户、商品、设置、订单、报价、打样、装箱、预收与报表（${remoteChannelCount()} 个接口）`
 }
 
 interface ErrorBody {
@@ -107,6 +175,26 @@ export async function remoteCall(channel: string, args: unknown[]): Promise<unkn
     body: JSON.stringify(body)
   })
   return readJson(res)
+}
+
+/* ---------------- 导出 ---------------- */
+
+/**
+ * 导出的 CSV 在后端算、在本机落盘。
+ * export: 前缀留在 LOCAL_ONLY（另存对话框是本机的事），数据却必须来自后端那份账——
+ * 远端模式还读本机库导出台账，等于把一张空表交给客户。
+ */
+export async function remoteExportCsv(
+  kind: string,
+  filter?: unknown
+): Promise<{ csv: string; fileName: string }> {
+  const res = await fetchRemote('/api/export/csv', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ kind, filter })
+  })
+  const data = (await readJson(res)) as { csv?: unknown; fileName?: unknown } | null
+  return { csv: String(data?.csv ?? ''), fileName: String(data?.fileName ?? '') }
 }
 
 /* ---------------- 图片文件 ---------------- */

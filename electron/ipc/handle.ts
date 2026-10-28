@@ -56,7 +56,7 @@ export function handle<T>(channel: string, fn: (...args: any[]) => T | Promise<T
         if (!isRemoteChannel(channel)) {
           throw new Error(
             `「${channel}」这个功能还没搬到后端，现在只有本机版。\n` +
-              `${coverageWords()}；订单、打样、单据这些还在本机。\n` +
+              `${coverageWords()}；客户统计、单据存档、备份这些还在本机。\n` +
               `要用它，请到「设置 · 数据来源」切回「本机」。`
           )
         }

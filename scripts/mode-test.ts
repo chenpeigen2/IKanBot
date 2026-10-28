@@ -4,8 +4,9 @@
  * 三层：
  *  1) 连接配置（纯函数）——默认值、环境变量钉住、地址校验；
  *  2) 转发与探活——真起一个假后端，看参数怎么翻成请求体、错误体怎么还原成中文原句；
- *  3) 真后端对拍——起 server/dist 的 NestJS 进程，经真实 IPC handler 调客户与商品通道
- *     （含图片上传/取回），再切回本机确认两边各是各的数据；没搬的通道必须当场报错。
+ *  3) 真后端对拍——起 server/dist 的 NestJS 进程，经真实 IPC handler 调客户、商品、设置与
+ *     单据簇通道（含图片上传/取回、订单/装箱/报价/打样/工作台/导出的读写），
+ *     再切回本机确认两边各是各的数据；没搬的通道必须当场报错。
  *
  * 运行：npm run test:mode（会先构建 server/dist）
  */
@@ -16,6 +17,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { openDb, closeDb } from '../electron/db'
 import { registerIpc } from '../electron/ipc'
+import { localDate } from '../src/shared/date'
 import {
   getConnection,
   saveConnection,
@@ -26,6 +28,7 @@ import {
 import {
   probeRemote,
   remoteCall,
+  remoteExportCsv,
   remoteImageBase,
   remoteUploadImage,
   REMOTE_ROUTES
@@ -233,8 +236,12 @@ async function main(): Promise<void> {
     openDb()
     registerIpc()
     check(
-      'IPC 通道都挂上了（客户 6 个 + 商品 12 个 + 分母那一批）',
-      stub.__handlers.has('customers:list') && stub.__handlers.has('products:list') && stub.__handlers.has('mode:get')
+      'IPC 通道都挂上了（客户 + 商品 + 设置 + 单据簇 + 分母那一批）',
+      stub.__handlers.has('customers:list') &&
+        stub.__handlers.has('products:list') &&
+        stub.__handlers.has('orders:create') &&
+        stub.__handlers.has('pl:create') &&
+        stub.__handlers.has('mode:get')
     )
 
     // 本机先落一个只有本机才有的客户和商品
@@ -273,8 +280,8 @@ async function main(): Promise<void> {
 
     const state = await ipc('mode:get')
     check(
-      `覆盖率口径：25 / 118（实得 ${(state as any).data?.covered} / ${(state as any).data?.total}）`,
-      state.ok && (state as any).data.covered === 25 && (state as any).data.total === 118
+      `覆盖率口径：87 / 118（实得 ${(state as any).data?.covered} / ${(state as any).data?.total}）`,
+      state.ok && (state as any).data.covered === 87 && (state as any).data.total === 118
     )
     const probe = await ipc('mode:test')
     check('设置页的「测试连接」走真后端', probe.ok && (probe as any).data.ok === true)
@@ -434,11 +441,96 @@ async function main(): Promise<void> {
       remotePl.ok && Array.isArray((remotePl as any).data) && (remotePl as any).data.length === 0
     )
 
+    // 单据簇：建单 → 明细 → 装箱 → 报价/打样 → 工作台/月报 → 导出，全落在后端那份账
+    console.log('单据簇对拍（真后端）')
+    const ord = await ipc('orders:create', {
+      customerId: remoteId,
+      currency: 'USD',
+      exchangeRate: 7.2,
+      exchangeRateDate: localDate()
+    })
+    check('后端模式：建单在后端烧号并回完整档案', ord.ok && /^SO\d/.test(String((ord as any).data.orderNo)))
+    const orderId = (ord as any).data.id as number
+
+    const ordItems = await ipc('orders:addItems', orderId, [{ styleNo: 'REMOTE-1', quantity: 6, unitPrice: 5 }])
+    check('后端模式：批量加明细算出货值 30', ordItems.ok && (ordItems as any).data.totalAmount === 30)
+
+    const ordList = await ipc('orders:list', { customerId: remoteId })
+    check('后端模式：订单列表按客户筛得到这一张', ordList.ok && (ordList as any).data.total === 1)
+    const ordGet = await ipc('orders:get', orderId)
+    check('后端模式：查单带回明细与空收款', ordGet.ok && (ordGet as any).data.items.length === 1)
+    const ordMiss = await ipc('orders:get', 999999)
+    check('后端模式：查不存在的单读成「没找到」而不是报错', ordMiss.ok && (ordMiss as any).data == null)
+
+    const ordEvents = await ipc('orders:events', orderId)
+    check('后端模式：建单那一步在操作历史里留了痕', ordEvents.ok && (ordEvents as any).data.length >= 1)
+
+    const shipBad = await ipc('orders:setShipStatus', orderId, 'partial_shipped')
+    check(
+      '后端模式：「部分出运」只能从装箱单推进（原句经 HTTP 400 还原）',
+      !shipBad.ok && (shipBad as any).error.includes('装箱单')
+    )
+
+    const plEmpty = await ipc('pl:list', orderId)
+    check('后端模式：新单还没有批次', plEmpty.ok && (plEmpty as any).data.length === 0)
+    const plNew = await ipc('pl:create', {
+      orderId,
+      containerNo: 'TCLU1',
+      lines: [{ boxNo: '1', styleNo: 'REMOTE-1', quantity: 3 }]
+    })
+    check('后端模式：建批次一箱三件', plNew.ok && (plNew as any).data[0].lines[0].quantity === 3)
+    const plVoidBad = await ipc('pl:void', orderId, (plNew as any).data[0].id, '  ')
+    check(
+      '后端模式：作废批次不写原因被拦（同一份 guards 话术）',
+      !plVoidBad.ok && (plVoidBad as any).error.includes('原因')
+    )
+
+    const quo = await ipc('quotations:save', {
+      customerId: remoteId,
+      currency: 'USD',
+      exchangeRate: 7.2,
+      exchangeRateDate: localDate(),
+      items: [{ styleNo: 'REMOTE-1', quantity: 2, unitPrice: 6 }]
+    })
+    check('后端模式：报价单烧号落到后端', quo.ok && /^Q\d/.test(String((quo as any).data.qNo)))
+    const quoList = await ipc('quotations:list', {})
+    check('后端模式：报价列表读的是后端那份', quoList.ok && (quoList as any).data.length === 1)
+
+    const sam = await ipc('samples:save', {
+      customerId: remoteId,
+      currency: 'USD',
+      exchangeRate: 7.2,
+      exchangeRateDate: localDate(),
+      sampleDate: localDate(),
+      items: [{ styleNo: 'REMOTE-1', quantity: 2, unitPrice: 10, goodsUnitPrice: 8 }]
+    })
+    check('后端模式：打样单样品费算成 20', sam.ok && (sam as any).data.sampleFee === 20)
+
+    // 草稿单不算销售：推到「已发出」再看工作台，顺带验 setPaymentStatus 这条写通道
+    const ordSent = await ipc('orders:setPaymentStatus', orderId, 'sent', 'PI 已发')
+    check('后端模式：收款状态推到「已发出」', ordSent.ok && (ordSent as any).data.paymentStatus === 'sent')
+
+    const stats = await ipc('dashboard:stats')
+    check('后端模式：工作台的本月新单来自后端这批单', stats.ok && (stats as any).data.monthNewOrders >= 1)
+    const monthly = await ipc('report:monthly')
+    check('后端模式：月报按月归集出至少一行', monthly.ok && (monthly as any).data.length >= 1)
+
+    // 导出的 CSV 在后端算、在本机落盘：另存对话框是本机的事，数据不能再读本机库
+    const exported = await remoteExportCsv('orders', {})
+    check(
+      '后端模式：订单台账 CSV 由后端算好（含刚建的那张单号）',
+      exported.csv.includes(String((ord as any).data.orderNo)) && exported.fileName.endsWith('.csv')
+    )
+    check(
+      '后端模式：导出类型写错时后端的话术原样传回',
+      (await errorOf(remoteExportCsv('nope', {}))).includes('只接')
+    )
+
     // 不碰数据的通道没必要绕一趟网络
     const tpl = await ipc('products:csvTemplate')
     check('远端模式下 CSV 模板仍走本机（不白跑一趟网络）', tpl.ok && String((tpl as any).data).includes('款号'))
 
-    const unMigrated = await ipc('orders:list', {})
+    const unMigrated = await ipc('customers:stylePriceHistory', {})
     check(
       '没搬的通道当场报错（含去哪切回本机）',
       !unMigrated.ok &&

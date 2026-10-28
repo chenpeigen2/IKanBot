@@ -9,6 +9,7 @@
  * 转单要建订单、收款要认预收抵扣，所以会回头调订单域与抵扣域；
  * 三边按需懒建工厂，拿到的是同一个连接。
  */
+import { bizError, notFound } from '../src/shared/errors'
 import type { Db } from './db'
 import { nextNo } from './next-no'
 import { logEvent } from './events'
@@ -302,7 +303,7 @@ export function samplesCore(db: Db) {
     const before = input.id
       ? ((await db.get('SELECT * FROM sample_orders WHERE id = ?', [input.id]) as Record<string, unknown> | null))
       : null
-    if (input.id && !before) throw new Error('打样单不存在')
+    if (input.id && !before) throw notFound('打样单不存在')
     // 空白行（款号都没填）忽略；填了款号的行必须过闸门——
     // 以前 filter 直接把数量≤0 的行丢掉，用户打了一半数字保存后那一行凭空消失，
     // 既不知道少了一行，也不知道为什么少
@@ -314,7 +315,7 @@ export function samplesCore(db: Db) {
       (i) => !i.styleNo && (Number(i.quantity ?? 0) !== 0 || Number(i.unitPrice ?? 0) !== 0)
     )
     if (blankIdx >= 0) {
-      throw new Error(`第 ${blankIdx + 1} 行填了数量或单价，但没写款号：这一行会被当成空行丢掉，样品费也少算。请补上款号，或把数量/单价清零。`)
+      throw bizError(`第 ${blankIdx + 1} 行填了数量或单价，但没写款号：这一行会被当成空行丢掉，样品费也少算。请补上款号，或把数量/单价清零。`)
     }
     const items = rawItems.filter((i) => i.styleNo)
     items.forEach((it) => {
@@ -356,7 +357,7 @@ export function samplesCore(db: Db) {
     // 状态是枚举列：'Paid'/'已收' 这种脏值会让待收、客户页、对账单三处各按各的理解跳单，
     // 而工作台还在催——入口一次拦死，比事后对口径便宜
     if (!SAMPLE_FEE_STATUS_ORDER.includes(rawFeeStatus as SampleFeeStatus)) {
-      throw new Error(
+      throw bizError(
         `打样费收款状态「${String(rawFeeStatus)}」不认识：只能是未收 / 已向客户收 / 已抵扣 / 免收。`
       )
     }
@@ -367,13 +368,13 @@ export function samplesCore(db: Db) {
     assertOptionalMoney(expressFee, '快递费')
     // 汇率必须是真的数：0 表示还没填，负数/NaN 会让待收和净垫一起失真
     if (!Number.isFinite(exchangeRate) || exchangeRate < 0) {
-      throw new Error(
+      throw bizError(
         `汇率「${String(keep('exchangeRate', 'exchange_rate'))}」不是有效汇率：请填大于 0 的数字（还没定就先留空）`
       )
     }
     // N23：未收的打样费要进工作台待收款，折算必须有汇率——没有就不许存（跟订单一个规矩）
     if (feeStatus === 'unpaid' && sampleFee + expressFee > 0 && exchangeRate <= 0) {
-      throw new Error('这张打样单还有应收没结（样品费+快递费），请先按今天钉盘的汇率填上汇率')
+      throw bizError('这张打样单还有应收没结（样品费+快递费），请先按今天钉盘的汇率填上汇率')
     }
     // 已登记过收款流水（R25）：钱到账的凭据已经钉住了当时的费用与汇率，
     // 事后一改，流水折出来的金额和这张单的应收就对不上。
@@ -393,17 +394,17 @@ export function samplesCore(db: Db) {
         (input.exchangeRateDate !== undefined &&
           input.exchangeRateDate !== String(before.exchange_rate_date ?? ''))
       if (moneyChanged) {
-        throw new Error(
+        throw bizError(
           `这张打样单已经登记过 ${flowCount} 笔收款流水：样品费、快递费、汇率是那些流水的折算依据，不能再改。要改请先在「打样费收款」里逐笔撤销，再回来改。`
         )
       }
       if (input.customerId !== undefined && Number(input.customerId) !== Number(before.customer_id)) {
-        throw new Error(
+        throw bizError(
           `这张打样单已经登记过收款流水，客户不能再改：流水和应收都记在这个客户名下。要改请先撤销收款。`
         )
       }
       if (feeStatus !== String(before.fee_status)) {
-        throw new Error(
+        throw bizError(
           `这张打样单已经登记过收款流水，收款状态由流水自动推导，不能手工改。要更正请撤销对应收款（撤销要写原因），状态会跟着回退。`
         )
       }
@@ -417,20 +418,20 @@ export function samplesCore(db: Db) {
       String(before?.fee_status ?? '') !== 'paid' &&
       sampleFee + expressFee > 0.001
     ) {
-      throw new Error(
+      throw bizError(
         '「已向客户收」不能手工勾：请用打样费收款里的「登记收款」按水单逐笔记，收齐后系统会自动标成已收。手勾的话这笔钱会从月报里消失。'
       )
     }
     // 升级前手工勾「已向客户收」的老账（没有流水，上面的流水锁拦不住）不能改成「免收」：
     // 钱当年确实收过，一改免收，对账单的已收样品费和月报回收同时消失，客户拿水单对账说不清。
     if (feeStatus === 'waived' && String(before?.fee_status ?? '') === 'paid') {
-      throw new Error(
+      throw bizError(
         '这张打样单的样品费是「已向客户收」，客户付过钱，不能直接改成「免收」——那样这笔已收的钱会从对账单和月报里消失。如果当时记错了，先改回「未收」，再按实际情况登记收款或免收。'
       )
     }
     // 「已抵扣」不是能手工勾的状态：它代表样品费真的抵进了某张订单，只有转单那一步才写
     if (feeStatus === 'offset' && (!input.id || String(before?.fee_status ?? '') !== 'offset')) {
-      throw new Error(
+      throw bizError(
         '「已抵扣」不能手工标记：这是样品费已经抵进某张订单的凭据，只有转订单时勾「样品费抵货款」才会自动记上。如果是真收到了钱，请选「已向客户收」。'
       )
     }
@@ -444,19 +445,19 @@ export function samplesCore(db: Db) {
         Math.abs(exchangeRate - Number(before.exchange_rate ?? 0)) > 0.001 ||
         (input.currency !== undefined && input.currency !== String(before.currency))
       if (moneyChanged) {
-        throw new Error(
+        throw bizError(
           '这张打样单已经有客户预收抵到了样品费上：样品费、快递费、币种、汇率是那笔抵扣的依据，不能再改。要改请先在客户页撤销抵扣。'
         )
       }
       if (input.customerId !== undefined && Number(input.customerId) !== Number(before.customer_id)) {
-        throw new Error('这张打样单已经有客户预收抵扣：换客户会让抵扣的钱串到另一家账上，请先在客户页撤销抵扣。')
+        throw bizError('这张打样单已经有客户预收抵扣：换客户会让抵扣的钱串到另一家账上，请先在客户页撤销抵扣。')
       }
     }
     // 取消要留原因：这单从此不再跟，日后客户问起「那批样品呢」，只有备注这句话能交代
     if (input.status === 'cancelled' && String(before?.status ?? '') !== 'cancelled') {
       const reason = String(input.note ?? '').trim()
       if (!reason || reason === String(before?.note ?? '').trim()) {
-        throw new Error('取消打样单要写原因：请在备注里补一句为什么取消（例如「客户自己打样了」「改走别的款」），再保存。')
+        throw bizError('取消打样单要写原因：请在备注里补一句为什么取消（例如「客户自己打样了」「改走别的款」），再保存。')
       }
     }
 
@@ -471,12 +472,12 @@ export function samplesCore(db: Db) {
       return !!hit
     }
     const noDupErr = (no: string): Error =>
-      new Error(
+      bizError(
         `样品单号 ${no} 已经存在（可能恢复过备份或手工导过数据）。单号是凭据，不能两张单共用一个号——请在「样品单号」里换一个号再保存。`
       )
 
     if (id) {
-      if (!before) throw new Error('打样单不存在')
+      if (!before) throw notFound('打样单不存在')
       // 已转订单的打样单：钱的部分（样品费合计 / 快递费 / 汇率）是那单的依据，
       // 事后一改订单就对不上。颜色、尺码、品名这些描述性的字眼照旧能改。
       if (before.converted_order_id) {
@@ -491,19 +492,19 @@ export function samplesCore(db: Db) {
           (input.exchangeRateDate !== undefined &&
             input.exchangeRateDate !== String(before.exchange_rate_date ?? ''))
         if (moneyChanged) {
-          throw new Error(
+          throw bizError(
             `这张打样单已经转成订单 ${o?.order_no ?? ''}，样品费、快递费、汇率都是那单的依据，不能再改。要改请直接改订单。`
           )
         }
         // 客户也锁：换个人，样品费抵扣和应收就串到另一家账上
         if (input.customerId !== undefined && Number(input.customerId) !== Number(before.customer_id)) {
-          throw new Error(
+          throw bizError(
             `这张打样单已经转成订单 ${o?.order_no ?? ''}，客户不能再改：样品费抵扣和应收都记在这个客户名下。要改请直接改订单。`
           )
         }
         // 收款状态也锁：已收/已抵扣改成未收，同一笔钱会在待收里再收一次
         if (feeStatus !== String(before.fee_status)) {
-          throw new Error(
+          throw bizError(
             `这张打样单已经转成订单 ${o?.order_no ?? ''}，样品费的收款状态不能再改（现在是「${SAMPLE_FEE_STATUS_LABEL[before.fee_status as SampleFeeStatus] ?? before.fee_status}」）：它和那单的抵扣、应收是绑在一起的。`
           )
         }
@@ -514,7 +515,7 @@ export function samplesCore(db: Db) {
           input.status !== undefined &&
           String(input.status) !== String(before.status)
         ) {
-          throw new Error(
+          throw bizError(
             `这张打样单已经转成订单 ${o?.order_no ?? ''}，状态不能再改（现在是「${SAMPLE_STATUS_LABEL[before.status as SampleStatus] ?? before.status}」）：转单之后它跟那单绑在一起。样品环节要收尾，请直接改订单。`
           )
         }
@@ -635,28 +636,28 @@ export function samplesCore(db: Db) {
       const o = await ordersOf().getOrder(s.convertedOrderId)
       // 活着的订单还靠这张打样单作原始凭据；订单已作废，留档订单本身就能追溯，同意删
       if (o && o.paymentStatus !== 'void') {
-        throw new Error(
+        throw bizError(
           `这张打样单已经转成订单 ${o.orderNo}，删了以后就查不到原始打样记录了。确实不要了，请先作废订单，再删打样单。`
         )
       }
     }
     // 预收抵扣记在这张单上：删单会让这笔余额「用到哪儿去了」失去凭据
     if (await creditsOf().hasActiveCredit('sample', id)) {
-      throw new Error(
+      throw bizError(
         `这张打样单上还有未撤销的客户预收抵扣，不能删：删了这笔余额用到哪儿就查不到了。请先在客户页撤销抵扣，再删单。`
       )
     }
     // 有收款流水就不能删：删了单，银行水单上的钱在系统里就找不到来路了。
     // 撤销流水要写原因，撤销完再删（那才是「钱退了、单也不要了」的完整交代）
     if (s.flowCount > 0) {
-      throw new Error(
+      throw bizError(
         `这张打样单已经登记过 ${s.flowCount} 笔收款流水（实收 ${s.collected.toFixed(2)} ${s.currency}），删了钱就找不到来路。请先在「打样费收款」里逐笔撤销（撤销要写原因），再删单。`
       )
     }
     // 还挂着应收的单不能零留痕删掉：钱没收回、单也没了，账上这笔应收就凭空断线。
     // 先取消（取消要写原因），应收归零、原因入档，才允许删
     if (s.feeStatus === 'unpaid' && s.status !== 'cancelled' && s.totalFee > 0.001) {
-      throw new Error(
+      throw bizError(
         `这张打样单还有 ${s.totalFee.toFixed(2)} ${s.currency} 没收回（样品费+快递费）。真要销掉，请先把状态改成「已取消」并写明原因——应收会跟着归零、为什么取消也留在档案里；之后再删。`
       )
     }
@@ -677,8 +678,8 @@ export function samplesCore(db: Db) {
     } = {}
   ): Promise<OrderDetail> {
     const s = await getSample(id)
-    if (!s) throw new Error('打样单不存在')
-    if (s.status === 'cancelled') throw new Error('这张打样单已取消，不能再转订单（要转请先把状态改回来）')
+    if (!s) throw notFound('打样单不存在')
+    if (s.status === 'cancelled') throw bizError('这张打样单已取消，不能再转订单（要转请先把状态改回来）')
     if (s.convertedOrderId) {
       const exist = await ordersOf().getOrder(s.convertedOrderId)
       // 上次转出的单还活着就复用；已经作废了要继续做生意，只能按新单重转
@@ -688,13 +689,13 @@ export function samplesCore(db: Db) {
     const currency = (s.currency || 'USD') as 'USD'
     const rate = Number(s.exchangeRate || 0)
     if (rate <= 0) {
-      throw new Error('这张打样单没有汇率，请先编辑打样单填上汇率再转订单')
+      throw bizError('这张打样单没有汇率，请先编辑打样单填上汇率再转订单')
     }
     // 锁汇日期必须是真记下来的那一天：打样日期不是订单的锁汇日，拿它或今天顶替
     // 都会在账上留下一个查不出处的汇率
     const rateDate = s.exchangeRateDate
     if (!rateDate) {
-      throw new Error('这张打样单没记汇率锁定日期。请先编辑打样单，把汇率锁定日期补上再转订单')
+      throw bizError('这张打样单没记汇率锁定日期。请先编辑打样单，把汇率锁定日期补上再转订单')
     }
 
     // 打样单价是打样费，不是大货价。没填大货单价的款号必须拦住，
@@ -704,7 +705,7 @@ export function samplesCore(db: Db) {
     )
     if (missingGoodsPrice.length) {
       const list = missingGoodsPrice.map((i) => i.styleNo || '(未填款号)').join('、')
-      throw new Error(`这些款号还没填大货单价：${list}。打样单价只是打样费，不能当大货价；请在打样单里补上大货单价再转。`)
+      throw bizError(`这些款号还没填大货单价：${list}。打样单价只是打样费，不能当大货价；请在打样单里补上大货单价再转。`)
     }
 
     // 转单挡：老数据里同款两行不能原样带进订单（不合并——合并会改客户确认过的价，让人回打样单自己改）
@@ -730,7 +731,7 @@ export function samplesCore(db: Db) {
       0
     )
     if (offsetTotal > goodsValue + 0.001) {
-      throw new Error(
+      throw bizError(
         `样品费及快递费还有 ${openFee.toFixed(2)} 没收回，超过这张订单的货值 ${goodsValue.toFixed(2)}。` +
           `这样转单会让订单合计变成负数，系统会把差额误认成客户多付（能拿去抵别的单甚至退款）。` +
           `请先按水单登记部分收款、把剩余部分免收，或补足大货明细后再转。`
@@ -877,14 +878,14 @@ export function samplesCore(db: Db) {
    */
   async function addSamplePayment(sampleId: number, p: SamplePaymentInput): Promise<SampleOrderDetail> {
     const s = await getSample(sampleId)
-    if (!s) throw new Error('打样单不存在')
+    if (!s) throw notFound('打样单不存在')
     if (s.status === 'cancelled') {
-      throw new Error(`打样单 ${s.sampleNo} 已取消：取消的单不再收钱。如果客户确实付了，请先把状态改回来（备注写明原因）再登记。`)
+      throw bizError(`打样单 ${s.sampleNo} 已取消：取消的单不再收钱。如果客户确实付了，请先把状态改回来（备注写明原因）再登记。`)
     }
     if (s.convertedOrderId) {
       const o = await ordersOf().getOrder(s.convertedOrderId)
       if (o && o.paymentStatus !== 'void') {
-        throw new Error(
+        throw bizError(
           `这张打样单已经转成订单 ${o.orderNo}：样品费的钱请直接登记在订单上，这里只留转单前的实收。` +
             (isBillingStatus(o.paymentStatus)
               ? ''
@@ -899,7 +900,7 @@ export function samplesCore(db: Db) {
       // 那时这张单上又落了一笔现金，同一块钱就收了两次（应收口径也解释不了）。
       const co = s.convertedOrderId ? await ordersOf().getOrder(s.convertedOrderId) : null
       const suspended = !!s.convertedOrderStatus && !isBillingStatus(s.convertedOrderStatus)
-      throw new Error(
+      throw bizError(
         `打样单 ${s.sampleNo} 的样品费已经抵扣进${co ? `订单 ${co.orderNo}` : '订单'}，这里再落一笔会重复计。` +
           (suspended
             ? `现在那张单是「${
@@ -910,10 +911,10 @@ export function samplesCore(db: Db) {
       )
     }
     if (s.feeStatus === 'waived') {
-      throw new Error(`打样单 ${s.sampleNo} 的样品费已免收：确实收到钱的话，请先把「打样费收款标记」改回「未收」再登记。`)
+      throw bizError(`打样单 ${s.sampleNo} 的样品费已免收：确实收到钱的话，请先把「打样费收款标记」改回「未收」再登记。`)
     }
     if (s.feeStatus === 'paid' && s.totalFee > 0.001) {
-      throw new Error(
+      throw bizError(
         s.flowCount === 0
           ? `打样单 ${s.sampleNo} 是按「已向客户收」记的老账（没有流水）。要补流水，请先在编辑里把收款标记改回「未收」，再按水单登记。`
           : `打样单 ${s.sampleNo} 的样品费已经收齐（${s.collected.toFixed(2)} ${s.currency}），不能再登记：多收的钱不属于这张单。`
@@ -922,13 +923,13 @@ export function samplesCore(db: Db) {
     const { paidAt, amount } = ordersOf().assertPaymentInput(p)
     const rate = Number(s.exchangeRate)
     if (!(rate > 0)) {
-      throw new Error('这张打样单没有汇率：收款要折进月报，请先编辑打样单填上汇率再登记收款。')
+      throw bizError('这张打样单没有汇率：收款要折进月报，请先编辑打样单填上汇率再登记收款。')
     }
     const remaining = Math.max(0, s.totalFee - s.collected - Number(s.creditApplied ?? 0))
     if (amount > remaining + 0.001) {
       const creditPart =
         Number(s.creditApplied ?? 0) > 0.001 ? ` − 预收抵扣 ${Number(s.creditApplied).toFixed(2)}` : ''
-      throw new Error(
+      throw bizError(
         `这笔 ${amount.toFixed(2)} 超过了还没收的 ${remaining.toFixed(2)} ${s.currency}（应收 ${s.totalFee.toFixed(2)} − 已收 ${s.collected.toFixed(2)}${creditPart}）。多出来的钱不属于这张打样单，请核对水单。`
       )
     }
@@ -961,14 +962,14 @@ export function samplesCore(db: Db) {
   ): Promise<SampleOrderDetail> {
     const why = String(reason ?? '').trim()
     if (!why) {
-      throw new Error('撤销打样收款要写原因（例如“金额录错”“客户退汇”），操作历史里要留痕。')
+      throw bizError('撤销打样收款要写原因（例如“金额录错”“客户退汇”），操作历史里要留痕。')
     }
     const s = await getSample(sampleId)
-    if (!s) throw new Error('打样单不存在')
+    if (!s) throw notFound('打样单不存在')
     if (s.convertedOrderId) {
       const o = await ordersOf().getOrder(s.convertedOrderId)
       if (o && o.paymentStatus !== 'void') {
-        throw new Error(
+        throw bizError(
           `这张打样单已经转成订单 ${o.orderNo}：转单前的实收已经参与抵扣计算，不能回头撤销。要更正请到订单里处理。`
         )
       }
@@ -977,13 +978,13 @@ export function samplesCore(db: Db) {
       paymentId,
       sampleId
     ]) as { paid_at?: string; amount?: number; bank_ref?: string } | null
-    if (!row) throw new Error('这条收款记录已经不存在了，刷新页面后再试。')
+    if (!row) throw bizError('这条收款记录已经不存在了，刷新页面后再试。')
     const usedBy = await db.get(
       'SELECT kind, amount, at FROM order_settlements WHERE payment_id = ? ORDER BY id LIMIT 1',
       [paymentId]
     ) as { kind?: string; amount?: number; at?: string } | null
     if (usedBy) {
-      throw new Error(
+      throw bizError(
         `这笔收款已经用于订单核销（${String(usedBy.at ?? '')}，${Number(usedBy.amount ?? 0).toFixed(2)}），不能直接删：请先撤销对应的核销记录。`
       )
     }
@@ -1046,3 +1047,6 @@ export function samplesCore(db: Db) {
     db_customerDefaults
   }
 }
+
+/** 打样域门面类型 */
+export type SamplesCore = ReturnType<typeof samplesCore>

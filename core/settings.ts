@@ -6,7 +6,7 @@
  * 现在 SQL、归一化、守门都在这里，两边各自把 Db 与图片目录接进来。
  */
 import { CURRENCIES, type AppSettings, type BankAccount, type Currency } from '../src/shared/types'
-import { BizError } from './errors'
+import { BizError } from '../src/shared/errors'
 import type { Db } from './db'
 
 export const SETTINGS_DEFAULTS: AppSettings = {

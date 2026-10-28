@@ -10,7 +10,7 @@ import { mapCustomer } from '../electron/db/mappers'
 import { likeAny } from '../electron/services/search'
 import { assertDepositRatio } from '../src/shared/guards'
 import { NON_BILLING_STATUSES } from '../src/shared/billing'
-import { BizError, notFound } from './errors'
+import { BizError, notFound } from '../src/shared/errors'
 import type { Db } from './db'
 
 export interface CustomerInput {
@@ -129,11 +129,7 @@ export function customersCore(db: Db) {
       )
     }
     // 档案里的默认定金比例是每张新单的起点：这里混进 1.5，以后每张单的 PI 都印负尾款
-    try {
-      assertDepositRatio(input.defaultDepositRatio)
-    } catch (e) {
-      throw new BizError((e as Error).message)
-    }
+    assertDepositRatio(input.defaultDepositRatio)
 
     const ship = {
       shipAttn: (input.shipAttn ?? '').trim(),

@@ -9,6 +9,7 @@
  * 抵扣生效/回退会推动目标单的收款状态，所以要回头调订单域；按需懒建工厂，
  * 避免与 orders 在模块初始化时互相等待。
  */
+import { bizError, notFound } from '../src/shared/errors'
 import type { Db } from './db'
 import { logEvent } from './events'
 import { settingsCore } from './settings'
@@ -62,21 +63,21 @@ export function creditsCore(db: Db) {
       'SELECT id, order_no, customer_id, currency, payment_status, charges, deposit_ratio FROM orders WHERE id = ?',
       [id]
     ) as Record<string, unknown> | null
-    if (!row) throw new Error('订单不存在')
+    if (!row) throw notFound('订单不存在')
     const customerId = Number(row.customer_id)
     const currency = String(row.currency ?? '').trim()
     const status = String(row.payment_status ?? '')
     if (status === 'draft') {
-      throw new Error(`订单 ${String(row.order_no ?? '')} 还是草稿：草稿不进应收，不能拿客户预收去抵。先把状态改成「已发出」或「已确认」。`)
+      throw bizError(`订单 ${String(row.order_no ?? '')} 还是草稿：草稿不进应收，不能拿客户预收去抵。先把状态改成「已发出」或「已确认」。`)
     }
     if (!isBillingStatus(status)) {
-      throw new Error(`订单 ${String(row.order_no ?? '')} 已失效/作废：它已经没有待收，预收抵扣无处可落。`)
+      throw bizError(`订单 ${String(row.order_no ?? '')} 已失效/作废：它已经没有待收，预收抵扣无处可落。`)
     }
     const detail = await ordersOf().getOrder(id)
     // 坏账已经从待收里拿掉过一次：再拿预收抵，同一笔欠款会同时算「坏账损失」和「预收抵扣」，
     // 待收、坏账余额、客户余额三处对不上。追回款走「坏账追回」，别用预收替客户补。
     if (detail && detail.badDebtOutstanding > 0.001) {
-      throw new Error(
+      throw bizError(
         `订单 ${String(row.order_no ?? '')} 还有 ${detail.badDebtOutstanding.toFixed(2)} ${currency} 坏账没追回：` +
           `先走「坏账追回」或撤销那笔坏账，再拿预收抵扣——否则同一笔欠款会同时算坏账损失和预收抵扣。`
       )
@@ -101,7 +102,7 @@ export function creditsCore(db: Db) {
        WHERE s.id = ?`,
       [id]
     ) as Record<string, unknown> | null
-    if (!row) throw new Error('打样单不存在')
+    if (!row) throw notFound('打样单不存在')
     const customerId = Number(row.customer_id)
     const currency = String(row.currency ?? '').trim()
     // 已经走「转单抵扣」的样品费由订单负费用行结清过一次，不能再拿预收抵第二次。
@@ -109,14 +110,14 @@ export function creditsCore(db: Db) {
     // 那只是抵扣暂挂，不是第二笔欠款；等订单恢复会自动再抵。
     if (String(row.fee_status ?? '') === 'offset') {
       const orderNo = String(row.converted_order_no ?? '').trim()
-      throw new Error(
+      throw bizError(
         `打样单 ${String(row.sample_no ?? '')} 的样品费已经抵进转出的订单${orderNo ? ` ${orderNo}` : ''}，不能再用客户预收抵一次。` +
           `如果转出的订单退回了草稿/失效，请先把订单恢复成正式单，抵扣会自动生效。`
       )
     }
     const hit = (await moneyOf().sampleOpenRows(customerId)).find((r) => r.sampleId === id)
     if (!hit) {
-      throw new Error(
+      throw bizError(
         `打样单 ${String(row.sample_no ?? '')} 没有待收（已收齐/已抵扣/已取消/已免单），不能再用预收抵扣。`
       )
     }
@@ -146,42 +147,42 @@ export function creditsCore(db: Db) {
   async function applyCredit(input: ApplyCreditInput): Promise<CustomerCreditCurrency[]> {
     const customerId = Number(input.customerId)
     const currency = String(input.currency ?? '').trim().toUpperCase()
-    if (!customerId) throw new Error('没有指定客户，不能抵扣预收。')
-    if (!currency) throw new Error('没有指定币种，不能抵扣预收。')
+    if (!customerId) throw bizError('没有指定客户，不能抵扣预收。')
+    if (!currency) throw bizError('没有指定币种，不能抵扣预收。')
     if (input.targetKind !== 'order' && input.targetKind !== 'sample') {
-      throw new Error('抵扣对象只能是订单或打样单。')
+      throw bizError('抵扣对象只能是订单或打样单。')
     }
     const amount = Math.round((Number(input.amount) || 0) * 100) / 100
-    if (!(amount > 0)) throw new Error('抵扣金额必须大于 0。')
+    if (!(amount > 0)) throw bizError('抵扣金额必须大于 0。')
     if (input.appliedAt != null && input.appliedAt !== '' && !isLocalDate(input.appliedAt)) {
-      throw new Error(`抵扣日期「${input.appliedAt}」不是有效日期。`)
+      throw bizError(`抵扣日期「${input.appliedAt}」不是有效日期。`)
     }
     if (input.appliedAt && input.appliedAt > localDate()) {
-      throw new Error('抵扣日期不能填未来：对账单按这一天排序，未来的日期会把余额排到还没发生的月份。')
+      throw bizError('抵扣日期不能填未来：对账单按这一天排序，未来的日期会把余额排到还没发生的月份。')
     }
 
     const target = await readTarget(input.targetKind, input.targetId)
     if (target.customerId !== customerId) {
-      throw new Error('这张单不属于当前客户：预收只能抵同一家客户的单，不能串账。')
+      throw bizError('这张单不属于当前客户：预收只能抵同一家客户的单，不能串账。')
     }
     if (target.currency !== currency) {
-      throw new Error(
+      throw bizError(
         `这张单是 ${target.currency}，客户可用预收是 ${currency}：跨币种抵扣没有唯一正确的汇率，请线下换汇后按同币种登记。`
       )
     }
     if (amount > target.open + 0.001) {
-      throw new Error(
+      throw bizError(
         `${target.no} 当前待收只有 ${target.open.toFixed(2)} ${currency}，不能再抵 ${amount.toFixed(2)}。`
       )
     }
     const available = await moneyOf().customerCreditAvailable(customerId, currency)
     if (available < -0.001) {
-      throw new Error(
+      throw bizError(
         `客户 ${currency} 预收出现缺口（${available.toFixed(2)}）：来源单据被改动过。请先在客户页撤销部分抵扣，再继续使用。`
       )
     }
     if (amount > available + 0.001) {
-      throw new Error(
+      throw bizError(
         `客户 ${currency} 可用预收只有 ${available.toFixed(2)}，不够抵 ${amount.toFixed(2)}。`
       )
     }
@@ -216,13 +217,13 @@ export function creditsCore(db: Db) {
       'SELECT id, customer_id, currency, amount, target_kind, target_id, reversed_at FROM credit_applications WHERE id = ?',
       [applicationId]
     ) as Record<string, unknown> | null
-    if (!row) throw new Error('这笔预收抵扣已经不存在了，刷新页面后再试。')
+    if (!row) throw bizError('这笔预收抵扣已经不存在了，刷新页面后再试。')
     const customerId = Number(row.customer_id)
-    if (row.reversed_at) throw new Error('这笔预收抵扣已经撤销过了。')
+    if (row.reversed_at) throw bizError('这笔预收抵扣已经撤销过了。')
     const why = String(reason ?? '').trim()
     // 撤销会把客户的余额和那张单的待收同时改回去：没有原因，历史里就只剩一个「不知道谁撤的」
     if (!why) {
-      throw new Error('撤销预收抵扣要写原因（例如「抵错了单」「客户改主意，余额留着抵下一单」），操作历史要留痕。')
+      throw bizError('撤销预收抵扣要写原因（例如「抵错了单」「客户改主意，余额留着抵下一单」），操作历史要留痕。')
     }
     const targetKind = String(row.target_kind ?? '') === 'sample' ? 'sample' : 'order'
     const targetId = Number(row.target_id)
@@ -262,28 +263,28 @@ export function creditsCore(db: Db) {
     const customerId = Number(input.customerId)
     const currency = String(input.currency ?? '').trim().toUpperCase()
     const amount = Math.round((Number(input.amount) || 0) * 100) / 100
-    if (!customerId) throw new Error('没有指定客户，不能退还预收。')
-    if (!currency) throw new Error('没有指定币种，不能退还预收。')
-    if (!(amount > 0)) throw new Error('退还金额必须大于 0。')
+    if (!customerId) throw bizError('没有指定客户，不能退还预收。')
+    if (!currency) throw bizError('没有指定币种，不能退还预收。')
+    if (!(amount > 0)) throw bizError('退还金额必须大于 0。')
     const refundAt = String(input.refundAt ?? '').trim() || localDate()
-    if (!isLocalDate(refundAt)) throw new Error(`退款日期「${refundAt}」不是有效日期。`)
-    if (refundAt > localDate()) throw new Error('退款日期不能填未来：钱还没退出去。')
+    if (!isLocalDate(refundAt)) throw bizError(`退款日期「${refundAt}」不是有效日期。`)
+    if (refundAt > localDate()) throw bizError('退款日期不能填未来：钱还没退出去。')
     const bankRef = String(input.bankRef ?? '').trim()
     if (!bankRef) {
-      throw new Error('退还预收必须填银行水单号：这是钱已经退给客户的凭据，对账时靠它和银行流水对上。')
+      throw bizError('退还预收必须填银行水单号：这是钱已经退给客户的凭据，对账时靠它和银行流水对上。')
     }
     const note = String(input.note ?? '').trim()
     if (!note) {
-      throw new Error('退还预收要写原因（例如“客户取消尾单，多付退回”）：这笔钱离开公司账上，必须留痕。')
+      throw bizError('退还预收要写原因（例如“客户取消尾单，多付退回”）：这笔钱离开公司账上，必须留痕。')
     }
     const available = await moneyOf().customerCreditAvailable(customerId, currency)
     if (available < -0.001) {
-      throw new Error(
+      throw bizError(
         `客户 ${currency} 预收已经有缺口（${available.toFixed(2)}）：来源单据被改动过。请先核对来源和抵扣，再办理退款。`
       )
     }
     if (amount > available + 0.001) {
-      throw new Error(
+      throw bizError(
         `客户 ${currency} 可用预收只有 ${available.toFixed(2)}，不够退 ${amount.toFixed(2)}。`
       )
     }
@@ -296,7 +297,7 @@ export function creditsCore(db: Db) {
       [customerId, currency, bankRef]
     ) as { refund_at?: string; amount?: number } | null
     if (dup) {
-      throw new Error(
+      throw bizError(
         `这个客户的 ${currency} 已经按水单号「${bankRef}」退过一次（${String(dup.refund_at ?? '')}，${Number(dup.amount ?? 0).toFixed(2)}）：` +
           `同一张出水单不能退两次，再记一笔余额就凭空少一截。` +
           `上次录错了请先在退款台账里撤销那条记录（撤销要写原因）再重录；确实是另一笔支出就填它自己的水单号。`
@@ -318,10 +319,10 @@ export function creditsCore(db: Db) {
     const row = await db.get('SELECT id, customer_id, reversed_at FROM customer_refunds WHERE id = ?', [refundId]) as
       | Record<string, unknown>
       | null
-    if (!row) throw new Error('这笔预收退款已经不存在了，刷新页面后再试。')
-    if (row.reversed_at) throw new Error('这笔预收退款已经撤销过了。')
+    if (!row) throw bizError('这笔预收退款已经不存在了，刷新页面后再试。')
+    if (row.reversed_at) throw bizError('这笔预收退款已经撤销过了。')
     const why = String(reason ?? '').trim()
-    if (!why) throw new Error('撤销退款要写原因（例如“水单录错，钱没退出去”），操作历史要留痕。')
+    if (!why) throw bizError('撤销退款要写原因（例如“水单录错，钱没退出去”），操作历史要留痕。')
     const customerId = Number(row.customer_id)
     await db.run('UPDATE customer_refunds SET reversed_at = ?, reversed_reason = ? WHERE id = ?', [
       new Date().toISOString(),
@@ -385,17 +386,17 @@ export function creditsCore(db: Db) {
     ) as Record<string, unknown>[]
     if (!applications.length) return
     if (applications.some((a) => Number(a.customer_id) !== Number(row.customer_id))) {
-      throw new Error('这张单上已经有客户预收抵扣：换客户会让抵扣的钱串到另一家账上，请先在客户页撤销抵扣。')
+      throw bizError('这张单上已经有客户预收抵扣：换客户会让抵扣的钱串到另一家账上，请先在客户页撤销抵扣。')
     }
     if (applications.some((a) => String(a.currency ?? '') !== String(row.currency ?? ''))) {
-      throw new Error('这张单上已经有客户预收抵扣：币种不能再改，那笔抵扣是按原币记的。请先在客户页撤销抵扣。')
+      throw bizError('这张单上已经有客户预收抵扣：币种不能再改，那笔抵扣是按原币记的。请先在客户页撤销抵扣。')
     }
     const money = (
       await moneyOf().moneyForOrders([{ id: orderId, charges: row.charges, depositRatio: Number(row.deposit_ratio ?? 0) }])
     ).get(orderId)
     if (money && money.remaining < -0.001) {
       const applied = applications.reduce((s, a) => s + Number(a.amount ?? 0), 0)
-      throw new Error(
+      throw bizError(
         `这张单上有 ${applied.toFixed(2)} ${String(row.currency ?? '')} 客户预收抵扣，改完后金额不够覆盖（待收会变成 ${money.remaining.toFixed(2)}）。请先在客户页撤销抵扣，再改金额。`
       )
     }
@@ -421,7 +422,7 @@ export function creditsCore(db: Db) {
     const gaps = (await moneyOf().customerCreditBalance(customerId)).filter((c) => c.available < -0.001)
     if (!gaps.length) return
     const detail = gaps.map((c) => `${c.currency} ${c.available.toFixed(2)}`).join('、')
-    throw new Error(
+    throw bizError(
       `这笔改动会让客户预收出现缺口（${detail}）：这些钱已经抵到了别的单上或退还给了客户。请先在客户页撤销对应的预收抵扣/退款，再改这笔钱。`
     )
   }
@@ -440,3 +441,6 @@ export function creditsCore(db: Db) {
     assertCreditSolvent
   }
 }
+
+/** 预收抵扣域门面类型 */
+export type CreditsCore = ReturnType<typeof creditsCore>

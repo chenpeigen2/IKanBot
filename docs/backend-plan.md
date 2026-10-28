@@ -42,7 +42,8 @@
 
 **已落地（2026-10-28，M0.5）**：`server/` 用 NestJS（Express 适配器），路由名照通道名一一对应；
 桌面端已有 `electron/mode.ts`（连接配置）+ `electron/remote/client.ts`（通道→HTTP 转发 + 探活）+
-设置页「数据来源」卡片（切换、地址、测试连接、覆盖率）；当前覆盖 25 / 118（客户档案、商品、系统设置、待收金额），
+设置页「数据来源」卡片（切换、地址、测试连接、覆盖率）；当前覆盖 87 / 118（客户档案、商品、系统设置、
+订单/报价/打样/装箱/预收、工作台与报表、台账导出），
 `GET /api` 自报路由，探活会点出后端缺哪几条，版本对不上不用猜。
 
 ## 一、终局形态
@@ -111,7 +112,8 @@
   这是机械改动但覆盖面广（约 1.2 万行 service），本地 SQLite 用同步 API 包成 Promise 即可，桌面行为不变。
   **不做**「为后端另写一份同步/异步服务」——两份业务逻辑必然漂移。
 - **M1 已开工（2026-10-28，客户域）**：新建顶层 `core/`——`core/db.ts`（`Db`/`Row`/`RunResult` 唯一定义）、
-  `core/errors.ts`（`BizError(message, status)`：桌面只认 message，后端按 status 落 400/404）、
+  `core/errors.ts`（`BizError(message, status)`：桌面只认 message，后端按 status 落 400/404；
+  第十刀起挪到 `src/shared/errors.ts`，好让 `src/shared/guards.ts` 也能发同一个类型）、
   `core/customers.ts`（列表/取/存/停用/删/同名/历史成交价，一份 SQL 一份守门）。
   桌面这边 `electron/db` 新增 `coreDb` 适配器（**同一个连接**、共享 SAVEPOINT 深度），
   `electron/services/customers.ts` 只剩聚合统计与订单摘要（它们还吃同步的 `money.ts`）；
@@ -148,8 +150,26 @@
   后端顺势接上四个纯读通道：待收榜、客户未结单、预收余额、批次金额——路由名照通道名走。
   覆盖 **25 / 118**（客户 6 + 商品 12 + 设置 3 + 金额只读 4），服务端冒烟 47+73 项、桌面 e2e 1831 项、
   双模式 72 项全绿。
-- **下一刀**：订单/报价/打样/额度/事件/单据簇是一个整体——`logEvent` 被它们约 40 处同步调用，
-  只能一起转；转完这簇，118 通道里的大头就到后端了。
+- **M1 第五刀（2026-10-28，事件 / 出货汇总 / 单号）**：`logEvent` 成为 `order_events` 唯一写入口，
+  出货件数、状态推进、工厂已交与烧号各留一份 SQL 进 core。代价是这些调用点从同步变 Promise——
+  凡有 `await` 的事务一律换 `transactAsync`（同一连接、同一套 BEGIN/SAVEPOINT 语义）。
+- **M1 第六～九刀（2026-10-28，单据簇整体 core 化）**：订单 59 个、抵扣 11 个、打样 17 个、
+  装箱 22 个函数、报价与工作台/提醒/月报/三张台账 CSV 依次进 `core/orders|credits|samples|packing|quotations|dashboard.ts`，
+  桌面只留绑定本机连接的薄壳。域之间互相调用是环，改用懒建工厂（`ordersOf` / `creditsOf` / `samplesOf`）打破初始化环。
+  core 不该知道本机目录：删照片与删商品图只删记录并回文件名，实物文件由两边各自在事务提交后删自己那份——
+  回滚时记录还在，证据不会被先毁掉。`export:` 前缀留在 `LOCAL_ONLY`（另存对话框是本机的事）。
+- **M1 第十刀（2026-10-28，单据簇接上 HTTP 路由）**：HTTP 路由 30 → 93 条，通道覆盖到 **87 / 118**——
+  订单 30、报价 8、打样 8、装箱 9、预收 4、工作台 2、月报 1，再加一条 `/api/export/csv`
+  （它不对应通道：`export:` 永远走本机，只有 CSV 内容由后端算）。导出只把 CSV 内容与文件名交给后端
+  （`remoteExportCsv()`），落盘仍在本机；订单照片走二进制直传，删记录时服务端一并删实物。
+  这一刀真正的收口是**错误类型**：`BizError` 从 `core/errors.ts` 挪到 `src/shared/errors.ts`，
+  core 与 `src/shared/guards.ts`、`src/shared/date.ts` 里所有「说给用户听」的话术一律换成 `bizError()` / `notFound()`。
+  后端只把这个类型当用户可见文案，其它错误按 500 藏起来——原来 `core/orders.ts` 抛裸 `Error`，
+  「部分出运要到装箱单里推进」这种守门话术到桌面只剩「服务器内部错误」，客户对着一个 500 猜自己哪里填错了。
+  覆盖、话术、图片、导出全经真实 IPC 对拍：服务端 47+126 项、双模式 90 项、桌面 e2e 1831 项、sweep 基线不变。
+- **下一刀**：剩下 31 个通道里，客户聚合统计（`customers:stats` / `orders` / `stylePriceHistory`）
+  是唯一的「读了会静默错」的面，先搬这三个；打印与单据渲染（`docs:`）、备份与更新（`backup:` / `updater:`）
+  按 M2/M5 的鉴权与多机并发一起做，不单独提前接。
 
 ## 四、事务与并发
 

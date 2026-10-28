@@ -6,6 +6,7 @@
  *
  * 转单要建订单、要按历史版本钉价格，所以回头调订单域；按需懒建工厂，共用同一个连接。
  */
+import { bizError, notFound } from '../src/shared/errors'
 import type { Db } from './db'
 import { nextNo } from './next-no'
 import { logEvent } from './events'
@@ -231,7 +232,7 @@ export function quotationsCore(db: Db) {
 
   async function listQuotationVersions(id: number): Promise<QuotationVersionSummary[]> {
     const q = await db.get('SELECT revision FROM quotations WHERE id = ?', [id]) as { revision?: number } | null
-    if (!q) throw new Error('报价单不存在')
+    if (!q) throw notFound('报价单不存在')
     await ensureQuotationVersion(id, Number(q.revision ?? 1))
     const rows = await db.all(
       `SELECT revision, goods_total, grand_total, snapshot_json, created_at
@@ -325,7 +326,7 @@ export function quotationsCore(db: Db) {
   ): Promise<string> {
     const row = await db.get('SELECT * FROM customers WHERE id = ?', [customerId]) as Record<string, unknown> | null
     const c = row ? mapCustomer(row) : null
-    if (!c) throw new Error(`客户编号 ${customerId} 不存在，不能建报价单`)
+    if (!c) throw bizError(`客户编号 ${customerId} 不存在，不能建报价单`)
     // 换了客户就重新取新客户的档案抬头；没换则沿用它已经冻结的那份
     const keepExisting = before && Number(before.customer_id) === customerId
     const base = (keepExisting ? parseParty(before?.bill_to_json) : null) ?? billPartyOf(c)
@@ -364,7 +365,7 @@ export function quotationsCore(db: Db) {
     const validUntil = sentValidUntil ?? addDays(localDate(), settings.piValidDays)
     // 汇率必须手动填：系统不拿默认值蒙人，也不替人编锁定日期
     const rate = Number(input.exchangeRate ?? 0)
-    if (!rate || rate <= 0) throw new Error('请先按今天钉盘的汇率填写汇率')
+    if (!rate || rate <= 0) throw bizError('请先按今天钉盘的汇率填写汇率')
 
     let qId = input.id
     let rateDate = input.exchangeRateDate ?? null
@@ -376,7 +377,7 @@ export function quotationsCore(db: Db) {
 
     if (qId) {
       const before = await db.get('SELECT * FROM quotations WHERE id = ?', [qId]) as Record<string, unknown> | null
-      if (!before) throw new Error('报价单不存在')
+      if (!before) throw notFound('报价单不存在')
       // 已转订单的报价单是那单的原始报价凭据：价格、明细、费用事后一改，
       // 订单和报价单就对不上了，客户拿两份纸来问谁也说不清。
       // 例外：转出的订单已经作废——那张单不再是活凭据，锁死报价只会逼人另建一张同号单
@@ -385,7 +386,7 @@ export function quotationsCore(db: Db) {
           Number(before.converted_order_id)
         ]) as { order_no?: string; payment_status?: string } | null
         if (o?.payment_status !== 'void') {
-          throw new Error(
+          throw bizError(
             `报价单 ${before.q_no} 已经转成订单 ${o?.order_no ?? ''}，是那单的原始报价凭据，不能再改。要改价格请直接改订单；` +
               `那张订单确实作废了之后，这里就能改价重转。`
           )
@@ -646,7 +647,7 @@ export function quotationsCore(db: Db) {
       )?.n ?? 0
     )
     if (docCount > 0) {
-      throw new Error(
+      throw bizError(
         `报价单 ${q.q_no} 已经有 ${docCount} 份单据存档，删了就连同发过客户的报价 PDF 一起查不到了。不要这张报价，请把「状态」改成「已失效」——记录和存档都留着。`
       )
     }
@@ -657,7 +658,7 @@ export function quotationsCore(db: Db) {
         | { order_no?: string; payment_status?: string }
         | null
       if (o?.order_no && o.payment_status !== 'void') {
-        throw new Error(
+        throw bizError(
           `报价单 ${q.q_no} 已经转成订单 ${o.order_no}，删了以后就查不到原始报价了。\n` +
             `要作废请把「状态」改成「已失效」，报价记录和版本存档都保留。`
         )
@@ -683,7 +684,7 @@ export function quotationsCore(db: Db) {
           converted_order_id: number | null
         }
       | null
-    if (!cur) throw new Error('报价单不存在')
+    if (!cur) throw notFound('报价单不存在')
     // 已转单的报价，成交与否已经由订单定案：再改成「已失效/失败」，同一个客户同一票货
     // 会在报表里既算成交又算流失，订单的原始报价也成了无主凭据。
     // 转出的订单已作废则不再有「定案」可言，放开让人改（对齐转单/编辑的口径）
@@ -696,7 +697,7 @@ export function quotationsCore(db: Db) {
           | { order_no?: string; payment_status?: string }
           | null
         if (o?.payment_status !== 'void') {
-          throw new Error(
+          throw bizError(
             `报价单已经转成订单 ${o?.order_no ?? ''}，状态和结果不能再改：这票货的成交与否已经由订单决定。要调整请直接改订单。`
           )
         }
@@ -742,7 +743,7 @@ export function quotationsCore(db: Db) {
     } = {}
   ): Promise<OrderDetail> {
     const q = await getQuotation(id)
-    if (!q) throw new Error('报价单不存在')
+    if (!q) throw notFound('报价单不存在')
     if (q.convertedOrderId) {
       const exist = await ordersOf().getOrder(q.convertedOrderId)
       // 上次转出的单还活着就复用；已经作废了要继续做生意，按新单重转（对齐打样转单口径）
@@ -750,7 +751,7 @@ export function quotationsCore(db: Db) {
     }
     // 汇率日期必须是真的：没有就不许转单，绝不拿转单当天冒充
     if (!q.exchangeRateDate) {
-      throw new Error('这张报价单没有汇率日期，请先编辑报价单把汇率日期补上再转订单')
+      throw bizError('这张报价单没有汇率日期，请先编辑报价单把汇率日期补上再转订单')
     }
 
     await ensureQuotationVersion(id, Number(q.revision ?? 1))
@@ -760,7 +761,7 @@ export function quotationsCore(db: Db) {
       targetRevision
     ]) as { snapshot_json?: string; grand_total?: number } | null
     if (!versionRow) {
-      throw new Error(
+      throw bizError(
         `报价单 ${q.qNo} 没有第 ${targetRevision} 版的存档（最早存档从升级后的修改开始）。请选一个已有版本，或重新保存后再转。`
       )
     }
@@ -768,7 +769,7 @@ export function quotationsCore(db: Db) {
     try {
       snap = JSON.parse(String(versionRow.snapshot_json ?? '')) as QuotationSnapshot
     } catch {
-      throw new Error(`报价单 ${q.qNo} 第 ${targetRevision} 版的存档读不出来，不能拿它转单。请在报价页重新保存一版。`)
+      throw bizError(`报价单 ${q.qNo} 第 ${targetRevision} 版的存档读不出来，不能拿它转单。请在报价页重新保存一版。`)
     }
     const snapGrand = Number(versionRow.grand_total ?? 0)
 
@@ -780,7 +781,7 @@ export function quotationsCore(db: Db) {
     const approvedBy = String(opts.override?.approvedBy ?? '').trim()
     const overrideReason = String(opts.override?.reason ?? '').trim()
     if (expired && (!approvedBy || !overrideReason)) {
-      throw new Error(
+      throw bizError(
         `报价单 ${q.qNo} 的有效期是 ${snap.validUntil || '未填'}，已经过期。` +
           `要按旧价转单，必须填写批准人和沿用原因；否则请先重报一版。`
       )
@@ -873,7 +874,7 @@ export function quotationsCore(db: Db) {
       // 客户看见议价底线，下次报价就拿它压人。原来这里还会整句覆盖掉「由报价单…转成」的凭据句。
       const saved = (await ordersOf().getOrder(order.id))!
       if (Math.abs(saved.grandTotal - snapGrand) > 0.005) {
-        throw new Error(
+        throw bizError(
           `按第 ${targetRevision} 版转单后金额对不上：存档合计 ${snapGrand.toFixed(2)}，订单算出来 ${saved.grandTotal.toFixed(2)}。已回滚，请检查报价明细。`
         )
       }
@@ -931,3 +932,6 @@ export function quotationsCore(db: Db) {
     convertToOrder
   }
 }
+
+/** 报价域门面类型 */
+export type QuotationsCore = ReturnType<typeof quotationsCore>

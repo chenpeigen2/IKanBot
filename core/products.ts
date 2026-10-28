@@ -8,7 +8,7 @@
 import type { Product, ProductImage } from '../src/shared/types'
 import { mapProduct, mapProductImage } from '../electron/db/mappers'
 import { likeAny } from '../electron/services/search'
-import { BizError, notFound } from './errors'
+import { BizError, notFound } from '../src/shared/errors'
 import type { Db, Row } from './db'
 
 export interface ProductInput {

@@ -8,6 +8,7 @@
  *
  * 作废/装箱会推动订单的出货状态，所以回头调订单域；按需懒建工厂，共用同一个连接。
  */
+import { bizError, notFound } from '../src/shared/errors'
 import type { Db } from './db'
 import { nextNo } from './next-no'
 import { logEvent } from './events'
@@ -81,14 +82,14 @@ export function packingCore(db: Db) {
     if (v == null || v === '') return
     const n = Number(v)
     if (!Number.isFinite(n) || n < 0) {
-      throw new Error(`${label}「${String(v)}」不是一个合理的公斤数（要留空就清空，不要填负数或非数字）`)
+      throw bizError(`${label}「${String(v)}」不是一个合理的公斤数（要留空就清空，不要填负数或非数字）`)
     }
   }
 
   /** 款号是箱单的锚：空款号的箱子进不了逐款守恒，也归不进任何一款 */
   function assertStyleNo(styleNo: unknown): void {
     if (String(styleNo ?? '').trim() === '') {
-      throw new Error('装箱明细必须有款号——没有款号的箱子上不了报关单，也算不进任何一款的已装量。请按款号×颜色×尺码分行装')
+      throw bizError('装箱明细必须有款号——没有款号的箱子上不了报关单，也算不进任何一款的已装量。请按款号×颜色×尺码分行装')
     }
   }
 
@@ -141,7 +142,7 @@ export function packingCore(db: Db) {
     if (ordered <= 0) {
       // 订单里有货、这一款却不在其中：多半是款号敲错或拿错了单，放进去对账就串了
       if (hasItems) {
-        throw new Error(
+        throw bizError(
           `订单里没有 ${styleNo} ${color}/${size} 这一款，装箱单不能凭空多出一款。请核对款号/颜色/尺码，或先到订单明细里把这一款加上；如果是升级前的老数据填错了，可以直接删掉这一行。`
         )
       }
@@ -160,7 +161,7 @@ export function packingCore(db: Db) {
     )
     if (packed + addQty > ordered + 0.0001) {
       const room = Math.max(0, ordered - packed)
-      throw new Error(
+      throw bizError(
         `款号 ${styleNo} ${color}/${size}：订单 ${ordered} 件，其他箱已装 ${packed} 件，还能装 ${room} 件；这一批填了 ${addQty} 件，超了 ${
           packed + addQty - ordered
         } 件。请先核对数量。`
@@ -196,21 +197,21 @@ export function packingCore(db: Db) {
       plId,
       orderId
     ]) as Record<string, unknown> | null
-    if (!cur) throw new Error('装箱单不存在')
+    if (!cur) throw notFound('装箱单不存在')
     if (isVoided(cur)) {
-      throw new Error(
+      throw bizError(
         `装箱单 ${String(cur.pl_no)} 已作废，现在只是留档：箱明细不能改。要接着用这一批，请先「撤销作废」。`
       )
     }
     const ciVer = await archivedCiVersion(orderId, String(cur.pl_no))
     if (ciVer > 0) {
-      throw new Error(
+      throw bizError(
         `装箱单 ${String(cur.pl_no)} 已经出过 CI（第 ${ciVer} 版存档），箱明细不能再改：那一批的金额已经按这些箱子印给客户了，改了系统重算的数和纸面就对不上。确实装错了，先把这一版 CI 存档作废（操作历史里写明原因），箱子改对后重出正确的一版。`
       )
     }
     const status = cur.ship_status == null ? null : (String(cur.ship_status) as BatchShipStatus)
     if (status && DEPARTED.includes(status)) {
-      throw new Error(
+      throw bizError(
         `装箱单 ${String(cur.pl_no)} 当前状态是「${SHIP_STATUS_LABEL[status]}」，箱明细不能改——出运记录是对客户的凭据。如果确实填错了，先把批次状态改回「已包装」再改。`
       )
     }
@@ -231,7 +232,7 @@ export function packingCore(db: Db) {
     ) as { received?: number | null; qty?: number } | null
     const received = row?.received
     if (received != null && Number(received) > Number(row?.qty ?? 0)) {
-      throw new Error(
+      throw bizError(
         `这一批登记了客户实收 ${Number(received)} 件，改完箱明细只剩 ${Number(row?.qty ?? 0)} 件——实收不可能比装出去的还多。请先把实收数量改对，或者补上少掉的那一箱。`
       )
     }
@@ -260,7 +261,7 @@ export function packingCore(db: Db) {
       [orderId, no, exceptLineId ?? -1]
     )
     if (hit) {
-      throw new Error(
+      throw bizError(
         `箱号「${no}」在这张订单里已经用过了：箱号跨批次连续（作废批次也占号），重复会让提单和报关单的箱数对不上。请换一个没发过的箱号。`
       )
     }
@@ -287,7 +288,7 @@ export function packingCore(db: Db) {
 
   async function createPackingList(input: PackingListInput): Promise<PackingList[]> {
     await ordersOf().assertOrderWritable(input.orderId, '装箱')
-    if (input.lines.length === 0) throw new Error('装箱单至少要有一箱，先生成箱明细再保存')
+    if (input.lines.length === 0) throw bizError('装箱单至少要有一箱，先生成箱明细再保存')
     // 同一 SKU 可能拆成好几箱，先按 SKU 合计再校验，免得逐行放行、加起来超了
     const bySku = new Map<string, { sku: { styleNo?: string; color?: string; size?: string }; qty: number }>()
     const seenBoxNo = new Set<string>()
@@ -295,7 +296,7 @@ export function packingCore(db: Db) {
       const boxNo = String(l.boxNo ?? '').trim()
       if (boxNo) {
         if (seenBoxNo.has(boxNo)) {
-          throw new Error(`箱号「${boxNo}」在这一批里出现了两次：一箱只能占一行，否则箱数和体积对不上`)
+          throw bizError(`箱号「${boxNo}」在这一批里出现了两次：一箱只能占一行，否则箱数和体积对不上`)
         }
         seenBoxNo.add(boxNo)
       }
@@ -363,19 +364,19 @@ export function packingCore(db: Db) {
     if (!cur) return listPackingLists(orderId)
     await ordersOf().assertOrderWritable(orderId, '删装箱单')
     if (isVoided(cur)) {
-      throw new Error(
+      throw bizError(
         `装箱单 ${String(cur.pl_no)} 已经作废留档了，就让它留着——纸面发过客户的单据，系统里得查得到。`
       )
     }
     const ciVer = await archivedCiVersion(orderId, String(cur.pl_no))
     if (ciVer > 0) {
-      throw new Error(
+      throw bizError(
         `装箱单 ${String(cur.pl_no)} 已经出过 CI（第 ${ciVer} 版存档），不能删除：删了这一批，存档的发票就找不到对应的箱单和金额了。先作废那版 CI 存档，这一批才能删。`
       )
     }
     const status = cur.ship_status == null ? null : (String(cur.ship_status) as BatchShipStatus)
     if (status && DEPARTED.includes(status)) {
-      throw new Error(
+      throw bizError(
         `装箱单 ${String(cur.pl_no)} 当前状态是「${SHIP_STATUS_LABEL[status]}」，不能删除——出运记录是对客户的凭据，必须留档。如果确实填错了，先把批次状态改回「已包装」再删，改动会留在操作历史里。`
       )
     }
@@ -398,18 +399,18 @@ export function packingCore(db: Db) {
       'SELECT pl_no, voided_at FROM packing_lists WHERE id = ? AND order_id = ?',
       [plId, orderId]
     ) as Record<string, unknown> | null
-    if (!cur) throw new Error('装箱单不存在')
+    if (!cur) throw notFound('装箱单不存在')
     // 作废/失效单的箱单也是留档的一部分：改它的作废状态会连带改整单出货汇总
     await ordersOf().assertOrderWritable(orderId, '作废装箱单')
-    if (isVoided(cur)) throw new Error(`装箱单 ${String(cur.pl_no)} 已经是作废状态，不用重复作废`)
+    if (isVoided(cur)) throw bizError(`装箱单 ${String(cur.pl_no)} 已经是作废状态，不用重复作废`)
     const ciVer = await archivedCiVersion(orderId, String(cur.pl_no))
     if (ciVer > 0) {
-      throw new Error(
+      throw bizError(
         `装箱单 ${String(cur.pl_no)} 已经出过 CI（第 ${ciVer} 版存档），不能作废：发票已经按这一批发给客户了，作废会让箱单、发票和订单三边的金额对不上。先作废那版 CI 存档（写明原因），这一批才能作废。`
       )
     }
     if (!String(reason ?? '').trim()) {
-      throw new Error('作废批次必须写明原因（比如「订舱取消」「整批发错」）：这是发给客户的凭据，不留原因以后对不上账。')
+      throw bizError('作废批次必须写明原因（比如「订舱取消」「整批发错」）：这是发给客户的凭据，不留原因以后对不上账。')
     }
     await db.transact(async () => {
       await db.run('UPDATE packing_lists SET voided_at = ? WHERE id = ? AND order_id = ?', [now(), plId, orderId])
@@ -431,11 +432,11 @@ export function packingCore(db: Db) {
       'SELECT pl_no, voided_at FROM packing_lists WHERE id = ? AND order_id = ?',
       [plId, orderId]
     ) as Record<string, unknown> | null
-    if (!cur) throw new Error('装箱单不存在')
+    if (!cur) throw notFound('装箱单不存在')
     await ordersOf().assertOrderWritable(orderId, '撤销作废装箱单')
     if (!isVoided(cur)) return listPackingLists(orderId)
     if (!String(reason ?? '').trim()) {
-      throw new Error('撤销作废也要写明原因：作废记录是留档凭据，为什么翻案得能查到。')
+      throw bizError('撤销作废也要写明原因：作废记录是留档凭据，为什么翻案得能查到。')
     }
     await db.transact(async () => {
       await db.run('UPDATE packing_lists SET voided_at = NULL WHERE id = ? AND order_id = ?', [plId, orderId])
@@ -457,13 +458,13 @@ export function packingCore(db: Db) {
       string,
       unknown
     > | null
-    if (!cur) throw new Error('装箱单不存在')
+    if (!cur) throw notFound('装箱单不存在')
     if (isVoided(cur)) {
-      throw new Error(`装箱单 ${String(cur.pl_no)} 已作废，不能改批次信息。要接着用请先「撤销作废」。`)
+      throw bizError(`装箱单 ${String(cur.pl_no)} 已作废，不能改批次信息。要接着用请先「撤销作废」。`)
     }
     await ordersOf().assertOrderWritable(orderId, '改装箱单')
     if (patch.shipStatus !== undefined && !SHIP_STATUS_ORDER.includes(patch.shipStatus)) {
-      throw new Error('这个出货状态不能手工选，请选择「未备货 / 备货中 / 已包装 / 已出运 / 已清关 / 已签收」')
+      throw bizError('这个出货状态不能手工选，请选择「未备货 / 备货中 / 已包装 / 已出运 / 已清关 / 已签收」')
     }
     assertLocalDate(patch.etdDate, 'ETD')
     // 预计可以排到未来，实际开船与签收不行：它们是催尾款的主钟
@@ -499,7 +500,7 @@ export function packingCore(db: Db) {
       else {
         const n = Number(patch.receivedQty)
         if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
-          throw new Error(
+          throw bizError(
             `实收数量「${String(patch.receivedQty)}」不是一个合理的件数（要 0 以上的整数；没和客户对上就先留空，留空等于按发数全收）`
           )
         }
@@ -509,7 +510,7 @@ export function packingCore(db: Db) {
             | null)?.q ?? 0
         )
         if (n > shippedQty) {
-          throw new Error(
+          throw bizError(
             `这一批只装出去 ${shippedQty} 件，客户实收不可能比发出的还多 ${n - shippedQty} 件。多收是补发或发错货，请另开装箱单登记。`
           )
         }
@@ -596,7 +597,7 @@ export function packingCore(db: Db) {
     const cur = await db.get('SELECT * FROM packing_list_lines WHERE id = ? AND packing_list_id = ?', [lineId, plId]) as
       | Record<string, unknown>
       | null
-    if (!cur) throw new Error('装箱明细不存在')
+    if (!cur) throw notFound('装箱明细不存在')
     if (patch.quantity !== undefined) assertQuantity(patch.quantity, '这一箱的数量')
     if (patch.styleNo !== undefined) assertStyleNo(patch.styleNo)
     assertWeight(patch.netWeight, '净重')
@@ -751,7 +752,7 @@ export function packingCore(db: Db) {
     const lineCount = await assertBatchLinesEditable(orderId, plId)
     await ordersOf().assertOrderWritable(orderId, '删装箱明细')
     if (lineCount <= 1) {
-      throw new Error('一箱都没有的装箱单留不住。如果整批作废，请直接删除这张装箱单。')
+      throw bizError('一箱都没有的装箱单留不住。如果整批作废，请直接删除这张装箱单。')
     }
     const cur = await db.get('SELECT * FROM packing_list_lines WHERE id = ? AND packing_list_id = ?', [lineId, plId]) as
       | Record<string, unknown>
@@ -798,3 +799,6 @@ export function packingCore(db: Db) {
     deletePackingListLine
   }
 }
+
+/** 装箱域门面类型 */
+export type PackingCore = ReturnType<typeof packingCore>
