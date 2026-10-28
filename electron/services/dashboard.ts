@@ -1010,7 +1010,7 @@ export async function exportCsv(kind: ExportKind, filter?: OrderExportFilter): P
       // 不能因为台账口径把行集先剔光、最后只导出一个表头。
       // 但日期/关键词/正常状态筛选仍走台账口径——把草稿、失效单混进「订单台账」，
       // Excel 里 SUM 出来的数就不等于销售额了。只有筛的本身就是非计费状态才放开全量行集。
-      return ordersCsv(
+      return await ordersCsv(
         kind === 'orders_all' || (filter?.paymentStatus && !isBillingStatus(filter.paymentStatus))
           ? await listOrderMoney({ includeVoided: true })
           : await listOrderMoney(),
@@ -1037,10 +1037,10 @@ export async function exportCsv(kind: ExportKind, filter?: OrderExportFilter): P
 }
 
 /** 订单台账：orders 与 orders_all 共用列，只差在传进来的行集 */
-function ordersCsv(rows: OrderMoneyRow[], base: string, filter?: OrderExportFilter): string {
+async function ordersCsv(rows: OrderMoneyRow[], base: string, filter?: OrderExportFilter): Promise<string> {
   if (filter) {
     // 不另写一份筛选 SQL：拿列表同一个 listWhere 算出的 id 再过滤，口径只此一处
-    const keep = new Set(listOrderIds(filter))
+    const keep = new Set(await listOrderIds(filter))
     rows = rows.filter((r) => keep.has(r.orderId))
   }
   const header = [

@@ -160,7 +160,7 @@ eq('总金额', cur.totalAmount, 100 * 8 + 150 * 8 + 50 * 8 + 80 * 12)
 eq('总成本', cur.totalCost, 300 * 5.5)
 eq('总毛利', cur.totalProfit, cur.totalAmount - cur.totalCost)
 
-const skus = orders.summarizeSkus(order.id)
+const skus = (await orders.summarizeSkus(order.id))
 eq('SKU 汇总条数', skus.length, 4)
 eq('SKU 汇总数量合计', skus.reduce((s, x) => s + x.quantity, 0), 380)
 
@@ -410,7 +410,7 @@ check('客户统计跟随新汇率', statsAfter.totalAmount > 0, `实际 ${stats
 
 /* ---------------- 事件日志 ---------------- */
 section('操作历史')
-const events = orders.listEvents(order.id)
+const events = (await orders.listEvents(order.id))
 check('记录了创建事件', events.some((e) => e.kind === 'create'))
 check('记录了状态自动流转', events.some((e) => e.kind === 'status_auto'))
 check('记录了收款事件', events.some((e) => e.kind === 'payment'))
@@ -475,7 +475,7 @@ const qAfter = quotations.getQuotation(q1.id)!
 eq('报价单状态变已转订单', qAfter.status, 'converted')
 eq('报价单结果变成交', qAfter.result, 'won')
 check('报价单记住了转出来的订单', qAfter.convertedOrderId === converted.id)
-check('转单有操作历史', orders.listEvents(converted.id).some((e) => e.kind === 'quotation_convert'))
+check('转单有操作历史', (await orders.listEvents(converted.id)).some((e) => e.kind === 'quotation_convert'))
 
 /* ---------------- 报价单：汇率必须手填、汇率日期真实 ---------------- */
 section('报价单汇率必须手填且带真实日期')
@@ -666,10 +666,9 @@ check(
 )
 check(
   '审批话术在订单操作历史里查得到',
-  orders
-    .listEvents(expiredOrder.id)
+  (await orders.listEvents(expiredOrder.id))
     .some((e) => e.kind === 'quotation_convert' && e.note.includes('周文娟') && e.note.includes('老客户翻单')),
-  JSON.stringify(orders.listEvents(expiredOrder.id))
+  JSON.stringify((await orders.listEvents(expiredOrder.id)))
 )
 check(
   '报价单操作历史记下了沿用审批',
@@ -748,7 +747,7 @@ eq('尺码已改', changed.size, 'L')
 eq('数量已改', changed.quantity, 600)
 check(
   '改单写进了操作历史',
-  orders.listEvents(converted.id).some((e) => e.kind === 'item_update' && e.note.includes('颜色'))
+  (await orders.listEvents(converted.id)).some((e) => e.kind === 'item_update' && e.note.includes('颜色'))
 )
 
 /* ---------------- 催尾款提醒 ---------------- */
@@ -792,12 +791,12 @@ eq('船名航次已保存', withExtra.vessel, 'MAERSK V.034E')
 eq('封条号已保存', withExtra.sealNo, 'CN1234567')
 eq('汇率锁定日期自动记今天', withExtra.exchangeRateDate, localDate())
 
-const terms = orders.lastOrderTerms(c2.id)
+const terms = (await orders.lastOrderTerms(c2.id))
 check('能取到客户上一次的条款', terms !== null)
 eq('上一次的装运港', terms?.portOfLoading, 'Ningbo')
-const portList = orders.listPorts()
+const portList = (await orders.listPorts())
 check('历史港口里有宁波', portList.loading.includes('Ningbo'))
-check('最近汇率能取到', orders.lastExchangeRate() !== null)
+check('最近汇率能取到', (await orders.lastExchangeRate()) !== null)
 
 // 客户档案付款条款印在 PI 上
 const piWithTerms = renderPi({ order: withExtra, settings: getSettings(), images: {} })
@@ -877,7 +876,7 @@ eq('费用合计跟着变', chargesChanged.chargesTotal, 280)
 eq('应收总额跟着变', chargesChanged.grandTotal, chargeOrder.totalAmount + 280)
 check(
   '改费用有操作历史',
-  orders.listEvents(chargeOrder.id).some((e) => e.note.includes('费用'))
+  (await orders.listEvents(chargeOrder.id)).some((e) => e.note.includes('费用'))
 )
 const chargesCleared = await orders.updateOrderCharges(chargeOrder.id, [])
 eq('费用行可以删光', chargesCleared.chargesTotal, 0)
@@ -1370,7 +1369,7 @@ getDb().run('DELETE FROM sample_orders WHERE sample_no = ?', [staleNo])
 await samples.deleteSample(bumped.id)
 
 // R25：有收款流水的单不能直接删 → 先撤销流水（要写原因，原因进 feeNote），再取消留原因、删除
-const smpPaidFlows = samples.listSamplePayments(smpPaid.id)
+const smpPaidFlows = (await samples.listSamplePayments(smpPaid.id))
 eq('打样收款落进流水表', smpPaidFlows.length, 1)
 const smpPaidReverted = await samples.deleteSamplePayment(smpPaid.id, smpPaidFlows[0].id, 'E2E 清理：测试收款')
 eq('撤销后回到未收', smpPaidReverted.feeStatus, 'unpaid')
@@ -1746,7 +1745,7 @@ eq('加单后定金变大', r7o.depositAmount, 3600)
 eq('加单后收款状态退回「部分收款」（不能还写着已收款）', r7o.paymentStatus, 'partial')
 check(
   '状态回退有留痕',
-  orders.listEvents(r7.id).some((e) => e.kind === 'status_auto' && e.toStatus === 'partial')
+  (await orders.listEvents(r7.id)).some((e) => e.kind === 'status_auto' && e.toStatus === 'partial')
 )
 // 减单：1500 → 1000，收够了应该升到「已收款」
 r7o = await orders.updateOrderItem(r7.id, r7i.items[0].id, { quantity: 1000 })
@@ -1797,7 +1796,7 @@ const r30b = await orders.addOrderItem(r30.id, {
   unitCost: 9
 })
 await orders.removeOrderItem(r30.id, r30b.items[1].id)
-const r30Events = orders.listEvents(r30.id)
+const r30Events = (await orders.listEvents(r30.id))
 check(
   '删行有留痕（写明款号/颜色/尺码/数量）',
   r30Events.some(
@@ -1823,12 +1822,12 @@ const r30plLine = r30pl[0].lines[0]
 await packing.updatePackingListLine(r30.id, r30pl[0].id, r30plLine.id, { netWeight: 12 })
 check(
   '装箱明细改净重有留痕',
-  orders.listEvents(r30.id).some((e) => e.kind === 'pl_line_update' && e.note.includes('净重'))
+  (await orders.listEvents(r30.id)).some((e) => e.kind === 'pl_line_update' && e.note.includes('净重'))
 )
 await packing.deletePackingListLine(r30.id, r30pl[0].id, r30plLine.id)
 check(
   '装箱明细删除有留痕',
-  orders.listEvents(r30.id).some((e) => e.kind === 'pl_line_remove' && e.note.includes('删除装箱明细'))
+  (await orders.listEvents(r30.id)).some((e) => e.kind === 'pl_line_remove' && e.note.includes('删除装箱明细'))
 )
 
 /* ---------------- N20：成本能补录，补完毛利就真了 ---------------- */
@@ -1849,7 +1848,7 @@ eq('成本补录后没有缺失行了', r20filled.missingCostItems, 0)
 eq('补录后毛利可信', r20filled.totalProfit, 100 * (20 - 12))
 check(
   '成本修改有留痕',
-  orders.listEvents(r20.id).some((e) => e.kind === 'item_update' && e.note.includes('成本'))
+  (await orders.listEvents(r20.id)).some((e) => e.kind === 'item_update' && e.note.includes('成本'))
 )
 // 毛利不可信时，报表和客户页都给 null（显示「—」）
 const r20stats = await customers.customerStats(c1.id)
@@ -1884,9 +1883,9 @@ check('有明细有款的单删不掉', deleteBlocked)
 const r28voided = await orders.voidOrder(r28.id, '客户取消')
 eq('作废后状态是已作废', r28voided.paymentStatus, 'void')
 check('作废后收款记录还在', r28voided.payments.length === 1)
-check('作废后操作历史还在', orders.listEvents(r28.id).length > 0)
+check('作废后操作历史还在', (await orders.listEvents(r28.id)).length > 0)
 check('作废后明细还在', r28voided.items.length === 1)
-check('作废有留痕', orders.listEvents(r28.id).some((e) => e.kind === 'void'))
+check('作废有留痕', (await orders.listEvents(r28.id)).some((e) => e.kind === 'void'))
 // 作废后不进销售额 / 待收款 / 毛利
 const salesBeforeVoid = (await dashboard.dashboard()).monthSales
 const pendingBeforeVoid = (await dashboard.dashboard()).pendingAmount
@@ -2099,7 +2098,7 @@ await orders.addOrderItem(batchOrder.id, {
   unitPrice: 5,
   unitCost: 2
 })
-const b0 = orders.summarizeSkus(batchOrder.id)[0]
+const b0 = (await orders.summarizeSkus(batchOrder.id))[0]
 eq('还没装箱时已装数量 = 0', b0.packedQuantity, 0)
 eq('还没装箱时未装箱数量 = 订单数量', b0.remainingQuantity, 100)
 
@@ -2108,7 +2107,7 @@ const bPl1 = await packing.createPackingList({
   containerNo: 'C1',
   lines: [{ boxNo: 'NO.1', styleNo: 'BATCH-1', color: 'Black', size: 'M', quantity: 40 }]
 })
-const b1 = orders.summarizeSkus(batchOrder.id)[0]
+const b1 = (await orders.summarizeSkus(batchOrder.id))[0]
 eq('装 40 件后已装数量 = 40', b1.packedQuantity, 40)
 eq('未装箱数量自动扣到 60', b1.remainingQuantity, 60)
 
@@ -2128,7 +2127,7 @@ await packing.createPackingList({
   lines: [{ boxNo: 'NO.2', styleNo: 'BATCH-1', color: 'Black', size: 'M', quantity: 60 }]
 })
 eq('第二批装剩下的 60 件放行', packing.listPackingLists(batchOrder.id).length, 2)
-eq('全部装完：未装箱数量归 0', orders.summarizeSkus(batchOrder.id)[0].remainingQuantity, 0)
+eq('全部装完：未装箱数量归 0', (await orders.summarizeSkus(batchOrder.id))[0].remainingQuantity, 0)
 
 const bLine = bPl1[0].lines[0]
 await packing.updatePackingListLine(batchOrder.id, bPl1[0].id, bLine.id, { netWeight: 20 })
@@ -2502,7 +2501,7 @@ try {
 check('删除收款必须写原因', r1DelErr.includes('原因'), r1DelErr)
 const r1Deleted = await orders.deletePayment(r1Order.id, r1PayId, '金额录错')
 eq('删款后已收归零', r1Deleted.paidAmount, 0)
-const r1DelEvent = orders.listEvents(r1Order.id).find((e) => e.kind === 'payment_delete')
+const r1DelEvent = (await orders.listEvents(r1Order.id)).find((e) => e.kind === 'payment_delete')
 check(
   '删款历史带金额、日期和流水号',
   !!r1DelEvent &&
@@ -2622,7 +2621,7 @@ eq('短款核销金额单独可见', woNow.writeOffShortage, 40)
 eq('短款核销不动已收', woNow.paidAmount, 700)
 eq('短款是让利，进毛利：1000 − 600 − 40', woNow.totalProfit, 360)
 eq('短款只核销一部分时状态仍是已收定金', woNow.paymentStatus, 'paid')
-eq('核销台账有一条短款', orders.listSettlements(wo.id).filter((s) => s.kind === 'shortage').length, 1)
+eq('核销台账有一条短款', (await orders.listSettlements(wo.id)).filter((s) => s.kind === 'shortage').length, 1)
 
 const recvBefore = (await dashboard.dashboard()).monthReceived
 woNow = await orders.addSettlement(wo.id, {
@@ -2684,7 +2683,7 @@ check('追回不能超过坏账余额', r2Err.includes('超过'), r2Err)
 // 追回登记的是「一笔自动收款 + 一条核销」，两行绑在一起。R36 起可以撤销：
 // 记错客户/金额时，这是唯一能把账退回原状的出口——只追加负数核销会让那笔钱
 // 继续躺在现金流里；只删收款则核销指向一条不存在的流水。要么一起退，要么都别动。
-const recoveryRow = orders.listSettlements(wo.id).find((s) => s.kind === 'recovery')!
+const recoveryRow = (await orders.listSettlements(wo.id)).find((s) => s.kind === 'recovery')!
 woNow = await orders.reverseSettlement(wo.id, recoveryRow.id, '水单录错，钱其实没到')
 eq('撤销追回后坏账余额回到 360', woNow.badDebtOutstanding, 360)
 eq('撤销追回同时退掉自动登记的收款', woNow.payments.filter((p) => p.bankRef === 'R2REC').length, 0)
@@ -2694,7 +2693,7 @@ check(
   Math.abs((await dashboard.dashboard()).monthReceived - recvBeforeRecovery) < 0.01,
   `before=${recvBeforeRecovery} after=${(await dashboard.dashboard()).monthReceived}`
 )
-const recRev = orders.listSettlements(wo.id).find((s) => s.reversesId === recoveryRow.id)!
+const recRev = (await orders.listSettlements(wo.id)).find((s) => s.reversesId === recoveryRow.id)!
 eq('撤销是追加一条负数追回，不删原记录', recRev.amount, -200)
 eq('撤销追回不破坏结清状态（短款 + 坏账仍然收口）', woNow.paymentStatus, 'settled')
 
@@ -2710,12 +2709,12 @@ await orders.addOrderItem(rev.id, {
 await orders.addPayment(rev.id, { paidAt: localDate(), amount: 20 })
 let revNow = await orders.addSettlement(rev.id, { kind: 'bad_debt', amount: 80, reason: '客户失联' })
 eq('撤销前待收归零', revNow.remaining, 0)
-const bdRow = orders.listSettlements(rev.id).find((s) => s.kind === 'bad_debt')!
+const bdRow = (await orders.listSettlements(rev.id)).find((s) => s.kind === 'bad_debt')!
 revNow = await orders.reverseSettlement(rev.id, bdRow.id, '客户又把钱补来了')
 eq('撤销坏账后待收恢复 = 100 − 20', revNow.remaining, 80)
 eq('撤销后坏账余额归零', revNow.badDebtOutstanding, 0)
 eq('撤销后状态退回部分收款', revNow.paymentStatus, 'partial')
-const revRows = orders.listSettlements(rev.id)
+const revRows = (await orders.listSettlements(rev.id))
 eq('撤销是追加一条负数，不删原记录', revRows.length, 2)
 eq('撤销记录金额为负', revRows.find((s) => s.reversesId === bdRow.id)!.amount, -80)
 r2Err = ''
@@ -2895,7 +2894,7 @@ const afterParty = await orders.setOrderParties(snapOrder.id, {
 check('抬头可以单点改，改完就印新地址', afterParty.billTo?.address === '客户临时指定的鹿特丹仓')
 check('没提到的字段保持快照原值', afterParty.billTo?.company === 'Snapshot Trading Co.')
 check('收货抬头只补邮编', afterParty.shipTo?.zipCode === '4845AB')
-const partyEvent = orders.listEvents(snapOrder.id).find((e) => e.kind === 'party_update')
+const partyEvent = (await orders.listEvents(snapOrder.id)).find((e) => e.kind === 'party_update')
 check('改抬头留痕并写清改了哪项', (partyEvent?.note ?? '').includes('地址'), partyEvent?.note ?? '')
 check('改抬头不碰客户档案', (await customers.getCustomer(cSnap.id))?.address === '换了三次门牌')
 
@@ -4385,7 +4384,7 @@ section('R11-5 批量加行：坏一行整批不进库')
   ])
   eq('两行都合规时一次加两行', okBatch.items.length, 2)
   eq('批量加行的件数直接进整单件数', okBatch.totalQuantity, 30)
-  eq('批量加行仍然逐行留痕', orders.listEvents(b.id).filter((e) => e.kind === 'item_add').length, 2)
+  eq('批量加行仍然逐行留痕', (await orders.listEvents(b.id)).filter((e) => e.kind === 'item_add').length, 2)
 }
 
 section('R11-4 操作历史答得出「谁改的」')
@@ -4399,7 +4398,7 @@ section('R11-4 操作历史答得出「谁改的」')
     validUntil: '2026-11-30',
     expectedShipDate: '2026-12-10'
   })
-  const born = orders.listEvents(h.id)
+  const born = (await orders.listEvents(h.id))
   check('建单就有历史记录', born.length > 0)
   check(
     '建单时每条历史都盖上设置里的操作员',
@@ -4408,25 +4407,25 @@ section('R11-4 操作历史答得出「谁改的」')
   )
 
   await orders.updateOrder(h.id, { expectedShipDate: '2026-12-20', cutOffDate: '2026-12-01' })
-  const moveEv = orders.listEvents(h.id).slice(-1)[0]
+  const moveEv = (await orders.listEvents(h.id)).slice(-1)[0]
   eq('交期确实写进库了', (await orders.getOrder(h.id))!.expectedShipDate, '2026-12-20')
   check('历史里写成 before → after', moveEv.note.includes('预计开船 2026-12-10 → 2026-12-20'), moveEv.note)
   check('同一次新增的截关日也留痕', moveEv.note.includes('截关日 空 → 2026-12-01'), moveEv.note)
 
   await orders.updateOrder(h.id, { note: '客户催货' })
-  const noteEv = orders.listEvents(h.id).slice(-1)[0]
+  const noteEv = (await orders.listEvents(h.id)).slice(-1)[0]
   check('只改备注的那次，历史不会把没传的交期说成清空', !noteEv.note.includes('预计开船'), noteEv.note)
   check('备注改动本身要留痕', noteEv.note.includes('备注 空 → 客户催货'), noteEv.note)
 
   const photo = await orders.addOrderPhoto(h.id, 'inspection-x.jpg', 'inspection', '尾期验货')
   await orders.deleteOrderPhoto(h.id, photo.id)
-  const photoEv = orders.listEvents(h.id).slice(-1)[0]
+  const photoEv = (await orders.listEvents(h.id)).slice(-1)[0]
   check('删验货照也进历史，并说明删的是哪一张', photoEv.note.includes('删除验货照') && photoEv.note.includes('尾期验货'), photoEv.note)
 
   // 换人：新动作盖新名字，旧记录一个都不改写
   await saveSettings({ ...getSettings(), operator: '周文娟' })
   await orders.voidOrder(h.id, '客户取消')
-  const allEv = orders.listEvents(h.id)
+  const allEv = (await orders.listEvents(h.id))
   eq('换人后的新历史盖新名字', allEv.slice(-1)[0].actor, '周文娟')
   eq('换人前写下的历史仍然是原操作员', allEv[0].actor, '林小满')
   await saveSettings(beforeOp)
@@ -4453,7 +4452,7 @@ section('R11-6 单号查重与建单原子化')
   eq('全库 PI 号仍然无重号', allPi.length, new Set(allPi).size)
   check(
     '建单和它的「建单」历史一起成立',
-    orders.listEvents(auto.id).some((e) => e.kind === 'create' && e.note.includes(auto.orderNo))
+    (await orders.listEvents(auto.id)).some((e) => e.kind === 'create' && e.note.includes(auto.orderNo))
   )
 }
 
@@ -5165,7 +5164,7 @@ check(
   (await r8err(async () => await orders.voidOrder(r15VoidOps.id, 'R15 作废'))).includes('凭据')
 )
 await orders.voidOrder(r15VoidOps.id, 'R15 作废', { confirmDocs: true })
-const r15OpsSettle = orders.listSettlements(r15VoidOps.id)[0]
+const r15OpsSettle = (await orders.listSettlements(r15VoidOps.id))[0]
 check(
   '作废单不能删收款',
   (await r8err(async () => await orders.deletePayment(r15VoidOps.id, r15OpsPay.payments[0].id, '删掉这笔'))).includes('已作废')
@@ -5183,7 +5182,7 @@ check(
   (await r8err(async () => await packing.unvoidPackingList(r15VoidOps.id, r15OpsPlB.id))).includes('已作废')
 )
 eq('作废单的收款还在', (await orders.getOrder(r15VoidOps.id))!.payments.length, 1)
-eq('作废单的核销还在', orders.listSettlements(r15VoidOps.id).length, 1)
+eq('作废单的核销还在', (await orders.listSettlements(r15VoidOps.id)).length, 1)
 
 section('R15 欠款榜：只打过样、没下过单的客户也在榜上')
 const r15SampleOnly = await customers.saveCustomer({ company: 'R15-ONLY-SAMPLE' })
@@ -5629,7 +5628,7 @@ const r18Saved2 = await docs.saveDocFile({
 })
 eq('可以重出正确的一版（第 2 版）', r18Saved2.version, 2)
 check('不能重复作废同一版', (await r8err(async () => await docs.voidDocVersion(r18Ver.id, '再废一次'))).includes('作废状态'))
-check('作废留痕进了操作历史', orders.listEvents(r18Order.id).some((e) => e.kind === 'doc_void'))
+check('作废留痕进了操作历史', (await orders.listEvents(r18Order.id)).some((e) => e.kind === 'doc_void'))
 
 section('R18 整单/批次 CI 重叠：不硬挡，但要人确认')
 
@@ -5678,7 +5677,7 @@ await orders.voidOrder(r18OffOrder.id, 'R18 客户取消，整单作废')
 eq('订单作废后抵扣回退为未收', (await samples.getSample(r18OffSample.id))!.feeStatus, 'unpaid')
 check('回退在费用备注里留了痕', (await samples.getSample(r18OffSample.id))!.feeNote.includes('已作废'))
 check('打样费重新进客户应收', await money.sampleReceivable(r18OffCust.id) > 0)
-check('订单操作历史记了抵扣回退', orders.listEvents(r18OffOrder.id).some((e) => e.kind === 'sample_offset_back'))
+check('订单操作历史记了抵扣回退', (await orders.listEvents(r18OffOrder.id)).some((e) => e.kind === 'sample_offset_back'))
 
 section('R18 汇率快照：到账那天钉住，改订单汇率月报不漂移')
 
@@ -5742,7 +5741,7 @@ await orders.voidOrder(r19Gate.id, '客户取消', { confirmDocs: true })
 check('勾了凭据已核对就能作废', (await orders.getOrder(r19Gate.id))!.paymentStatus, 'void')
 check(
   '作废历史里写明核对过哪些凭据',
-  orders.listEvents(r19Gate.id).slice(-1)[0].note.includes('凭据已核对')
+  (await orders.listEvents(r19Gate.id)).slice(-1)[0].note.includes('凭据已核对')
 )
 
 section('R19 作废通道只认 CI：PI/箱单/报价存档作不了废，作废单的存档也不能动')
@@ -5800,12 +5799,12 @@ check(
 )
 check(
   'CI 金额与应收口径不一致时留了差异痕',
-  orders.listEvents(r19Overlap.id).some((e) => e.kind === 'doc_amount_diff' && e.note.includes('相差'))
+  (await orders.listEvents(r19Overlap.id)).some((e) => e.kind === 'doc_amount_diff' && e.note.includes('相差'))
 )
 const r19Match = await orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R19-MATCH' })
 await orders.addOrderItem(r19Match.id, { styleNo: 'R19-MATCH', quantity: 10, unitPrice: 10 })
 await docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r19 match'), docNo: ciNoOf('PI-R19-MATCH'), kind: 'ci', orderId: r19Match.id, amount: 100 })
-check('金额一致时不留差异痕', !orders.listEvents(r19Match.id).some((e) => e.kind === 'doc_amount_diff'))
+check('金额一致时不留差异痕', !(await orders.listEvents(r19Match.id)).some((e) => e.kind === 'doc_amount_diff'))
 
 section('R19 零金额 CI 也是纸面依据：批次照样钉住')
 
@@ -5825,7 +5824,7 @@ await orders.addOrderItem(r19Rate.id, { styleNo: 'R19-RATE', quantity: 10, unitP
 await orders.addPayment(r19Rate.id, { paidAt: addDays(localDate(), -3), amount: 20, method: 'T/T', bankRef: 'R19-RATE-P' })
 check(
   '补录过去日期的到账，历史里写明按录入时汇率钉快照',
-  orders.listEvents(r19Rate.id).some((e) => e.kind === 'payment' && e.note.includes('钉快照') && e.note.includes('汇率按 7'))
+  (await orders.listEvents(r19Rate.id)).some((e) => e.kind === 'payment' && e.note.includes('钉快照') && e.note.includes('汇率按 7'))
 )
 
 /* ---------------- R20：闸门做实与回款正门 ---------------- */
@@ -5849,7 +5848,7 @@ check('作废单登记收款不写来路会被拦下', r20NoNoteErr.includes('�
 await orders.addPayment(r20Rec.id, { paidAt: localDate(), amount: 30, note: '取消单客户退回的定金' })
 check(
   '作废单回款落账且历史写明「作废单回款」',
-  orders.listEvents(r20Rec.id).some((e) => e.kind === 'payment' && e.note.includes('作废单回款') && e.note.includes('30.00'))
+  (await orders.listEvents(r20Rec.id)).some((e) => e.kind === 'payment' && e.note.includes('作废单回款') && e.note.includes('30.00'))
 )
 check('作废单回款不复活订单（收款状态仍为 void）', (await orders.getOrder(r20Rec.id))!.paymentStatus === 'void')
 const r20RecAgain = (await orders.getOrder(r20Rec.id))!
@@ -5934,7 +5933,7 @@ try {
 check('批次作废不写原因被拦下', r21VoidNoReasonErr.includes('原因'), r21VoidNoReasonErr)
 
 await packing.voidPackingList(r21PlOrder.id, r21Pl.id, '订舱被货代取消')
-const r21VoidEvt = orders.listEvents(r21PlOrder.id).filter((e) => e.kind === 'pl_void').pop()
+const r21VoidEvt = (await orders.listEvents(r21PlOrder.id)).filter((e) => e.kind === 'pl_void').pop()
 check('作废原因进了操作历史', !!r21VoidEvt && r21VoidEvt.note.includes('订舱被货代取消'), r21VoidEvt?.note ?? '没有 pl_void 事件')
 
 let r21UnvoidNoReasonErr = ''
@@ -5947,7 +5946,7 @@ check('撤销作废不写原因也被拦下', r21UnvoidNoReasonErr.includes('原
 
 await packing.unvoidPackingList(r21PlOrder.id, r21Pl.id, '货代恢复订舱')
 check('写了原因的撤销作废放行', packing.listPackingLists(r21PlOrder.id).find((p) => p.id === r21Pl.id)!.voidedAt == null)
-const r21UnvoidEvt = orders.listEvents(r21PlOrder.id).filter((e) => e.kind === 'pl_unvoid').pop()
+const r21UnvoidEvt = (await orders.listEvents(r21PlOrder.id)).filter((e) => e.kind === 'pl_unvoid').pop()
 check('撤销原因也进了操作历史', !!r21UnvoidEvt && r21UnvoidEvt.note.includes('货代恢复订舱'), r21UnvoidEvt?.note ?? '没有 pl_unvoid 事件')
 
 // ③ 换客户留痕：操作历史写明「客户 A → B」，改单弹窗另有确认弹窗兜底
@@ -5956,7 +5955,7 @@ section('R21 换主留痕：历史写明客户从谁换成谁')
 const r21Swap = await orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R21-SWAP' })
 await orders.addOrderItem(r21Swap.id, { styleNo: 'R21-SWAP', quantity: 5, unitPrice: 10 })
 await orders.updateOrder(r21Swap.id, { customerId: c2.id })
-const r21SwapEvt = orders.listEvents(r21Swap.id).find((e) => e.note.includes('客户'))
+const r21SwapEvt = (await orders.listEvents(r21Swap.id)).find((e) => e.note.includes('客户'))
 check(
   '换客户在历史里写明「客户 A → B」',
   !!r21SwapEvt && r21SwapEvt.note.includes('客户') && r21SwapEvt.note.includes('→'),
@@ -5969,8 +5968,8 @@ section('R21 汇率参考值同币种：参考的就是同币种那一张')
 
 const r21Eur = await orders.createOrder({ customerId: c1.id, currency: 'EUR', exchangeRate: 7.8, paymentStatus: 'confirmed', piNo: 'PI-R21-EUR' })
 await orders.addOrderItem(r21Eur.id, { styleNo: 'R21-EUR', quantity: 5, unitPrice: 10 })
-const r21UsdInfo = orders.lastExchangeRateInfo('USD')
-const r21EurInfo = orders.lastExchangeRateInfo('EUR')
+const r21UsdInfo = (await orders.lastExchangeRateInfo('USD'))
+const r21EurInfo = (await orders.lastExchangeRateInfo('EUR'))
 check('EUR 参考值取的是 EUR 那张单的汇率', !!r21EurInfo && Math.abs(r21EurInfo.rate - 7.8) < 0.0001, JSON.stringify(r21EurInfo))
 check('USD 参考值不再是刚建的 EUR 单', !r21UsdInfo || Math.abs(r21UsdInfo.rate - 7.8) > 0.0001, JSON.stringify(r21UsdInfo))
 
@@ -5980,7 +5979,7 @@ section('R21 作废单冻结照片：留档不再「还在走」')
 const r21Photo = await orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R21-PHOTO' })
 await orders.addOrderItem(r21Photo.id, { styleNo: 'R21-PHOTO', quantity: 5, unitPrice: 10 })
 await orders.addOrderPhoto(r21Photo.id, 'r21-normal.jpg', 'inspection', '正常单传照放行')
-eq('正常单传照放行', orders.listOrderPhotos(r21Photo.id).length, 1)
+eq('正常单传照放行', (await orders.listOrderPhotos(r21Photo.id)).length, 1)
 await orders.voidOrder(r21Photo.id, 'R21 照片冻结测试')
 let r21PhotoErr = ''
 try {
@@ -5989,7 +5988,7 @@ try {
   r21PhotoErr = (e as Error).message
 }
 check('作废单再传照片被拦下', r21PhotoErr.includes('已作废'), r21PhotoErr)
-eq('作废单照片一张没多', orders.listOrderPhotos(r21Photo.id).length, 1)
+eq('作废单照片一张没多', (await orders.listOrderPhotos(r21Photo.id)).length, 1)
 
 /* ---------------- R22：转单与建单入口守门 ---------------- */
 
@@ -6230,8 +6229,8 @@ check('过期转单有效期被重置到未来', !!r23ExpFresh.validUntil && r23
 // R34：有效期重置是我方内部口径，写在历史里，不写在发给客户的纸面上
 check(
   '有效期重置只落在订单操作历史',
-  orders.listEvents(r23ExpOrder.id).some((e) => e.kind === 'quotation_convert' && e.note.includes('重置')),
-  JSON.stringify(orders.listEvents(r23ExpOrder.id))
+  (await orders.listEvents(r23ExpOrder.id)).some((e) => e.kind === 'quotation_convert' && e.note.includes('重置')),
+  JSON.stringify((await orders.listEvents(r23ExpOrder.id)))
 )
 check('订单备注不带有效期重置话术', !r23ExpFresh.note.includes('重置'), r23ExpFresh.note)
 
@@ -6461,7 +6460,7 @@ check(
 )
 eq('描述性字段仍可改', (await samples.saveSample({ id: r25Sample.id, note: 'R25 备注可改' })).note, 'R25 备注可改')
 
-const r25Flows1 = samples.listSamplePayments(r25Sample.id)
+const r25Flows1 = (await samples.listSamplePayments(r25Sample.id))
 eq('流水表能列出这笔', r25Flows1.length, 1)
 eq('打样流水的 orderId 为空', r25Flows1[0].orderId, null)
 eq('打样流水的 sampleOrderId 指回打样单', r25Flows1[0].sampleOrderId, r25Sample.id)
@@ -6474,7 +6473,7 @@ eq('撤销后回到未收', r25Reverted.feeStatus, 'unpaid')
 eq('撤销后已收归零', r25Reverted.collected, 0)
 eq('撤销后待收恢复全额', r25Reverted.receivableBase, 15 * 7.2)
 check('撤销原因写进收款说明', r25Reverted.feeNote.includes('金额录错'), r25Reverted.feeNote)
-eq('撤销是真删流水', samples.listSamplePayments(r25Sample.id).length, 0)
+eq('撤销是真删流水', (await samples.listSamplePayments(r25Sample.id)).length, 0)
 
 const r25Paid = await samples.addSamplePayment(r25Sample.id, {
   paidAt: localDate(),
@@ -6490,11 +6489,11 @@ check(
 check('有流水的单不能直接删', (await r8err(async () => await samples.deleteSample(r25Sample.id))).includes('收款流水'))
 check(
   '订单入口删不掉打样流水（指回打样单）',
-  (await r8err(async () => await orders.deletePayment(r24Charged.id, samples.listSamplePayments(r25Sample.id)[0].id, 'x'))).includes('打样单')
+  (await r8err(async () => await orders.deletePayment(r24Charged.id, (await samples.listSamplePayments(r25Sample.id))[0].id, 'x'))).includes('打样单')
 )
 
 // 清理：先撤销流水（原因留痕），再取消留原因、删除
-await samples.deleteSamplePayment(r25Sample.id, samples.listSamplePayments(r25Sample.id)[0].id, 'E2E 清理')
+await samples.deleteSamplePayment(r25Sample.id, (await samples.listSamplePayments(r25Sample.id))[0].id, 'E2E 清理')
 await samples.saveSample({ id: r25Sample.id, status: 'cancelled', note: 'E2E 清理：测试单不收了' })
 await samples.deleteSample(r25Sample.id)
 eq('清理后打样单已删', await samples.getSample(r25Sample.id), null)
@@ -6532,7 +6531,7 @@ const r25Batch = await orders.batchAddPayments([
 ])
 eq('一笔水单同时落订单和打样单', r25Batch.length, 2)
 eq('订单那笔落在订单上', (await orders.getOrder(r25Split.id))!.payments[0].bankRef, 'R25-SLIP')
-eq('打样那笔落在打样单上', samples.listSamplePayments(r25Sample2.id)[0].bankRef, 'R25-SLIP')
+eq('打样那笔落在打样单上', (await samples.listSamplePayments(r25Sample2.id))[0].bankRef, 'R25-SLIP')
 eq('拆分后打样待收只剩 11 × 7.2', await money.sampleReceivable(r25C.id), 11 * 7.2)
 check(
   '客户拆分表的待收跟着流水减少',
@@ -6554,7 +6553,7 @@ check(
   (await r8err(async () => await orders.batchAddPayments([{ paidAt: localDate(), amount: 1, bankRef: 'R25-X' }]))).includes('二选一')
 )
 const r25PaysBeforeBad = (await orders.getOrder(r25Split.id))!.payments.length
-const r25FlowsBeforeBad = samples.listSamplePayments(r25Sample2.id).length
+const r25FlowsBeforeBad = (await samples.listSamplePayments(r25Sample2.id)).length
 check(
   '第二笔超标 → 整批回滚，第一笔也不留',
   (await r8err(async () =>
@@ -6565,7 +6564,7 @@ check(
   )).includes('整批已回滚')
 )
 eq('回滚后订单没多出一笔', (await orders.getOrder(r25Split.id))!.payments.length, r25PaysBeforeBad)
-eq('回滚后打样单也没多出一笔', samples.listSamplePayments(r25Sample2.id).length, r25FlowsBeforeBad)
+eq('回滚后打样单也没多出一笔', (await samples.listSamplePayments(r25Sample2.id)).length, r25FlowsBeforeBad)
 
 const r25Csv = await dashboard.exportCsv('payments')
 check('收款台账多了「单据类型」列（加在最后一列）', r25Csv.includes('单据类型'))
@@ -6593,7 +6592,7 @@ check(
   '转单后不能再登记打样收款',
   (await r8err(async () => await samples.addSamplePayment(r25Sample2.id, { paidAt: localDate(), amount: 1 }))).includes('转成订单')
 )
-const r25ConvFlow = samples.listSamplePayments(r25Sample2.id)[0]
+const r25ConvFlow = (await samples.listSamplePayments(r25Sample2.id))[0]
 check(
   '转单后不能撤销转单前的实收',
   (await r8err(async () => await samples.deleteSamplePayment(r25Sample2.id, r25ConvFlow.id, 'x'))).includes('不能回头撤销')
@@ -6626,7 +6625,7 @@ const r25LegacyRead = await samples.getSample(r25Legacy.id)!
 eq('旧记录·无流水能认出来', r25LegacyRead.legacyPaidNoFlow, true)
 eq('旧记录按全额认已收', r25LegacyRead.feeRecoveredBase, 15 * 7.2)
 eq('旧记录不计待收', r25LegacyRead.receivableBase, 0)
-eq('旧记录没有流水', samples.listSamplePayments(r25Legacy.id).length, 0)
+eq('旧记录没有流水', (await samples.listSamplePayments(r25Legacy.id)).length, 0)
 check(
   '旧记录补流水要先改回未收',
   (await r8err(async () => await samples.addSamplePayment(r25Legacy.id, { paidAt: localDate(), amount: 15 }))).includes('老账')
@@ -8147,7 +8146,7 @@ const r33TermNew = await orders.createOrder({
   portOfLoading: 'NINGBO'
 })
 await orders.addOrderItem(r33TermNew.id, { styleNo: 'R33-T2', quantity: 1, unitPrice: 10 })
-const r33Terms = orders.lastOrderTerms(r33TermCust.id)
+const r33Terms = (await orders.lastOrderTerms(r33TermCust.id))
 eq('最近一张草稿单被跳过：币种仍来自正式单', r33Terms?.currency, 'USD')
 eq('港口也来自正式单', r33Terms?.portOfLoading, 'SHANGHAI')
 
@@ -8328,7 +8327,7 @@ await orders.setShipStatus(r34ShipOrder.id, 'shipped', 'R34 手工出运')
 eq('状态落了', (await orders.getOrder(r34ShipOrder.id))!.shipStatus, 'shipped')
 check(
   '同一次跃迁留下配对的 ship_status 事件（催款主钟的兜底）',
-  orders.listEvents(r34ShipOrder.id).some((e) => e.kind === 'ship_status' && e.toStatus === 'shipped')
+  (await orders.listEvents(r34ShipOrder.id)).some((e) => e.kind === 'ship_status' && e.toStatus === 'shipped')
 )
 
 const r34Legacy = await orders.createOrder({
@@ -8545,16 +8544,16 @@ const r35PhOrder = await orders.createOrder({
 })
 const r35Photo = await orders.addOrderPhoto(r35PhOrder.id, 'r35-inspect.jpg', 'inspection', '尾期验货')
 await orders.deleteOrderPhoto(r35PhOrder.id, r35Photo.id)
-eq('照片记录删掉了', orders.listOrderPhotos(r35PhOrder.id).length, 0)
+eq('照片记录删掉了', (await orders.listOrderPhotos(r35PhOrder.id)).length, 0)
 check(
   '删除这件事在订单历史里查得到',
-  orders.listEvents(r35PhOrder.id).some((e) => e.kind === 'photo' && e.note.includes('删除验货照')),
-  JSON.stringify(orders.listEvents(r35PhOrder.id).filter((e) => e.kind === 'photo'))
+  (await orders.listEvents(r35PhOrder.id)).some((e) => e.kind === 'photo' && e.note.includes('删除验货照')),
+  JSON.stringify((await orders.listEvents(r35PhOrder.id)).filter((e) => e.kind === 'photo'))
 )
 await orders.deleteOrderPhoto(r35PhOrder.id, 9_999_999)
 eq(
   '删一张不存在的照片不会多留一条痕',
-  orders.listEvents(r35PhOrder.id).filter((e) => e.kind === 'photo' && e.note.includes('删除')).length,
+  (await orders.listEvents(r35PhOrder.id)).filter((e) => e.kind === 'photo' && e.note.includes('删除')).length,
   1
 )
 
@@ -8575,7 +8574,7 @@ eq('挂成失效后退出应收口径', (await orders.getOrder(r35Exp.id))!.paym
 eq('改回计费状态时按账重算：钱早就收齐了', (await orders.setPaymentStatus(r35Exp.id, 'confirmed')).paymentStatus, 'settled')
 check(
   '重算留下自动流转的痕',
-  orders.listEvents(r35Exp.id).some((e) => e.kind === 'status_auto' && e.toStatus === 'settled')
+  (await orders.listEvents(r35Exp.id)).some((e) => e.kind === 'status_auto' && e.toStatus === 'settled')
 )
 const r35Exp2 = await orders.createOrder({
   customerId: r35C.id,
@@ -8587,7 +8586,7 @@ const r35Exp2 = await orders.createOrder({
 await orders.addOrderItem(r35Exp2.id, { styleNo: 'R35-E2', quantity: 10, unitPrice: 10 })
 await orders.setPaymentStatus(r35Exp2.id, 'expired')
 eq('一分钱没收的单恢复后还是已确认（重算不乱升）', (await orders.setPaymentStatus(r35Exp2.id, 'confirmed')).paymentStatus, 'confirmed')
-eq('不乱加自动流转的历史', orders.listEvents(r35Exp2.id).filter((e) => e.kind === 'status_auto').length, 0)
+eq('不乱加自动流转的历史', (await orders.listEvents(r35Exp2.id)).filter((e) => e.kind === 'status_auto').length, 0)
 
 section('R35 对账单：让利说「为您减免」，不替客户算坏账')
 
@@ -8636,10 +8635,9 @@ const r35NotePi = renderPi({ order: (await orders.getOrder(r35NoteOrder.id))!, s
 check('报价单里的内部话术没印到 PI 上', !r35NotePi.includes('客户问起再说'))
 check(
   '但这句在订单操作历史里查得到',
-  orders
-    .listEvents(r35NoteOrder.id)
+  (await orders.listEvents(r35NoteOrder.id))
     .some((e) => e.kind === 'quotation_convert' && e.note.includes('客户问起再说')),
-  JSON.stringify(orders.listEvents(r35NoteOrder.id).filter((e) => e.kind === 'quotation_convert'))
+  JSON.stringify((await orders.listEvents(r35NoteOrder.id)).filter((e) => e.kind === 'quotation_convert'))
 )
 const r35Sample = await samples.saveSample({
   customerId: r35C.id,
@@ -8653,7 +8651,7 @@ const r35SpOrder = await samples.convertSampleToOrder(r35Sample.id)
 eq('打样转单也只留凭据句', r35SpOrder.note, `由打样单 ${r35Sample.sampleNo} 转成`)
 check(
   '打样单的内部备注落在订单历史里',
-  orders.listEvents(r35SpOrder.id).some((e) => e.kind === 'sample_convert' && e.note.includes('还没点头'))
+  (await orders.listEvents(r35SpOrder.id)).some((e) => e.kind === 'sample_convert' && e.note.includes('还没点头'))
 )
 check(
   '不在 PI 上',
@@ -8972,8 +8970,8 @@ await docs.saveDocFile({
 })
 check(
   '分批出 CI 不再凭空写一条「金额相差」',
-  !orders.listEvents(r37CiOrder.id).some((e) => e.kind === 'doc_amount_diff'),
-  JSON.stringify(orders.listEvents(r37CiOrder.id).filter((e) => e.kind === 'doc_amount_diff'))
+  !(await orders.listEvents(r37CiOrder.id)).some((e) => e.kind === 'doc_amount_diff'),
+  JSON.stringify((await orders.listEvents(r37CiOrder.id)).filter((e) => e.kind === 'doc_amount_diff'))
 )
 await docs.saveDocFile({
   pdf: Buffer.from('%PDF-1.4 r37 whole'),
@@ -8985,7 +8983,7 @@ await docs.saveDocFile({
 })
 check(
   '整单 CI 与应收对不上，照样留痕',
-  orders.listEvents(r37CiOrder.id).some((e) => e.kind === 'doc_amount_diff' && e.note.includes('相差'))
+  (await orders.listEvents(r37CiOrder.id)).some((e) => e.kind === 'doc_amount_diff' && e.note.includes('相差'))
 )
 check(
   '存档金额是乱码就拒收（不再静默记成 0）',
@@ -9421,7 +9419,7 @@ eq('拦下后坏账没被冲两遍', r39Blocked.badDebtOutstanding, 40)
 eq('拦下后已收还是 60', r39Blocked.paidAmount, 60)
 
 // 撤销那笔追回会把自动登记的收款一起退掉（R36）：水单腾出来了，同一个号才允许重录
-const r39RecRow = orders.listSettlements(r39Order.id).find((s) => s.kind === 'recovery' && s.amount > 0)!
+const r39RecRow = (await orders.listSettlements(r39Order.id)).find((s) => s.kind === 'recovery' && s.amount > 0)!
 check(
   '撤销追回也要写原因',
   (await r8err(async () => await orders.reverseSettlement(r39Order.id, r39RecRow.id, '  '))).includes('原因'),
@@ -9634,12 +9632,12 @@ const r41c = await orders.createOrder({ customerId: r41RateCust.id, piNo: 'PI-R4
 getDb().run(`UPDATE orders SET exchange_rate=7.25, exchange_rate_date='2099-01-01', updated_at='2026-03-01T10:00:00.000Z' WHERE id=?`, [r41a.id])
 getDb().run(`UPDATE orders SET exchange_rate=7.1, exchange_rate_date='2098-01-01', updated_at=? WHERE id=?`, [new Date().toISOString(), r41b.id])
 // r41c 刚建、updated_at 最新，但没钉过汇率（或只有哨兵值、没有钉盘日期）
-eq('参考值按钉盘日期取最近（老单补备注/改状态不再把它带偏）', orders.lastExchangeRateInfo('USD')?.rate, 7.25)
+eq('参考值按钉盘日期取最近（老单补备注/改状态不再把它带偏）', (await orders.lastExchangeRateInfo('USD'))?.rate, 7.25)
 getDb().run(`UPDATE orders SET exchange_rate=1, exchange_rate_date=NULL, updated_at=? WHERE id=?`, [new Date().toISOString(), r41a.id])
 check(
   '最新编辑的单没钉汇率（哨兵值、无钉盘日期）时，参考值落到上一张真钉过的单，不返回哨兵也不消失',
-  orders.lastExchangeRateInfo('USD')?.rate === 7.1,
-  String(orders.lastExchangeRateInfo('USD'))
+  (await orders.lastExchangeRateInfo('USD'))?.rate === 7.1,
+  String((await orders.lastExchangeRateInfo('USD')))
 )
 section('R41 备份包超限说人话（图片和存档是凭据，不叫人删）')
 const r41big = Array.from({ length: 65536 }, (_, i) => ({ name: `docs/x-${i}.txt`, data: Buffer.alloc(0) }))

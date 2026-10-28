@@ -257,7 +257,7 @@ export function listPackingLists(orderId: number): PackingList[] {
 
 export async function createPackingList(input: PackingListInput): Promise<PackingList[]> {
   const db = getDb()
-  assertOrderWritable(input.orderId, '装箱')
+  await assertOrderWritable(input.orderId, '装箱')
   if (input.lines.length === 0) throw new Error('装箱单至少要有一箱，先生成箱明细再保存')
   // 同一 SKU 可能拆成好几箱，先按 SKU 合计再校验，免得逐行放行、加起来超了
   const bySku = new Map<string, { sku: { styleNo?: string; color?: string; size?: string }; qty: number }>()
@@ -333,7 +333,7 @@ export async function deletePackingList(orderId: number, plId: number): Promise<
     [plId, orderId]
   ) as Record<string, unknown> | null
   if (!cur) return listPackingLists(orderId)
-  assertOrderWritable(orderId, '删装箱单')
+  await assertOrderWritable(orderId, '删装箱单')
   if (isVoided(cur)) {
     throw new Error(
       `装箱单 ${String(cur.pl_no)} 已经作废留档了，就让它留着——纸面发过客户的单据，系统里得查得到。`
@@ -373,7 +373,7 @@ export async function voidPackingList(orderId: number, plId: number, reason = ''
   ) as Record<string, unknown> | null
   if (!cur) throw new Error('装箱单不存在')
   // 作废/失效单的箱单也是留档的一部分：改它的作废状态会连带改整单出货汇总
-  assertOrderWritable(orderId, '作废装箱单')
+  await assertOrderWritable(orderId, '作废装箱单')
   if (isVoided(cur)) throw new Error(`装箱单 ${String(cur.pl_no)} 已经是作废状态，不用重复作废`)
   const ciVer = archivedCiVersion(orderId, String(cur.pl_no))
   if (ciVer > 0) {
@@ -406,7 +406,7 @@ export async function unvoidPackingList(orderId: number, plId: number, reason = 
     [plId, orderId]
   ) as Record<string, unknown> | null
   if (!cur) throw new Error('装箱单不存在')
-  assertOrderWritable(orderId, '撤销作废装箱单')
+  await assertOrderWritable(orderId, '撤销作废装箱单')
   if (!isVoided(cur)) return listPackingLists(orderId)
   if (!String(reason ?? '').trim()) {
     throw new Error('撤销作废也要写明原因：作废记录是留档凭据，为什么翻案得能查到。')
@@ -452,7 +452,7 @@ export async function updatePackingListInfo(
   if (isVoided(cur)) {
     throw new Error(`装箱单 ${String(cur.pl_no)} 已作废，不能改批次信息。要接着用请先「撤销作废」。`)
   }
-  assertOrderWritable(orderId, '改装箱单')
+  await assertOrderWritable(orderId, '改装箱单')
   if (patch.shipStatus !== undefined && !SHIP_STATUS_ORDER.includes(patch.shipStatus)) {
     throw new Error('这个出货状态不能手工选，请选择「未备货 / 备货中 / 已包装 / 已出运 / 已清关 / 已签收」')
   }
@@ -584,7 +584,7 @@ export async function updatePackingListLine(
 ): Promise<PackingList[]> {
   const db = getDb()
   assertBatchLinesEditable(orderId, plId)
-  assertOrderWritable(orderId, '改装箱明细')
+  await assertOrderWritable(orderId, '改装箱明细')
   const cur = db.get('SELECT * FROM packing_list_lines WHERE id = ? AND packing_list_id = ?', [lineId, plId]) as
     | Record<string, unknown>
     | null
@@ -691,7 +691,7 @@ export async function addPackingListLine(
 ): Promise<PackingList[]> {
   const db = getDb()
   assertBatchLinesEditable(orderId, plId)
-  assertOrderWritable(orderId, '加装箱明细')
+  await assertOrderWritable(orderId, '加装箱明细')
   assertStyleNo(line.styleNo)
   assertQuantity(line.quantity)
   assertBoxNoFree(plId, line.boxNo)
@@ -743,7 +743,7 @@ export async function addPackingListLine(
 export async function deletePackingListLine(orderId: number, plId: number, lineId: number): Promise<PackingList[]> {
   const db = getDb()
   const lineCount = assertBatchLinesEditable(orderId, plId)
-  assertOrderWritable(orderId, '删装箱明细')
+  await assertOrderWritable(orderId, '删装箱明细')
   if (lineCount <= 1) {
     throw new Error('一箱都没有的装箱单留不住。如果整批作废，请直接删除这张装箱单。')
   }

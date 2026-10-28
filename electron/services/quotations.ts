@@ -338,7 +338,7 @@ async function saveQuotationInner(input: QuotationInput): Promise<QuotationDetai
     assertUnitPrice(it.unitPrice, `${who} 的单价`)
   })
   // 源头拦同款两行：转单时明细原样带过去，两行不同单价会把 CI 金额算乱
-  assertSkuListUnique(input.items, '报价单')
+  await assertSkuListUnique(input.items, '报价单')
   const settings = getSettings()
   // 费用行与有效期是「编辑时没传 ≠ 要清空」的列：先按传了的算，
   // 走到更新分支时再用数据库原值兜住漏传（见下面的 keepCharges/keepValidUntil）
@@ -787,7 +787,7 @@ export async function convertToOrder(
   if (expired) overrideNote += `；有效期已从 ${snap.validUntil || '未填'} 重置为 ${freshValidUntil}`
 
   // 转单挡：存档里的同款两行不能原样带进订单（老数据；新存的报价单在源头已拦）
-  assertSkuListUnique(snap.items, `报价单 ${q.qNo} 第 ${targetRevision} 版存档`)
+  await assertSkuListUnique(snap.items, `报价单 ${q.qNo} 第 ${targetRevision} 版存档`)
 
   return transactAsync(async () => {
     const order = await createOrder({
