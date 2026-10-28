@@ -467,7 +467,7 @@ export function registerIpc(): void {
     // 对账单还要带客户名，同一天导两家不能同名
     const name =
       kind === 'statement' && filter?.customerId
-        ? dashboard.statementFileName(filter.customerId)
+        ? await dashboard.statementFileName(filter.customerId)
         : EXPORT_FILE_NAME[kind].replace(/\.csv$/, `_${localDate()}.csv`)
     const res = await dialog.showSaveDialog(win, {
       title: '导出 Excel(CSV)',

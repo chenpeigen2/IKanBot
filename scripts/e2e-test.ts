@@ -6815,7 +6815,7 @@ check(
 )
 eq('表尾合计 = 订单 360 + 打样 72（汇率未填的单不瞎折）', r26BaseOpen, 432)
 
-const r26File = dashboard.statementFileName(r26C.id)
+const r26File = await dashboard.statementFileName(r26C.id)
 check('对账单文件名带客户名与截止日', r26File.includes('R26 Statement Co') && r26File.includes(localDate()), r26File)
 const r26Empty = await customers.saveCustomer({ company: 'R26 Empty Co' })
 check(
