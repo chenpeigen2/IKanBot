@@ -1,7 +1,40 @@
 # IKanBot 后端数据服务 · 落地拆分
 
 > 2026-10-28 定案：接 MySQL 走后端数据服务（路 B），不做桌面直连 MySQL，也不做 repository 层。
-> 前置契约见 `docs/api-contract.md`（R40）。本文是可执行的施工图，不是愿景。
+> 同日补充：**必须支持双模式**——本地 SQLite（现状、单机、离线可用）与远端服务（多人）都要能跑，
+> 由用户在设置里选。前置契约见 `docs/api-contract.md`（R40）。本文是可执行的施工图，不是愿景。
+
+## 〇、双模式：一套业务核心，两个数据后端
+
+```
+模式 A（本地，现状）                    模式 B（远端服务）
+┌──────── Electron ────────┐           ┌──────── Electron ────────┐
+│ 渲染层 ─ IPC ─▶ 转发器    │           │ 渲染层 ─ IPC ─▶ 转发器    │
+│              │ 本地         │           │              │ HTTP      │
+│        core 服务（异步）    │           │        core 服务（异步）   │
+│              │              │           │              │           │
+│        Db: SQLite 适配器    │           │     （本地无数据库）        │
+│        （同步包成 Promise）  │           │              │           │
+└──────────────────────────┘           └──────────────┼───────────┘
+                                                      │
+                                          ┌───────────▼───────────┐
+                                          │ 后端服务（同一 core）   │
+                                          │ Db: MySQL 适配器       │
+                                          └───────────┬───────────┘
+                                                  ┌───▼───┐
+                                                  │ MySQL │
+                                                  └───────┘
+```
+
+- **业务逻辑只有一份**：`electron/services/*` 提升为与运行环境无关的 `core/`，异步函数、通过注入的 `Db` 访问数据。
+  桌面本地模式与后端服务跑的是同一份代码——口径、守门、纸面数字不可能两边不一致。
+- **两个 Db 实现**：`SqliteDb`（node-sqlite3-wasm，同步 API 包成 Promise，供本地模式与测试）
+  与 `MysqlDb`（mysql2 连接池，事务钉连接，供后端服务）。
+- **两种模式共用 IPC 边界**：`electron/ipc/index.ts` 变成一个转发器——模式 A 调本地 core，
+  模式 B 调远程 HTTP。渲染层、`preload`、纸面渲染一行不改。
+- **模式配置必须存在数据库之外**：服务器地址/账号写在本地配置文件（打包后 `userData/config.json`），
+  否则「先连哪里」这件事本身就没有着落。切换模式需要重启程序。
+- 离线只在模式 A 成立；模式 B 在线优先（断网只能看不能录），这是明确的取舍。
 
 ## 一、终局形态
 
@@ -63,7 +96,11 @@
   - 日期业务日 `DATE`（本地日字符串），时刻用 `DATETIME(3)` 存 UTC
   - `PRAGMA` 全部去掉；`sqlite_master` 查询改 `information_schema`
   - `LIKE` 转义不同：现有 `escapeLike` 逻辑要按 MySQL 的 `ESCAPE` 规则核对
-- **适配器策略（关键）**：写一个 `sqlite3-wasm` 兼容层（`get/all/run/exec/inTransaction`、`run` 返回 `{ lastInsertRowid, changes }` ← MySQL `{ insertId, affectedRows }`），包在 mysql2 之上。这样 service 层 153 处调用**第一版几乎零改动**，先把系统跑起来，方言再逐条收敛。不做"先重写全部 SQL"的豪赌。
+- **接口形状（关键，2026-10-28 实测修正）**：`Db` 接口必须是**异步**的——mysql2 只有异步 API，
+  而现有 service 全是同步函数（node-sqlite3-wasm 是同步驱动）。同步→异步无法用「兼容层」藏起来，
+  因此 M1 的主干就是**把 service 层逐域异步化**（函数加 `async`、`getDb()` 换成注入的 `Db`）。
+  这是机械改动但覆盖面广（约 1.2 万行 service），本地 SQLite 用同步 API 包成 Promise 即可，桌面行为不变。
+  **不做**「为后端另写一份同步/异步服务」——两份业务逻辑必然漂移。
 
 ## 四、事务与并发
 
@@ -96,10 +133,10 @@
 
 | 阶段 | 内容 | 验收 |
 | --- | --- | --- |
-| M0 | `server/` 骨架、mysql2 兼容适配器、`transact`、建库脚本、`/healthz`；先移植 `customers` + `products` | 两个域在 MySQL 上 CRUD 通过，事务回滚有测试 |
-| M1 | 全量 service 移植（orders/samples/quotations/credits/packing/docs/money/dashboard…）；e2e 改跑服务端实现 | **现有 1800+ 断言全绿**（这是硬门槛） |
-| M2 | HTTP 层：118 路由 + 鉴权 + 统一错误 + 请求日志 | 通道清单逐条对拍；错误文案与现在一致 |
-| M3 | 桌面切换：`ipc/index.ts` 变 HTTP 客户端；设置加服务器地址/登录；桌面移除 SQL 直连 | 桌面全功能真跑（打印/存档/备份）；断网有明确提示 |
+| M0 | `server/` 骨架、异步 `Db` 接口、SQLite/MySQL 两个实现、`transact`（钉连接 + SAVEPOINT）、`/healthz`、样板域 | 骨架 typecheck + SQLite 冒烟（嵌套事务回滚）全绿 |
+| M1 | `electron/services/*` 逐域提升为 `core/`：异步化、注入 `Db` 与目录（去掉 electron 依赖）；桌面本地模式接 core | **现有 1800+ 断言全绿**（这是硬门槛），桌面全功能真跑 |
+| M2 | 后端服务：118 路由 + 鉴权 + 统一错误 + 请求日志，跑同一份 core + MySQL | 通道清单逐条对拍；错误文案与现在一致 |
+| M3 | 桌面双模式：转发器按配置走本地 core 或 HTTP；本地配置文件存服务器地址/账号；登录态存 safeStorage | 两模式各跑一遍全功能（打印/存档/备份）；断网有明确提示；切换需重启 |
 | M4 | 并发：`row_version` / `updated_at` 冲突检测、409 提示、收款幂等 | 两窗口同时改同一单，后写者收到可见提示；双击收款只落一笔 |
 | M5 | 文件上对象存储、备份/恢复脚本、部署与监控、整库搬迁工具 | 恢复演练成功；搬迁校验报告逐项通过 |
 

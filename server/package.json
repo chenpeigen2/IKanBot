@@ -1,0 +1,15 @@
+{
+  "name": "ikanbot-server",
+  "private": true,
+  "version": "0.0.0",
+  "description": "IKanBot 后端数据服务",
+  "main": "dist/src/index.js",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "smoke": "tsc -p tsconfig.json && node dist/test/smoke.js",
+    "start": "tsc -p tsconfig.json && node dist/src/index.js"
+  },
+  "dependencies": {
+    "mysql2": "^3.24.6"
+  }
+}
