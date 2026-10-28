@@ -4,7 +4,7 @@
  */
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'fs'
 import { isAbsolute, join, relative, resolve, sep } from 'path'
-import { dataDir, docsDir, getDb, transact } from '../db'
+import { dataDir, docsDir, getDb, transactAsync } from '../db'
 import { logEvent } from './events'
 import { computeOrderMoney, parseCharges } from './money'
 import { assertDocNo } from '../../src/shared/guards'
@@ -67,7 +67,7 @@ export function nextVersion(docNo: string, kind: string): number {
   return Number(row?.v ?? 0) + 1
 }
 
-export function recordDocVersion(input: {
+export async function recordDocVersion(input: {
   orderId?: number | null
   quotationId?: number | null
   docNo: string
@@ -75,11 +75,11 @@ export function recordDocVersion(input: {
   version: number
   amount?: number
   filePath: string
-}): DocVersion {
+}): Promise<DocVersion> {
   const db = getDb()
   // 存档记录和「出单据」留痕在同一个事务里：提交成功但事件没写上，
   // 操作历史就丢了「这一版是什么时候出的」这条凭据
-  const id = transact(() => {
+  const id = await transactAsync(async () => {
     const res = db.run(
       `INSERT INTO doc_versions(order_id, quotation_id, doc_no, kind, version, amount, file_path, created_at)
        VALUES(?,?,?,?,?,?,?,?)`,
@@ -95,7 +95,7 @@ export function recordDocVersion(input: {
       ]
     )
     if (input.orderId) {
-      logEvent(
+      await logEvent(
         input.orderId,
         'doc_export',
         null,
@@ -115,7 +115,7 @@ export function recordDocVersion(input: {
  * 作废只摘掉「纸面金额依据」的资格：记录和 PDF 留着（纸发出去过就是事实），
  * 批次解锁、金额按当前数据重算，允许重出正确的一版。原因必填。
  */
-export function voidDocVersion(versionId: number, reason = ''): DocVersion[] {
+export async function voidDocVersion(versionId: number, reason = ''): Promise<DocVersion[]> {
   const db = getDb()
   const why = String(reason ?? '').trim()
   if (!why) throw new Error('作废存档要写原因（例如“金额敲错一位”“箱数装错”），操作历史要留痕。')
@@ -138,10 +138,10 @@ export function voidDocVersion(versionId: number, reason = ''): DocVersion[] {
     )
     if (st === 'void') throw new Error('这张订单已作废，存档是留档凭据，不能再作废。')
   }
-  transact(() => {
+  await transactAsync(async () => {
     db.run('UPDATE doc_versions SET voided_at = ?, void_reason = ? WHERE id = ?', [now(), why, versionId])
     if (v.orderId != null) {
-      logEvent(
+      await logEvent(
         v.orderId,
         'doc_void',
         null,
@@ -161,7 +161,7 @@ export function voidDocVersion(versionId: number, reason = ''): DocVersion[] {
  * - 落盘用 wx（已存在即失败），数据库唯一索引兜底，失败时删掉刚写的文件。
  * - 数据库里存 data 目录相对路径，换电脑/恢复备份后仍能找到。
  */
-export function saveDocFile(input: {
+export async function saveDocFile(input: {
   pdf: Buffer
   docNo: string
   kind: string
@@ -171,7 +171,7 @@ export function saveDocFile(input: {
   expectedVersion?: number
   /** CI 与已存档批次/整单 CI 重叠时是否已由人确认（预览弹窗勾选后带来） */
   confirmOverlap?: boolean
-}): { filePath: string; absolutePath: string; version: number } {
+}): Promise<{ filePath: string; absolutePath: string; version: number }> {
   const docNo = assertDocNo(input.docNo)
   const kind = assertDocKind(input.kind)
   // 存档金额是事后对账的依据：NaN/负数直接拒收，不能静默落成 0
@@ -217,13 +217,13 @@ export function saveDocFile(input: {
   }
 
   try {
-    transact(() => {
+    await transactAsync(async () => {
       // 落账前复查重叠：预览阶段的检查隔着秒级的 PDF 生成，两个预览并发存档会双双放行——
       // 检查与记账放进同一事务，落库的一刻不可能夹带未经确认的重叠
       if (kind === 'ci' && input.orderId != null) {
         assertCiNoOverlap(input.orderId, docNo, input.confirmOverlap === true)
       }
-      recordDocVersion({
+      await recordDocVersion({
         orderId: input.orderId ?? null,
         quotationId: input.quotationId ?? null,
         docNo,
@@ -245,7 +245,7 @@ export function saveDocFile(input: {
           const grand = orderGrandTotal(input.orderId)
           const diff = Number(input.amount) - grand
           if (Math.abs(diff) > 0.005) {
-            logEvent(
+            await logEvent(
               input.orderId,
               'doc_amount_diff',
               null,

@@ -6,7 +6,8 @@
  *  - 但公司垫的钱（快递费、样品费）要记账，所以单独一张表、单独一个页面
  *  - 样品单号、快递单号都能查（客户来问「上次那个样品寄到哪了」）
  */
-import { getDb, nextNo, transact, transactAsync } from '../db'
+import { coreDb, getDb, transact, transactAsync } from '../db'
+import { nextNo } from '../../core/next-no'
 import { mapCustomer, mapPayment } from '../db/mappers'
 import { assertLocalDate, localDate } from '../../src/shared/date'
 import { isBillingStatus } from '../../src/shared/billing'
@@ -416,7 +417,7 @@ async function saveSampleInner(input: SampleInput): Promise<SampleOrderDetail> {
   }
   // 客户预收已经抵到这张单上：金额/币种/汇率/客户都是那笔抵扣的依据，改了余额就对不上。
   // 只抵过预收、没落过收款流水的单，上面的流水锁不会触发，得单独锁。
-  const creditLocked = before ? hasActiveCredit('sample', Number(before.id)) : false
+  const creditLocked = before ? await hasActiveCredit('sample', Number(before.id)) : false
   if (creditLocked && before) {
     const moneyChanged =
       Math.abs(storedFee - sampleFee) > 0.001 ||
@@ -529,7 +530,7 @@ async function saveSampleInner(input: SampleInput): Promise<SampleOrderDetail> {
     let sampleNo = requestedNo
     if (!sampleNo) {
       // 自动编号：计数器落后时（手工插过数据）自动跳号，绝不生成重号
-      sampleNo = nextNo('SMP')
+      sampleNo = await nextNo(coreDb, 'SMP')
       while (noTaken(sampleNo)) sampleNo = bumpNo(sampleNo)
     } else if (noTaken(sampleNo)) {
       // 手填的号撞了才拦：给中文报错 + 留着单号输入框让她换号
@@ -567,10 +568,10 @@ async function saveSampleInner(input: SampleInput): Promise<SampleOrderDetail> {
   // 否则这笔钱既不在待收里、也不在余额里，两边都找不到
   const finalStatus = before ? keepText('status', 'status') || String(before.status) : String(input.status ?? 'pending')
   if (finalStatus === 'cancelled' && String(before?.status ?? '') !== 'cancelled') {
-    reverseCreditsForTarget('sample', id, '打样单已取消，预收抵扣回退')
+    await reverseCreditsForTarget('sample', id, '打样单已取消，预收抵扣回退')
   }
   if (feeStatus === 'waived' && String(before?.fee_status ?? '') !== 'waived') {
-    reverseCreditsForTarget('sample', id, '打样费改为免收，预收抵扣回退')
+    await reverseCreditsForTarget('sample', id, '打样费改为免收，预收抵扣回退')
   }
 
   if (itemsProvided) {
@@ -621,7 +622,7 @@ export async function deleteSample(id: number): Promise<void> {
     }
   }
   // 预收抵扣记在这张单上：删单会让这笔余额「用到哪儿去了」失去凭据
-  if (hasActiveCredit('sample', id)) {
+  if (await hasActiveCredit('sample', id)) {
     throw new Error(
       `这张打样单上还有未撤销的客户预收抵扣，不能删：删了这笔余额用到哪儿就查不到了。请先在客户页撤销抵扣，再删单。`
     )
@@ -791,7 +792,7 @@ export async function convertSampleToOrder(
         ]
       )
     }
-    logEvent(
+    await logEvent(
       order.id,
       'sample_convert',
       null,

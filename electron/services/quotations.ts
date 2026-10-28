@@ -4,7 +4,8 @@
  * 关键约定：报价单存在自己的表里，完全不参与销售额 / 毛利 / 待收款统计，
  * 也不会出现在订单列表里。它只有一个出口：转成正式订单。
  */
-import { getDb, nextNo, transact, transactAsync } from '../db'
+import { coreDb, getDb, transactAsync } from '../db'
+import { nextNo } from '../../core/next-no'
 import { mapQuotation, mapQuotationItem, mapCustomer } from '../db/mappers'
 import { getSettings } from './settings'
 import { createOrder, getOrder, assertSkuListUnique, assertChargeAmounts } from './orders'
@@ -323,11 +324,11 @@ function billForQuotation(customerId: number, input: QuotationInput, before?: Re
  * 保存报价单。整段写包在一个事务里：主表、明细「删旧插新」、版本冻结、历史是一件事，
  * 中途抛错（比如第 3 行明细没过校验）不能留下「明细被删光、只剩半张单」的现场。
  */
-export function saveQuotation(input: QuotationInput): QuotationDetail {
-  return transact(() => saveQuotationInner(input))
+export function saveQuotation(input: QuotationInput): Promise<QuotationDetail> {
+  return transactAsync(() => saveQuotationInner(input))
 }
 
-function saveQuotationInner(input: QuotationInput): QuotationDetail {
+async function saveQuotationInner(input: QuotationInput): Promise<QuotationDetail> {
   const db = getDb()
   const ts = now()
   // 明细闸门先过一遍再动库：删旧插新之前就知道哪一行不合规
@@ -474,7 +475,7 @@ function saveQuotationInner(input: QuotationInput): QuotationDetail {
     db.run('DELETE FROM quotation_items WHERE quotation_id = ?', [qId])
   } else {
     if (!rateDate) rateDate = localDate()
-    const qNo = nextNo('Q')
+    const qNo = await nextNo(coreDb, 'Q')
     const billJson = billForQuotation(input.customerId, input, null)
     const res = db.run(
       `INSERT INTO quotations(q_no, customer_id, status, result, currency, exchange_rate, exchange_rate_date, base_currency, incoterm,
@@ -866,7 +867,7 @@ export async function convertToOrder(
         `按第 ${targetRevision} 版转单后金额对不上：存档合计 ${snapGrand.toFixed(2)}，订单算出来 ${saved.grandTotal.toFixed(2)}。已回滚，请检查报价明细。`
       )
     }
-    logEvent(
+    await logEvent(
       order.id,
       'quotation_convert',
       null,

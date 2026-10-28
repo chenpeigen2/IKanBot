@@ -1,4 +1,5 @@
-import { getDb, nextNo, transact } from '../db'
+import { coreDb, getDb, transactAsync } from '../db'
+import { nextNo } from '../../core/next-no'
 import { mapPackingList, mapPackingListLine } from '../db/mappers'
 import { getSettings } from './settings'
 import { logEvent } from './events'
@@ -254,7 +255,7 @@ export function listPackingLists(orderId: number): PackingList[] {
   })
 }
 
-export function createPackingList(input: PackingListInput): PackingList[] {
+export async function createPackingList(input: PackingListInput): Promise<PackingList[]> {
   const db = getDb()
   assertOrderWritable(input.orderId, '装箱')
   if (input.lines.length === 0) throw new Error('装箱单至少要有一箱，先生成箱明细再保存')
@@ -282,9 +283,9 @@ export function createPackingList(input: PackingListInput): PackingList[] {
   // 跨批次查号放在超装校验之后：用户先看到「数量超了」这个更直接的问题
   for (const no of seenBoxNo) assertBoxNoFreeInOrder(input.orderId, no)
 
-  transact(() => {
+  await transactAsync(async () => {
     // 烧号进事务：插入失败（超装校验漏网、并发撞号）时号跟着回滚，不烧空号
-    const plNo = nextNo('PL')
+    const plNo = await nextNo(coreDb, 'PL')
     const res = db.run(
       `INSERT INTO packing_lists(order_id, pl_no, container_no, note, created_at, ship_status)
        VALUES(?,?,?,?,?,'packed')`,
@@ -318,14 +319,14 @@ export function createPackingList(input: PackingListInput): PackingList[] {
       )
     }
     // 新批次一落地就要回算订单状态（装箱单 = 已包装，或者还没装够 = 备货中）
-    applyShipStatus(input.orderId)
+    await applyShipStatus(input.orderId)
     // 留痕和批次在同一个事务里：提交成功但留痕失败，单据和历史就对不上了
-    logEvent(input.orderId, 'pl_create', null, null, `生成装箱单 ${plNo}（${input.lines.length} 箱）`)
+    await logEvent(input.orderId, 'pl_create', null, null, `生成装箱单 ${plNo}（${input.lines.length} 箱）`)
   })
   return listPackingLists(input.orderId)
 }
 
-export function deletePackingList(orderId: number, plId: number): PackingList[] {
+export async function deletePackingList(orderId: number, plId: number): Promise<PackingList[]> {
   const db = getDb()
   const cur = db.get(
     'SELECT pl_no, ship_status, voided_at FROM packing_lists WHERE id = ? AND order_id = ?',
@@ -350,10 +351,10 @@ export function deletePackingList(orderId: number, plId: number): PackingList[] 
       `装箱单 ${String(cur.pl_no)} 当前状态是「${SHIP_STATUS_LABEL[status]}」，不能删除——出运记录是对客户的凭据，必须留档。如果确实填错了，先把批次状态改回「已包装」再删，改动会留在操作历史里。`
     )
   }
-  transact(() => {
+  await transactAsync(async () => {
     db.run('DELETE FROM packing_lists WHERE id = ? AND order_id = ?', [plId, orderId])
-    applyShipStatus(orderId)
-    logEvent(orderId, 'pl_delete', null, null, `删除装箱单 ${String(cur.pl_no)}`)
+    await applyShipStatus(orderId)
+    await logEvent(orderId, 'pl_delete', null, null, `删除装箱单 ${String(cur.pl_no)}`)
   })
   return listPackingLists(orderId)
 }
@@ -364,7 +365,7 @@ export function deletePackingList(orderId: number, plId: number): PackingList[] 
  * 状态汇总、件数守恒和本批金额。作废不需要先把状态退回「已包装」：
  * 作废是承认这一批没走成，不是篡改出运凭据。
  */
-export function voidPackingList(orderId: number, plId: number, reason = ''): PackingList[] {
+export async function voidPackingList(orderId: number, plId: number, reason = ''): Promise<PackingList[]> {
   const db = getDb()
   const cur = db.get(
     'SELECT pl_no, voided_at FROM packing_lists WHERE id = ? AND order_id = ?',
@@ -383,10 +384,10 @@ export function voidPackingList(orderId: number, plId: number, reason = ''): Pac
   if (!String(reason ?? '').trim()) {
     throw new Error('作废批次必须写明原因（比如「订舱取消」「整批发错」）：这是发给客户的凭据，不留原因以后对不上账。')
   }
-  transact(() => {
+  await transactAsync(async () => {
     db.run('UPDATE packing_lists SET voided_at = ? WHERE id = ? AND order_id = ?', [now(), plId, orderId])
-    applyShipStatus(orderId)
-    logEvent(
+    await applyShipStatus(orderId)
+    await logEvent(
       orderId,
       'pl_void',
       null,
@@ -398,7 +399,7 @@ export function voidPackingList(orderId: number, plId: number, reason = ''): Pac
 }
 
 /** 撤销作废：点错了，或者这一批后来照常发了 */
-export function unvoidPackingList(orderId: number, plId: number, reason = ''): PackingList[] {
+export async function unvoidPackingList(orderId: number, plId: number, reason = ''): Promise<PackingList[]> {
   const db = getDb()
   const cur = db.get(
     'SELECT pl_no, voided_at FROM packing_lists WHERE id = ? AND order_id = ?',
@@ -410,10 +411,10 @@ export function unvoidPackingList(orderId: number, plId: number, reason = ''): P
   if (!String(reason ?? '').trim()) {
     throw new Error('撤销作废也要写明原因：作废记录是留档凭据，为什么翻案得能查到。')
   }
-  transact(() => {
+  await transactAsync(async () => {
     db.run('UPDATE packing_lists SET voided_at = NULL WHERE id = ? AND order_id = ?', [plId, orderId])
-    applyShipStatus(orderId)
-    logEvent(orderId, 'pl_unvoid', null, null, `撤销作废装箱单 ${String(cur.pl_no)}：${reason}（重新参与状态与件数汇总）`)
+    await applyShipStatus(orderId)
+    await logEvent(orderId, 'pl_unvoid', null, null, `撤销作废装箱单 ${String(cur.pl_no)}：${reason}（重新参与状态与件数汇总）`)
   })
   return listPackingLists(orderId)
 }
@@ -437,11 +438,11 @@ export interface PackingListInfoInput {
 }
 
 /** 编辑批次信息：柜号/船名/船期/封条/提单号 + 出运状态 + 实收数量 + 单据日期 */
-export function updatePackingListInfo(
+export async function updatePackingListInfo(
   orderId: number,
   plId: number,
   patch: PackingListInfoInput
-): PackingList[] {
+): Promise<PackingList[]> {
   const db = getDb()
   const cur = db.get('SELECT * FROM packing_lists WHERE id = ? AND order_id = ?', [plId, orderId]) as Record<
     string,
@@ -512,7 +513,7 @@ export function updatePackingListInfo(
   const ciVer = archivedCiVersion(orderId, String(cur.pl_no))
 
   const pick = (v: string | null | undefined, old: unknown) => (v === undefined ? String(old ?? '') : (v ?? ''))
-  transact(() => {
+  await transactAsync(async () => {
     db.run(
       `UPDATE packing_lists
        SET container_no = ?, vessel = ?, etd_date = ?, atd_date = ?, eta_date = ?,
@@ -536,7 +537,7 @@ export function updatePackingListInfo(
         orderId
       ]
     )
-    applyShipStatus(orderId)
+    await applyShipStatus(orderId)
     // 留痕入事务：改成功了历史却没记上，等于把「谁改的」这条证据弄丢了
     const parts: string[] = []
     const cmp = (label: string, next: string | number | null | undefined, old: unknown) => {
@@ -564,7 +565,7 @@ export function updatePackingListInfo(
         parts.push(`注意：这一批已出 CI 第 ${ciVer} 版存档，已发出的纸面不会跟着变，请核对后重出正确的一版`)
       }
     }
-    logEvent(
+    await logEvent(
       orderId,
       'pl_update',
       curStatus,
@@ -575,12 +576,12 @@ export function updatePackingListInfo(
   return listPackingLists(orderId)
 }
 
-export function updatePackingListLine(
+export async function updatePackingListLine(
   orderId: number,
   plId: number,
   lineId: number,
   patch: Partial<PackingListLine>
-): PackingList[] {
+): Promise<PackingList[]> {
   const db = getDb()
   assertBatchLinesEditable(orderId, plId)
   assertOrderWritable(orderId, '改装箱明细')
@@ -633,7 +634,7 @@ export function updatePackingListLine(
       : patch.netWeight !== undefined
         ? estFlag(gross, false)
         : (cur.gross_est as number | null)
-  transact(() => {
+  await transactAsync(async () => {
     db.run(
       `UPDATE packing_list_lines SET box_no=?, style_no=?, product_name=?, color=?, size=?, quantity=?,
         net_weight=?, gross_weight=?, gross_est=?, box_length=?, box_width=?, box_height=?
@@ -656,11 +657,11 @@ export function updatePackingListLine(
       ]
     )
     assertReceivedFitsLines(plId)
-    applyShipStatus(orderId)
+    await applyShipStatus(orderId)
     // 箱数/净重被改过也要留痕（报关单跟箱单一对不上的时候要拿凭据）
     const changes = describePlLineChange(cur, scale !== 1 ? { ...patch, netWeight: net, grossWeight: gross } : patch)
     if (changes) {
-      logEvent(orderId, 'pl_line_update', null, null, `修改装箱明细 ${cur.style_no} ${cur.color}/${cur.size}：${changes}`)
+      await logEvent(orderId, 'pl_line_update', null, null, `修改装箱明细 ${cur.style_no} ${cur.color}/${cur.size}：${changes}`)
     }
   })
   return listPackingLists(orderId)
@@ -683,11 +684,11 @@ function describePlLineChange(cur: Record<string, unknown>, patch: Partial<Packi
   return parts.join('；')
 }
 
-export function addPackingListLine(
+export async function addPackingListLine(
   orderId: number,
   plId: number,
   line: { boxNo?: string; styleNo?: string; productName?: string; color?: string; size?: string; quantity: number }
-): PackingList[] {
+): Promise<PackingList[]> {
   const db = getDb()
   assertBatchLinesEditable(orderId, plId)
   assertOrderWritable(orderId, '加装箱明细')
@@ -706,7 +707,7 @@ export function addPackingListLine(
   const unitNet = twin && twinQty > 0 && twin.net_weight != null ? Number(twin.net_weight) / twinQty : null
   const net = unitNet == null ? null : Number((unitNet * Number(line.quantity)).toFixed(2))
   const gross = net == null ? null : Number((net * getSettings().grossWeightFactor).toFixed(2))
-  transact(() => {
+  await transactAsync(async () => {
     db.run(
       `INSERT INTO packing_list_lines(packing_list_id, box_no, style_no, product_name, color, size, quantity,
         net_weight, gross_weight, gross_est, box_length, box_width, box_height)
@@ -727,8 +728,8 @@ export function addPackingListLine(
         twin?.box_height == null ? null : Number(twin.box_height)
       ]
     )
-    applyShipStatus(orderId)
-    logEvent(
+    await applyShipStatus(orderId)
+    await logEvent(
       orderId,
       'pl_line_add',
       null,
@@ -739,7 +740,7 @@ export function addPackingListLine(
   return listPackingLists(orderId)
 }
 
-export function deletePackingListLine(orderId: number, plId: number, lineId: number): PackingList[] {
+export async function deletePackingListLine(orderId: number, plId: number, lineId: number): Promise<PackingList[]> {
   const db = getDb()
   const lineCount = assertBatchLinesEditable(orderId, plId)
   assertOrderWritable(orderId, '删装箱明细')
@@ -749,12 +750,12 @@ export function deletePackingListLine(orderId: number, plId: number, lineId: num
   const cur = db.get('SELECT * FROM packing_list_lines WHERE id = ? AND packing_list_id = ?', [lineId, plId]) as
     | Record<string, unknown>
     | null
-  transact(() => {
+  await transactAsync(async () => {
     db.run('DELETE FROM packing_list_lines WHERE id = ? AND packing_list_id = ?', [lineId, plId])
     assertReceivedFitsLines(plId)
-    applyShipStatus(orderId)
+    await applyShipStatus(orderId)
     if (cur) {
-      logEvent(
+      await logEvent(
         orderId,
         'pl_line_remove',
         null,

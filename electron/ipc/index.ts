@@ -505,7 +505,7 @@ export function registerIpc(): void {
       )
     }
     const pdf = await htmlToPdf(payload.html, payload.docNo)
-    const saved = docsSvc.saveDocFile({
+    const saved = await docsSvc.saveDocFile({
       pdf,
       docNo: payload.docNo,
       kind: payload.kind,

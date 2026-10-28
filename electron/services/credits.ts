@@ -180,7 +180,7 @@ export async function applyCredit(input: ApplyCreditInput): Promise<CustomerCred
       [customerId, currency, amount, target.kind, target.id, appliedAt, note, actor, new Date().toISOString()]
     )
     if (target.kind === 'order') {
-      logEvent(
+      await logEvent(
         target.id,
         'credit_apply',
         null,
@@ -220,7 +220,7 @@ export async function reverseCredit(applicationId: number, reason = ''): Promise
       applicationId
     ])
     if (targetKind === 'order') {
-      logEvent(
+      await logEvent(
         targetId,
         'credit_reverse',
         null,
@@ -330,11 +330,11 @@ export async function reverseRefund(refundId: number, reason = ''): Promise<Cust
  * 目标单作废/取消时自动回退它的全部抵扣。
  * 调用方必须已经在事务里（本函数不另开事务，避免嵌套时错误地提前提交）。
  */
-export function reverseCreditsForTarget(
+export async function reverseCreditsForTarget(
   targetKind: 'order' | 'sample',
   targetId: number,
   reason: string
-): number {
+): Promise<number> {
   const db = getDb()
   const rows = db.all(
     `SELECT id, customer_id, currency, amount FROM credit_applications
@@ -354,13 +354,13 @@ export function reverseCreditsForTarget(
     total += Number(r.amount ?? 0)
   }
   if (targetKind === 'order') {
-    logEvent(targetId, 'credit_reverse', null, null, `目标单据作废/取消，预收抵扣回退 ${total.toFixed(2)}：${why}`)
+    await logEvent(targetId, 'credit_reverse', null, null, `目标单据作废/取消，预收抵扣回退 ${total.toFixed(2)}：${why}`)
   }
   return total
 }
 
 /** 目标单是否还有未撤销的预收抵扣（删单前的守门用） */
-export function hasActiveCredit(targetKind: 'order' | 'sample', targetId: number): boolean {
+export async function hasActiveCredit(targetKind: 'order' | 'sample', targetId: number): Promise<boolean> {
   return !!getDb().get(
     `SELECT 1 AS hit FROM credit_applications
      WHERE target_kind = ? AND target_id = ? AND reversed_at IS NULL LIMIT 1`,

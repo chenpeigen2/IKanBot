@@ -447,7 +447,7 @@ export async function reminders(): Promise<Reminder[]> {
       )
       // 口径只认 shipping 里那一份「工厂已交货件数」：以前这里自己写 SQL 用
       // 「状态非空」判定，结果被改回备货中的批次还算工厂已交，催单直接不响
-      const deliveredQty = factoryDeliveredQuantity(orderId)
+      const deliveredQty = await factoryDeliveredQuantity(orderId)
       const diff = daysTo(factoryRaw)
       const gone = ['shipped', 'cleared', 'delivered'].includes(String(r.ship_status))
       if (diff === null) {
