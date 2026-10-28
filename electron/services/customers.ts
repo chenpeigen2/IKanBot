@@ -92,6 +92,8 @@ export async function customerOrderBriefs(customerId: number): Promise<{
   paid: number
   /** 待收（含费用合计 − 已收） */
   remaining: number
+  /** 其中已用客户预收抵扣（不是现金到账，但这单的钱已经由客户账上的余额覆盖） */
+  creditApplied: number
   /** 这条是否计入上面的「订单数 / 成交额」（草稿、失效、作废不计） */
   counted: boolean
   createdAt: string
@@ -110,6 +112,9 @@ export async function customerOrderBriefs(customerId: number): Promise<{
     // 草稿 / 已失效 / 已作废的单在历史里保留，但不再向客户催款，待收按 0 显示
     // （口径见 src/shared/billing.ts，订单列表和客户页必须是同一个说法）
     remaining: shownRemaining(r.paymentStatus, r.receivable),
+    // 待收里已经由客户账上余额覆盖的那一块：不露出来，「待收 500 + 已收 500」看着像
+    // 还差 500 现金，实际那 500 早已抵扣掉，再催一遍就是重复收款
+    creditApplied: isBillingStatus(r.paymentStatus) ? r.creditApplied : 0,
     counted: isBillingStatus(r.paymentStatus),
     createdAt: r.createdAt
   }))

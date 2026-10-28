@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Modal, useToast, money, Empty, Button, LoadError, PromptModal } from '../ui'
+import { Modal, useToast, money, Empty, Button, LoadError, PromptModal, useLoadGuard } from '../ui'
 import { imageUrl } from '../imageUrl'
 import type { Product, ProductImage } from '../../../shared/types'
 import { CSV_BOM, looksGarbled, pickCsvDecode } from '../../../shared/csv'
@@ -62,13 +62,20 @@ export default function Products() {
   const [copyFrom, setCopyFrom] = useState<Product | null>(null)
   /** 读取失败不能装成「还没有商品」 */
   const [loadError, setLoadError] = useState('')
+  // 搜索/筛选并发在途时，只认最后一次请求的结果
+  const beginLoad = useLoadGuard()
 
   const load = async (kw = keyword) => {
+    // 连敲两次搜索、或搜索还没回就切「显示已停用」：先发的旧响应后到会盖掉新结果，
+    // 屏幕上留下一份和搜索框不对应的商品表
+    const { isCurrent } = beginLoad()
     try {
       const rows = await window.api.products.list(kw, includeInactive)
+      if (!isCurrent()) return
       setList(rows)
       setLoadError('')
     } catch (e) {
+      if (!isCurrent()) return
       setLoadError((e as Error).message || '商品列表没加载出来')
     }
   }

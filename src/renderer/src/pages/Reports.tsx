@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useToast, money, Empty, Button, Card, LoadError } from '../ui'
+import { useToast, money, Empty, Button, Card, LoadError, useLoadGuard } from '../ui'
 import type { CustomerReceivable, ExportKind, MonthlyReportRow } from '../../../shared/types'
 
 /** 一行取整到分；合计只吃这些取整后的行值（口径：所见即所算，别让浮点在小数点后打架） */
@@ -9,6 +9,7 @@ function r2(v: number): number {
 
 export default function Reports() {
   const toast = useToast()
+  const beginLoad = useLoadGuard()
   const [rows, setRows] = useState<MonthlyReportRow[]>([])
   const [owed, setOwed] = useState<CustomerReceivable[]>([])
   const [settings, setSettings] = useState<any>(null)
@@ -17,20 +18,25 @@ export default function Reports() {
   const [loadError, setLoadError] = useState('')
 
   const load = useCallback(async () => {
+    // 重算/重试并发时只认最后一次：旧的月报响应后到会把刚点出来的结果盖回去，
+    // 顺手把 loading 关掉，看着像算完了
+    const { isCurrent } = beginLoad()
     try {
       const [r, o, s] = await Promise.all([
         window.api.report.monthly(),
         window.api.report.receivables(),
         window.api.settings.get()
       ])
+      if (!isCurrent()) return
       setRows(r)
       setOwed(o)
       setSettings(s)
       setLoadError('')
     } catch (e) {
+      if (!isCurrent()) return
       setLoadError((e as Error).message || '报表没算出来')
     } finally {
-      setLoading(false)
+      if (isCurrent()) setLoading(false)
     }
   }, [])
 
@@ -50,6 +56,7 @@ export default function Reports() {
       badDebt: r2(a.badDebt + r2(r.badDebt)),
       received: r2(a.received + r2(r.received)),
       refundCount: a.refundCount + r.refundCount,
+      unconvertedCount: a.unconvertedCount + r.unconvertedCount,
       orders: a.orders + r.orders,
       missingCostOrders: a.missingCostOrders + r.missingCostOrders
     }),
@@ -62,6 +69,7 @@ export default function Reports() {
       badDebt: 0,
       received: 0,
       refundCount: 0,
+      unconvertedCount: 0,
       orders: 0,
       missingCostOrders: 0
     }
@@ -137,9 +145,14 @@ export default function Reports() {
             <div className="stat-value">{money(totals.received, cur)}</div>
             {/* 退款是钱流出，没有从收款里减掉：说破差异，老板才不至于拿这张表去对银行流水时对不上 */}
             <div className="stat-hint">
-              {totals.refundCount
-                ? `按到账月合计 · 含打样费实收 · 不含退给客户的 ${totals.refundCount} 笔`
-                : '按到账月合计 · 含打样费实收'}
+              {[
+                '按到账月合计',
+                '含打样费实收',
+                totals.refundCount ? `不含退给客户的 ${totals.refundCount} 笔` : '',
+                // 外币流水没有汇率就折不成基准币：折不出来的笔数说出来，
+                // 这张表和银行流水对不上时才知道差在哪
+                totals.unconvertedCount ? `另有 ${totals.unconvertedCount} 笔没填汇率、未折入` : ''
+              ].filter(Boolean).join(' · ')}
             </div>
           </div>
           <div className="stat">
@@ -230,6 +243,11 @@ export default function Reports() {
                         {r.refundCount ? (
                           <span className="faint">
                             （另退 {r.refundCount} 笔 {r.refundText}，未折{cur}）
+                          </span>
+                        ) : null}
+                        {r.unconvertedCount ? (
+                          <span className="faint">
+                            （{r.unconvertedCount} 笔没填汇率，没折进来）
                           </span>
                         ) : null}
                       </td>

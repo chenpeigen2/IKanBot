@@ -232,13 +232,18 @@ export function creditsCore(db: Db) {
     const amount = Number(row.amount ?? 0)
     const currency = String(row.currency ?? '')
     await db.transact(async () => {
-      await db.run('UPDATE credit_applications SET reversed_at = ?, reversed_reason = ? WHERE id = ?', [
-        new Date().toISOString(),
-        why,
-        applicationId
-      ])
+      // CAS 写：从读出 reversed_at 到写回之间，另一次点击可能已经把这笔撤了。
+      // 裸 UPDATE 会把对方的原因盖掉，历史里多出两条「撤销」而余额只回来一次
+      const done = await db.run(
+        'UPDATE credit_applications SET reversed_at = ?, reversed_reason = ? WHERE id = ? AND reversed_at IS NULL',
+        [new Date().toISOString(), why, applicationId]
+      )
+      if (done.changes !== 1) {
+        throw bizError('这笔预收抵扣刚刚已经被撤销过了（多半是两个人同时点了撤销），本次操作没有改动任何数据。')
+      }
       if (targetKind === 'order') {
-        await logEvent(db, 
+        await logEvent(
+          db,
           targetId,
           'credit_reverse',
           null,
@@ -328,11 +333,15 @@ export function creditsCore(db: Db) {
     const why = String(reason ?? '').trim()
     if (!why) throw bizError('撤销退款要写原因（例如“水单录错，钱没退出去”），操作历史要留痕。')
     const customerId = Number(row.customer_id)
-    await db.run('UPDATE customer_refunds SET reversed_at = ?, reversed_reason = ? WHERE id = ?', [
-      new Date().toISOString(),
-      why,
-      refundId
-    ])
+    // CAS 写：读出来时还没撤销，写回去这中间可能已经被撤过一次（后端多人同时点）。
+    // 裸 UPDATE 会把对方的原因盖掉，台账上多一条撤销、余额只回来一次
+    const done = await db.run(
+      'UPDATE customer_refunds SET reversed_at = ?, reversed_reason = ? WHERE id = ? AND reversed_at IS NULL',
+      [new Date().toISOString(), why, refundId]
+    )
+    if (done.changes !== 1) {
+      throw bizError('这笔退款刚刚已经被撤销过了（多半是两个人同时点了撤销），本次操作没有改动任何数据。')
+    }
     return await moneyOf().customerCreditBalance(customerId)
   }
 

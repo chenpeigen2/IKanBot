@@ -32,6 +32,7 @@
 import { localMonthOf, localDateOf, localDate } from '../src/shared/date'
 import { ciNoOf } from '../src/shared/documents'
 import { NON_BILLING_STATUSES, isBillingStatus } from '../src/shared/billing'
+import { settingsCore } from './settings'
 import type {
   CustomerCreditApplication,
   CustomerCreditCurrency,
@@ -56,6 +57,50 @@ export function parseCharges(v: unknown): QuotationCharge[] {
   } catch {
     return []
   }
+}
+
+/**
+ * 费用行变更说明（人话），订单和报价单的留痕共用这一份。
+ *
+ * 不能按名称建 Map 比对：两张「运费」行改其中一张，Map 会互相覆盖，
+ * 留痕写成「运费 300 → 50」却没说动的是哪一张、另一张去哪了。
+ * 这里按名称分组、组内金额当多重集配对：相等的先消掉，剩下的才是真的增/删/改。
+ *
+ * @param word 名称前的限定词，订单信息变更里要写「新增费用 运费 100」，
+ *             改费用行的留痕已经包在「修改费用：」里，就只要「新增 运费 100」
+ */
+export function describeChargeChange(
+  oldCharges: QuotationCharge[],
+  newCharges: QuotationCharge[],
+  word = ''
+): string[] {
+  const parts: string[] = []
+  const labels = [...new Set([...oldCharges, ...newCharges].map((c) => c.label))]
+  for (const label of labels) {
+    const olds = oldCharges
+      .filter((c) => c.label === label)
+      .map((c) => Number(c.amount))
+      .sort((a, b) => a - b)
+    const news = newCharges
+      .filter((c) => c.label === label)
+      .map((c) => Number(c.amount))
+      .sort((a, b) => a - b)
+    const pool = [...olds]
+    const changed: number[] = []
+    for (const amt of news) {
+      const i = pool.indexOf(amt)
+      if (i >= 0) pool.splice(i, 1)
+      else changed.push(amt)
+    }
+    // 多出来的新金额和没配掉的老金额按序配对说成「改」，两边数量一样就是纯改、多出来的是新增
+    for (const amt of changed) {
+      const old = pool.shift()
+      if (old === undefined) parts.push(`新增${word} ${label} ${amt}`)
+      else parts.push(word ? `${word} ${label} ${old} → ${amt}` : `${label} ${old} → ${amt}`)
+    }
+    for (const amt of pool) parts.push(`删除${word} ${label} ${amt}`)
+  }
+  return parts
 }
 
 /** 参与金额计算的一条明细 */
@@ -289,6 +334,25 @@ export function depositDueOf(
   )
 }
 
+/**
+ * 一笔钱折成基准币：折不出就给 null，不许拿 0 或原币凑一个数。
+ *
+ * 三种情况：本币单不需要汇率（老数据里汇率是默认 0，折成 0 就凭空少一笔钱）；
+ * 外币单汇率没填过（≤0）折不出 → null，由调用方露出「N 笔未折算」；
+ * 外币单汇率正好 1:1 = 建单时没人盘过，那是「汇率待修」提醒负责追人的事，
+ * 这里照旧按 1 折——待收、销售额、毛利用的是同一个存值，现金流不许偷偷换一套规矩。
+ */
+export function baseAmountOf(
+  currency: string,
+  baseCurrency: string,
+  rate: number,
+  amount: number
+): number | null {
+  if (currency === baseCurrency) return amount
+  if (!(rate > 0)) return null
+  return amount * rate
+}
+
 /** 汇总时的筛选条件 */
 export interface MoneyListFilter {
   /** 只要这些订单（已排除的默认不算） */
@@ -351,7 +415,8 @@ export interface CashFlowRow {
   paidAt: string
   exchangeRate: number
   amount: number
-  amountBase: number
+  /** 折成基准币；汇率没填过就是 null（宁可空着，不拿 1:1 或 0 凑一个数） */
+  amountBase: number | null
   method: string
   bankRef: string
   note: string
@@ -857,6 +922,7 @@ export function moneyCore(db: Db) {
    * 传 customerId 时两个分支各自过滤：混用参数会让一张水单带着全公司的钱出去。
    */
   async function cashFlowRows(filter: { customerId?: number } = {}): Promise<CashFlowRow[]> {
+    const base = (await settingsCore(db).get()).baseCurrency
     const cash = notInStatuses('o.payment_status', CASHFLOW_EXCLUDED_STATUSES)
     const orderWhere = [cash.sql]
     const orderParams: (string | number)[] = [...cash.params]
@@ -891,6 +957,7 @@ export function moneyCore(db: Db) {
       const status = String(r.doc_status ?? '')
       const exchangeRate = Number(r.exchange_rate ?? 0)
       const amount = Number(r.amount ?? 0)
+      const currency = String(r.currency ?? '')
       return {
         docType,
         docId: Number(r.doc_id ?? 0),
@@ -901,11 +968,13 @@ export function moneyCore(db: Db) {
           docType === 'sample'
             ? `打样·${SAMPLE_STATUS_LABEL[status as keyof typeof SAMPLE_STATUS_LABEL] ?? status}`
             : PAYMENT_STATUS_LABEL[status as keyof typeof PAYMENT_STATUS_LABEL] ?? status,
-        currency: String(r.currency ?? ''),
+        currency,
         paidAt: String(r.paid_at ?? ''),
         exchangeRate,
         amount,
-        amountBase: amount * exchangeRate,
+        // 汇率没填过的外币单折不出基准币：给 null，让报表露出「N 笔未折算」，
+        // 而不是悄悄算成 0（银行里真有过这笔钱）
+        amountBase: baseAmountOf(currency, base, exchangeRate, amount),
         method: String(r.method ?? ''),
         bankRef: String(r.bank_ref ?? ''),
         note: String(r.note ?? '')
@@ -949,17 +1018,24 @@ export function moneyCore(db: Db) {
    * 迟早会漂出两个数（红线：算钱的 SQL 不许在报表里另起一套）。
    * 已作废/失效单的钱真到账了就是到账了，所以这里用 CASHFLOW 状态集合。
    * 打样费（R25）也走同一份流水：实收落 payments，抵扣不落。
+   * `unconverted` 是这个月有几笔**没能折进** amount 的流水（外币单汇率没填）：
+   * 钱确实到过账，只是折不出基准币，必须让界面把笔数露出来，而不是让它从合计里静默消失。
    */
-  async function receivedByMonth(): Promise<{ month: string; amount: number }[]> {
-    const by = new Map<string, number>()
+  async function receivedByMonth(): Promise<{ month: string; amount: number; unconverted: number }[]> {
+    const by = new Map<string, { amount: number; unconverted: number }>()
     for (const r of await cashFlowRows()) {
       // 老数据里可能有空日期或非 YYYY-MM-DD 的收款日：这些钱认到账，但不认月份，
       // 不能让它冒出一个 "null" 月把报表撑成垃圾行
       const m = localMonthOf(r.paidAt)
       if (!/^\d{4}-\d{2}$/.test(m)) continue
-      by.set(m, (by.get(m) ?? 0) + r.amountBase)
+      const cur = by.get(m) ?? { amount: 0, unconverted: 0 }
+      if (r.amountBase === null) cur.unconverted += 1
+      else cur.amount += r.amountBase
+      by.set(m, cur)
     }
-    return [...by.entries()].map(([month, amount]) => ({ month, amount })).sort((a, b) => b.month.localeCompare(a.month))
+    return [...by.entries()]
+      .map(([month, v]) => ({ month, amount: v.amount, unconverted: v.unconverted }))
+      .sort((a, b) => b.month.localeCompare(a.month))
   }
 
   /**

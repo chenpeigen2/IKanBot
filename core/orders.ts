@@ -16,12 +16,12 @@ import { settingsCore } from './settings'
 import { applyShipStatus, isShipStatusDerived, shipmentSummary } from './shipping'
 import { creditsCore } from './credits'
 import { samplesCore } from './samples'
-import { computeOrderMoney, costInOrderCurrency, moneyCore, notInStatuses, parseCharges } from './money'
+import { computeOrderMoney, costInOrderCurrency, depositDueOf, describeChargeChange, moneyCore, notInStatuses, parseCharges } from './money'
 import { mapCustomer, mapEvent, mapOrder, mapOrderItem, mapOrderPhoto, mapPackingList, mapPackingListLine, mapPayment, mapSettlement, mapSkuSummary } from '../electron/db/mappers'
 import { likeAny } from '../electron/services/search'
 import { addDays, daysBetween, isLocalDate, localDate, localDayAfterUtc, localDayStartUtc } from '../src/shared/date'
 import { billPartyOf, emptyParty, parseParty, patchParty, shipPartyOf, stringifyParty } from '../src/shared/party'
-import { isBillingStatus, NON_BILLING_STATUSES } from '../src/shared/billing'
+import { isBillingStatus, NON_BILLING_STATUSES, shownRemaining } from '../src/shared/billing'
 import { assertDepositRatio, assertDocNo, assertQuantity, assertUnitPrice } from '../src/shared/guards'
 import { PAYMENT_STATUS_LABEL, SETTLEMENT_KIND_LABEL, SHIP_STATUS_LABEL, SHIP_STATUS_ORDER } from '../src/shared/types'
 import type {
@@ -248,6 +248,7 @@ export function ordersCore(db: Db) {
     exchangeRate: number
     /** 待收（原币） */
     remaining: number
+    paymentStatus: string
     expectedShipDate: string | null
     shipStatus: ShipStatus
   }
@@ -271,6 +272,8 @@ export function ordersCore(db: Db) {
    */
   function sortRows<T extends SortKeys>(list: T[], sort: OrderSort): T[] {
     const base = (o: T) => o.totalAmount * o.exchangeRate
+    // 待收排序吃的是界面那个数（shownRemaining）：不催款的单算 0，多收的不许倒挂成负数抢前排
+    const owedBase = (o: T) => shownRemaining(o.paymentStatus, o.remaining) * o.exchangeRate
     const byCreated = (a: T, b: T) =>
       a.createdAt === b.createdAt ? b.id - a.id : a.createdAt < b.createdAt ? 1 : -1
     switch (sort) {
@@ -287,8 +290,10 @@ export function ordersCore(db: Db) {
           return av === bv ? byCreated(a, b) : av < bv ? -1 : 1
         })
       case 'owed_desc':
+        // 按「屏幕上那个待收」排：作废/草稿/失效的单不催款，列表上显示「—」，
+        // 拿它们的 remaining 参与比较会把一张不催的单顶到第一排
         return [...list].sort(
-          (a, b) => b.remaining * b.exchangeRate - a.remaining * a.exchangeRate || byCreated(a, b)
+          (a, b) => owedBase(b) - owedBase(a) || byCreated(a, b)
         )
       case 'overdue_first':
         return [...list].sort(
@@ -1049,19 +1054,10 @@ export function ordersCore(db: Db) {
     cmp('工厂交期', 'factoryDueDate', 'factory_due_date')
     cmp('截关日', 'cutOffDate', 'cut_off_date')
     cmp('ETD', 'etdDate', 'etd_date')
-    // 费用行也要留痕（运费改了多少）
+    // 费用行也要留痕（运费改了多少）。两张同名行必须按多重集配对，
+    // 建 Map 会互相覆盖，历史里就说不清动的是哪一张、另一张去哪了
     if (input.charges !== undefined) {
-      const oldCharges = parseCharges(before.charges)
-      const oldMap = new Map(oldCharges.map((c) => [c.label, c.amount]))
-      const newMap = new Map(input.charges.filter((c) => c.label.trim()).map((c) => [c.label, c.amount]))
-      for (const [label, amt] of newMap) {
-        const old = oldMap.get(label)
-        if (old === undefined) parts.push(`新增费用 ${label} ${amt}`)
-        else if (Math.abs(old - amt) > 0.0001) parts.push(`费用 ${label} ${old} → ${amt}`)
-      }
-      for (const [label] of oldMap) {
-        if (!newMap.has(label)) parts.push(`删除费用 ${label}`)
-      }
+      parts.push(...describeChargeChange(parseCharges(before.charges), input.charges.filter((c) => c.label.trim()), '费用'))
     }
     if (parts.length === 0) return '修改订单信息'
     return `修改订单：${parts.join('；')}`
@@ -1278,40 +1274,6 @@ export function ordersCore(db: Db) {
         .sort()
         .join('\u0001')
     return snap(oldCharges) !== snap(newCharges)
-  }
-
-  /** 费用行变更说明（人话）。
-   * 不能按名称建 Map 比对：两张「运费」行改其中一张，Map 会互相覆盖，
-   * 留痕写成「运费 300 → 50」却没说动的是哪一张、另一张去哪了。
-   * 这里按名称分组、组内金额当多重集配对：相等的先消掉，剩下的才是真的增/删/改。 */
-  function describeChargeChange(oldCharges: QuotationCharge[], newCharges: QuotationCharge[]): string[] {
-    const parts: string[] = []
-    const labels = [...new Set([...oldCharges, ...newCharges].map((c) => c.label))]
-    for (const label of labels) {
-      const olds = oldCharges
-        .filter((c) => c.label === label)
-        .map((c) => Number(c.amount))
-        .sort((a, b) => a - b)
-      const news = newCharges
-        .filter((c) => c.label === label)
-        .map((c) => Number(c.amount))
-        .sort((a, b) => a - b)
-      const pool = [...olds]
-      const changed: number[] = []
-      for (const amt of news) {
-        const i = pool.indexOf(amt)
-        if (i >= 0) pool.splice(i, 1)
-        else changed.push(amt)
-      }
-      // 多出来的新金额和没配掉的老金额按序配对说成「改」，两边数量一样就是纯改、多出来的是新增
-      for (const amt of changed) {
-        const old = pool.shift()
-        if (old === undefined) parts.push(`新增 ${label} ${amt}`)
-        else parts.push(`${label} ${old} → ${amt}`)
-      }
-      for (const amt of pool) parts.push(`删除 ${label} ${amt}`)
-    }
-    return parts
   }
 
   /* ---------------- 订单行 ---------------- */
@@ -2245,9 +2207,13 @@ export function ordersCore(db: Db) {
     // 负数也不算：那是费用/折扣把货值抵穿了，方向是「该退客户钱」，
     // 标成结清正好把老板最不能吃的那口假象做出来（待收界面本来就把它收在 0）。
     const offsetToZero = Math.abs(total) <= 0.001 && money.goodsValue > 0.001
+    // 定金还差多少只认 depositDueOf 那一份算术（工作台待收四桶、催定金、压制尾款共用它）：
+    // 以前这里只算 paid+抵扣、不算核销，短款核销把定金抵平的单会永远停在「已确认」，
+    // 而同一个客户在同一屏上看到的定金桶已经是 0——一个数两张嘴。
+    const depositLeft = depositDueOf(money)
     if (offsetToZero || (total > 0.001 && paid + writtenOff + creditApplied >= total - 0.001)) next = 'settled'
-    else if (deposit > 0 && paid + creditApplied >= deposit - 0.001) next = 'paid'
-    else if (paid + creditApplied > 0) next = 'partial'
+    else if (deposit > 0 && depositLeft <= 0.001) next = 'paid'
+    else if (paid + writtenOff + creditApplied > 0) next = 'partial'
     else next = status === 'sent' ? 'sent' : 'confirmed'
 
     if (next !== status) {
@@ -2362,13 +2328,36 @@ export function ordersCore(db: Db) {
         )
       }
     }
+    // 手工勾「已结清」但按流水算还欠：这单会从应收、月报、催款里整体消失，差额没人再追。
+    // 所以原因必填，并把「还差多少」钉进留痕——将来对不上账，这条历史要说清点的是谁、差多少。
+    // 用的就是 recomputePaymentStatus 那一份待收（grandTotal − 已收 − 净核销 − 预收抵扣），
+    // 不许在这里再写一条公式：两套算术迟早一个说欠一个说不欠。
+    let settleGap = ''
+    if (next === 'settled') {
+      const settleRow = await db.get('SELECT charges, deposit_ratio, currency FROM orders WHERE id = ?', [orderId]) as
+        | { charges: string | null; deposit_ratio: number | null; currency: string }
+        | null
+      const money = (
+        await moneyOf().moneyForOrders([
+          { id: orderId, charges: settleRow?.charges, depositRatio: Number(settleRow?.deposit_ratio ?? 0) }
+        ])
+      ).get(orderId)!
+      if (money.remaining > 0.001) {
+        if (!note.trim()) {
+          throw bizError(
+            `这张单按流水还欠 ${money.remaining.toFixed(2)} ${settleRow?.currency ?? ''}，不能直接勾「已结清」：请先在收款/核销里把这笔做平；确实不用再收（线下收款未入账、协商免尾款…）请写明原因。`
+          )
+        }
+        settleGap = `（按流水仍欠 ${money.remaining.toFixed(2)} ${settleRow?.currency ?? ''}）`
+      }
+    }
     await db.transact(async () => {
       // 改成草稿/失效就退出应收口径：抵在这张单上的客户预收无处可落，先退回余额
       if (!isBillingStatus(next)) {
         await creditsOf().reverseCreditsForTarget('order', orderId, `订单转为「${PAYMENT_STATUS_LABEL[next]}」，预收抵扣回退`)
       }
       await db.run('UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?', [next, now(), orderId])
-      await logEvent(db, orderId, 'payment_status', cur.payment_status, next, note)
+      await logEvent(db, orderId, 'payment_status', cur.payment_status, next, note + settleGap)
       // 失效单改回计费状态：预收来源从「全部到账」收回成「只有多收的部分」，
       // 已经抵出去的钱可能就多于客户实际多付的了
       if (isBillingStatus(next)) await creditsOf().assertCreditSolvent(cur.customer_id)

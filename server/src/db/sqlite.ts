@@ -8,6 +8,7 @@ export class SqliteDb implements Db {
   readonly kind = 'sqlite' as const
   private db: Database
   private depth = 0
+  private seq = 0
 
   constructor(file: string) {
     const path = resolve(file)
@@ -37,13 +38,26 @@ export class SqliteDb implements Db {
     this.db.exec(sql)
   }
 
+  /**
+   * 事务：最外层 BEGIN、嵌套 SAVEPOINT，语义与 electron/db 完全一致。
+   *
+   * 存档点标签只增不复用（RELEASE 会连带删掉它之后开的所有存档点，同名两条链会互相抹掉回滚点）；
+   * 「连接在事务里、本地一层都没开」直接报错——那说明这层事务是别处开的（手写 BEGIN 或上次提交
+   * 失败留下的残事务），把这段并进去会让两边回滚互相牵连。
+   */
   async transact<T>(fn: () => Promise<T>): Promise<T> {
     // 以数据库自己的状态为准：调用方可能手写了 BEGIN
     const top = !this.db.inTransaction
-    const tag = `tx_${this.depth}`
+    if (!top && this.depth === 0) {
+      throw new Error(
+        '事务插队：这个连接已经在事务里，但本地没有任何在途事务，这段写入不能并进别人的事务。' +
+          '多半是别处手写了 BEGIN，或上一次提交失败后残事务没清——请先找到那一层，别把两段账并成一笔。'
+      )
+    }
+    const tag = `tx_${this.seq++}`
+    this.db.exec(top ? 'BEGIN' : `SAVEPOINT ${tag}`)
     this.depth++
     try {
-      this.db.exec(top ? 'BEGIN' : `SAVEPOINT ${tag}`)
       const result = await fn()
       this.db.exec(top ? 'COMMIT' : `RELEASE SAVEPOINT ${tag}`)
       return result

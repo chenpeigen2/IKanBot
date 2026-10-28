@@ -345,6 +345,7 @@ export function mapDashboard(r: Row): DashboardStats {
     monthProfit: r.month_profit == null ? null : num(r.month_profit),
     monthProfitReliable: true,
     monthReceived: num(r.month_received),
+    monthUnconverted: num(r.month_unconverted),
     monthRefunded: num(r.month_refunded),
     monthNewOrders: num(r.month_new_orders),
     // 待收拆分与坏账是内存里算出来的，由 services/dashboard.ts 覆盖这几个 0
@@ -368,6 +369,7 @@ export function mapMonthlyReport(r: Row): MonthlyReportRow {
     shortage: num(r.shortage),
     badDebt: num(r.bad_debt),
     received: num(r.received),
+    unconvertedCount: num(r.unconverted_count),
     refundCount: num(r.refund_count),
     refundText: str(r.refund_text),
     missingCostOrders: num(r.missing_cost_orders)

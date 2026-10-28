@@ -1,4 +1,4 @@
-import { coreDb, dataDir, getDb, imagesDir } from '../db'
+import { coreDb, dataDir, getDb } from '../db'
 import type { AppSettings, BankAccount, Currency } from '../../src/shared/types'
 import { parseSettings, settingsCore } from '../../core/settings'
 
@@ -45,12 +45,6 @@ export function defaultBanks(currencies: Currency[]): BankAccount[] {
     swift: '',
     address: ''
   }))
-}
-
-export function companyLogoPath(): string {
-  const s = getSettings()
-  if (!s.company.logoFile) return ''
-  return `${imagesDir()}/${s.company.logoFile}`
 }
 
 export function dataRoot(): string {

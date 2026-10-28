@@ -43,8 +43,50 @@ export function getDb(): Database {
   return db
 }
 
-/** transact 的嵌套深度：只用来给 SAVEPOINT 起不重名的标签 */
+/** 在途事务的嵌套深度：用来认出「连接说在事务里，可我们一层都没开」的插队 */
 let txDepth = 0
+/** SAVEPOINT 标签计数器：只增不复用 */
+let txSeq = 0
+
+/**
+ * 打开一层事务：最外层 BEGIN，嵌套层 SAVEPOINT。
+ *
+ * 标签只增不复用：RELEASE 会连带删掉它之后开的所有存档点，两条链共用一个名字
+ * 等于把对方的回滚点抹掉——剩下的写入就只能整段回滚或一路提交。
+ *
+ * 插队守卫：连接已经在事务里、本地却一层事务都没开，说明这层事务不是 transact 开的
+ * （别处手写的 BEGIN，或上次 COMMIT 抛错留在原地）。这时发 SAVEPOINT 是把这段并进别人的尾巴：
+ * 对方回滚会连累这段，这段报错也会把对方的活一起带走。宁可当场报错，也不悄悄并进去。
+ */
+function txOpen(database: Database): { top: boolean; tag: string } {
+  const top = !database.inTransaction
+  if (!top && txDepth === 0) {
+    throw new Error(
+      '事务插队：这个连接已经在事务里，但本地没有任何在途事务，这段写入不能并进别人的事务。' +
+        '多半是别处手写了 BEGIN，或上一次提交失败后残事务没清——请先找到那一层，别把两段账并成一笔。'
+    )
+  }
+  const tag = `tx_${txSeq++}`
+  database.exec(top ? 'BEGIN' : `SAVEPOINT ${tag}`)
+  // BEGIN 自己抛错就不进计数：否则深度会和连接的真实状态越差越远
+  txDepth++
+  return { top, tag }
+}
+
+/** 提交这一层（最外层 COMMIT，嵌套层 RELEASE） */
+function txCommit(database: Database, layer: { top: boolean; tag: string }): void {
+  database.exec(layer.top ? 'COMMIT' : `RELEASE SAVEPOINT ${layer.tag}`)
+}
+
+/** 回滚这一层：最外层只在连接还真在事务里时 ROLLBACK，嵌套层回到自己的存档点 */
+function txRollback(database: Database, layer: { top: boolean; tag: string }): void {
+  if (layer.top) {
+    if (database.inTransaction) database.exec('ROLLBACK')
+  } else {
+    database.exec(`ROLLBACK TO SAVEPOINT ${layer.tag}`)
+    database.exec(`RELEASE SAVEPOINT ${layer.tag}`)
+  }
+}
 
 /**
  * 事务包装：里面的代码抛错就整体回滚，不会留下「主表改了、明细被删了没插回去」这种半截单。
@@ -56,23 +98,15 @@ let txDepth = 0
  */
 export function transact<T>(fn: () => T): T {
   const database = getDb()
-  const top = !database.inTransaction
-  const tag = `tx_${txDepth}`
-  txDepth++
+  const layer = txOpen(database)
   try {
-    database.exec(top ? 'BEGIN' : `SAVEPOINT ${tag}`)
     const result = fn()
-    database.exec(top ? 'COMMIT' : `RELEASE SAVEPOINT ${tag}`)
+    // COMMIT 本身也可能抛错（磁盘满等）：深度只在 finally 里走一次，
+    // 旧写法「成功路径先减、catch 再减」会在 COMMIT 抛错时双递减，SAVEPOINT 标签错乱
+    txCommit(database, layer)
     return result
   } catch (e) {
-    // COMMIT 本身也可能抛错（磁盘满等）：深度只在这里和 finally 里各走一条路，
-    // 旧写法「成功路径先减、catch 再减」会在 COMMIT 抛错时双递减，SAVEPOINT 标签错乱
-    if (top) {
-      if (database.inTransaction) database.exec('ROLLBACK')
-    } else {
-      database.exec(`ROLLBACK TO SAVEPOINT ${tag}`)
-      database.exec(`RELEASE SAVEPOINT ${tag}`)
-    }
+    txRollback(database, layer)
     throw e
   } finally {
     txDepth--
@@ -176,24 +210,16 @@ export const coreDb: Db = {
   async exec(sql) {
     getDb().exec(sql)
   },
-  // 与上面的 transact 共用 txDepth：两条路混用时 SAVEPOINT 标签也不能撞
+  // 与上面的同步 transact 共用 txDepth/txSeq：两条路混用时存档点也不能撞
   async transact<T>(fn: () => Promise<T>): Promise<T> {
     const database = getDb()
-    const top = !database.inTransaction
-    const tag = `tx_${txDepth}`
-    txDepth++
+    const layer = txOpen(database)
     try {
-      database.exec(top ? 'BEGIN' : `SAVEPOINT ${tag}`)
       const result = await fn()
-      database.exec(top ? 'COMMIT' : `RELEASE SAVEPOINT ${tag}`)
+      txCommit(database, layer)
       return result
     } catch (e) {
-      if (top) {
-        if (database.inTransaction) database.exec('ROLLBACK')
-      } else {
-        database.exec(`ROLLBACK TO SAVEPOINT ${tag}`)
-        database.exec(`RELEASE SAVEPOINT ${tag}`)
-      }
+      txRollback(database, layer)
       throw e
     } finally {
       txDepth--

@@ -12,7 +12,7 @@ import { nextNo } from './next-no'
 import { logEvent } from './events'
 import { settingsCore } from './settings'
 import { ordersCore } from './orders'
-import { computeOrderMoney, costInOrderCurrency } from './money'
+import { computeOrderMoney, costInOrderCurrency, describeChargeChange } from './money'
 import { mapQuotation, mapQuotationItem, mapCustomer } from '../electron/db/mappers'
 import { likeAny } from '../electron/services/search'
 import { billPartyOf, emptyParty, parseParty, patchParty, stringifyParty } from '../src/shared/party'
@@ -596,16 +596,9 @@ export function quotationsCore(db: Db) {
     for (const [k, oi] of oldMap) {
       if (!usedOld.has(k)) parts.push(`删除 ${k.replace(/\|/g, '/')} ×${oi.quantity}`)
     }
-    const oldChargeMap = new Map(oldCharges.map((c) => [c.label, c.amount]))
-    const newChargeMap = new Map(newCharges.filter((c) => c.label.trim()).map((c) => [c.label, c.amount]))
-    for (const [label, amt] of newChargeMap) {
-      const old = oldChargeMap.get(label)
-      if (old === undefined) parts.push(`新增费用 ${label} ${amt}`)
-      else if (Math.abs(old - amt) > 0.0001) parts.push(`费用 ${label} ${old} → ${amt}`)
-    }
-    for (const [label, amt] of oldChargeMap) {
-      if (!newChargeMap.has(label)) parts.push(`删除费用 ${label} ${amt}`)
-    }
+    // 和订单同一份多重集比对：两张「运费」行改一张，Map 会把它们叠成一条，
+    // 历史里看不出到底动了哪一张
+    parts.push(...describeChargeChange(oldCharges, newCharges.filter((c) => c.label.trim()), '费用'))
     if (parts.length === 0) return '修改报价单'
     return `修改报价单：${parts.join('；')}`
   }
@@ -713,18 +706,22 @@ export function quotationsCore(db: Db) {
       status === 'confirmed' ? (cur.status === 'confirmed' ? cur.confirmed_at ?? null : ts) : null
     // 只改结果不动「最后修改」：纸面一个字都没变。列表上的「发后改过」是从
     // updated_at > sent_at 派生的，勾一下成交/失败就跟着喊「待重发」，等于教人别信这个标记
-    await db.run('UPDATE quotations SET status=?, result=?, sent_at=?, confirmed_at=?, updated_at=COALESCE(?, updated_at) WHERE id=?', [
-      status,
-      meta.result ?? cur.result,
-      sentAt,
-      confirmedAt,
-      statusChanged ? ts : null,
-      id
-    ])
-    const parts: string[] = []
-    if (meta.status && meta.status !== cur.status) parts.push(`状态 ${cur.status} → ${meta.status}`)
-    if (meta.result && meta.result !== cur.result) parts.push(`结果 ${cur.result} → ${meta.result}`)
-    if (parts.length) await logQuotationEvent(id, 'meta', parts.join('；'))
+    // 状态、时间和留痕必须一起落：中间断掉就是「状态改了、历史里没有」，
+    // 工作台按 sent_at/confirmed_at 起算的等待天数也会跟历史对不上
+    await db.transact(async () => {
+      await db.run('UPDATE quotations SET status=?, result=?, sent_at=?, confirmed_at=?, updated_at=COALESCE(?, updated_at) WHERE id=?', [
+        status,
+        meta.result ?? cur.result,
+        sentAt,
+        confirmedAt,
+        statusChanged ? ts : null,
+        id
+      ])
+      const parts: string[] = []
+      if (meta.status && meta.status !== cur.status) parts.push(`状态 ${cur.status} → ${meta.status}`)
+      if (meta.result && meta.result !== cur.result) parts.push(`结果 ${cur.result} → ${meta.result}`)
+      if (parts.length) await logQuotationEvent(id, 'meta', parts.join('；'))
+    })
     return (await getQuotation(id))!
   }
 

@@ -27,6 +27,7 @@ export {
   summarizeSettlements,
   computeOrderMoney,
   depositDueOf,
+  baseAmountOf,
   notInStatuses,
   EXCLUDED_STATUSES,
   CASHFLOW_EXCLUDED_STATUSES
@@ -107,8 +108,8 @@ export function refundFlowRows(filter: { customerId?: number } = {}): Promise<Re
   return core.refundFlowRows(filter)
 }
 
-/** 到账金额按「到账月」归集（基准币），现金流口径：只排除草稿单 */
-export function receivedByMonth(): Promise<{ month: string; amount: number }[]> {
+/** 到账金额按「到账月」归集（基准币），现金流口径：只排除草稿单；unconverted = 当月折不出的笔数 */
+export function receivedByMonth(): Promise<{ month: string; amount: number; unconverted: number }[]> {
   return core.receivedByMonth()
 }
 

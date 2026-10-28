@@ -23,7 +23,9 @@ const NAV: { to: string; label: string; icon: NavIconName; end?: boolean }[] = [
 ]
 
 export default function App() {
-  const [reminderCount, setReminderCount] = useState(0)
+  // null = 没读出来：角标整个不显示。0 是「读到了，确实没有提醒」，
+  // 两者混成一个数，提醒服务挂了就等于把「今天该催的」说成「没有」
+  const [reminderCount, setReminderCount] = useState<number | null>(null)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -32,7 +34,7 @@ export default function App() {
         const list = await window.api.dashboard.reminders()
         setReminderCount(list.length)
       } catch {
-        /* ignore */
+        setReminderCount(null)
       }
     }
     load()
@@ -58,7 +60,7 @@ export default function App() {
               >
                 <NavIcon name={n.icon} />
                 <span>{n.label}</span>
-                {n.to === '/' && reminderCount > 0 ? (
+                {n.to === '/' && (reminderCount ?? 0) > 0 ? (
                   <span className="nav-badge">{reminderCount}</span>
                 ) : null}
               </NavLink>

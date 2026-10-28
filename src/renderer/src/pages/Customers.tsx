@@ -1047,6 +1047,9 @@ export default function Customers() {
                       <td className="num">
                         {money(o.remaining, o.currency)}
                         {o.counted ? null : <span className="faint"> · 不催款</span>}
+                        {o.counted && o.creditApplied > 0.001 ? (
+                          <div className="faint">其中预收抵扣 {money(o.creditApplied, o.currency)}</div>
+                        ) : null}
                       </td>
                       <td className="faint nowrap">{fmtDate(o.createdAt)}</td>
                     </tr>

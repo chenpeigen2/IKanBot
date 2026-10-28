@@ -101,6 +101,8 @@ export default function OrderDetail() {
   const [voidModal, setVoidModal] = useState(false)
   const [voidChecked, setVoidChecked] = useState(false)
   const [voiding, setVoiding] = useState(false)
+  // 账上还欠着就把单标成「已结清」，必须先写原因：这单以后不再出现在待收和催款里
+  const [settlePrompt, setSettlePrompt] = useState(false)
   /** 读不出来就明说并给重试，不能永远停在「加载中…」 */
   const [loadError, setLoadError] = useState('')
 
@@ -423,6 +425,18 @@ export default function OrderDetail() {
     }
   }
 
+  // 手工推进收款状态：还欠钱要勾「已结清」时先收原因（core 那边硬拦，
+  // 不在这里先问，用户只会看到一句报错、不知道去哪儿补）
+  const applyPaymentStatus = async (next: PaymentStatus, note?: string) => {
+    try {
+      await window.api.orders.setPaymentStatus(orderId, next, note)
+      setEditPayment(false)
+      await load()
+    } catch (err) {
+      toast((err as Error).message, 'error')
+    }
+  }
+
   if (!order) {
     return (
       <div className="content">
@@ -717,13 +731,17 @@ export default function OrderDetail() {
                       if (next === 'expired' && order.paymentStatus !== 'expired') {
                         if (!confirm('改成「已失效」后这单会被冻结：不能再收款、改明细、装箱或核销，直到改回「客户已确认」。确定吗？')) return
                       }
-                      try {
-                        await window.api.orders.setPaymentStatus(orderId, next)
-                        setEditPayment(false)
-                        await load()
-                      } catch (err) {
-                        toast((err as Error).message, 'error')
+                      // 还欠着钱却要勾「已结清」：这单从此不进待收、月报和催款，差额没人再追。
+                      // 先把原因收齐（必填），core 会把「仍欠多少」一起写进历史
+                      if (
+                        next === 'settled' &&
+                        order.paymentStatus !== 'settled' &&
+                        Number(order.remaining ?? 0) > 0.001
+                      ) {
+                        setSettlePrompt(true)
+                        return
                       }
+                      await applyPaymentStatus(next)
                     }}
                   >
                     {/* 作废只能走「⋯ → 作废此单」的凭据核对弹窗，下拉里不给这个旁路；
@@ -930,6 +948,31 @@ export default function OrderDetail() {
             </Modal>
           )
         })()
+      ) : null}
+
+      {settlePrompt ? (
+        <PromptModal
+          title={`标记为「已结清」：${order.orderNo}`}
+          label={
+            <>
+              按流水算，这张单还欠 {money(order.remaining, order.currency)}。勾了已结清，它就从待收、月报和催款里消失，差额不会再有人追。
+              <br />
+              <span className="muted">请写明为什么这钱不用再收（必填，会连同差额一起记进操作历史）。</span>
+            </>
+          }
+          okText="确认已结清"
+          multiline
+          onOk={async (reason) => {
+            if (!reason.trim()) {
+              toast('原因必须写一句：以后对不上账，全靠这句话知道是谁点的、为什么点。', 'error')
+              return false
+            }
+            await applyPaymentStatus('settled', reason.trim())
+            setSettlePrompt(false)
+            return false
+          }}
+          onClose={() => setSettlePrompt(false)}
+        />
       ) : null}
 
       {preview ? (
@@ -2643,12 +2686,22 @@ function PackingTab({
   // 分批出运时箱单/存档上不能再挂整单的数——三批各存一次「12000」，看的人以为卖了 36000。
   const [amounts, setAmounts] = useState<Record<number, PackingAmount>>({})
   const [amountsError, setAmountsError] = useState('')
+  const beginAmounts = useLoadGuard()
   const loadAmounts = () => {
+    // 批次刚改完就再拉一次金额：旧响应后到会拿改之前的批次金额盖掉新的，
+    // 箱单上留下一个和这一批货对不上的钱
+    const { isCurrent } = beginAmounts()
     setAmountsError('')
     window.api.pl
       .amounts(order.id)
-      .then((rows) => setAmounts(Object.fromEntries(rows.map((a) => [a.plId, a]))))
-      .catch((e) => setAmountsError((e as Error).message))
+      .then((rows) => {
+        if (!isCurrent()) return
+        setAmounts(Object.fromEntries(rows.map((a) => [a.plId, a])))
+      })
+      .catch((e) => {
+        if (!isCurrent()) return
+        setAmountsError((e as Error).message)
+      })
   }
   useEffect(() => {
     loadAmounts()

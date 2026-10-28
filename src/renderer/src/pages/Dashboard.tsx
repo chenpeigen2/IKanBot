@@ -234,7 +234,15 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
               <h2>本月收款</h2>
               <div className="spacer" />
               <span className="faint">
-                {stats?.monthRefunded ? `到账合计 · 另退给客户 ${stats.monthRefunded} 笔` : '到账合计'}
+                {[
+                  '到账合计',
+                  stats?.monthRefunded ? `另退给客户 ${stats.monthRefunded} 笔` : '',
+                  // 外币流水没汇率就折不进本币：折不出来的笔数必须说出来，
+                  // 不然这个数看着像「本月就收了这么多」
+                  stats?.monthUnconverted ? `${stats.monthUnconverted} 笔没填汇率，没折进来` : ''
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
               </span>
             </div>
             <div className="card-body">

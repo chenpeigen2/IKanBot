@@ -1572,9 +1572,11 @@ eq('导出台账的含费用合计 = 订单详情的含费用合计', Number(csv
     !page2.rows.some((r) => bigPage.rows.some((x) => x.id === r.id))
   )
   const owedRows = (await orders.listOrderRows({ sort: 'owed_desc' })).rows
+  // 排的是屏幕上那个待收：不催款的单（草稿/失效/作废）算 0，多收的不许倒挂成负数抢前排
+  const owedShown = (r: (typeof owedRows)[number]) => shownRemaining(r.paymentStatus, r.remaining) * r.exchangeRate
   check(
-    '待收排序（基准币）单调不增',
-    owedRows.every((r, i) => i === 0 || owedRows[i - 1].remainingBase >= r.remainingBase)
+    '待收排序（基准币，按界面那个数）单调不增',
+    owedRows.every((r, i) => i === 0 || owedShown(owedRows[i - 1]) >= owedShown(r) - 0.001)
   )
   eq('日期区间按本地日切：今天建的单落在 [今天, 今天] 里', (await orders.listOrderRows({ from: localDate(), to: localDate() })).rows.some((r) => r.id === moneyOrder.id), true)
   check('日期区间收窄后不多于全量', (await orders.listOrderRows({ from: '2000-01-01', to: localDate() })).total <= (await orders.listOrderRows({})).total)
@@ -8619,7 +8621,11 @@ await orders.addSettlement(r35Bo.id, {
   evidence: '破产公告 R35'
 })
 const r35Stmt = JSON.stringify(parseCsv(await dashboard.exportCsv('statement', { customerId: r35B.id })))
-check('对账单说得出这笔钱已经不必付了', r35Stmt.includes('已为您减免'), r35Stmt)
+check(
+  '对账单说得出这笔钱已经不必付了',
+  r35Stmt.includes('也不再向贵司计收'),
+  r35Stmt
+)
 check('不再对客户讲「坏账核销」这种内部话术', !r35Stmt.includes('坏账'), r35Stmt)
 const r35Ledger = recOf(await dashboard.exportCsv('orders'), '订单号', r35Bo.orderNo)!
 eq(
@@ -9266,7 +9272,11 @@ await orders.addSettlement(r38DepWritten, { kind: 'shortage', amount: 10, reason
 const r38RowWritten = (await money.listOrderMoney()).find((r) => r.orderId === r38DepWritten)!
 eq('待收只算还欠的 70（已扣核销）', r38RowWritten.receivable, 70)
 eq('定金差额归零（核销也算有着落）', money.depositDueOf(r38RowWritten), 0)
-eq('订单状态仍如实停在部分收款（核销不等于收到钱）', (await orders.getOrder(r38DepWritten))!.paymentStatus, 'partial')
+eq(
+  '定金有没有着落决定状态：现金 20 + 抹零 10 已覆盖定金 30，升到已收定金',
+  (await orders.getOrder(r38DepWritten))!.paymentStatus,
+  'paid'
+)
 const r38RemsWritten = (await dashboard.reminders()).filter((r) => r.orderId === r38DepWritten)
 check(
   '不再催那笔已经核销掉的定金',
@@ -9607,7 +9617,7 @@ check(
     .some((r) => r.kind === 'sample' && r.sampleId === r40Waive.id && r.message.includes('打样费'))
 )
 
-section('R40 对账单不印内部话术：坏账追回按减免收回说')
+section('R40 对账单不印内部话术：坏账追回说成补付早前欠款')
 const r40StmtCust = await customers.saveCustomer({ company: 'R40-STMT-CO' })
 const r40Stmt = await orders.createOrder({ customerId: r40StmtCust.id, piNo: 'PI-R40-STMT', paymentStatus: 'sent' })
 await orders.addOrderItem(r40Stmt.id, { styleNo: 'R40-STMT', quantity: 1, unitPrice: 100 })
@@ -9615,7 +9625,8 @@ await orders.addSettlement(r40Stmt.id, { kind: 'bad_debt', amount: 40, reason: '
 await orders.addSettlement(r40Stmt.id, { kind: 'recovery', amount: 20, bankRef: 'R40-STMT-REC', reason: 'R40 又联系上了' })
 const r40Csv = await dashboard.exportCsv('statement', { customerId: r40StmtCust.id })
 check('对账单里不出现内部话术「坏账追回」', !r40Csv.includes('坏账追回'), r40Csv.split('\n').filter((l) => l.includes('追回')).join(' / '))
-check('对账单把追回说成「前期减免收回」', r40Csv.includes('前期减免收回：R40 又联系上了'))
+check('对账单把追回说成「补付早前欠款」', r40Csv.includes('补付早前欠款：R40 又联系上了'))
+check('对账单不替公司认「减免」：坏账不是让利', !r40Csv.includes('减免'), r40Csv)
 await saveSettings(r40RemPrev)
 
 /* ---------------- R41 ---------------- */
@@ -10457,6 +10468,286 @@ check(
   r45RemBalRow2?.message
 )
 await saveSettings(r45RemSettings)
+
+/* ---------------- R46：一个数只许一张嘴 ---------------- */
+section('R46 手工勾「已结清」但按流水还欠：原因必填，差额钉进留痕')
+const r46Cust = await customers.saveCustomer({ company: 'R46-SETTLE-CO' })
+const r46Owed = await orders.createOrder({
+  customerId: r46Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R46-OWED'
+})
+await orders.addOrderItem(r46Owed.id, { styleNo: 'R46-S1', quantity: 1, unitPrice: 100 })
+await orders.addPayment(r46Owed.id, { paidAt: localDate(), amount: 60, method: 'T/T', bankRef: 'ZZ-R46-OWED' })
+const r46Before = (await orders.getOrder(r46Owed.id))!.paymentStatus
+const r46NoReason = await r8err(async () => await orders.setPaymentStatus(r46Owed.id, 'settled'))
+check('还欠 40 时直接勾「已结清」被拦', r46NoReason.includes('还欠'), r46NoReason)
+check('拦下的话术说清该干什么（先做平，或写明为什么不收了）', r46NoReason.includes('请写明原因'), r46NoReason)
+eq('拦下后状态一个字没动', (await orders.getOrder(r46Owed.id))!.paymentStatus, r46Before)
+await orders.setPaymentStatus(r46Owed.id, 'settled', '客户现场付现金，水单不入账')
+const r46SetEv = (await orders.listEvents(r46Owed.id)).find(
+  (e) => e.kind === 'payment_status' && e.toStatus === 'settled'
+)
+check('结清留痕把差额钉进历史：将来对不上账知道差多少', (r46SetEv?.note ?? '').includes('按流水仍欠 40.00'), r46SetEv?.note ?? '')
+const r46Clean = await orders.createOrder({
+  customerId: r46Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R46-CLEAN'
+})
+await orders.addOrderItem(r46Clean.id, { styleNo: 'R46-S2', quantity: 1, unitPrice: 80 })
+await orders.addPayment(r46Clean.id, { paidAt: localDate(), amount: 80, method: 'T/T', bankRef: 'ZZ-R46-CLEAN' })
+eq('收齐了勾结清不折腾人（原因不必填）', (await orders.setPaymentStatus(r46Clean.id, 'settled')).paymentStatus, 'settled')
+check('不欠钱的单，结清留痕里不多出「仍欠」', !(await orders.listEvents(r46Clean.id)).some((e) => e.note.includes('仍欠')))
+
+section('R46 定金阶梯：状态和工作台定金桶吃同一份算术')
+const r46DepCust = await customers.saveCustomer({ company: 'R46-DEP-CO' })
+const r46Dep = await orders.createOrder({
+  customerId: r46DepCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  depositRatio: 0.3,
+  piNo: 'PI-R46-DEP'
+})
+await orders.addOrderItem(r46Dep.id, { styleNo: 'R46-D1', quantity: 10, unitPrice: 10 })
+await orders.addSettlement(r46Dep.id, { kind: 'shortage', amount: 30, reason: 'ZZ-R46-DEP-W' })
+const r46DepRow = (await money.listOrderMoney()).find((r) => r.orderId === r46Dep.id)!
+eq('定金 30 全靠抹零有着落：depositDueOf 归零', money.depositDueOf(r46DepRow), 0)
+eq('同一个数决定的状态升到已收定金（不再永远停在已确认）', (await orders.getOrder(r46Dep.id))!.paymentStatus, 'paid')
+const r46DepRem = (await dashboard.reminders()).filter((r) => r.orderId === r46Dep.id)
+check('定金桶已经是 0，催款里不再喊这笔定金', !r46DepRem.some((r) => r.kind === 'payment'), JSON.stringify(r46DepRem.map((r) => r.message)))
+
+section('R46 待收排序排的是屏幕上那个数')
+const r46HugeCust = await customers.saveCustomer({ company: 'R46-HUGE-CO' })
+const r46Huge = await orders.createOrder({
+  customerId: r46HugeCust.id,
+  currency: 'USD',
+  exchangeRate: 8,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R46-HUGE'
+})
+await orders.addOrderItem(r46Huge.id, { styleNo: 'R46-H1', quantity: 100000, unitPrice: 100 })
+await orders.setPaymentStatus(r46Huge.id, 'expired')
+const r46OverCust = await customers.saveCustomer({ company: 'R46-OVER-CO' })
+const r46Over = await orders.createOrder({
+  customerId: r46OverCust.id,
+  currency: 'USD',
+  exchangeRate: 8,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R46-OVER'
+})
+await orders.addOrderItem(r46Over.id, { styleNo: 'R46-O1', quantity: 1, unitPrice: 100 })
+await orders.addPayment(r46Over.id, { paidAt: localDate(), amount: 30000, method: 'T/T', bankRef: 'ZZ-R46-OVER' })
+const r46TopRow = (await orders.listOrderRows({ sort: 'owed_desc', limit: 1 })).rows[0]
+check('失效单挂 1000 万待收也不占榜首（屏幕上它是「—」）', r46TopRow.id !== r46Huge.id, JSON.stringify(r46TopRow))
+check('多收的单不许拿负待收倒挂抢前排', r46TopRow.id !== r46Over.id, JSON.stringify(r46TopRow))
+check('榜首那一单屏幕上确实写着待收', shownRemaining(r46TopRow.paymentStatus, r46TopRow.remaining) > 0, JSON.stringify(r46TopRow))
+
+section('R46 费用行留痕：两张同名「运费」按多重集配对，不互相顶掉')
+const r46Chg = await orders.createOrder({
+  customerId: r46Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R46-CHG'
+})
+await orders.addOrderItem(r46Chg.id, { styleNo: 'R46-C1', quantity: 1, unitPrice: 100 })
+await orders.updateOrder(r46Chg.id, {
+  customerId: r46Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  charges: [
+    { label: '运费', amount: 300 },
+    { label: '运费', amount: 50 }
+  ]
+})
+await orders.updateOrder(r46Chg.id, {
+  customerId: r46Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  charges: [
+    { label: '运费', amount: 250 },
+    { label: '运费', amount: 50 }
+  ]
+})
+const r46ChgNotes = (await orders.listEvents(r46Chg.id)).map((e) => e.note)
+check(
+  '改的是哪一张说得清：300 → 250',
+  r46ChgNotes.some((n) => n.includes('费用 运费 300 → 250')),
+  JSON.stringify(r46ChgNotes)
+)
+check(
+  '另一张 50 既没被说成删除、也没被说成新增',
+  !r46ChgNotes.some((n) => n.includes('删除 运费') || n.includes('新增 运费')),
+  JSON.stringify(r46ChgNotes)
+)
+
+section('R46 撤销抵扣/退款只看台账：第二次点不盖原因、不重复放钱')
+const r46CrCust = await customers.saveCustomer({ company: 'R46-CAS-CO' })
+const r46Src = await orders.createOrder({
+  customerId: r46CrCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R46-SRC'
+})
+await orders.addOrderItem(r46Src.id, { styleNo: 'R46-A', quantity: 1, unitPrice: 100 })
+await orders.addPayment(r46Src.id, { paidAt: localDate(), amount: 150, method: 'T/T', bankRef: 'ZZ-R46-SRC' })
+eq('多收 50 进预收', await money.customerCreditAvailable(r46CrCust.id, 'USD'), 50)
+const r46Tgt = await orders.createOrder({
+  customerId: r46CrCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R46-TGT'
+})
+await orders.addOrderItem(r46Tgt.id, { styleNo: 'R46-B', quantity: 1, unitPrice: 100 })
+await credits.applyCredit({
+  customerId: r46CrCust.id,
+  currency: 'USD',
+  targetKind: 'order',
+  targetId: r46Tgt.id,
+  amount: 30
+})
+const r46Brief = (await customers.customerOrderBriefs(r46CrCust.id)).find((o) => o.orderNo === r46Tgt.orderNo)!
+check(
+  '客户页订单摘要露出「待收里有多少是预收抵的」（不是还差这么多现金）',
+  Math.abs(r46Brief.creditApplied - 30) < 0.001 && r46Brief.remaining > 0.001,
+  JSON.stringify(r46Brief)
+)
+const r46AppId = (getDb().get(
+  'SELECT id FROM credit_applications WHERE target_kind = ? AND target_id = ? AND reversed_at IS NULL',
+  ['order', r46Tgt.id]
+) as { id: number }).id
+await credits.reverseCredit(r46AppId, '甲：抵错了单')
+const r46Twice = await r8err(async () => await credits.reverseCredit(r46AppId, '乙：盖掉甲的原因'))
+check('第二次撤销被拦（不重复放钱）', r46Twice.includes('撤销过'), r46Twice)
+eq(
+  '原因还是第一次写的那个（CAS 写不许盖别人的手）',
+  (getDb().get('SELECT reversed_reason FROM credit_applications WHERE id = ?', [r46AppId]) as {
+    reversed_reason: string
+  }).reversed_reason,
+  '甲：抵错了单'
+)
+eq('余额只回来一次', await money.customerCreditAvailable(r46CrCust.id, 'USD'), 50)
+check(
+  '台账不删行，只打撤销标记',
+  (getDb().get('SELECT reversed_at FROM credit_applications WHERE id = ?', [r46AppId]) as {
+    reversed_at: string
+  }).reversed_at !== null
+)
+const r46Brief2 = (await customers.customerOrderBriefs(r46CrCust.id)).find((o) => o.orderNo === r46Tgt.orderNo)!
+eq('撤销后摘要跟着改口：这单没有抵扣了', r46Brief2.creditApplied, 0)
+await credits.refundCredit({
+  customerId: r46CrCust.id,
+  currency: 'USD',
+  amount: 20,
+  bankRef: 'ZZ-R46-REF',
+  note: '客户取消尾单，多付退回'
+})
+eq('退出去 20，余额只剩 30', await money.customerCreditAvailable(r46CrCust.id, 'USD'), 30)
+const r46RefId = (getDb().get(
+  'SELECT id FROM customer_refunds WHERE customer_id = ? AND reversed_at IS NULL',
+  [r46CrCust.id]
+) as { id: number }).id
+await credits.reverseRefund(r46RefId, '水单录错，钱没退出去')
+const r46RefTwice = await r8err(async () => await credits.reverseRefund(r46RefId, '再撤一次'))
+check('退款第二次撤销同样被拦', r46RefTwice.includes('撤销过'), r46RefTwice)
+eq('撤回来的钱正好是一次（不是两次的 40）', await money.customerCreditAvailable(r46CrCust.id, 'USD'), 50)
+
+section('R46 报价状态、时间、留痕是同一笔事务')
+const r46Q = await quotations.saveQuotation({
+  customerId: r46Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  items: [{ styleNo: 'A001', productName: 'x', color: '', size: '', quantity: 10, unitPrice: 7.5 }]
+})
+await quotations.updateQuotationMeta(r46Q.id, { status: 'sent' })
+eq('状态落了', (await quotations.getQuotation(r46Q.id))!.status, 'sent')
+check(
+  '同一次改动在历史里也有一条（不会出现「改了状态、历史里没有」）',
+  (await quotations.listQuotationEvents(r46Q.id)).some((e) => e.note.includes('状态') && e.note.includes('sent'))
+)
+const r46QAfter = await quotations.getQuotation(r46Q.id)
+check('发出时间钉在同一笔事务里：工作台按它起算等待天数', !!r46QAfter!.sentAt, JSON.stringify(r46QAfter?.sentAt))
+
+section('R46 折不出基准币的流水：给 null，让报表露出「N 笔未折」')
+const r46Base = getSettings().baseCurrency
+const r46Fx = r46Base === 'EUR' ? 'USD' : 'EUR'
+eq('本币单不需要汇率：老数据里汇率 0 也照原额算，不凭空少一笔', money.baseAmountOf(r46Base, r46Base, 0, 100), 100)
+eq('外币单汇率没填折不出来：给 null，不拿 0 或原币凑一个数', money.baseAmountOf(r46Fx, r46Base, 0, 100), null)
+eq('外币单填了汇率就正常折', money.baseAmountOf(r46Fx, r46Base, 7, 100), 700)
+const r46FxCust = await customers.saveCustomer({ company: 'R46-FX-CO' })
+const r46FxOrder = await orders.createOrder({
+  customerId: r46FxCust.id,
+  currency: r46Fx,
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R46-FX'
+})
+await orders.addOrderItem(r46FxOrder.id, { styleNo: 'R46-F1', quantity: 1, unitPrice: 100 })
+await orders.addPayment(r46FxOrder.id, { paidAt: localDate(), amount: 100, method: 'T/T', bankRef: 'ZZ-R46-FX' })
+// 模拟老数据 / 漏汇率快照：这笔流水折不出基准币
+getDb().run('UPDATE payments SET exchange_rate = 0 WHERE order_id = ?', [r46FxOrder.id])
+const r46Flow = (await money.cashFlowRows({ customerId: r46FxCust.id })).find((r) => r.bankRef === 'ZZ-R46-FX')!
+eq('流水里这一笔的基准币是 null（不是 0）', r46Flow.amountBase, null)
+const r46ThisMonth = localMonthOf(localDate())
+const r46Rbm = (await money.receivedByMonth()).find((m) => m.month === r46ThisMonth)
+check('本月未折笔数露出来：钱到过账，不许从合计里静默消失', (r46Rbm?.unconverted ?? 0) >= 1, JSON.stringify(r46Rbm))
+check('工作台本月收款写明有几笔没折进来', (await dashboard.dashboard()).monthUnconverted >= 1)
+const r46MonthlyRow = (await dashboard.monthlyReport()).find((m) => m.month === r46ThisMonth)
+check('月度汇总同一个月带着同一个笔数', (r46MonthlyRow?.unconvertedCount ?? 0) >= 1, JSON.stringify(r46MonthlyRow))
+const r46FxLine = (await dashboard.exportCsv('payments')).split(/\r?\n/).find((l) => l.includes('ZZ-R46-FX')) ?? ''
+check('收款台账基准币那一格空得看得见，备注说清为什么空', r46FxLine.includes('汇率未填，未折算'), r46FxLine)
+eq('这一格没有拿 0.00 冒充折算结果（Excel 里 SUM 才不会虚高）', r46FxLine.split(',')[7], '')
+
+section('R46 事务不许插队：连接说在事务里、本地却一层都没开')
+const r46TxErr = await (async () => {
+  getDb().exec('BEGIN')
+  try {
+    await orders.addOrderItem(r46Clean.id, { styleNo: 'R46-TX-1', quantity: 1, unitPrice: 1 })
+    return '没报错（守卫没拦住）'
+  } catch (e) {
+    return (e as Error).message
+  } finally {
+    getDb().exec('ROLLBACK')
+  }
+})()
+check('手写的 BEGIN 想吞掉这段写入：当场拦下', r46TxErr.includes('事务插队'), r46TxErr)
+eq(
+  '拦下后本地深度没漏：同一笔写入紧接着照常成功（那条明细真落了库）',
+  (await orders.addOrderItem(r46Clean.id, { styleNo: 'R46-TX-2', quantity: 1, unitPrice: 1 })).grandTotal,
+  81
+)
+
+section('R46 嵌套链的存档点只增不复用：内层失败只回滚自己')
+await coreDb.transact(async () => {
+  await coreDb.run('INSERT INTO counters(name, value) VALUES(?, ?)', ['ZZ-R46-TX-KEEP', 1])
+  await coreDb
+    .transact(async () => {
+      await coreDb.run('INSERT INTO counters(name, value) VALUES(?, ?)', ['ZZ-R46-TX-BAD', 1])
+      throw new Error('内层自己失败')
+    })
+    .catch(() => {})
+  await coreDb.transact(async () => {
+    await coreDb.run('INSERT INTO counters(name, value) VALUES(?, ?)', ['ZZ-R46-TX-GOOD', 1])
+  })
+})
+eq(
+  '内层炸了，外层先写的和后面那条链的都没被牵连',
+  (getDb().get("SELECT COUNT(*) AS c FROM counters WHERE name LIKE 'ZZ-R46-TX%'") as { c: number }).c,
+  2
+)
+eq(
+  '炸掉那条的写入确实没落库',
+  getDb().get("SELECT name FROM counters WHERE name = 'ZZ-R46-TX-BAD'") ?? null,
+  null
+)
+getDb().run("DELETE FROM counters WHERE name LIKE 'ZZ-R46-TX%'")
 
 /* ---------------- 汇总 ---------------- */
 

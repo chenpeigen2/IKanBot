@@ -123,7 +123,11 @@ export function dashboardCore(db: Db) {
     // 本月到账：走 money.ts 里唯一一份「按到账月算收到多少钱」的实现。
     // 以前这里和月度报表各写一遍 SUM，两处会各自漂出两个数。
     const thisMonth = localMonthOf(localDate())
-    const monthReceived = (await money.receivedByMonth()).find((m) => m.month === thisMonth)?.amount ?? 0
+    const receivedRow = (await money.receivedByMonth()).find((m) => m.month === thisMonth)
+    const monthReceived = receivedRow?.amount ?? 0
+    // 外币单汇率没填过的流水折不进这个合计（money.ts 的口径）：钱确实到过账，
+    // 不说破笔数，老板会以为本月就是没收这笔
+    const monthUnconverted = receivedRow?.unconverted ?? 0
     // 退款是钱流出，不并进到账（到账就是到账）；但当月退过钱要在这里点一笔，
     // 否则老板看着「本月收款 8 万」去对银行流水，怎么也对不上。
     const monthRefunded = (await money.refundedByMonth()).find((m) => m.month === thisMonth)?.count ?? 0
@@ -133,6 +137,7 @@ export function dashboardCore(db: Db) {
         ...(row ?? {}),
         pending_amount: pendingAmount,
         month_received: monthReceived,
+        month_unconverted: monthUnconverted,
         month_refunded: monthRefunded,
         month_sales: monthRows.reduce((s, r) => s + r.grandTotalBase, 0),
         month_profit: monthProfitRaw
@@ -923,6 +928,8 @@ export function dashboardCore(db: Db) {
       shortage: number
       badDebt: number
       received: number
+      /** 有几笔到账折不出基准币（外币单汇率没填），没进 received */
+      unconverted: number
       missingCostOrders: number
     }
     const empty = (month: string): MonthAcc => ({
@@ -935,6 +942,7 @@ export function dashboardCore(db: Db) {
       shortage: 0,
       badDebt: 0,
       received: 0,
+      unconverted: 0,
       missingCostOrders: 0
     })
     const byMonth = new Map<string, MonthAcc>()
@@ -957,6 +965,7 @@ export function dashboardCore(db: Db) {
     for (const p of await money.receivedByMonth()) {
       const cur = byMonth.get(p.month) ?? empty(p.month)
       cur.received += p.amount
+      cur.unconverted += p.unconverted
       byMonth.set(p.month, cur)
     }
 
@@ -986,6 +995,7 @@ export function dashboardCore(db: Db) {
           shortage: r.shortage,
           bad_debt: r.badDebt,
           received: r.received,
+          unconverted_count: r.unconverted,
           refund_count: refundByMonth.get(r.month)?.count ?? 0,
           refund_text: refundByMonth.get(r.month)?.text ?? '',
           missing_cost_orders: r.missingCostOrders
@@ -1274,10 +1284,12 @@ export function dashboardCore(db: Db) {
           r.statusText,
           r.currency,
           money2(r.amount),
-          money2(r.amountBase),
+          r.amountBase === null ? '' : money2(r.amountBase),
           r.method,
           r.bankRef,
-          r.note,
+          // 汇率没填的外币流水：基准币那一格空得看得见，不写 0.00 骗 Excel 的 SUM；
+          // 备注里补一句，让人知道这一格为什么空
+          r.amountBase === null ? `${r.note ? r.note + '；' : ''}汇率未填，未折算` : r.note,
           r.docType === 'sample' ? '打样单' : '订单'
         ]
       }))
@@ -1385,9 +1397,12 @@ export function dashboardCore(db: Db) {
         if (r.paidAmount > 0.001) notes.push(`实收 ${money2(r.paidAmount)} 已计入客户预收结余`)
       }
       if (r.negativeCharges < -0.001) notes.push(`含折让/抵扣 ${money2(r.negativeCharges)}（已计入单据金额）`)
-      // 对账单客户会拿去跟自己的水单核：这张表开头就写明不含坏账这类内部数字，
-      // 那就不该在备注里冒出「坏账核销」——那是我们的账，对客户只是一笔不必付的减免
-      if (r.netWrittenOff > 0.001) notes.push(`其中已为您减免 ${money2(r.netWrittenOff)}，无需支付`)
+      // 核销掉的两种来路必须分开说：短款是双方点头让掉的尾款（真是替客户减的），
+      // 坏账是我们自己认了收不回——那张纸不能替公司许下一个没人批过的减免，
+      // 否则真去追的时候，客户手里攥着一张「已为您减免」的表。
+      if (r.shortageAmount > 0.001) notes.push(`其中已为您减免 ${money2(r.shortageAmount)}，无需支付`)
+      if (r.badDebtOutstanding > 0.001)
+        notes.push(`其中 ${money2(r.badDebtOutstanding)} 我方账上没收到、也不再向贵司计收；若已付请把水单发来核对`)
       if (creditUsed > 0.001) notes.push(`其中预收抵扣 ${money2(creditUsed)}（非现金，从客户预收余额冲减）`)
       if (open > 0.001 && rate <= 0) notes.push('汇率未填，未折算')
       if (prepaid > 0.001) notes.push(`实收比单据多 ${money2(prepaid)}（预收结余）`)
@@ -1471,8 +1486,9 @@ export function dashboardCore(db: Db) {
         method: f.method,
         bankRef: f.bankRef,
         // 台账里追回款备注带着内部话术（坏账追回：xxx）——对客户这只是一笔照常付的货款，
-        // 对账单按减免收回的说法转写；台账保留原话。
-        note: f.note.replace(/^坏账追回：/, '前期减免收回：')
+        // 对账单说成「早前没收到、现在补上了」；台账保留原话。
+        // 不写「减免收回」：那等于在纸上承认我们让过这一步，而坏账从来不是让利。
+        note: f.note.replace(/^坏账追回：/, '补付早前欠款：')
       }))
       .sort((a, b) => a.date.localeCompare(b.date) || a.docNo.localeCompare(b.docNo))
 
@@ -1554,7 +1570,9 @@ export function dashboardCore(db: Db) {
       '币种',
       '金额(原币)',
       '已收(原币)',
-      '已让利(原币)',
+      // 这一列是「既没收到、也不再向客户要」的钱：短款让利和坏账都落在这里，
+      // 列名只说客户需要知道的事实（不必再付），至于是让的还是认的，备注里分开讲
+      '不必再付(原币)',
       '未收(原币)',
       '汇率',
       `未收(${base})`,
