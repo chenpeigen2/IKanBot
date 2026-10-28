@@ -5,6 +5,7 @@ import {
   Get,
   Header,
   HttpCode,
+  Inject,
   NotFoundException,
   Param,
   Post,
@@ -14,6 +15,9 @@ import {
 } from '@nestjs/common'
 import type { Request } from 'express'
 import { strParam } from '../common/params'
+import { DB } from '../db/db.module'
+import type { Db } from '../db/types'
+import { filesCore, type FilesCore } from '../../../core/files'
 import { ImageStore, MAX_IMAGE_BYTES } from './image-store.service'
 
 /**
@@ -25,7 +29,11 @@ import { ImageStore, MAX_IMAGE_BYTES } from './image-store.service'
  */
 @Controller('api/files')
 export class FilesController {
-  constructor(private readonly store: ImageStore) {}
+  private readonly files: FilesCore
+
+  constructor(private readonly store: ImageStore, @Inject(DB) db: Db) {
+    this.files = filesCore(db)
+  }
 
   @Post('upload')
   @HttpCode(200)
@@ -40,11 +48,14 @@ export class FilesController {
 
   @Post('discard')
   @HttpCode(200)
-  discard(@Body() body: Record<string, unknown>): { removed: number } {
+  async discard(@Body() body: Record<string, unknown>): Promise<{ removed: number }> {
     const names: unknown[] = Array.isArray(body['names']) ? body['names'] : []
+    // 传上去不等于登记进了库。已经在用的图不许从这条通道消失，
+    // 判据跟桌面那条 images:discard 共用 core/files，免得两边口径不一样。
+    const inUse = await this.files.referenced(names)
     let removed = 0
     for (const n of names) {
-      if (typeof n !== 'string') continue
+      if (typeof n !== 'string' || inUse.has(n)) continue
       if (this.store.remove(n)) removed++
     }
     return { removed }

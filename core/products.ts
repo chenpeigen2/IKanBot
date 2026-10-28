@@ -553,6 +553,10 @@ export function productsCore(db: Db) {
 
   async function addImage(productId: number, fileName: string, isPrimary = false): Promise<ProductImage> {
     return db.transact(async () => {
+      // 商品已经不在了就直说：硬插会被外键拦下，报出来的是一句 SQLite 原话，
+      // 界面只显示「服务器内部错误」——两个窗口开着、其中一个刚删掉这个商品时就会撞上
+      const lives = await db.get('SELECT id FROM products WHERE id = ?', [productId])
+      if (!lives) throw notFound('商品不存在')
       // 有图就必须有一张主图：商品的第一张图无条件上位，不用界面传标志——
       // 界面那份「是不是第一张」在批量上传时人人都是 true，最后落哪张全看谁写得晚
       const hasAny = await db.get('SELECT id FROM product_images WHERE product_id = ? LIMIT 1', [productId])

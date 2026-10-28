@@ -16,7 +16,11 @@ module.exports = {
     isPackaged: false,
     getVersion: () => '0.0.0-test',
     getAppPath: () => root,
-    getPath: () => root
+    getPath: () => root,
+    // 恢复备份换完数据后要说「重启吧」：桩里这两个空壳让测试能跑到那句之后，
+    // 又不会真把跑测试的 node 进程带走
+    relaunch() {},
+    exit() {}
   },
   ipcMain: {
     handle(channel, fn) {

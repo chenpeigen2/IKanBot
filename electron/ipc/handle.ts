@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron'
 import { isRemoteMode } from '../mode'
 import { coverageWords, isRemoteChannel, remoteCall } from '../remote/client'
+import { isRestoring } from '../services/backup'
 
 /**
  * 这些通道天生只能在本机做：开文件框、出 PDF、写备份包、装更新、还有「改去哪找数据」本身。
@@ -33,6 +34,20 @@ export function registeredChannels(): string[] {
 }
 
 /**
+ * 恢复备份期间还放行的通道：只剩「看备份、关窗口、切数据源、让程序重启」。
+ * 其余一律挡住。原因不是怕写坏磁盘，是怕写了也白写：
+ * restoreBackup 里 `await createBackup('pre-restore')` 会交出事件循环，
+ * 排队中的存档/建单请求正好插进来提交进旧库，紧接着旧库整个被备份包盖掉——
+ * 界面那头收到的是「保存成功」，重启后那条记录连个影子都没有。
+ * 宁可让按钮响一声「等一下」，也不能让它撒这个谎。
+ */
+const RESTORE_ALLOWED = ['backup:', 'app:', 'window:', 'mode:']
+
+function isRestoreAllowed(channel: string): boolean {
+  return RESTORE_ALLOWED.some((p) => channel.startsWith(p))
+}
+
+/**
  * 包装 handler，统一错误传递。
  *
  * 渲染进程那一侧的 call() 只认 {ok,data} / {ok,error} 这个壳：
@@ -48,6 +63,12 @@ export function handle<T>(channel: string, fn: (...args: any[]) => T | Promise<T
   registered.add(channel)
   ipcMain.handle(channel, async (_e, ...args) => {
     try {
+      if (isRestoring() && !isRestoreAllowed(channel)) {
+        throw new Error(
+          '正在恢复备份，程序马上要重启，这一步先停一停。\n' +
+            '这会儿写进去的记录会被恢复覆盖掉——界面报了「保存成功」，重启以后却找不到，比直接失败更坑。'
+        )
+      }
       if (
         isRemoteMode() &&
         !LOCAL_ONLY_CHANNELS.has(channel) &&

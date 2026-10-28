@@ -1,5 +1,6 @@
 import { existsSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync, renameSync, rmSync, mkdirSync } from 'fs'
 import { join, resolve, sep, dirname } from 'path'
+import { randomUUID } from 'crypto'
 import { app, dialog } from 'electron'
 import { Database } from 'node-sqlite3-wasm'
 import { dataDir, imagesDir, backupsDir, docsDir, closeDb, openDb, getDb } from '../db'
@@ -16,11 +17,36 @@ import { localDate } from '../../src/shared/date'
  * 直接在最终文件名上写，中途断电 / 磁盘满 / 进程被杀会留下一个名字看着正常、
  * 内容却是半截的 zip。人只认文件名，第二天出事了才发现备份是空的。
  */
-export async function createBackup(note = ''): Promise<string> {
+/**
+ * 备份排队跑，一次只压一份包。
+ * 为什么要排队：文件名只精确到秒，同一秒里来两次（每小时的自动备份撞上人手点「立即备份」，
+ * 或恢复前的那份 pre-restore 撞上别的）就会算出同一个 target；
+ * 而临时文件名是固定的 `.part`——一边刚 renameSync 把包挪走，另一边还在往同名路径写，
+ * 轻则两份挤成一份、重则改名撞已存在的文件报错，把已经写好的备份记成「备份失败」。
+ * 分不开锁反而简单：打包本身几百毫秒，让人多等一秒不构成问题。
+ */
+let backupChain: Promise<unknown> = Promise.resolve()
+
+export function createBackup(note = ''): Promise<string> {
+  const task = backupChain.then(
+    () => writeBackup(note),
+    () => writeBackup(note)
+  )
+  // 队列尾巴把失败咽掉，否则一次备份炸了，以后每次备份都排在一条 rejected promise 上
+  backupChain = task.then(
+    () => undefined,
+    () => undefined
+  )
+  return task
+}
+
+async function writeBackup(note: string): Promise<string> {
   const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
   const name = `ikanbot-${stamp}${note ? `-${note}` : ''}.zip`
   const target = join(backupsDir(), name)
-  const temp = `${target}.part`
+  // 临时名带 uuid：万一有别的进程（或上一轮没清干净的调用）也在写同一秒的包，
+  // 两边不会互相把对方的半截文件当自己的临时文件改名走
+  const temp = `${target}.${process.pid}-${randomUUID()}.part`
 
   try {
     const entries = collectBackupEntries()
@@ -120,6 +146,17 @@ export function pruneBackups(keep = 30): void {
       /* 忽略删除失败 */
     }
   }
+  // 半截的 .part 顺手清掉：断电/被杀时留下的，名字里带 .zip 不算数、
+  // 界面看不见，却实实在在占着磁盘（一份包 = 全部图片+存档的大小）
+  const halfWritten = readdirSync(dir).filter((f) => f.endsWith('.part'))
+  for (const f of halfWritten) {
+    try {
+      const p = join(dir, f)
+      if (Date.now() - statSync(p).mtimeMs > 60 * 60 * 1000) unlinkSync(p)
+    } catch {
+      /* 同上，善后不报错 */
+    }
+  }
 }
 
 /**
@@ -130,6 +167,12 @@ export function pruneBackups(keep = 30): void {
  * 真出事要退回上周时一份都没有。设置页和这里的注释都写「每天一次」，得兑现。
  */
 export function autoBackupOnStart(): void {
+  // 恢复在途时不插队：这会儿打包出来的是「旧库 + 已经铺好的新图片」那种半截组合，
+  // 名字却像个正常备份，等着哪天被人选来恢复。恢复自己的反悔药由 restoreBackup 压。
+  if (restoring) {
+    console.log('[backup] 正在恢复备份，这一次自动备份跳过')
+    return
+  }
   const dir = backupsDir()
   const today = localDate()
   const doneToday = readdirSync(dir).some((f) => {
@@ -395,6 +438,33 @@ function requireBackupPath(rawPath: string): string {
  * 恢复本身是破坏性操作（选错包 = 覆盖掉这几天的活），留一份能反悔的东西比省一次磁盘写入重要得多。
  */
 export async function restoreBackup(rawPath: string): Promise<{ restarted: boolean }> {
+  // 立旗：从这里起，除了备份页自己的通道，别的读写一律先停一停。
+  // 关键是下面那句 await createBackup('pre-restore')——它是整段里唯一让出事件循环的 await，
+  // 在途的一条 docs:save / orders 写请求正好能插进来提交：
+  // 那份号称「恢复前的样子」的包就没包含它，而恢复完它又被新库盖掉，两头都不认账。
+  restoring = true
+  try {
+    return await runRestore(rawPath)
+  } catch (e) {
+    // 能走到这里说明库还没换（包校验没过 / 反悔药没压成 / 附件目录已退回原样），
+    // 原来的数据还是完整的，就把写通道放开——否则一次点错备份文件，
+    // 这个进程到重启之前都再也没法记任何账。
+    restoring = false
+    throw e
+  }
+}
+
+/**
+ * 恢复正在进行（或已经换完库、等着重启）。
+ * ipc 包装层读它来决定要不要挡住新的调用：这段时间写进去的记录，重启后就不存在了。
+ */
+let restoring = false
+
+export function isRestoring(): boolean {
+  return restoring
+}
+
+async function runRestore(rawPath: string): Promise<{ restarted: boolean }> {
   const path = requireBackupPath(rawPath)
   const entries = readZip(readFileSync(path))
   for (const e of entries) {

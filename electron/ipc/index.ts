@@ -3,7 +3,8 @@ import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync } from '
 import { join, basename, resolve, sep } from 'path'
 import { tmpdir } from 'os'
 import { pathToFileURL } from 'url'
-import { imagesDir, docsDir, dataDir, backupsDir } from '../db'
+import { imagesDir, docsDir, dataDir, backupsDir, coreDb } from '../db'
+import { filesCore } from '../../core/files'
 import * as products from '../services/products'
 import * as customers from '../services/customers'
 import * as orders from '../services/orders'
@@ -46,6 +47,31 @@ function escapeFooter(s: string): string {
   return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)
 }
 
+/** 出一次 PDF 最多等多久：Chromium 卡住时不能让打印窗口和按钮一起吊死到天荒地老 */
+const PRINT_TIMEOUT_MS = 60_000
+
+/**
+ * 给一段异步活加个死线。
+ * loadURL / printToPDF 都可能永远不回来（图片巨大、渲染进程挂了、系统打印子系统卡了），
+ * 而 await 一旦吊住，htmlToPdf 的 finally 就永远跑不到——隐藏窗口、临时 .html
+ * 一个都清不掉，用户每点一次「另存为 PDF」就多攒一个看不见的窗口，
+ * 界面还停在「正在生成…」上转圈。超时先 reject，收尾照旧走完。
+ */
+async function withDeadline<T>(message: string, run: () => Promise<T>): Promise<T> {
+  const task = run()
+  // 超时之后原任务还在后台跑；它要是最终失败了，reject 没人接就是主进程未处理拒绝
+  task.catch(() => {})
+  let timer: NodeJS.Timeout | undefined
+  const deadline = new Promise<never>((_res, rej) => {
+    timer = setTimeout(() => rej(new Error(message)), PRINT_TIMEOUT_MS)
+  })
+  try {
+    return await Promise.race([task, deadline])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export async function htmlToPdf(html: string, docLabel = ''): Promise<Buffer> {
   const file = join(tmpdir(), `ikanbot-print-${randomUUID()}.html`)
   const printWin = new BrowserWindow({
@@ -56,20 +82,25 @@ export async function htmlToPdf(html: string, docLabel = ''): Promise<Buffer> {
   try {
     writeFileSync(file, String(html ?? ''), 'utf8')
     // 用标准 file URL 加载：Windows 用户名带空格/短路径时 loadFile 会拼出带反斜杠的 URL 而失败
-    await printWin.loadURL(pathToFileURL(file).href)
-    return await printWin.webContents.printToPDF({
-      printBackground: true,
-      // 多页单据每一页都要有页边距：边距由打印区域给，footer 才放得下单号与页码
-      displayHeaderFooter: true,
-      headerTemplate: '<div></div>',
-      footerTemplate: `<div style="width:100%;padding:0 12mm;font-size:8px;color:#555;display:flex;justify-content:space-between;font-family:'Segoe UI','Microsoft YaHei',sans-serif">
-        <span>${label}</span><span>Page <span class="pageNumber"></span> / <span class="totalPages"></span></span>
-      </div>`,
-      // 12mm / 14mm（英寸）：与单据原来的内边距一致，第一页几何不变
-      margins: { top: 0.4724, bottom: 0.5512, left: 0.4724, right: 0.4724 },
-      pageSize: 'A4',
-      preferCSSPageSize: true
-    })
+    return await withDeadline(
+      '打印窗口 60 秒没出结果，这一份先失败了。稍后再试一次；一直不行的话，看看这一单里的图片是不是特别大。',
+      async () => {
+        await printWin.loadURL(pathToFileURL(file).href)
+        return await printWin.webContents.printToPDF({
+          printBackground: true,
+          // 多页单据每一页都要有页边距：边距由打印区域给，footer 才放得下单号与页码
+          displayHeaderFooter: true,
+          headerTemplate: '<div></div>',
+          footerTemplate: `<div style="width:100%;padding:0 12mm;font-size:8px;color:#555;display:flex;justify-content:space-between;font-family:'Segoe UI','Microsoft YaHei',sans-serif">
+            <span>${label}</span><span>Page <span class="pageNumber"></span> / <span class="totalPages"></span></span>
+          </div>`,
+          // 12mm / 14mm（英寸）：与单据原来的内边距一致，第一页几何不变
+          margins: { top: 0.4724, bottom: 0.5512, left: 0.4724, right: 0.4724 },
+          pageSize: 'A4',
+          preferCSSPageSize: true
+        })
+      }
+    )
   } finally {
     if (!printWin.isDestroyed()) printWin.destroy()
     try {
@@ -405,7 +436,11 @@ export function registerIpc(): void {
       await remoteDiscardImages(list)
       return
     }
+    // 已经登记进库的图不许从这条通道消失：删不可逆，库里的记录却还在，
+    // 商品卡与单据上的图就这么永久空了（判据与后端共用 core/files）
+    const inUse = await filesCore(coreDb).referenced(list)
     for (const n of list) {
+      if (inUse.has(n)) continue
       const p = safeImage(n)
       if (!p) continue
       try {

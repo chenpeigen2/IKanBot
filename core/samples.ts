@@ -882,7 +882,11 @@ export function samplesCore(db: Db) {
     if (s.status === 'cancelled') {
       throw bizError(`打样单 ${s.sampleNo} 已取消：取消的单不再收钱。如果客户确实付了，请先把状态改回来（备注写明原因）再登记。`)
     }
-    if (s.convertedOrderId) {
+    // 转过订单 ≠ 钱在订单上：只有勾了「下单抵扣」的那笔样品费才真的挂在转出单上。
+    // 没勾抵扣的（收款标记还是未收/已收），那张单里一分样品费都没有——
+    // 这里照拦就成了死账：界面明写「打样费照收」，可转单后编辑通道锁死了收款标记，
+    // 待收榜和催款天天挂这笔，却没有任何正门能把收到的现金记进账。
+    if (s.convertedOrderId && s.feeStatus === 'offset') {
       const o = await ordersOf().getOrder(s.convertedOrderId)
       if (o && o.paymentStatus !== 'void') {
         throw bizError(
@@ -966,7 +970,10 @@ export function samplesCore(db: Db) {
     }
     const s = await getSample(sampleId)
     if (!s) throw notFound('打样单不存在')
-    if (s.convertedOrderId) {
+    // 只有「下单抵扣」的那笔样品费真的参与过抵扣计算，才不许回头撤销流水。
+    // 没勾抵扣的转出单，这笔钱跟那张单无关（登记正门刚放开），录错了总能退得回来——
+    // 否则「允许登记」配上「不许撤销」就成了录错一次终身作废。
+    if (s.convertedOrderId && s.feeStatus === 'offset') {
       const o = await ordersOf().getOrder(s.convertedOrderId)
       if (o && o.paymentStatus !== 'void') {
         throw bizError(

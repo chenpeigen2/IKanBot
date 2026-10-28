@@ -2,7 +2,8 @@
  * 端到端业务逻辑测试：直接调用 service 层，验证核心流程。
  * 运行：npm run test:e2e
  */
-import { openDb, closeDb, getDb, dataDir, imagesDir, docsDir, backupsDir } from '../electron/db'
+import { openDb, closeDb, getDb, coreDb, dataDir, imagesDir, docsDir, backupsDir } from '../electron/db'
+import { filesCore } from '../core/files'
 import { LATEST_DB_VERSION } from '../electron/db/schema'
 import * as fs from 'fs'
 import { join, isAbsolute } from 'path'
@@ -18,7 +19,7 @@ import * as dashboard from '../electron/services/dashboard'
 import * as money from '../electron/services/money'
 import * as credits from '../electron/services/credits'
 import { getSettings, saveSettings, markBackupOk, markBackupFail, baseCurrencyLocked } from '../electron/services/settings'
-import { createBackup, inspectBackup, listBackups, pruneBackups, restoreBackup } from '../electron/services/backup'
+import { createBackup, inspectBackup, isRestoring, listBackups, pruneBackups, restoreBackup } from '../electron/services/backup'
 import * as docs from '../electron/services/docs'
 import { collectDir, createZip, readZip, verifyZip } from '../electron/services/zip'
 import {
@@ -9772,7 +9773,275 @@ check(
   })()
 )
 
+/* ---------------- R43 ---------------- */
+section('R43 同一张单的存档排队，不撞版本号')
+const r43Cust = await customers.saveCustomer({ company: 'R43-CONC-CO' })
+const r43Order = await orders.createOrder({
+  customerId: r43Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R43-CONC'
+})
+await orders.addOrderItem(r43Order.id, { styleNo: 'R43-C', quantity: 1, unitPrice: 20 })
+const r43Pdf = Buffer.from('%PDF-1.4 r43 concurrent')
+const r43Saves = await Promise.all([
+  docs.saveDocFile({ pdf: r43Pdf, docNo: 'PI-R43-CONC', kind: 'pi', orderId: r43Order.id, amount: 20 }),
+  docs.saveDocFile({ pdf: r43Pdf, docNo: 'PI-R43-CONC', kind: 'pi', orderId: r43Order.id, amount: 20 })
+])
+eq(
+  '两个预览并发点存档，拿到的是第 1、2 两版（不再双双算成第 1 版）',
+  r43Saves
+    .map((s) => s.version)
+    .sort((a, b) => a - b)
+    .join(','),
+  '1,2'
+)
+check('两版 PDF 都还在盘上（失败的一方不许回滚掉对手的文件）', r43Saves.every((s) => fs.existsSync(s.absolutePath)))
+eq('库里也记了两版', docs.listDocVersions(r43Order.id).length, 2)
+check(
+  '存档记录里的相对路径都解析得回盘上',
+  docs.listDocVersions(r43Order.id).every((v) => fs.existsSync(docs.resolveDocPath(v.filePath)))
+)
+
+section('R43 备份打包排队：同一秒点两次不留半截包')
+const r43Zips = await Promise.all([createBackup('r43a'), createBackup('r43b')])
+check('两份备份都真的落盘', r43Zips.every((p) => fs.existsSync(p)))
+check('同一秒的两个请求各成一份包（没挤成一份）', r43Zips[0] !== r43Zips[1], r43Zips.join('|'))
+eq('打包收尾不留 .part 临时文件', fs.readdirSync(backupsDir()).filter((f) => f.endsWith('.part')).length, 0)
+check('两份都还当得了恢复源', r43Zips.every((p) => inspectBackup(p).hasDb))
+// 半截 .part 的善后：断电/被杀留下的那份占着磁盘，名字却不带 .zip，界面永远看不见
+const r43StalePart = join(backupsDir(), 'ikanbot-20200101000000-stale.4242-uuid.part')
+const r43LivePart = join(backupsDir(), 'ikanbot-live-inflight.part')
+fs.writeFileSync(r43StalePart, 'half')
+fs.writeFileSync(r43LivePart, 'half')
+fs.utimesSync(r43StalePart, new Date(), new Date(Date.now() - 2 * 24 * 3600 * 1000))
+pruneBackups(30)
+check('一小时前的半截包被顺手清掉', !fs.existsSync(r43StalePart))
+check('刚留下的 .part 不碰（可能是另一条还在写的备份）', fs.existsSync(r43LivePart))
+fs.unlinkSync(r43LivePart)
+
+section('R43 恢复备份失败不能把写通道锁死')
+eq('没在恢复时不挡任何通道', isRestoring(), false)
+const r43RestoreErr = await r8err(async () => await restoreBackup(join(backupsDir(), 'ikanbot-19700101000000-none.zip')))
+check('恢复一个不存在的包会报错', r43RestoreErr.includes('已经不在了'), r43RestoreErr)
+eq('报错后写通道马上放开（点错一次不许锁到重启）', isRestoring(), false)
+
+section('R43 删图前先问库里有谁在引用')
+const r43Product = await products.saveProduct({
+  styleNo: 'R43-REF',
+  name: '引用检查',
+  composition: '100% Cotton',
+  sizes: ['M'],
+  colors: ['Black']
+})
+await products.addProductImage(r43Product.id, 'R43-used.png')
+const r43PhotoOrder = await orders.createOrder({
+  customerId: r43Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R43-PHOTO'
+})
+await orders.addOrderPhoto(r43PhotoOrder.id, 'R43-photo.png', 'inspection', 'R43 验货照')
+const r43Conf = getSettings()
+await saveSettings({ ...r43Conf, company: { ...r43Conf.company, logoFile: 'R43-logo.png' } })
+const r43Refs = await filesCore(coreDb).referenced([
+  'R43-used.png',
+  'R43-photo.png',
+  'R43-logo.png',
+  'R43-draft.png'
+])
+check('商品图认得出（不许当草稿删掉）', r43Refs.has('R43-used.png'))
+check('订单照片认得出', r43Refs.has('R43-photo.png'))
+check('公司 Logo 认得出（库里只有一条设置，不在这两张表里）', r43Refs.has('R43-logo.png'))
+check('没登记过的名字不算被引用（上传到一半的草稿仍要清得掉）', !r43Refs.has('R43-draft.png'))
+eq('空列表不查库', (await filesCore(coreDb).referenced([])).size, 0)
+eq('传进来不是数组也不炸', (await filesCore(coreDb).referenced('R43-used.png')).size, 0)
+check('混进非字符串只忽略它，别的照认', (await filesCore(coreDb).referenced([null, 7, '', 'R43-used.png'])).size, 1)
+await saveSettings(r43Conf)
+
+section('R43 没勾抵扣的转单：打样费还在这张单上收')
+const r43ConvCust = await customers.saveCustomer({ company: 'R43-CONV-CO' })
+const r43ConvSample = await samples.saveSample({
+  customerId: r43ConvCust.id,
+  sampleDate: dAgo(4),
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: dAgo(4),
+  items: [
+    {
+      styleNo: 'R43-N1',
+      productName: '不抵扣转单',
+      color: 'Black',
+      size: 'M',
+      quantity: 1,
+      unitPrice: 60,
+      goodsUnitPrice: 200
+    }
+  ]
+})
+const r43ConvOrder = await samples.convertSampleToOrder(r43ConvSample.id, { offsetSampleFee: false, paymentStatus: 'confirmed' })
+eq('不勾抵扣：样品费收款标记还是未收', (await samples.getSample(r43ConvSample.id))!.feeStatus, 'unpaid')
+eq('转出的订单里一条费用行都没有（那笔钱没挂到订单上）', r43ConvOrder.charges.length, 0)
+const r43ConvPaid = await samples.addSamplePayment(r43ConvSample.id, {
+  paidAt: localDate(),
+  amount: 60,
+  bankRef: 'R43-CONV-IN'
+})
+eq('转单后仍能把这笔现金记进账', r43ConvPaid.feeStatus, 'paid')
+eq('记完待收归零', r43ConvPaid.owed, 0)
+const r43ConvFlow = (await samples.listSamplePayments(r43ConvSample.id))[0]
+const r43ConvBack = await samples.deleteSamplePayment(r43ConvSample.id, r43ConvFlow.id, '金额录错，撤回重录')
+eq('录错的撤得回来（放开登记就不能锁死撤销）', r43ConvBack.feeStatus, 'unpaid')
+eq('撤回后待收又回到 60', r43ConvBack.owed, 60)
+const r43OffSample = await samples.saveSample({
+  customerId: r43ConvCust.id,
+  sampleDate: dAgo(4),
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: dAgo(4),
+  items: [
+    {
+      styleNo: 'R43-N2',
+      productName: '抵扣转单',
+      color: 'Black',
+      size: 'M',
+      quantity: 1,
+      unitPrice: 60,
+      goodsUnitPrice: 200
+    }
+  ]
+})
+await samples.convertSampleToOrder(r43OffSample.id, { offsetSampleFee: true, paymentStatus: 'confirmed' })
+check(
+  '勾了抵扣的照旧拦死（钱要登记在那张订单上）',
+  (
+    await r8err(
+      async () => await samples.addSamplePayment(r43OffSample.id, { paidAt: localDate(), amount: 60, bankRef: 'R43-OFF-IN' })
+    )
+  ).includes('请直接登记在订单上')
+)
+
+section('R43 抵扣正好抵平货值的单：算结清，不许永远挂「已发送」')
+const r43ZeroCust = await customers.saveCustomer({ company: 'R43-ZERO-CO' })
+const r43ZeroSample = await samples.saveSample({
+  customerId: r43ZeroCust.id,
+  sampleDate: dAgo(2),
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: dAgo(2),
+  items: [
+    {
+      styleNo: 'R43-Z1',
+      productName: '抵扣抵平货值',
+      color: 'Black',
+      size: 'M',
+      quantity: 1,
+      unitPrice: 40,
+      goodsUnitPrice: 40
+    }
+  ]
+})
+const r43ZeroOrder = await samples.convertSampleToOrder(r43ZeroSample.id, { offsetSampleFee: true, paymentStatus: 'sent' })
+eq('货值 40 − 抵扣 40 = 合计 0', r43ZeroOrder.grandTotal, 0)
+eq(
+  '收款状态自动流转认「合计 0 就是收齐」',
+  await orders.recomputePaymentStatus(r43ZeroOrder.id),
+  'settled'
+)
+eq('库里也落成已结清', (await orders.getOrder(r43ZeroOrder.id))!.paymentStatus, 'settled')
+const r43DraftZero = await orders.createOrder({
+  customerId: r43ZeroCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  piNo: 'PI-R43-DRAFT-ZERO'
+})
+eq('草稿单即使合计 0 也不自动流转', await orders.recomputePaymentStatus(r43DraftZero.id), 'draft')
+const r43BlankSent = await orders.createOrder({
+  customerId: r43ZeroCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  piNo: 'PI-R43-BLANK-SENT'
+})
+await orders.setPaymentStatus(r43BlankSent.id, 'sent')
+eq(
+  '一张还没填货的 0 单不算结清：客户点头才是它的事，不能被当成「钱收齐了」',
+  await orders.recomputePaymentStatus(r43BlankSent.id),
+  'sent'
+)
+check(
+  '结清了就不再挂「PI 已发出未确认」',
+  !(await dashboard.reminders()).some((r) => r.orderId === r43ZeroOrder.id && r.kind === 'confirm')
+)
+
+section('R43 预收正好抵清的打样单：对账单说「预收已抵清」')
+const r43CrCust = await customers.saveCustomer({ company: 'R43-CREDIT-CO' })
+const r43SrcSample = await samples.saveSample({
+  customerId: r43CrCust.id,
+  sampleDate: dAgo(3),
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: dAgo(3),
+  items: [
+    {
+      styleNo: 'R43-SRC',
+      productName: '取消单的实收',
+      color: 'Black',
+      size: 'M',
+      quantity: 1,
+      unitPrice: 30,
+      goodsUnitPrice: 30
+    }
+  ]
+})
+await samples.addSamplePayment(r43SrcSample.id, { paidAt: localDate(), amount: 30, bankRef: 'R43-CR-IN' })
+await samples.saveSample({ id: r43SrcSample.id, status: 'cancelled', note: 'R43 测试：客户改走别家，实收转预收' })
+eq('取消单的实收成了客户预收', await money.customerCreditAvailable(r43CrCust.id, 'USD'), 30)
+const r43TgtSample = await samples.saveSample({
+  customerId: r43CrCust.id,
+  sampleDate: dAgo(3),
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: dAgo(3),
+  items: [
+    {
+      styleNo: 'R43-TGT',
+      productName: '被预收抵清的样',
+      color: 'Black',
+      size: 'M',
+      quantity: 1,
+      unitPrice: 20,
+      goodsUnitPrice: 20
+    }
+  ]
+})
+await credits.applyCredit({
+  customerId: r43CrCust.id,
+  currency: 'USD',
+  targetKind: 'sample',
+  targetId: r43TgtSample.id,
+  amount: 20,
+  note: 'R43 用预收抵清'
+})
+const r43Tgt = (await samples.getSample(r43TgtSample.id))!
+eq('待收归零', r43Tgt.owed, 0)
+eq('收款标记仍是未收（抵扣不是现金，不改标记）', r43Tgt.feeStatus, 'unpaid')
+const r43CrCsv = parseCsv(await dashboard.exportCsv('statement', { customerId: r43CrCust.id }))
+const r43Col = (name: string): number => r43CrCsv[0].indexOf(name)
+const r43TgtRow = r43CrCsv.slice(1).find((r) => r[r43Col('单据号')] === r43TgtSample.sampleNo)
+check('对账单里有这张打样单', !!r43TgtRow, JSON.stringify(r43TgtRow))
+check(
+  '状态说「预收已抵清」：既不说明朝还欠着，也不说现金已收回',
+  (r43TgtRow?.[r43Col('状态')] ?? '').includes('预收已抵清'),
+  r43TgtRow?.[r43Col('状态')] ?? '<缺行>'
+)
+check('不再挂「已收 0.00」这种自相矛盾的备注', !(r43TgtRow?.[r43Col('备注')] ?? '').includes('未收'), r43TgtRow?.[r43Col('备注')])
+eq('未收列是 0', Number(r43TgtRow?.[r43Col('未收(原币)')]), 0)
+eq('预收抵扣列记 20', Number(r43TgtRow?.[r43Col('预收抵扣(原币)')]), 20)
+
 /* ---------------- 汇总 ---------------- */
+
 console.log(`\n${'='.repeat(46)}`)
 console.log(`通过 ${passed} 项，失败 ${failed} 项`)
 console.log('='.repeat(46))

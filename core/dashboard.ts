@@ -1408,7 +1408,12 @@ export function dashboardCore(db: Db) {
     for (const s of samples) {
       const rate = s.exchangeRate > 0 ? s.exchangeRate : 0
       const statusText = SAMPLE_STATUS_LABEL[s.status as keyof typeof SAMPLE_STATUS_LABEL] ?? s.status
-      const feeText = SAMPLE_FEE_STATUS_LABEL[s.feeStatus as keyof typeof SAMPLE_FEE_STATUS_LABEL] ?? s.feeStatus
+      // 收款标记「未收」说的是现金还没进这张单；预收抵清的单子未收已经是 0.00。
+      // 对账单是发给客户的纸，状态列印「未收」、未收列印 0.00 是自己跟自己对不上。
+      const feeText =
+        s.feeStatus === 'unpaid' && s.creditApplied > 0.001 && s.open <= 0.001
+          ? '预收已抵清'
+          : SAMPLE_FEE_STATUS_LABEL[s.feeStatus as keyof typeof SAMPLE_FEE_STATUS_LABEL] ?? s.feeStatus
       const notes: string[] = []
       if (s.status === 'cancelled') {
         notes.push(`已取消，实收 ${money2(s.recovered)} 留在账上`)

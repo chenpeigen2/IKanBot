@@ -2239,7 +2239,11 @@ export function ordersCore(db: Db) {
 
     // 注意：这里算出来的是「下一个状态」，跟当前状态无关，所以能往上走也能往下退
     let next: PaymentStatus = status
-    if (total > 0 && paid + writtenOff + creditApplied >= total - 0.001) next = 'settled'
+    // 有货值却被费用行抵成 0 的单（转单时抵扣恰等于货值）本来就不欠钱：以前要求 total>0
+    // 才认结清，这种单会一直停在「已发出」，在途榜和催款天天追一张没有任何金额的账。
+    // 空的 0 单不算——那张 PI 还没填货，客户点头才是它的事，不能被当成「钱收齐了」。
+    const offsetToZero = total <= 0.001 && money.goodsValue > 0.001
+    if (offsetToZero || (total > 0.001 && paid + writtenOff + creditApplied >= total - 0.001)) next = 'settled'
     else if (deposit > 0 && paid + creditApplied >= deposit - 0.001) next = 'paid'
     else if (paid + creditApplied > 0) next = 'partial'
     else next = status === 'sent' ? 'sent' : 'confirmed'

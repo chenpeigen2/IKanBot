@@ -577,6 +577,22 @@ async function main(): Promise<void> {
     const remoteSettingsStill = (await remoteCall('settings:get', [])) as any
     check('后端设置仍在后端', remoteSettingsStill?.company?.name === '后端工厂')
 
+    // —— 恢复备份期间的写闸门（这段必须放在最后：恢复成功 = 换完库等着重启，
+    //    旗子在这个测试进程里立起来就再也不会放下，真的程序那会儿已经退出去重开了）
+    saveConnection({ mode: 'local' })
+    const gateZip = (await ipc('backup:create')) as any
+    check('先压一份本机备份当恢复源', gateZip.ok === true && typeof gateZip.data === 'string', JSON.stringify(gateZip))
+    const gateRestored = (await ipc('backup:restore', gateZip.data)) as any
+    check('恢复通道自己在闸门里：换完数据等着重启', gateRestored.ok === true, JSON.stringify(gateRestored))
+    const gateList = (await ipc('customers:list', '')) as any
+    check(
+      '恢复在途时业务读写先停一停（这会儿写进去的，重启后没影）',
+      !gateList.ok && String(gateList.error).includes('正在恢复备份'),
+      JSON.stringify(gateList)
+    )
+    const gateBackupList = (await ipc('backup:list')) as any
+    check('备份页自己照常用（还得看得见的列表、按得动取消）', gateBackupList.ok === true, JSON.stringify(gateBackupList))
+
     console.log(`\n${'='.repeat(46)}`)
     console.log(`双模式通过 ${passed} 项`)
     console.log('='.repeat(46))

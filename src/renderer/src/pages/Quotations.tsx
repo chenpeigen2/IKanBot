@@ -458,6 +458,8 @@ function QuotationDetailModal({
     null
   )
   const [settings, setSettings] = useState<any>(null)
+  // 存档在途：连点两下会撞同一个版本号，报错还差点把对方那份 PDF 删掉
+  const [docSaving, setDocSaving] = useState(false)
   const [docVersions, setDocVersions] = useState<any[]>([])
   const [events, setEvents] = useState<any[]>([])
   /** 读失败和「真的没有」分开说：存档没拉出来却显示「还没有存档」，用户会以为凭据没存过 */
@@ -522,7 +524,8 @@ function QuotationDetailModal({
   }
 
   const saveToSystem = async () => {
-    if (!preview) return
+    if (!preview || docSaving) return
+    setDocSaving(true)
     try {
       const savedHtml = preview.render(false)
       const r = await window.api.docs.save({
@@ -542,12 +545,15 @@ function QuotationDetailModal({
       setDocVersions(fresh)
     } catch (e) {
       toast((e as Error).message, 'error')
+    } finally {
+      setDocSaving(false)
     }
   }
 
   /** 另存 PDF：先存档拿正式版纸面，再把不带「待存」字样的那份给客户 */
   const saveAs = async () => {
-    if (!preview) return
+    if (!preview || docSaving) return
+    setDocSaving(true)
     try {
       const savedHtml = preview.render(false)
       const r = await window.api.docs.save({
@@ -570,6 +576,8 @@ function QuotationDetailModal({
       toast(out ? `已存档第 ${r.version} 版，PDF 已保存` : `已存档第 ${r.version} 版；没有另存 PDF`)
     } catch (e) {
       toast((e as Error).message, 'error')
+    } finally {
+      setDocSaving(false)
     }
   }
 
@@ -872,11 +880,11 @@ function QuotationDetailModal({
           <Button  onClick={openPreview}>
             预览报价单
           </Button>
-          <Button  onClick={saveToSystem} disabled={!preview}>
-            存到系统
+          <Button onClick={saveToSystem} disabled={!preview || docSaving}>
+            {docSaving ? '存档中…' : '存到系统'}
           </Button>
-          <Button  onClick={saveAs} disabled={!preview}>
-            另存为 PDF
+          <Button onClick={saveAs} disabled={!preview || docSaving}>
+            {docSaving ? '存档中…' : '另存为 PDF'}
           </Button>
         </div>
       </Modal>

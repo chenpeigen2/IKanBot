@@ -563,9 +563,12 @@ function SamplePayModal({
   // 原先自己拿 totalFee 减一遍，免收单会显示「还欠全额」，和服务层/工作台两套话。
   const remaining = Number(detail.owed ?? 0)
   const convertedLive = !!detail.convertedOrderId && detail.convertedOrderStatus !== 'void'
+  // 钱到底在不在那张订单上，看的是转单时有没有勾「下单抵扣」：勾了才有负费用行、样品费才算收过。
+  // 没勾抵扣的转出单，样品费仍然挂在这张打样单上（列表那句话说的是「打样费照收」），
+  // 收款与撤销的正门都得留着——服务层是同一条判据（core/samples.ts）。
+  const feeOnOrder = convertedLive && detail.feeStatus === 'offset'
   const canAdd =
     detail.status !== 'cancelled' &&
-    !convertedLive &&
     detail.feeStatus !== 'offset' &&
     detail.feeStatus !== 'waived' &&
     !(detail.feeStatus === 'paid' && detail.totalFee > 0.001)
@@ -659,9 +662,9 @@ function SamplePayModal({
         </div>
       ) : null}
       {detail.feeStatus === 'waived' ? <div className="alert info">这张单的样品费已免收。</div> : null}
-      {convertedLive ? (
+      {feeOnOrder ? (
         <div className="alert info">
-          这张打样单已经转成订单：转单前的实收只能看、不能再改；转单之后收到的钱请登记在订单上。
+          这张打样单的样品费已经抵扣进转出的订单：转单前的实收只能看、不能再改；转单之后收到的钱请登记在订单上。
         </div>
       ) : null}
       {detail.status === 'cancelled' ? <div className="alert warn">这张打样单已取消，不能再登记收款。</div> : null}
@@ -762,8 +765,8 @@ function SamplePayModal({
                       ) : (
                         <button
                           className="link"
-                          disabled={convertedLive}
-                          title={convertedLive ? '转单后不能撤销转单前的实收' : ''}
+                          disabled={feeOnOrder}
+                          title={feeOnOrder ? '样品费已抵扣进那张订单，转单前的实收参与过抵扣计算，不能回头撤销' : ''}
                           onClick={() => setRevoking({ id: p.id, reason: '' })}
                         >
                           撤销

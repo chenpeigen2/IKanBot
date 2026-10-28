@@ -69,6 +69,8 @@ export default function OrderDetail() {
   const [events, setEvents] = useState<any[]>([])
   const [tab, setTab] = useState<'items' | 'payment' | 'packing' | 'timeline' | 'photos'>('items')
   const [preview, setPreview] = useState<PreviewState>(null)
+  // 存档在途：连点两下会算出同一个版本号，后一下撞唯一索引、报错还差点把前一份 PDF 删掉
+  const [docSaving, setDocSaving] = useState(false)
   const [showEdit, setShowEdit] = useState(false)
   const [showParty, setShowParty] = useState(false)
   const [showCi, setShowCi] = useState(false)
@@ -294,7 +296,8 @@ export default function OrderDetail() {
    * 绝不能把预览稿（页脚印「待存为第 N 版」）发给客户或报关行。
    */
   const savePdf = async () => {
-    if (!preview) return
+    if (!preview || docSaving) return
+    setDocSaving(true)
     try {
       const savedHtml = preview.render(false)
       const r = await window.api.docs.save({
@@ -321,12 +324,15 @@ export default function OrderDetail() {
       )
     } catch (e) {
       toast((e as Error).message, 'error')
+    } finally {
+      setDocSaving(false)
     }
   }
 
   /** 存到系统存档：自动记版本、记操作历史。存档那份纸印正式版本号（它就是这一版） */
   const saveToSystem = async () => {
-    if (!preview) return
+    if (!preview || docSaving) return
+    setDocSaving(true)
     try {
       const savedHtml = preview.render(false)
       const r = await window.api.docs.save({
@@ -345,6 +351,8 @@ export default function OrderDetail() {
       await load()
     } catch (e) {
       toast((e as Error).message, 'error')
+    } finally {
+      setDocSaving(false)
     }
   }
 
@@ -917,11 +925,11 @@ export default function OrderDetail() {
                 </span>
               ) : (
                 <>
-                  <Button  onClick={savePdf}>
-                    另存为 PDF
+                  <Button disabled={docSaving} onClick={savePdf}>
+                    {docSaving ? '存档中…' : '另存为 PDF'}
                   </Button>
-                  <Button variant="primary"  onClick={saveToSystem}>
-                    存到系统
+                  <Button variant="primary" disabled={docSaving} onClick={saveToSystem}>
+                    {docSaving ? '存档中…' : '存到系统'}
                   </Button>
                 </>
               )}

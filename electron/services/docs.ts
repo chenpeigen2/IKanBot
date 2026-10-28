@@ -154,14 +154,44 @@ export async function voidDocVersion(versionId: number, reason = ''): Promise<Do
 }
 
 /**
+ * 同一「单号 + 单据类型」的存档排队走，一笔完了才轮下一笔。
+ *
+ * 为什么必须串行：版本号是 MAX+1 在事务外算的，文件先落盘、记录后进库。
+ * 两个预览并发点同一张 PI 时，两边都算出 v3——后写的一方 wx 撞 EEXIST，
+ * 查库看到「还没记账」判成孤儿直接覆盖，然后自己的记账撞唯一索引失败，
+ * 回滚时一 unlink，把前一笔已经记进库的那份 PDF 删了。
+ * 纸面和库里对不上、且不报错，事后退税查证时手里是空的。
+ * 分键排队（而不是全局一把锁）：给 A 单存档不该把 B 单也堵住。
+ */
+const saveQueue = new Map<string, Promise<void>>()
+
+function serializeDocSave<T>(key: string, run: () => Promise<T>): Promise<T> {
+  const prev = saveQueue.get(key) ?? Promise.resolve()
+  // 前一笔无论成败都要接上，不能让一次失败把这条线卡死
+  const task = prev.then(run, run)
+  const tail = task.then(
+    () => undefined,
+    () => undefined
+  )
+  saveQueue.set(key, tail)
+  void tail.then(() => {
+    if (saveQueue.get(key) === tail) saveQueue.delete(key)
+  })
+  return task
+}
+
+/**
  * 把一版 PDF 落盘并记账。
  *
  * - 版本按 MAX+1 取；带 expectedVersion 时先核对纸面版次，避免「纸印第 1 版、库里第 2 版」。
  * - 文件名带 kind，PI 与 CI 同号也不会互相覆盖。
  * - 落盘用 wx（已存在即失败），数据库唯一索引兜底，失败时删掉刚写的文件。
  * - 数据库里存 data 目录相对路径，换电脑/恢复备份后仍能找到。
+ *
+ * 同一单号同一类单据的存档在进程内串行（见 serializeDocSave）：版本号算在事务之外、
+ * 文件先落盘后进库，两个预览并发点存档会双双算出同一个 v。
  */
-export async function saveDocFile(input: {
+export function saveDocFile(input: {
   pdf: Buffer
   docNo: string
   kind: string
@@ -174,6 +204,14 @@ export async function saveDocFile(input: {
 }): Promise<{ filePath: string; absolutePath: string; version: number }> {
   const docNo = assertDocNo(input.docNo)
   const kind = assertDocKind(input.kind)
+  return serializeDocSave(`${docNo}::${kind}`, () => writeDocVersion(docNo, kind, input))
+}
+
+async function writeDocVersion(
+  docNo: string,
+  kind: DocKind,
+  input: Parameters<typeof saveDocFile>[0]
+): Promise<{ filePath: string; absolutePath: string; version: number }> {
   // 存档金额是事后对账的依据：NaN/负数直接拒收，不能静默落成 0
   if (input.amount != null) {
     const amt = Number(input.amount)
@@ -194,9 +232,12 @@ export async function saveDocFile(input: {
   const fileName = `${kind}_${docNo}_v${version}.pdf`
   const absolutePath = join(dir, fileName)
   const filePath = relative(dataDir(), absolutePath).split(sep).join('/')
+  // 只删自己 wx 新建的那份：孤儿覆盖与并发对手的 PDF，回滚时碰不得
+  let createdHere = false
 
   try {
     writeFileSync(absolutePath, input.pdf, { flag: 'wx' })
+    createdHere = true
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'EEXIST') {
       // 文件在、库里没记录 = 上次存档在「落盘成功、记账之前」崩溃留下的孤儿：
@@ -258,10 +299,12 @@ export async function saveDocFile(input: {
       }
     })
   } catch (e) {
-    try {
-      unlinkSync(absolutePath)
-    } catch {
-      /* 文件没写成功或已删，忽略 */
+    if (createdHere) {
+      try {
+        unlinkSync(absolutePath)
+      } catch {
+        /* 文件没写成功或已删，忽略 */
+      }
     }
     const msg = (e as Error).message ?? ''
     if (/UNIQUE|unique/i.test(msg)) {

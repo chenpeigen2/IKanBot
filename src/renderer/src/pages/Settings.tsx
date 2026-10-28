@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useToast, Card, Button, clientKey, LoadError } from '../ui'
 import { imageUrl } from '../imageUrl'
 import { CURRENCIES } from '../../../shared/types'
@@ -52,9 +52,32 @@ export default function Settings() {
   const [probe, setProbe] = useState<RemoteProbe | null>(null)
   const [probing, setProbing] = useState(false)
 
+  /**
+   * 这一页经手过、但还没进库的 Logo 文件。
+   * 「导入 Logo」每点一次就往图片目录拷一份新文件，而设置里只存最后一个文件名：
+   * 前面那些谁也不引用了，却会被备份一张不落地打包，图片目录只增不减。
+   * 换一张就当场清掉旧的；保存成功就不再是草稿；带着没保存的导入离开这一页时也清掉。
+   */
+  const logoDrafts = useRef<string[]>([])
+  /** 库里此刻真正被设置引用的那张 Logo：换成新的并保存成功，上一张就再没人引用了 */
+  const storedLogo = useRef('')
+  const dropLogoDrafts = (names: string[]): void => {
+    logoDrafts.current = []
+    if (names.length) void window.api.images.discard(names).catch(() => {})
+  }
+
+  useEffect(
+    () => () => {
+      dropLogoDrafts(logoDrafts.current)
+    },
+    []
+  )
+
   const loadSettings = async () => {
     try {
-      setS(withBankUids(await window.api.settings.get()))
+      const r = await window.api.settings.get()
+      storedLogo.current = String(r?.company?.logoFile ?? '')
+      setS(withBankUids(r))
       setLoadError('')
     } catch (e) {
       setLoadError((e as Error).message || '设置没读出来')
@@ -219,6 +242,13 @@ export default function Settings() {
   const save = async () => {
     try {
       const r = await window.api.settings.save(s)
+      const keep = String(r?.company?.logoFile ?? '')
+      // 库里那张被这次保存换掉了：图片文件留在目录里没人引用，备份会一直带着它
+      if (storedLogo.current && storedLogo.current !== keep)
+        void window.api.images.discard([storedLogo.current]).catch(() => {})
+      storedLogo.current = keep
+      // 刚进库的那张现在是活文件，不再当草稿处理
+      logoDrafts.current = []
       setS(withBankUids(r))
       toast('设置已保存')
     } catch (e) {
@@ -252,10 +282,12 @@ export default function Settings() {
 
   const importLogo = async () => {
     const name = await window.api.images.importLogo()
-    if (name) {
-      setCompany('logoFile', name)
-      toast('Logo 已导入，记得保存设置')
-    }
+    if (!name) return
+    // 上一次导的那张被这张顶掉了：它从没进过库，当场清掉，别攒着
+    dropLogoDrafts(logoDrafts.current)
+    logoDrafts.current = [name]
+    setCompany('logoFile', name)
+    toast('Logo 已导入，记得保存设置')
   }
 
   const runBackup = async () => {

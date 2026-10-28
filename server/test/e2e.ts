@@ -279,6 +279,40 @@ async function main(): Promise<void> {
     check('丢弃图片只删存在的那张', disc.status === 200 && disc.body.removed === 1)
     check('删完再取确实没了', (await http.get(`/api/files/images/${storedName}`)).status === 404)
 
+    // 删除不可逆：这条通道本来是给「传上去没登记」的草稿收尾的，
+    // 但名字是调用方传上来的——已经在用的那张不能当草稿清掉
+    const draftUp = await http
+      .post('/api/files/upload?name=r43-draft.png')
+      .set('content-type', 'application/octet-stream')
+      .send(png)
+    const draftName = String(draftUp.body.fileName)
+    const usedUp = await http
+      .post('/api/files/upload?name=r43-used.png')
+      .set('content-type', 'application/octet-stream')
+      .send(png)
+    const usedName = String(usedUp.body.fileName)
+    const usedProduct = await http
+      .post('/api/products/save')
+      .send({ input: { styleNo: 'R43-USED', name: '引用检查', composition: '', sizes: [], colors: [] } })
+    await http
+      .post('/api/products/addImage')
+      .send({ productId: usedProduct.body.id, fileName: usedName })
+    const ghostAdd = await http.post('/api/products/addImage').send({ productId: 999999, fileName: 'ghost.png' })
+    check(
+      '给已经不存在的商品登记图说「商品不存在」（不外泄 SQLite 原话）',
+      ghostAdd.status === 404 && ghostAdd.body.error.message === '商品不存在'
+    )
+    const discUsed = await http.post('/api/files/discard').send({ names: [usedName, draftName] })
+    check('已登记在商品上的图拒删，只删没登记的那张', discUsed.status === 200 && discUsed.body.removed === 1)
+    check(
+      '被引用的图还在（记录在、文件没了 = 商品页一片破图）',
+      (await http.get(`/api/files/images/${usedName}`)).status === 200
+    )
+    check(
+      '没登记的草稿照删（这条通道的本意）',
+      (await http.get(`/api/files/images/${draftName}`)).status === 404
+    )
+
     console.log('设置域')
     const sDefault = await http.post('/api/settings/get').send({})
     check(
