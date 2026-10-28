@@ -11,25 +11,51 @@
 import { settingsCore } from './settings'
 import type { Db } from './db'
 
+/**
+ * 名字归一到裸文件名：删除端（桌面 safeImage / 服务端 store.remove）都是先取 basename
+ * 再落地的，判据必须落在同一个口径上。
+ * 否则传 'dir/uuid.jpg' 或图片 URL 进来时这里查不中引用（库里存的是裸名），
+ * 调用方却照样把那张在用的图删了——记录还在，图永久没了。
+ */
+function bareName(raw: unknown): string {
+  const noQuery = String(raw ?? '').split(/[?#]/)[0]
+  return (noQuery.split(/[\\/]/).pop() ?? '').trim()
+}
+
 export function filesCore(db: Db) {
+  /** 给一批文件名，返回其中确实被库引用的那些；调用方只许删剩下的 */
+  const referenced = async (names: unknown): Promise<Set<string>> => {
+    const list = [...new Set((Array.isArray(names) ? names : []).map(bareName).filter((n) => !!n))]
+    if (list.length === 0) return new Set()
+    // 占位符按个数拼，名字一律走参数，不当 SQL 片段使
+    const marks = list.map(() => '?').join(',')
+    const rows = await db.all(
+      `SELECT file_name AS n FROM product_images WHERE file_name IN (${marks})
+       UNION SELECT file_name FROM order_photos WHERE file_name IN (${marks})`,
+      [...list, ...list]
+    )
+    const out = new Set(rows.map((r) => String(r['n'])))
+    const logo = (await settingsCore(db).get()).company.logoFile
+    if (logo && list.includes(bareName(logo))) out.add(bareName(logo))
+    return out
+  }
+
+  const normalize = (names: unknown): string[] => [
+    ...new Set((Array.isArray(names) ? names : []).map(bareName).filter((n) => !!n))
+  ]
+
   return {
-    /** 给一批文件名，返回其中确实被库引用的那些；调用方只许删剩下的 */
-    async referenced(names: unknown): Promise<Set<string>> {
-      const list = [
-        ...new Set((Array.isArray(names) ? names : []).filter((n): n is string => typeof n === 'string' && !!n))
-      ]
-      if (list.length === 0) return new Set()
-      // 占位符按个数拼，名字一律走参数，不当 SQL 片段使
-      const marks = list.map(() => '?').join(',')
-      const rows = await db.all(
-        `SELECT file_name AS n FROM product_images WHERE file_name IN (${marks})
-         UNION SELECT file_name FROM order_photos WHERE file_name IN (${marks})`,
-        [...list, ...list]
-      )
-      const out = new Set(rows.map((r) => String(r['n'])))
-      const logo = (await settingsCore(db).get()).company.logoFile
-      if (logo && list.includes(logo)) out.add(logo)
-      return out
+    referenced,
+    /**
+     * 这批名字里哪些可以安全删除（已归一成裸名）。
+     * 把「问库」和「归一」一起给出去，调用方就不必自己再算一遍 basename——
+     * 两个 runtime 各归各的正是口径漂移的起点。
+     */
+    deletable: async (names: unknown): Promise<string[]> => {
+      const list = normalize(names)
+      if (list.length === 0) return []
+      const inUse = await referenced(list)
+      return list.filter((n) => !inUse.has(n))
     }
   }
 }

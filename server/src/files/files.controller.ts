@@ -51,11 +51,11 @@ export class FilesController {
   async discard(@Body() body: Record<string, unknown>): Promise<{ removed: number }> {
     const names: unknown[] = Array.isArray(body['names']) ? body['names'] : []
     // 传上去不等于登记进了库。已经在用的图不许从这条通道消失，
-    // 判据跟桌面那条 images:discard 共用 core/files，免得两边口径不一样。
-    const inUse = await this.files.referenced(names)
+    // 判据跟桌面那条 images:discard 共用 core/files（名字也一起归一到裸文件名），
+    // 免得两边各算一遍 basename 算出两套口径。
+    const doomed = await this.files.deletable(names)
     let removed = 0
-    for (const n of names) {
-      if (typeof n !== 'string' || inUse.has(n)) continue
+    for (const n of doomed) {
       if (this.store.remove(n)) removed++
     }
     return { removed }

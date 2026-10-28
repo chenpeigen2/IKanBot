@@ -437,10 +437,9 @@ export function registerIpc(): void {
       return
     }
     // 已经登记进库的图不许从这条通道消失：删不可逆，库里的记录却还在，
-    // 商品卡与单据上的图就这么永久空了（判据与后端共用 core/files）
-    const inUse = await filesCore(coreDb).referenced(list)
-    for (const n of list) {
-      if (inUse.has(n)) continue
+    // 商品卡与单据上的图就这么永久空了（判据与后端共用 core/files，名字也归一到裸文件名）
+    const doomed = await filesCore(coreDb).deletable(list)
+    for (const n of doomed) {
       const p = safeImage(n)
       if (!p) continue
       try {
@@ -522,6 +521,25 @@ export function registerIpc(): void {
   })
 
   /* ---- 单据存档 ---- */
+  /**
+   * 存档的账（版次、金额、作废留痕）记在 doc_versions，而这张表只在本机库里：
+   * docs: 整族是「本机独有」通道，后端模式下它照样读本机那份数据。
+   * 于是存档会把凭据写进另一份账本——界面报了「已存为第 2 版」，服务器那边却查无此版，
+   * 「出过 CI 锁单价」「有存档禁删」「重版同号」这些闸门全部跟着瞎掉；
+   * 更糟的是本机库为空时 INSERT 撞外键，用户看到的是半句英文 SQLite 原话。
+   * 读侧同理：远端模式下列表里的 137 号是服务器那单，docs:list(137) 查到的
+   * 却是本机那个 137 号的存档，两家客户的单据会串进同一个弹窗。
+   * 打印/预览不吃这张表（window:printPdf 自己出 PDF），后端模式照常用。
+   */
+  const assertLocalArchive = (): void => {
+    if (!isRemoteMode()) return
+    throw new Error(
+      '「单据存档」目前只在本机模式下工作：存档的版次、金额和作废留痕记的是本机那份账，\n' +
+        '后端模式下存进去会写到另一份数据库里——界面报了成功，服务器却查不到这张凭据，\n' +
+        '「出过 CI 不许改单价」「有存档不许删单」这些闸门也就跟着失效。\n' +
+        '要存档请到「设置 · 数据来源」切回「本机」；打印和预览不存档，后端模式照常用。'
+    )
+  }
   handle('docs:save', async (payload: {
     html: string
     fileName: string
@@ -535,6 +553,7 @@ export function registerIpc(): void {
     /** 整单/批次 CI 重叠时，用户已在弹窗里看着重叠金额勾过确认 */
     confirmOverlap?: boolean
   }) => {
+    assertLocalArchive()
     if (payload.kind === 'ci' && payload.orderId != null) {
       docsSvc.assertCiNoOverlap(Number(payload.orderId), payload.docNo, payload.confirmOverlap === true)
     }
@@ -559,10 +578,22 @@ export function registerIpc(): void {
     })
     return { path: saved.absolutePath, filePath: saved.filePath, version: saved.version }
   })
-  handle('docs:list', (orderId: number) => docsSvc.listDocVersions(orderId))
-  handle('docs:listQuotation', (quotationId: number) => docsSvc.listQuotationDocVersions(quotationId))
-  handle('docs:void', (versionId: number, reason?: string) => docsSvc.voidDocVersion(versionId, reason ?? ''))
-  handle('docs:nextVersion', (docNo: string, kind: string) => docsSvc.nextVersion(docNo, kind))
+  handle('docs:list', (orderId: number) => {
+    assertLocalArchive()
+    return docsSvc.listDocVersions(orderId)
+  })
+  handle('docs:listQuotation', (quotationId: number) => {
+    assertLocalArchive()
+    return docsSvc.listQuotationDocVersions(quotationId)
+  })
+  handle('docs:void', (versionId: number, reason?: string) => {
+    assertLocalArchive()
+    return docsSvc.voidDocVersion(versionId, reason ?? '')
+  })
+  handle('docs:nextVersion', (docNo: string, kind: string) => {
+    assertLocalArchive()
+    return docsSvc.nextVersion(docNo, kind)
+  })
   handle('docs:reveal', async (filePath?: string) => {
     // N34：点「打开目录」要打开**这一版文件**所在的文件夹，而不是整个 docs 根目录
     if (filePath) {

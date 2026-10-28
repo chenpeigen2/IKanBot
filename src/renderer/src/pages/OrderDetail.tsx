@@ -16,7 +16,7 @@ import {
   type ShipStatus,
   type PaymentMethod
 } from '../../../shared/types'
-import { isBillingStatus } from '../../../shared/billing'
+import { isBillingStatus, shownRemaining } from '../../../shared/billing'
 import {
   renderPi,
   renderPl,
@@ -34,6 +34,16 @@ import { imageUrl } from '../imageUrl'
 import { isLocalDate, localDate } from '../../../shared/date'
 import EditOrderModal from './EditOrderModal'
 import PartyModal from './PartyModal'
+
+/**
+ * 屏幕上「待收」的唯一写法：草稿/失效/作废的单一律显示「—」。
+ * 列表页与台账导出走的是同一对 helper（shared/billing）；这里不另算一份，
+ * 否则顶部横幅写着「不再计入待收款」、下面的统计卡却还挂着金额，
+ * 接催款电话的人打开详情就会误信这笔账还没收。
+ */
+function remainingText(o: { paymentStatus: string; remaining: number | null; currency: string }): string {
+  return isBillingStatus(o.paymentStatus) ? money(shownRemaining(o.paymentStatus, o.remaining), o.currency) : '—'
+}
 
 type PreviewState = {
   kind: 'pi' | 'pl' | 'ci'
@@ -364,7 +374,7 @@ export default function OrderDetail() {
       `确认删除订单 ${order.orderNo}？\n\n` +
       `含费用合计 ${money(total, order.currency)}\n` +
       `已收 ${money(paid, order.currency)}\n` +
-      `待收 ${money(order.remaining, order.currency)}\n\n` +
+      `待收 ${remainingText(order)}\n\n` +
       (paid > 0 || (order.items?.length ?? 0) > 0
         ? '这一单有明细或收款，删了收款记录和操作历史会一起没有。\n建议改用「作废」：记录全留，只是不再计入销售额和待收款。'
         : '这是一张空单，删了就找不回来了。')
@@ -468,7 +478,7 @@ export default function OrderDetail() {
             <div className="stat-label">已收 / 待收</div>
             <div className="stat-value">{money(order.paidAmount, order.currency)}</div>
             <div className="stat-hint split">
-              <span>待收 {money(order.remaining, order.currency)}</span>
+              <span>待收 {remainingText(order)}</span>
               <span>定金 {money(order.depositAmount, order.currency)}</span>
               {order.creditApplied > 0.001 ? (
                 <span>预收抵扣 {money(order.creditApplied, order.currency)}</span>
@@ -2151,7 +2161,7 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
           ) : null}
           <div className="total">
             <span>待收</span>
-            <span>{money(order.remaining, order.currency)}</span>
+            <span>{remainingText(order)}</span>
           </div>
         </div>
         {order.chargesTotal ? (

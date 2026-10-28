@@ -19,7 +19,7 @@ import * as dashboard from '../electron/services/dashboard'
 import * as money from '../electron/services/money'
 import * as credits from '../electron/services/credits'
 import { getSettings, saveSettings, markBackupOk, markBackupFail, baseCurrencyLocked } from '../electron/services/settings'
-import { createBackup, inspectBackup, isRestoring, listBackups, pruneBackups, restoreBackup } from '../electron/services/backup'
+import { createBackup, inspectBackup, isRestoring, listBackups, pruneBackups, restoreBackup, uniqueBackupName } from '../electron/services/backup'
 import * as docs from '../electron/services/docs'
 import { collectDir, createZip, readZip, verifyZip } from '../electron/services/zip'
 import {
@@ -9945,6 +9945,9 @@ const r43ZeroSample = await samples.saveSample({
 })
 const r43ZeroOrder = await samples.convertSampleToOrder(r43ZeroSample.id, { offsetSampleFee: true, paymentStatus: 'sent' })
 eq('货值 40 − 抵扣 40 = 合计 0', r43ZeroOrder.grandTotal, 0)
+// R44：转单事务收尾自己重算，落库那一刻就是结清——
+// 以前要等下一次收款/改状态事件才被纠正，这期间列表同屏挂着「已发出 + 已收齐」
+eq('转出来的单落库时已经是已结清（不再需要等一次事件）', r43ZeroOrder.paymentStatus, 'settled')
 eq(
   '收款状态自动流转认「合计 0 就是收齐」',
   await orders.recomputePaymentStatus(r43ZeroOrder.id),
@@ -10039,6 +10042,139 @@ check(
 check('不再挂「已收 0.00」这种自相矛盾的备注', !(r43TgtRow?.[r43Col('备注')] ?? '').includes('未收'), r43TgtRow?.[r43Col('备注')])
 eq('未收列是 0', Number(r43TgtRow?.[r43Col('未收(原币)')]), 0)
 eq('预收抵扣列记 20', Number(r43TgtRow?.[r43Col('预收抵扣(原币)')]), 20)
+
+section('R44 转单落库时就过重算：不再留「已发出 + 已收齐」那种自相矛盾的单')
+const r44Cust = await customers.saveCustomer({ company: 'R44-CONV-CO' })
+const r44Full = await samples.saveSample({
+  customerId: r44Cust.id,
+  sampleDate: dAgo(2),
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: dAgo(2),
+  items: [
+    { styleNo: 'R44-F1', productName: '抵扣抵平货值', color: 'Black', size: 'M', quantity: 1, unitPrice: 40, goodsUnitPrice: 40 }
+  ]
+})
+const r44FullOrder = await samples.convertSampleToOrder(r44Full.id, { offsetSampleFee: true, paymentStatus: 'sent' })
+eq('全额抵扣的转单：落库那一刻就是已结清（不用等下一次收款事件）', r44FullOrder.paymentStatus, 'settled')
+eq('库里落的也是已结清', (await orders.getOrder(r44FullOrder.id))!.paymentStatus, 'settled')
+eq('自动流转只留一条痕（同值不再重跑）', (await orders.listEvents(r44FullOrder.id)).filter((e) => e.kind === 'status_auto').length, 1)
+check(
+  '结清了就不该再天天催「客户没确认」',
+  !(await dashboard.reminders()).some((r) => r.orderId === r44FullOrder.id && r.kind === 'confirm')
+)
+const r44Part = await samples.saveSample({
+  customerId: r44Cust.id,
+  sampleDate: dAgo(2),
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: dAgo(2),
+  items: [
+    { styleNo: 'R44-P1', productName: '只抵掉一小部分', color: 'Black', size: 'M', quantity: 1, unitPrice: 40, goodsUnitPrice: 300 }
+  ]
+})
+const r44PartOrder = await samples.convertSampleToOrder(r44Part.id, { offsetSampleFee: true, paymentStatus: 'sent' })
+eq('没抵平的单照旧停在「已发出」：重算不是把状态一律往上推', r44PartOrder.paymentStatus, 'sent')
+const r44Draft = await samples.saveSample({
+  customerId: r44Cust.id,
+  sampleDate: dAgo(2),
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: dAgo(2),
+  items: [
+    { styleNo: 'R44-D1', productName: '选了先存草稿', color: 'Black', size: 'M', quantity: 1, unitPrice: 40, goodsUnitPrice: 40 }
+  ]
+})
+const r44DraftOrder = await samples.convertSampleToOrder(r44Draft.id, { offsetSampleFee: true, paymentStatus: 'draft' })
+eq('用户选的「先存草稿」不被自动流转覆盖（即使这张单合计 0）', r44DraftOrder.paymentStatus, 'draft')
+const r44Quot = await quotations.saveQuotation({
+  customerId: r44Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  items: [{ styleNo: 'R44-Q1', productName: '正常报价转单', color: 'Black', size: 'M', quantity: 10, unitPrice: 8 }]
+})
+const r44QuotOrder = await quotations.convertToOrder(r44Quot.id)
+eq('报价转单也走同一条重算：正常有欠款的单仍停在「已发出」等客户点头', r44QuotOrder.paymentStatus, 'sent')
+
+section('R44 负合计不算结清：那是该退客户钱，不是收齐了')
+const r44Neg = await orders.createOrder({
+  customerId: r44Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  piNo: 'PI-R44-NEG',
+  charges: [{ label: '让利（录重了，把货值抵穿）', amount: -200 }]
+})
+await orders.addOrderItem(r44Neg.id, { styleNo: 'R44-NG', productName: '货值 100', color: 'Black', size: 'M', quantity: 1, unitPrice: 100 })
+const r44NegRow = (await orders.getOrder(r44Neg.id))!
+check('这张单合计是负的（让利把货值抵穿了）', r44NegRow.grandTotal < -0.001, String(r44NegRow.grandTotal))
+check('原始欠款也记成负数：账面上要看得见「该退多少」', r44NegRow.remainingRaw < -0.001, String(r44NegRow.remainingRaw))
+await orders.setPaymentStatus(r44Neg.id, 'sent')
+eq('合计为负不判结清（顶多回到「已发出」，等人来处理这笔该退的钱）', await orders.recomputePaymentStatus(r44Neg.id), 'sent')
+eq('界面上的待收把负数收在 0，不显示「待收 −100」', shownRemaining('sent', r44NegRow.remainingRaw), 0)
+
+section('R44 删图判据认得下带路径的名字与 URL')
+const r44Prod = await products.saveProduct({ styleNo: 'R44-PIC', name: '判据测试款', sizes: ['M'], colors: ['Black'] })
+await products.addProductImage(r44Prod.id, 'R44-used.png', true)
+const r44Files = filesCore(coreDb)
+check(
+  '传「sub/dir/R44-used.png」这种带目录的名字也认得是在用的图（删除端按 basename 落地）',
+  (await r44Files.referenced(['sub/dir/R44-used.png'])).has('R44-used.png')
+)
+eq(
+  '图片 URL 进来照样拦得住，剩下的才许删',
+  JSON.stringify(await r44Files.deletable(['http://127.0.0.1:3000/api/files/images/R44-used.png', 'R44-draft.png'])),
+  JSON.stringify(['R44-draft.png'])
+)
+eq('没登记过的草稿图还在可删清单里', (await r44Files.deletable(['R44-draft.png'])).length, 1)
+eq('传进来不是数组就什么都不删', (await r44Files.deletable('R44-draft.png')).length, 0)
+await products.deleteProduct(r44Prod.id)
+
+section('R44 备份文件名撞上了不顶掉上一份')
+eq('目录里没这个名就照原名', uniqueBackupName(backupsDir(), 'ikanbot-R44DUP.zip'), 'ikanbot-R44DUP.zip')
+fs.writeFileSync(join(backupsDir(), 'ikanbot-R44DUP.zip'), 'SENTINEL')
+eq('同秒撞名往后加 -2，不去覆盖那一份能救命的恢复点', uniqueBackupName(backupsDir(), 'ikanbot-R44DUP.zip'), 'ikanbot-R44DUP-2.zip')
+fs.writeFileSync(join(backupsDir(), 'ikanbot-R44DUP-2.zip'), 'SENTINEL2')
+eq('再撞就 -3', uniqueBackupName(backupsDir(), 'ikanbot-R44DUP.zip'), 'ikanbot-R44DUP-3.zip')
+const r44Sentinel = fs.readFileSync(join(backupsDir(), 'ikanbot-R44DUP.zip'), 'utf8')
+fs.rmSync(join(backupsDir(), 'ikanbot-R44DUP.zip'))
+fs.rmSync(join(backupsDir(), 'ikanbot-R44DUP-2.zip'))
+eq('上一份包的内容没被动过', r44Sentinel, 'SENTINEL')
+
+section('R44 打样单的锁：那单作废了才放开（草稿/失效照旧锁死）')
+const r44LockSample = await samples.saveSample({
+  customerId: r44Cust.id,
+  sampleDate: dAgo(3),
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: dAgo(3),
+  items: [
+    { styleNo: 'R44-L1', productName: '样品费录错了', color: 'Black', size: 'M', quantity: 1, unitPrice: 50, goodsUnitPrice: 200 }
+  ]
+})
+const r44LockOrder = await samples.convertSampleToOrder(r44LockSample.id, { offsetSampleFee: true, paymentStatus: 'draft' })
+check(
+  '转出订单还是草稿：费用照旧锁死（那单随时可能活过来，抵扣已经烧进它的费用行）',
+  (
+    await r8err(
+      async () =>
+        await samples.saveSample({
+          id: r44LockSample.id,
+          items: [
+            { styleNo: 'R44-L1', productName: '样品费录错了', color: 'Black', size: 'M', quantity: 1, unitPrice: 55, goodsUnitPrice: 200 }
+          ]
+        })
+    )
+  ).includes('不能再改')
+)
+await orders.voidOrder(r44LockOrder.id, 'R44 评审：客户取消这张单')
+const r44Unlocked = await samples.saveSample({
+  id: r44LockSample.id,
+  items: [
+    { styleNo: 'R44-L1', productName: '样品费录错了', color: 'Black', size: 'M', quantity: 1, unitPrice: 55, goodsUnitPrice: 200 }
+  ]
+})
+eq('那单作废了就能改回真实样品费（不必删除重建、水单挂靠不断）', r44Unlocked.sampleFee, 55)
+eq('作废单不再靠这张样用作凭据，样品费回到未收', r44Unlocked.feeStatus, 'unpaid')
 
 /* ---------------- 汇总 ---------------- */
 

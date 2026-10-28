@@ -2242,7 +2242,9 @@ export function ordersCore(db: Db) {
     // 有货值却被费用行抵成 0 的单（转单时抵扣恰等于货值）本来就不欠钱：以前要求 total>0
     // 才认结清，这种单会一直停在「已发出」，在途榜和催款天天追一张没有任何金额的账。
     // 空的 0 单不算——那张 PI 还没填货，客户点头才是它的事，不能被当成「钱收齐了」。
-    const offsetToZero = total <= 0.001 && money.goodsValue > 0.001
+    // 负数也不算：那是费用/折扣把货值抵穿了，方向是「该退客户钱」，
+    // 标成结清正好把老板最不能吃的那口假象做出来（待收界面本来就把它收在 0）。
+    const offsetToZero = Math.abs(total) <= 0.001 && money.goodsValue > 0.001
     if (offsetToZero || (total > 0.001 && paid + writtenOff + creditApplied >= total - 0.001)) next = 'settled'
     else if (deposit > 0 && paid + creditApplied >= deposit - 0.001) next = 'paid'
     else if (paid + creditApplied > 0) next = 'partial'

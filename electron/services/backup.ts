@@ -40,9 +40,28 @@ export function createBackup(note = ''): Promise<string> {
   return task
 }
 
+/**
+ * 名字撞上已有的包就往后加 -2、-3。
+ * 排队（backupChain）解决的是「两个调用交错」，解决不了「同秒算出同一个名字」：
+ * 一次成功备份几百毫秒，人手点「立即备份」紧着自动备份落在同一秒是完全可能的，
+ * 而 renameSync 在 Windows 上会直接把上一份顶掉——恢复点静默少一份，
+ * 出事那天翻备份列表还以为历史都在。宁可文件名丑一点。
+ */
+export function uniqueBackupName(dir: string, name: string): string {
+  if (!existsSync(join(dir, name))) return name
+  const stem = name.replace(/\.zip$/, '')
+  for (let n = 2; ; n++) {
+    const candidate = `${stem}-${n}.zip`
+    if (!existsSync(join(dir, candidate))) return candidate
+  }
+}
+
 async function writeBackup(note: string): Promise<string> {
+  // 上一轮的降级原因不许带进这一轮：一次 VACUUM 失败之后，
+  // 每次成功备份都会被追一句陈旧的「快照降级」，还把下一次的真错盖掉
+  snapshotFallbackReason = ''
   const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
-  const name = `ikanbot-${stamp}${note ? `-${note}` : ''}.zip`
+  const name = uniqueBackupName(backupsDir(), `ikanbot-${stamp}${note ? `-${note}` : ''}.zip`)
   const target = join(backupsDir(), name)
   // 临时名带 uuid：万一有别的进程（或上一轮没清干净的调用）也在写同一秒的包，
   // 两边不会互相把对方的半截文件当自己的临时文件改名走
@@ -56,16 +75,6 @@ async function writeBackup(note: string): Promise<string> {
     const onDisk = readFileSync(temp)
     verifyZip(onDisk, entries)
     renameSync(temp, target)
-    pruneBackups(30)
-    await markBackupOk(new Date().toISOString())
-    // 快照降级过的备份能用于恢复，但不是事务一致快照：留一句在 lastBackupError 里，
-    // 工作台会挂起提示，别让人以为这份和平时的是同一种口径
-    if (snapshotFallbackReason) {
-      await markBackupFail(
-        `备份已生成，但数据库快照降级为直接拷贝（${snapshotFallbackReason}）。这份备份可用于恢复，但不是事务一致快照，建议查明原因后再备一次。`
-      )
-    }
-    return target
   } catch (e) {
     try {
       if (existsSync(temp)) unlinkSync(temp)
@@ -73,9 +82,33 @@ async function writeBackup(note: string): Promise<string> {
       /* 临时文件删不掉不影响报错 */
     }
     const msg = (e as Error).message
-    await markBackupFail(msg)
+    // 记原因这一步自己坏了不能把原始失败顶掉（closeDb 之后 markBackupFail 会再抛一句
+    // 「数据库尚未初始化」，用户看到的那句话就跟备份为什么坏了没关系）
+    try {
+      await markBackupFail(msg)
+    } catch (markErr) {
+      console.warn('[backup] 备份失败原因没记进设置：', markErr)
+    }
     throw new Error(msg)
   }
+
+  // 包已经落盘了：下面全是善后与留痕，任何一步坏了都不许把成功的备份说成失败
+  pruneBackups(30)
+  const degrade = snapshotFallbackReason
+  try {
+    if (degrade) {
+      // 快照降级过的备份能用于恢复，但不是事务一致快照：留一句在 lastBackupError 里，
+      // 工作台会挂起提示，别让人以为这份和平时的是同一种口径
+      await markBackupFail(
+        `备份已生成，但数据库快照降级为直接拷贝（${degrade}）。这份备份可用于恢复，但不是事务一致快照，建议查明原因后再备一次。`
+      )
+    } else {
+      await markBackupOk(new Date().toISOString())
+    }
+  } catch (markErr) {
+    console.warn('[backup] 备份结果没记进设置：', markErr)
+  }
+  return target
 }
 
 export function collectBackupEntries(): ZipEntry[] {
@@ -124,12 +157,21 @@ function snapshotDb(dbFile: string): Buffer {
   }
 }
 
+/** 列目录不许把备份本身拖下水：网盘/杀软一口咬住 backups 目录时 readdir 会抛 EPERM/ENOENT */
+function safeReaddir(dir: string): string[] {
+  try {
+    return readdirSync(dir)
+  } catch {
+    return []
+  }
+}
+
 /** 保留最近 N 份备份 */
 export function pruneBackups(keep = 30): void {
   const dir = backupsDir()
   // readdir 和 stat 之间文件可能被网盘/杀软挪走：prune 只是善后，
   // 任何异常都不能让已经成功的备份被记成失败（createBackup 会进 catch 去 markBackupFail）
-  const files = readdirSync(dir)
+  const files = safeReaddir(dir)
     .filter((f) => f.startsWith('ikanbot-') && f.endsWith('.zip'))
     .map((f) => {
       try {
@@ -148,7 +190,7 @@ export function pruneBackups(keep = 30): void {
   }
   // 半截的 .part 顺手清掉：断电/被杀时留下的，名字里带 .zip 不算数、
   // 界面看不见，却实实在在占着磁盘（一份包 = 全部图片+存档的大小）
-  const halfWritten = readdirSync(dir).filter((f) => f.endsWith('.part'))
+  const halfWritten = safeReaddir(dir).filter((f) => f.endsWith('.part'))
   for (const f of halfWritten) {
     try {
       const p = join(dir, f)
@@ -175,8 +217,9 @@ export function autoBackupOnStart(): void {
   }
   const dir = backupsDir()
   const today = localDate()
-  const doneToday = readdirSync(dir).some((f) => {
-    if (!/^ikanbot-\d{14}-auto\.zip$/.test(f)) return false
+  // -2 / -3 后缀是同秒撞名时加的，同样算「今天已经备过」
+  const doneToday = safeReaddir(dir).some((f) => {
+    if (!/^ikanbot-\d{14}-auto(-\d+)?\.zip$/.test(f)) return false
     try {
       return localDate(new Date(statSync(join(dir, f)).mtimeMs)) === today
     } catch {
@@ -438,6 +481,11 @@ function requireBackupPath(rawPath: string): string {
  * 恢复本身是破坏性操作（选错包 = 覆盖掉这几天的活），留一份能反悔的东西比省一次磁盘写入重要得多。
  */
 export async function restoreBackup(rawPath: string): Promise<{ restarted: boolean }> {
+  // 立旗之前先看旗是不是已经举着。恢复期间放行的恰好是 backup: 这一族（失败了还得让人
+  // 重新挑一个包），于是第二个窗口能原样再进来一次：两次 runRestore 并发 closeDb、
+  // 并发换目录，落在盘上的就是「A 包的库 + B 包的照片」，连 pre-restore 那份反悔药
+  // 都可能被同名顶掉。恢复是唯一一个「做了两次比做一次更糟」的操作。
+  if (restoring) throw new Error('已经在恢复备份了，请等它跑完（成功后程序会自动重启）。')
   // 立旗：从这里起，除了备份页自己的通道，别的读写一律先停一停。
   // 关键是下面那句 await createBackup('pre-restore')——它是整段里唯一让出事件循环的 await，
   // 在途的一条 docs:save / orders 写请求正好能插进来提交：

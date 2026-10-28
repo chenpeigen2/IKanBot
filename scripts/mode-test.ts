@@ -543,6 +543,29 @@ async function main(): Promise<void> {
     const paths = await ipc('app:paths')
     check('本机独有通道在远端模式下照常可用', paths.ok && typeof (paths as any).data.db === 'string')
 
+    // 存档表（doc_versions）只在本机库里：docs: 整族在远端模式也走本机实现，
+    // 于是「把这张 PI 存成第 2 版」会把凭据记到另一份账上——服务器那边查无此版，
+    // 「出过 CI 锁单价」「有存档禁删」全跟着瞎掉，本机库为空时还会甩出英文 SQLite 原话。
+    const remoteDocSave = (await ipc('docs:save', {
+      html: '<p>x</p>',
+      fileName: 'PI-M44.pdf',
+      docNo: 'PI-M44',
+      kind: 'pi',
+      orderId: null,
+      amount: 10
+    })) as any
+    check(
+      '远端模式存档当场说清楚（不写进本机那另一份账，也不报英文）',
+      !remoteDocSave.ok && String(remoteDocSave.error).includes('只在本机模式下工作'),
+      JSON.stringify(remoteDocSave)
+    )
+    const remoteDocList = (await ipc('docs:list', 1)) as any
+    check(
+      '远端模式连「本机第 1 号的存档」都不翻给服务器那 1 号看（两家的单据不串进一个弹窗）',
+      !remoteDocList.ok && String(remoteDocList.error).includes('只在本机模式下工作'),
+      JSON.stringify(remoteDocList)
+    )
+
     // 切回本机：后端那份数据必须原封不动地留在后端
     saveConnection({ mode: 'local' })
     const backLocal = await ipc('customers:list', '')
@@ -592,6 +615,12 @@ async function main(): Promise<void> {
     )
     const gateBackupList = (await ipc('backup:list')) as any
     check('备份页自己照常用（还得看得见的列表、按得动取消）', gateBackupList.ok === true, JSON.stringify(gateBackupList))
+    const gateRestoreAgain = (await ipc('backup:restore', gateZip.data)) as any
+    check(
+      '恢复不让第二次恢复插队（两次并发换库 = A 包的库配 B 包的照片，反悔药还可能被同名顶掉）',
+      !gateRestoreAgain.ok && String(gateRestoreAgain.error).includes('已经在恢复备份了'),
+      JSON.stringify(gateRestoreAgain)
+    )
 
     console.log(`\n${'='.repeat(46)}`)
     console.log(`双模式通过 ${passed} 项`)

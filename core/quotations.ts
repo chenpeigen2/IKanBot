@@ -872,6 +872,10 @@ export function quotationsCore(db: Db) {
       // 过期报价的审批话术**只进操作历史**（下面那条 quotation_convert 事件），绝不写进订单备注：
       // note 会原样印在 PI/CI 上发给客户，「经谁批准、为什么让步、有效期重置」都是我方内部口径，
       // 客户看见议价底线，下次报价就拿它压人。原来这里还会整句覆盖掉「由报价单…转成」的凭据句。
+      // 明细同样是在这个事务里裸插的，不经 addItem 的自动重算：转完补一次，
+      // 让「合计已经抵平」的报价单落库时就是它真正的收款状态，
+      // 而不是顶着一张「已发出」去挨催（draft 走不到这里——recompute 对草稿早返回）
+      await ordersOf().recomputePaymentStatus(order.id)
       const saved = (await ordersOf().getOrder(order.id))!
       if (Math.abs(saved.grandTotal - snapGrand) > 0.005) {
         throw bizError(

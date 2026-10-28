@@ -484,6 +484,13 @@ export function samplesCore(db: Db) {
         const o = await db.get('SELECT order_no, payment_status FROM orders WHERE id = ?', [
           Number(before.converted_order_id)
         ]) as { order_no?: string; payment_status?: string } | null
+        // 那单作废了才放开四把锁：作废是终态（改不回来），voidOrder 又已把抵扣翻回未收、
+        // 预收抵扣退回去，这笔样品费这时独立在那张死单之外——不放开就只能删除重建打样单，
+        // 一删单号断了、已登记的水单也失去挂靠，等于为了改一个写错的样品费毁掉凭据链。
+        // 草稿/失效不放：转单时抵扣是一次性烧进订单 charges JSON 的，全局没有
+        // 「样品费→订单费用行」的再同步路径；那两态还能复活成计费状态，
+        // 放开会让订单恢复时按旧抵扣算钱，两边静默错开。
+        const orderVoided = o?.payment_status === 'void'
         const moneyChanged =
           Math.abs(storedFee - sampleFee) > 0.001 ||
           Math.abs(expressFee - Number(before.express_fee ?? 0)) > 0.001 ||
@@ -491,19 +498,19 @@ export function samplesCore(db: Db) {
           (input.currency !== undefined && input.currency !== String(before.currency)) ||
           (input.exchangeRateDate !== undefined &&
             input.exchangeRateDate !== String(before.exchange_rate_date ?? ''))
-        if (moneyChanged) {
+        if (moneyChanged && !orderVoided) {
           throw bizError(
             `这张打样单已经转成订单 ${o?.order_no ?? ''}，样品费、快递费、汇率都是那单的依据，不能再改。要改请直接改订单。`
           )
         }
         // 客户也锁：换个人，样品费抵扣和应收就串到另一家账上
-        if (input.customerId !== undefined && Number(input.customerId) !== Number(before.customer_id)) {
+        if (!orderVoided && input.customerId !== undefined && Number(input.customerId) !== Number(before.customer_id)) {
           throw bizError(
             `这张打样单已经转成订单 ${o?.order_no ?? ''}，客户不能再改：样品费抵扣和应收都记在这个客户名下。要改请直接改订单。`
           )
         }
         // 收款状态也锁：已收/已抵扣改成未收，同一笔钱会在待收里再收一次
-        if (feeStatus !== String(before.fee_status)) {
+        if (!orderVoided && feeStatus !== String(before.fee_status)) {
           throw bizError(
             `这张打样单已经转成订单 ${o?.order_no ?? ''}，样品费的收款状态不能再改（现在是「${SAMPLE_FEE_STATUS_LABEL[before.fee_status as SampleFeeStatus] ?? before.fee_status}」）：它和那单的抵扣、应收是绑在一起的。`
           )
@@ -511,7 +518,7 @@ export function samplesCore(db: Db) {
         // 状态同样锁：转完单又标回「已取消」，这张单就从样品台账里消失，订单却还挂着它的抵扣。
         // 订单已作废则不住拦：那单不再靠这张单作凭据，取消留原因后可以照常销档。
         if (
-          o?.payment_status !== 'void' &&
+          !orderVoided &&
           input.status !== undefined &&
           String(input.status) !== String(before.status)
         ) {
@@ -820,6 +827,13 @@ export function samplesCore(db: Db) {
           offsetTotal > 0 ? `样品费及快递费 ${offsetTotal.toFixed(2)} 抵扣` : '样品费未抵扣'
         }${s.note ? `；打样单备注：${s.note}` : ''}`
       )
+      // 明细是这里裸插进去的，走不到 addItem 那条「改一行就重算状态」的路，
+      // 所以转完必须在同一个事务里重算一次收款状态：
+      // 全额抵扣的转单合计正好 0，不重算就顶着一张「已发出」的结清单——
+      // 列表同屏挂出「已发出 + 已收齐」，催确认天天响，在途榜多算一单。
+      // 重算对 draft/expired/void 直接早返回，用户选的「先存草稿」不会被覆盖；
+      // 没填货的 0 单（货值 0）也不满足结清条件，照旧留在「已发出」等客户点头。
+      await ordersOf().recomputePaymentStatus(order.id)
       return (await ordersOf().getOrder(order.id))!
     })
   }
