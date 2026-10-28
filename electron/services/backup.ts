@@ -60,6 +60,7 @@ async function writeBackup(note: string): Promise<string> {
   // 上一轮的降级原因不许带进这一轮：一次 VACUUM 失败之后，
   // 每次成功备份都会被追一句陈旧的「快照降级」，还把下一次的真错盖掉
   snapshotFallbackReason = ''
+  skippedFiles = []
   const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
   const name = uniqueBackupName(backupsDir(), `ikanbot-${stamp}${note ? `-${note}` : ''}.zip`)
   const target = join(backupsDir(), name)
@@ -95,12 +96,22 @@ async function writeBackup(note: string): Promise<string> {
   // 包已经落盘了：下面全是善后与留痕，任何一步坏了都不许把成功的备份说成失败
   pruneBackups(30)
   const degrade = snapshotFallbackReason
+  const missing = [...skippedFiles]
   try {
-    if (degrade) {
+    if (degrade || missing.length) {
       // 快照降级过的备份能用于恢复，但不是事务一致快照：留一句在 lastBackupError 里，
-      // 工作台会挂起提示，别让人以为这份和平时的是同一种口径
+      // 工作台会挂起提示，别让人以为这份和平时的是同一种口径。
+      // 没能打进包的文件同理：包是好的，只是不全——「备份成功」这四个字不能白给。
+      const parts: string[] = []
+      if (missing.length) {
+        parts.push(
+          `有 ${missing.length} 个文件没能打进这一份：${missing.slice(0, 5).join('；')}` +
+            (missing.length > 5 ? `；另有 ${missing.length - 5} 个` : '')
+        )
+      }
+      if (degrade) parts.push(`数据库快照降级为直接拷贝（${degrade}）`)
       await markBackupFail(
-        `备份已生成，但数据库快照降级为直接拷贝（${degrade}）。这份备份可用于恢复，但不是事务一致快照，建议查明原因后再备一次。`
+        `备份已生成，但${parts.join('；')}。这份备份不全，恢复时上面那些东西回不来，请查明原因后再备一次。`
       )
     } else {
       await markBackupOk(new Date().toISOString())
@@ -111,14 +122,21 @@ async function writeBackup(note: string): Promise<string> {
   return target
 }
 
+/**
+ * 本次打包里没能读进来的文件（正被删、被占用、没权限）。
+ * 备份包照样能出，但这些名字必须留痕——否则少了几张图、几个单据存档的包
+ * 会被记成「备份成功」，出事那天翻备份列表还以为什么都在。
+ */
+let skippedFiles: string[] = []
+
 export function collectBackupEntries(): ZipEntry[] {
   const entries: ZipEntry[] = []
   const dbFile = join(dataDir(), 'ikanbot.db')
   if (existsSync(dbFile)) {
     entries.push({ name: 'ikanbot.db', data: snapshotDb(dbFile) })
   }
-  entries.push(...collectDir(imagesDir(), 'images'))
-  entries.push(...collectDir(docsDir(), 'docs'))
+  entries.push(...collectDir(imagesDir(), 'images', skippedFiles))
+  entries.push(...collectDir(docsDir(), 'docs', skippedFiles))
   return entries
 }
 

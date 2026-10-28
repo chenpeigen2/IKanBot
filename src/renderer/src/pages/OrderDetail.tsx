@@ -30,6 +30,7 @@ import {
   type CiBatchOptions,
   type ImageMap
 } from '../../../shared/documents'
+import { docPageFingerprint } from '../../../shared/docFingerprint'
 import { imageUrl } from '../imageUrl'
 import { isLocalDate, localDate } from '../../../shared/date'
 import EditOrderModal from './EditOrderModal'
@@ -59,6 +60,12 @@ type PreviewState = {
   notice?: string
   /** 预览时算出的下一版版次；存档时用它核对，纸面和库里必须同号 */
   rev: number
+  /**
+   * 预览当时那几份数据（订单 + 设置）的指纹。
+   * 存档前主进程按库里的现在数据再算一次：对不上说明这张纸底下的账已经变了，
+   * 旧纸不能当成正式的一版存进档案。
+   */
+  fp: string
   title: string
   /**
    * 重新生成纸面 HTML：
@@ -146,7 +153,8 @@ export default function OrderDetail() {
       new Set<string>(((order?.items ?? []) as any[]).map((i) => String(i.styleNo)))
     )
     for (const s of styleNos) {
-      const p = await window.api.products.list(s)
+      // 停用款也要出图：这张单的明细上写着这一款，商品那边停用了不该让纸面空着
+      const p = await window.api.products.list(s, true)
       const hit = p.find((x: any) => x.styleNo === s)
       if (!hit) continue
       const imgs = await window.api.products.images(hit.id)
@@ -178,6 +186,7 @@ export default function OrderDetail() {
         // 存档金额唯一入口：含费用合计（与 PI 纸面 TOTAL 同一个数）
         amount: orderDocAmount(order),
         rev,
+        fp: docPageFingerprint({ kind: 'pi', docNo: order.piNo, order, settings }),
         title: `PI ${order.piNo}`,
         notice: bankNotice(),
         render
@@ -225,6 +234,7 @@ export default function OrderDetail() {
       amount: thisAmount,
       voided: isVoid,
       rev,
+      fp: docPageFingerprint({ kind: 'pl', docNo: pl.plNo, order, settings }),
       title: isVoid ? `PL ${pl.plNo}（已作废 · 仅留档）` : `PL ${pl.plNo}`,
       render
     })
@@ -290,6 +300,7 @@ export default function OrderDetail() {
         docNo,
         amount,
         rev,
+        fp: docPageFingerprint({ kind: 'ci', docNo, order, settings }),
         title,
         confirmOverlap,
         notice: bankNotice(),
@@ -318,6 +329,7 @@ export default function OrderDetail() {
         orderId: order.id,
         amount: preview.amount,
         expectedVersion: preview.rev,
+        pageFingerprint: preview.fp,
         confirmOverlap: preview.confirmOverlap === true
       })
       setPreview({ ...preview, html: savedHtml, rev: r.version })
@@ -353,6 +365,7 @@ export default function OrderDetail() {
         orderId: order.id,
         amount: preview.amount,
         expectedVersion: preview.rev,
+        pageFingerprint: preview.fp,
         confirmOverlap: preview.confirmOverlap === true
       })
       toast(`已存档到系统：${r.path}（第 ${r.version} 版）`)

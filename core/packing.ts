@@ -426,7 +426,14 @@ export function packingCore(db: Db) {
     return listPackingLists(orderId)
   }
 
-  /** 撤销作废：点错了，或者这一批后来照常发了 */
+  /**
+   * 撤销作废：点错了，或者这一批后来照常发了。
+   *
+   * 作废期间这一批的件数不参与汇总，别的批次可以把同款的空间用满。
+   * 所以翻案前必须按本批的款号×颜色×尺码再算一遍累计：
+   * 这一批此刻还是 voided 状态，正好被汇总条件排除，等于「别的箱已装多少 + 本批要加回来多少」。
+   * 守门和落库放进同一个事务，免得中间插进来一笔新装箱。
+   */
   async function unvoidPackingList(orderId: number, plId: number, reason = ''): Promise<PackingList[]> {
     const cur = await db.get(
       'SELECT pl_no, voided_at FROM packing_lists WHERE id = ? AND order_id = ?',
@@ -439,6 +446,26 @@ export function packingCore(db: Db) {
       throw bizError('撤销作废也要写明原因：作废记录是留档凭据，为什么翻案得能查到。')
     }
     await db.transact(async () => {
+      const batches = (await db.all(
+        `SELECT style_no, color, size, COALESCE(SUM(quantity), 0) AS qty
+         FROM packing_list_lines WHERE packing_list_id = ?
+         GROUP BY style_no, color, size`,
+        [plId]
+      )) as { style_no?: string; color?: string; size?: string; qty?: number }[]
+      for (const b of batches) {
+        const qty = Number(b.qty ?? 0)
+        if (qty <= 0) continue
+        try {
+          await assertNotOverPacked(orderId, { styleNo: b.style_no, color: b.color, size: b.size }, qty)
+        } catch (e) {
+          const why = e instanceof Error ? e.message : String(e)
+          throw bizError(
+            `装箱单 ${String(cur.pl_no)} 撤销作废会被件数守门拦下：${why}` +
+              `（作废的这段日子里，别的批次可能已经把这一款的空间用掉了，也可能订单明细里已经不再下这一款。）` +
+              `这一批翻案后要重新参与汇总，请先把订单明细或那几批的数量改对，再来撤销作废。`
+          )
+        }
+      }
       await db.run('UPDATE packing_lists SET voided_at = NULL WHERE id = ? AND order_id = ?', [plId, orderId])
       await applyShipStatus(db, orderId)
       await logEvent(db, orderId, 'pl_unvoid', null, null, `撤销作废装箱单 ${String(cur.pl_no)}：${reason}（重新参与状态与件数汇总）`)

@@ -144,6 +144,8 @@ export interface IKanApi {
       amount?: number
       /** 纸面印的版次；与系统下一版不一致会被拒绝，防止纸面/存档错位 */
       expectedVersion?: number
+      /** 预览打开时那几份数据的指纹；数据变了就不让旧纸存成新版本 */
+      pageFingerprint?: string
       /** 整单/批次 CI 重叠时，用户已在弹窗里看着重叠金额勾过确认 */
       confirmOverlap?: boolean
     }): Promise<{ path: string; filePath: string; version: number }>
@@ -241,6 +243,12 @@ export interface IKanApi {
     inspect(path: string): Promise<BackupPreview>
     /** 用选定的备份包覆盖当前数据，成功后程序会自动重启 */
     restore(path: string): Promise<{ restarted: boolean }>
+    /**
+     * 本机这一份备份的结果：成功时刻与上次失败原因。
+     * 永远读本机库（backup: 是本机独有通道）——后端模式下 settings.get 拿的是服务器那份设置，
+     * 而备份包、图片、单据存档都在这台电脑上。
+     */
+    lastResult(): Promise<{ lastBackupAt: string | null; lastBackupError: string | null }>
   }
   exporter: {
     csv(kind: ExportKind, filter?: OrderExportFilter): Promise<string>

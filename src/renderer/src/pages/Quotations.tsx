@@ -16,6 +16,7 @@ import {
   type QuotationStatus
 } from '../../../shared/types'
 import { renderQuotation, type ImageMap } from '../../../shared/documents'
+import { docPageFingerprint } from '../../../shared/docFingerprint'
 import { addDays, localDate } from '../../../shared/date'
 
 interface LineRow {
@@ -454,9 +455,15 @@ function QuotationDetailModal({
 }) {
   const toast = useToast()
   const navigate = useNavigate()
-  const [preview, setPreview] = useState<{ html: string; render: (pending: boolean) => string; rev: number } | null>(
-    null
-  )
+  const [preview, setPreview] = useState<{
+    html: string
+    render: (pending: boolean) => string
+    rev: number
+    /** 预览当时那份报价 + 设置的数据指纹；存档前主进程按库里现在的数据重算一次 */
+    fp: string
+    /** 预览渲染用的那份报价数据（打开预览时刚从库里取） */
+    q: any
+  } | null>(null)
   const [settings, setSettings] = useState<any>(null)
   // 存档在途：连点两下会撞同一个版本号，报错还差点把对方那份 PDF 删掉
   const [docSaving, setDocSaving] = useState(false)
@@ -494,15 +501,16 @@ function QuotationDetailModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quotation.id])
 
-  const buildImages = async (): Promise<ImageMap> => {
+  const buildImages = async (q: any): Promise<ImageMap> => {
     const map: ImageMap = {}
     if (settings?.company?.logoFile) {
       const d = await window.api.images.readDataUrl(settings.company.logoFile)
       if (d) map['__logo__'] = d
     }
-    for (const it of quotation.items) {
+    for (const it of q.items) {
       if (map[it.styleNo]) continue
-      const p = await window.api.products.list(it.styleNo)
+      // 停用款也要出图：报价单上印着这一款，纸面不能因为商品被停用就空着
+      const p = await window.api.products.list(it.styleNo, true)
       const hit = p.find((x: any) => x.styleNo === it.styleNo)
       if (!hit) continue
       const imgs = await window.api.products.images(hit.id)
@@ -515,12 +523,28 @@ function QuotationDetailModal({
     return map
   }
 
+  /**
+   * 打开预览：先按库里现在这份重取一遍。
+   * 列表里的行可能是几分钟前加载的，客户名、明细、金额在别处已经改过——
+   * 拿旧行渲染再存档，存进去的 PDF 就成了「看着对、其实过期」的一版。
+   */
   const openPreview = async () => {
-    const images = await buildImages()
-    // 先问存档：这一版存进去会是第几版；没存之前纸上印「待存为第 N 版」（N39，不占还不存在的版本号）
-    const rev = await window.api.docs.nextVersion(quotation.qNo, 'quotation')
-    const render = (pending: boolean) => renderQuotation({ quotation, settings, images, rev, pending })
-    setPreview({ html: render(true), render, rev })
+    try {
+      const fresh = (await window.api.quotations.get(quotation.id)) ?? quotation
+      const images = await buildImages(fresh)
+      // 先问存档：这一版存进去会是第几版；没存之前纸上印「待存为第 N 版」（N39，不占还不存在的版本号）
+      const rev = await window.api.docs.nextVersion(fresh.qNo, 'quotation')
+      const render = (pending: boolean) => renderQuotation({ quotation: fresh, settings, images, rev, pending })
+      setPreview({
+        html: render(true),
+        render,
+        rev,
+        q: fresh,
+        fp: docPageFingerprint({ kind: 'quotation', docNo: fresh.qNo, quotation: fresh, settings })
+      })
+    } catch (e) {
+      toast((e as Error).message || '生成预览失败', 'error')
+    }
   }
 
   const saveToSystem = async () => {
@@ -530,12 +554,13 @@ function QuotationDetailModal({
       const savedHtml = preview.render(false)
       const r = await window.api.docs.save({
         html: savedHtml,
-        fileName: `${quotation.qNo}.pdf`,
-        docNo: quotation.qNo,
+        fileName: `${preview.q.qNo}.pdf`,
+        docNo: preview.q.qNo,
         kind: 'quotation',
-        quotationId: quotation.id,
-        amount: quotation.grandTotal,
-        expectedVersion: preview.rev
+        quotationId: preview.q.id,
+        amount: preview.q.grandTotal,
+        expectedVersion: preview.rev,
+        pageFingerprint: preview.fp
       })
       toast(`已存档：${r.path}（第 ${r.version} 版）`)
       // 存完屏幕上的纸也换成正式版本号，跟存档表一个号（N39）
@@ -558,12 +583,13 @@ function QuotationDetailModal({
       const savedHtml = preview.render(false)
       const r = await window.api.docs.save({
         html: savedHtml,
-        fileName: `${quotation.qNo}.pdf`,
-        docNo: quotation.qNo,
+        fileName: `${preview.q.qNo}.pdf`,
+        docNo: preview.q.qNo,
         kind: 'quotation',
-        quotationId: quotation.id,
-        amount: quotation.grandTotal,
-        expectedVersion: preview.rev
+        quotationId: preview.q.id,
+        amount: preview.q.grandTotal,
+        expectedVersion: preview.rev,
+        pageFingerprint: preview.fp
       })
       setPreview({ ...preview, html: savedHtml, rev: r.version })
       const fresh = await window.api.docs.listQuotation(quotation.id)

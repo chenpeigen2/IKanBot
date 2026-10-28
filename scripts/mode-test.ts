@@ -280,8 +280,8 @@ async function main(): Promise<void> {
 
     const state = await ipc('mode:get')
     check(
-      `覆盖率口径：87 / 118（实得 ${(state as any).data?.covered} / ${(state as any).data?.total}）`,
-      state.ok && (state as any).data.covered === 87 && (state as any).data.total === 118
+      `覆盖率口径：87 / 119（实得 ${(state as any).data?.covered} / ${(state as any).data?.total}）`,
+      state.ok && (state as any).data.covered === 87 && (state as any).data.total === 119
     )
     const probe = await ipc('mode:test')
     check('设置页的「测试连接」走真后端', probe.ok && (probe as any).data.ok === true)
@@ -564,6 +564,19 @@ async function main(): Promise<void> {
       '远端模式连「本机第 1 号的存档」都不翻给服务器那 1 号看（两家的单据不串进一个弹窗）',
       !remoteDocList.ok && String(remoteDocList.error).includes('只在本机模式下工作'),
       JSON.stringify(remoteDocList)
+    )
+
+    // 「最近一次成功备份」「上一次为什么没备齐」记的是这台电脑的账：backup: 前缀本机独有，
+    // 远端模式下必须照常答得出来——跟着 settings:get 去问服务器，界面上会显示服务器那次备份
+    const remoteBackup = (await ipc('backup:create')) as any
+    check('远端模式下照样能为这台电脑压一份备份（打的是本机这份库）', remoteBackup.ok === true, JSON.stringify(remoteBackup))
+    const lastResult = (await ipc('backup:lastResult')) as any
+    check(
+      '远端模式读到的「本机最近一次成功备份」就是刚才这一次（没跑到服务器那份账上）',
+      lastResult.ok === true &&
+        Date.now() - Date.parse(String(lastResult.data?.lastBackupAt ?? '')) < 5 * 60 * 1000 &&
+        !lastResult.data?.lastBackupError,
+      JSON.stringify(lastResult)
     )
 
     // 切回本机：后端那份数据必须原封不动地留在后端

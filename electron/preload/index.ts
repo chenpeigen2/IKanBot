@@ -124,6 +124,7 @@ const api: IKanApi = {
       quotationId?: number | null
       amount?: number
       expectedVersion?: number
+      pageFingerprint?: string
       confirmOverlap?: boolean
     }) => call<{ path: string; filePath: string; version: number }>('docs:save', payload),
     list: (orderId: number) => call<any[]>('docs:list', orderId),
@@ -203,7 +204,9 @@ const api: IKanApi = {
     list: () => call<any[]>('backup:list'),
     pick: () => call<string>('backup:pick'),
     inspect: (path: string) => call<any>('backup:inspect', path),
-    restore: (path: string) => call<{ restarted: boolean }>('backup:restore', path)
+    restore: (path: string) => call<{ restarted: boolean }>('backup:restore', path),
+    /** 本机这一份备份的结果（成功时刻 / 上次失败原因）：永远读本机库，后端模式也一样 */
+    lastResult: () => call<{ lastBackupAt: string | null; lastBackupError: string | null }>('backup:lastResult')
   },
   exporter: {
     csv: (kind: ExportKind, filter?: OrderExportFilter) => call<string>('export:csv', kind, filter)

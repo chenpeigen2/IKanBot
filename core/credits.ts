@@ -161,36 +161,38 @@ export function creditsCore(db: Db) {
       throw bizError('抵扣日期不能填未来：对账单按这一天排序，未来的日期会把余额排到还没发生的月份。')
     }
 
-    const target = await readTarget(input.targetKind, input.targetId)
-    if (target.customerId !== customerId) {
-      throw bizError('这张单不属于当前客户：预收只能抵同一家客户的单，不能串账。')
-    }
-    if (target.currency !== currency) {
-      throw bizError(
-        `这张单是 ${target.currency}，客户可用预收是 ${currency}：跨币种抵扣没有唯一正确的汇率，请线下换汇后按同币种登记。`
-      )
-    }
-    if (amount > target.open + 0.001) {
-      throw bizError(
-        `${target.no} 当前待收只有 ${target.open.toFixed(2)} ${currency}，不能再抵 ${amount.toFixed(2)}。`
-      )
-    }
-    const available = await moneyOf().customerCreditAvailable(customerId, currency)
-    if (available < -0.001) {
-      throw bizError(
-        `客户 ${currency} 预收出现缺口（${available.toFixed(2)}）：来源单据被改动过。请先在客户页撤销部分抵扣，再继续使用。`
-      )
-    }
-    if (amount > available + 0.001) {
-      throw bizError(
-        `客户 ${currency} 可用预收只有 ${available.toFixed(2)}，不够抵 ${amount.toFixed(2)}。`
-      )
-    }
-
+    // 校验和落库必须在同一个事务里：中间只要让出事件循环，别的写口就能插进来
+    // 改待收或花掉同一笔预收，检查时看到的「够」到插入时已经不够了。
+    // 余额守门（缺口、超可用）和水单查重同理——它们查的都是将要被改写的那张表。
     const appliedAt = input.appliedAt && isLocalDate(input.appliedAt) ? input.appliedAt : localDate()
     const note = String(input.note ?? '').trim() || '客户预收抵扣'
-    const actor = (await settingsCore(db).get()).operator
-    await db.transact(async () => {
+    return await db.transact(async () => {
+      const target = await readTarget(input.targetKind, input.targetId)
+      if (target.customerId !== customerId) {
+        throw bizError('这张单不属于当前客户：预收只能抵同一家客户的单，不能串账。')
+      }
+      if (target.currency !== currency) {
+        throw bizError(
+          `这张单是 ${target.currency}，客户可用预收是 ${currency}：跨币种抵扣没有唯一正确的汇率，请线下换汇后按同币种登记。`
+        )
+      }
+      if (amount > target.open + 0.001) {
+        throw bizError(
+          `${target.no} 当前待收只有 ${target.open.toFixed(2)} ${currency}，不能再抵 ${amount.toFixed(2)}。`
+        )
+      }
+      const available = await moneyOf().customerCreditAvailable(customerId, currency)
+      if (available < -0.001) {
+        throw bizError(
+          `客户 ${currency} 预收出现缺口（${available.toFixed(2)}）：来源单据被改动过。请先在客户页撤销部分抵扣，再继续使用。`
+        )
+      }
+      if (amount > available + 0.001) {
+        throw bizError(
+          `客户 ${currency} 可用预收只有 ${available.toFixed(2)}，不够抵 ${amount.toFixed(2)}。`
+        )
+      }
+      const actor = (await settingsCore(db).get()).operator
       await db.run(
         `INSERT INTO credit_applications(customer_id, currency, amount, target_kind, target_id, applied_at, note, actor, created_at)
          VALUES(?,?,?,?,?,?,?,?,?)`,
@@ -207,8 +209,8 @@ export function creditsCore(db: Db) {
         // 抵扣过后这张单可能已经收齐：收款状态要跟着走，不能再在工作台上催
         await ordersOf().recomputePaymentStatus(target.id)
       }
+      return await moneyOf().customerCreditBalance(customerId)
     })
-    return await moneyOf().customerCreditBalance(customerId)
   }
 
   /** 撤销一笔抵扣：不删行，写 reversed_at；余额和待收一起回来 */
@@ -277,41 +279,43 @@ export function creditsCore(db: Db) {
     if (!note) {
       throw bizError('退还预收要写原因（例如“客户取消尾单，多付退回”）：这笔钱离开公司账上，必须留痕。')
     }
-    const available = await moneyOf().customerCreditAvailable(customerId, currency)
-    if (available < -0.001) {
-      throw bizError(
-        `客户 ${currency} 预收已经有缺口（${available.toFixed(2)}）：来源单据被改动过。请先核对来源和抵扣，再办理退款。`
-      )
-    }
-    if (amount > available + 0.001) {
-      throw bizError(
-        `客户 ${currency} 可用预收只有 ${available.toFixed(2)}，不够退 ${amount.toFixed(2)}。`
-      )
-    }
-    // 一张出水单只退一次钱。水单号是钱已经出门的凭据，同一号记第二笔，
-    // 客户余额会被扣两遍，而银行流水那边只找得到一笔支出——对账时两头都说不清。
-    const dup = await db.get(
-      `SELECT refund_at, amount FROM customer_refunds
-        WHERE customer_id = ? AND currency = ? AND reversed_at IS NULL AND UPPER(TRIM(bank_ref)) = UPPER(?)
-        ORDER BY id LIMIT 1`,
-      [customerId, currency, bankRef]
-    ) as { refund_at?: string; amount?: number } | null
-    if (dup) {
-      throw bizError(
-        `这个客户的 ${currency} 已经按水单号「${bankRef}」退过一次（${String(dup.refund_at ?? '')}，${Number(dup.amount ?? 0).toFixed(2)}）：` +
-          `同一张出水单不能退两次，再记一笔余额就凭空少一截。` +
-          `上次录错了请先在退款台账里撤销那条记录（撤销要写原因）再重录；确实是另一笔支出就填它自己的水单号。`
-      )
-    }
+    // 余额够不够、这张水单退没退过，都要和落库同事务查：
+    // 水单查重在事务外查过一次，两笔同号退款各自看到「没退过」，余额就会被凭空扣两遍。
     const actor = (await settingsCore(db).get()).operator
-    await db.transact(async () => {
+    return await db.transact(async () => {
+      const available = await moneyOf().customerCreditAvailable(customerId, currency)
+      if (available < -0.001) {
+        throw bizError(
+          `客户 ${currency} 预收已经有缺口（${available.toFixed(2)}）：来源单据被改动过。请先核对来源和抵扣，再办理退款。`
+        )
+      }
+      if (amount > available + 0.001) {
+        throw bizError(
+          `客户 ${currency} 可用预收只有 ${available.toFixed(2)}，不够退 ${amount.toFixed(2)}。`
+        )
+      }
+      // 一张出水单只退一次钱。水单号是钱已经出门的凭据，同一号记第二笔，
+      // 客户余额会被扣两遍，而银行流水那边只找得到一笔支出——对账时两头都说不清。
+      const dup = await db.get(
+        `SELECT refund_at, amount FROM customer_refunds
+          WHERE customer_id = ? AND currency = ? AND reversed_at IS NULL AND UPPER(TRIM(bank_ref)) = UPPER(?)
+          ORDER BY id LIMIT 1`,
+        [customerId, currency, bankRef]
+      ) as { refund_at?: string; amount?: number } | null
+      if (dup) {
+        throw bizError(
+          `这个客户的 ${currency} 已经按水单号「${bankRef}」退过一次（${String(dup.refund_at ?? '')}，${Number(dup.amount ?? 0).toFixed(2)}）：` +
+            `同一张出水单不能退两次，再记一笔余额就凭空少一截。` +
+            `上次录错了请先在退款台账里撤销那条记录（撤销要写原因）再重录；确实是另一笔支出就填它自己的水单号。`
+        )
+      }
       await db.run(
         `INSERT INTO customer_refunds(customer_id, currency, amount, refund_at, bank_ref, note, actor, created_at)
          VALUES(?,?,?,?,?,?,?,?)`,
         [customerId, currency, amount, refundAt, bankRef, note, actor, new Date().toISOString()]
       )
+      return await moneyOf().customerCreditBalance(customerId)
     })
-    return await moneyOf().customerCreditBalance(customerId)
   }
 
   /** 撤销一笔退款（登记错了才用）：写 reversed_at，余额回来，不删行 */

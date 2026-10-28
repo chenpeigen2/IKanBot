@@ -109,17 +109,51 @@ export function createZip(entries: ZipEntry[]): Buffer {
   return Buffer.concat([...chunks, centralBuf, end])
 }
 
-/** 收集目录内所有文件为 zip 条目 */
-export function collectDir(dir: string, prefix: string): ZipEntry[] {
+/** 操作系统那几个错误码没人会读：给一句人话，原码留在括号里方便查 */
+const FS_ERROR_ZH: Record<string, string> = {
+  ENOENT: '文件已经不在了（可能刚被删掉）',
+  ENOTDIR: '路径上有同名的文件挡着',
+  EBUSY: '文件正被别的程序占用',
+  EPERM: '没有权限读这个文件',
+  EACCES: '没有权限读这个文件',
+  ENAMETOOLONG: '文件路径太长了',
+  ELOOP: '文件夹里套着软链，绕回来了'
+}
+
+export function zhFsError(e: unknown): string {
+  const err = e as NodeJS.ErrnoException
+  const zh = err?.code ? FS_ERROR_ZH[err.code] : undefined
+  return zh ? `${zh}（${err.code}）` : String((e as Error)?.message ?? e)
+}
+
+/**
+ * 收集目录内所有文件为 zip 条目。
+ *
+ * 单个文件读不了（正被删、被占用、没权限）不该把整场备份带走：跳过它、记进 skipped，
+ * 由备份服务决定怎么留痕。但「跳过」绝不能等同于「成功」——少了几张图、几个 PDF 的包
+ * 也要如实告诉人，否则出事那天翻备份，以为备份里什么都有。
+ */
+export function collectDir(dir: string, prefix: string, skipped: string[] = []): ZipEntry[] {
   if (!existsSync(dir)) return []
   const out: ZipEntry[] = []
-  for (const f of readdirSync(dir)) {
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch (e) {
+    skipped.push(`${prefix}/：整个目录读不出来 —— ${zhFsError(e)}`)
+    return out
+  }
+  for (const f of names) {
     const p = join(dir, f)
-    if (statSync(p).isDirectory()) {
-      // 单据按单号分子目录：备份必须把子目录里的 PDF 一起带上
-      out.push(...collectDir(p, `${prefix}/${f}`))
-    } else {
-      out.push({ name: `${prefix}/${f}`, data: readFileSync(p) })
+    try {
+      if (statSync(p).isDirectory()) {
+        // 单据按单号分子目录：备份必须把子目录里的 PDF 一起带上
+        out.push(...collectDir(p, `${prefix}/${f}`, skipped))
+      } else {
+        out.push({ name: `${prefix}/${f}`, data: readFileSync(p) })
+      }
+    } catch (e) {
+      skipped.push(`${prefix}/${f} —— ${zhFsError(e)}`)
     }
   }
   return out

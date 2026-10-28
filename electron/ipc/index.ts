@@ -151,7 +151,7 @@ export function registerIpc(): void {
    * 覆盖数按运行时注册的通道算，不手抄数字：
    * 以后每搬一个域到后端，设置页那句「已接入 N 个」自己会跟着变。
    * mode:（来源本身）和 updater:（本机装更新）永远在本机，不算业务接口——
-   * 加上它们分母就不是接口契约里那 118 个了。
+   * 加上它们分母就不是接口契约里那 119 个了。
    */
   const dataSource = () => ({
     ...getConnection(),
@@ -494,6 +494,17 @@ export function registerIpc(): void {
     await shell.openPath(dir)
     return dir
   })
+  /**
+   * 「最近一次成功备份」和「上一次为什么没备成」记的是本机这份账：
+   * 备份打的是这台电脑的图片目录与单据存档 PDF，成功标记也只写在本机库里。
+   * 后端模式下 settings:get 拿回来的是服务器那份设置，里面这两个字段
+   * 跟本机刚生成的那一包没有关系——所以这两个值单独走一条本机通道
+   * （backup: 前缀是本机独有，远端模式不会把它转发到服务器）。
+   */
+  handle('backup:lastResult', () => {
+    const s = settingsSvc.getSettings()
+    return { lastBackupAt: s.lastBackupAt ?? null, lastBackupError: s.lastBackupError ?? null }
+  })
   handle('export:csv', async (kind: ExportKind, filter?: OrderExportFilter) => {
     const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
     // 先算再弹框：对账单没有内容时要在用户挑路径之前就拦住，别让人选完文件才看到报错。
@@ -550,6 +561,8 @@ export function registerIpc(): void {
     amount?: number
     /** 纸面上印的版次；与系统实际下一版不一致时拒绝，避免纸面与存档错位 */
     expectedVersion?: number
+    /** 预览打开时那几份数据的指纹；数据变了就不让旧纸存成新版本 */
+    pageFingerprint?: string
     /** 整单/批次 CI 重叠时，用户已在弹窗里看着重叠金额勾过确认 */
     confirmOverlap?: boolean
   }) => {
@@ -574,6 +587,7 @@ export function registerIpc(): void {
       quotationId: payload.quotationId ?? null,
       amount: archiveAmount,
       expectedVersion: payload.expectedVersion,
+      pageFingerprint: payload.pageFingerprint,
       confirmOverlap: payload.confirmOverlap === true
     })
     return { path: saved.absolutePath, filePath: saved.filePath, version: saved.version }

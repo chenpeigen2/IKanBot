@@ -41,6 +41,15 @@ export default function Settings() {
   const [baseLocked, setBaseLocked] = useState(false)
   const [busy, setBusy] = useState(false)
   const [lastBackupFile, setLastBackupFile] = useState('')
+  /**
+   * 本机这份备份的结果（成功时刻 / 上次为什么没成）。
+   * 不能拿表单里那份 settings 的 lastBackupAt 顶替：后端模式下 settings.get 读的是
+   * 服务器那份设置，而备份包、图片、单据存档都在这台电脑上，成功标记也只写本机库——
+   * 用服务器的值显示，刚点完「立即备份」界面还会说「从来没备过」。
+   */
+  const [backupResult, setBackupResult] = useState<{ lastBackupAt: string | null; lastBackupError: string | null }>(
+    { lastBackupAt: null, lastBackupError: null }
+  )
   const [restorePath, setRestorePath] = useState('')
   const [restoreInfo, setRestoreInfo] = useState<BackupPreview | null>(null)
   const [restoring, setRestoring] = useState(false)
@@ -94,6 +103,16 @@ export default function Settings() {
     }
   }
 
+  // 必须和 loadSettings/loadSource 一起待在「未加载就 return」那道闸门之前：
+  // 首帧走的是提前返回，闸门之后的 const 还没初始化，挂载 effect 一调它就是 TDZ 报错，整页白屏
+  const loadBackupResult = async () => {
+    try {
+      setBackupResult(await window.api.backup.lastResult())
+    } catch (e) {
+      toast(`本机备份状态没读出来：${(e as Error).message}`, 'error')
+    }
+  }
+
   useEffect(() => {
     void loadSettings()
     // 这三样都是页面骨架信息：读不出来要吭声，不能默默显示默认值
@@ -103,6 +122,7 @@ export default function Settings() {
     // 一进来先问主进程要当前状态：进度那一份只认主进程存的，页面刷新也不会丢
     window.api.updater.state().then(setUpdate, fail('更新状态'))
     void loadSource()
+    void loadBackupResult()
   }, [])
 
   const switchMode = async (mode: 'local' | 'remote') => {
@@ -212,7 +232,8 @@ export default function Settings() {
           {source.mode === 'remote' ? (
             <div className="alert warn">
               现在是<strong>后端模式</strong>：客户、商品、设置、订单、报价、打样、装箱、预收与报表都读写后端那份数据（已搬到后端{' '}
-              {source.covered} / {source.total} 个接口）。单据存档、备份、打印仍在本机；客户统计这类还没搬的点了会当场报错，绝不会悄悄改本机那一份。
+              {source.covered} / {source.total} 个接口）。备份与打印仍在本机；<strong>单据存档在后端模式下会当场拒绝</strong>
+              （存档的版次和金额记的是本机那本账，写进服务器对不上）；客户统计这类还没搬的点了也会当场报错，绝不会悄悄改本机那一份。
             </div>
           ) : (
             <div className="hint">
@@ -295,12 +316,8 @@ export default function Settings() {
     try {
       const f = await window.api.backup.create()
       setLastBackupFile(f)
-      // 备份时间戳是备份服务写的，要拿回来才能刷新「最近一次成功备份」。
-      // 只合并这两个服务端字段：以前整份设置覆盖回表单，用户改到一半的条款会被冲掉。
-      const fresh = await window.api.settings.get()
-      setS((prev: any) =>
-        prev ? { ...prev, lastBackupAt: fresh.lastBackupAt, lastBackupError: fresh.lastBackupError } : prev
-      )
+      // 备份时间戳是本机库里的备份服务写的，要单独取回来才能刷新「最近一次成功备份」
+      await loadBackupResult()
       toast('备份已创建')
     } catch (e) {
       toast((e as Error).message, 'error')
@@ -325,10 +342,17 @@ export default function Settings() {
   const doRestore = async () => {
     if (!restoreInfo) return
     const when = restoreInfo.takenAt ? new Date(restoreInfo.takenAt).toLocaleString() : '时间未知'
+    // 后端模式下这份备份包换的是本机库：说清「服务器的账不会动」，
+    // 不然人会以为点下去连后端那份账也一起回到那天
+    const scope =
+      source?.mode === 'remote'
+        ? '现在是后端模式：这一步只替换这台电脑上的本机库（图片、单据存档这些还没搬的），\n服务器上那份订单/收款的账一点不动。\n'
+        : ''
     const summary =
       `要用这一份恢复：\n` +
       `  备份时间：${when}\n` +
       `  订单 ${restoreInfo.orderCount ?? '?'} 张 / 收款 ${restoreInfo.paymentCount ?? '?'} 笔 / 文件 ${restoreInfo.entryCount} 个\n\n` +
+      scope +
       `现在的订单、图片、单据存档会被整体替换成这一份的内容（当前数据会先自动备份一份，选错了还能退回来）。\n` +
       `确定要替换吗？程序随后会重启一次。`
     if (!confirm(summary)) return
@@ -621,13 +645,20 @@ export default function Settings() {
           </div>
           <div className="hint" style={{ marginBottom: 8 }}>
             程序每天启动时自动备份一次，保留最近 30 份。备份把数据库、商品图片、单据存档 PDF 一起打包，缺一样都不算备齐。
+            {source?.mode === 'remote' ? (
+              <>
+                <br />
+                {/* 整段留在一行里：JSX 会把换行处的缩进折成一个空格，中文句子中间就多出缝了 */}
+                <strong>现在是后端模式</strong>：这一份打包的是<strong>这台电脑</strong>的库（图片、单据存档这些还没搬的都在本机），服务器上那份账它管不着——服务端备份要等多机鉴权那一版一起做。恢复同理：只替换本机这份，服务器上的账不会动。
+              </>
+            ) : null}
           </div>
           <div className="hint" style={{ marginBottom: 12 }}>
-            最近一次成功备份：<strong>{sinceWords(s.lastBackupAt)}</strong>
+            本机最近一次成功备份：<strong>{sinceWords(backupResult.lastBackupAt)}</strong>
           </div>
-          {s.lastBackupError ? (
+          {backupResult.lastBackupError ? (
             <div className="alert warn" style={{ marginBottom: 12 }}>
-              上一次备份没成功：{s.lastBackupError}
+              上一次备份没成功（或没备齐）：{backupResult.lastBackupError}
             </div>
           ) : null}
           <div className="row" style={{ flexWrap: 'wrap', gap: 8 }}>

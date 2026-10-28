@@ -21,7 +21,8 @@ import * as credits from '../electron/services/credits'
 import { getSettings, saveSettings, markBackupOk, markBackupFail, baseCurrencyLocked } from '../electron/services/settings'
 import { createBackup, inspectBackup, isRestoring, listBackups, pruneBackups, restoreBackup, uniqueBackupName } from '../electron/services/backup'
 import * as docs from '../electron/services/docs'
-import { collectDir, createZip, readZip, verifyZip } from '../electron/services/zip'
+import { collectDir, createZip, readZip, verifyZip, zhFsError } from '../electron/services/zip'
+import { docPageFingerprint } from '../src/shared/docFingerprint'
 import {
   renderPi,
   renderPl,
@@ -8449,7 +8450,14 @@ await quotations.saveQuotation({
 })
 const r35Vers = (await quotations.listQuotationVersions(r35Q.id))
 eq('改了价，第 1 版的时间也不会被这次编辑顶掉', r35Vers.find((v) => v.revision === 1)!.createdAt, r35OldTs)
-check('新冻的第 2 版写在本次保存的当下', r35Vers.find((v) => v.revision === 2)!.createdAt.startsWith(localDate()))
+const r35V2 = r35Vers.find((v) => v.revision === 2)!.createdAt
+// 这一版存的是带时区的时间戳（UTC），拿 localDate() 比日期在本地凌晨 0~8 点会假失败：
+// 这条断言要验的是「写在本次保存的当下」，直接比时刻，不比落在哪一天
+check(
+  '新冻的第 2 版写在本次保存的当下',
+  r35V2 !== r35OldTs && Math.abs(Date.now() - Date.parse(r35V2)) < 5 * 60 * 1000,
+  r35V2
+)
 
 section('R35 报价有效期默认值按本地日')
 
@@ -10175,6 +10183,280 @@ const r44Unlocked = await samples.saveSample({
 })
 eq('那单作废了就能改回真实样品费（不必删除重建、水单挂靠不断）', r44Unlocked.sampleFee, 55)
 eq('作废单不再靠这张样用作凭据，样品费回到未收', r44Unlocked.feeStatus, 'unpaid')
+
+/* ---------------- R45 ---------------- */
+
+section('R45 撤销作废要重算守恒：作废期间别的批次把空间用满了，这一批不能直接翻案')
+const r45Cust = await customers.saveCustomer({ company: 'R45-PL-CO' })
+const r45Order = await orders.createOrder({
+  customerId: r45Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R45-PL'
+})
+await orders.addOrderItem(r45Order.id, { styleNo: 'R45-SKU', color: 'Black', size: 'M', quantity: 100, unitPrice: 10 })
+const r45A = (
+  await packing.createPackingList({
+    orderId: r45Order.id,
+    containerNo: 'R45-A',
+    lines: [{ boxNo: 'NO.1', styleNo: 'R45-SKU', color: 'Black', size: 'M', quantity: 40 }]
+  })
+).find((p) => p.containerNo === 'R45-A')!
+const r45B = (
+  await packing.createPackingList({
+    orderId: r45Order.id,
+    containerNo: 'R45-B',
+    lines: [{ boxNo: 'NO.2', styleNo: 'R45-SKU', color: 'Black', size: 'M', quantity: 60 }]
+  })
+).find((p) => p.containerNo === 'R45-B')!
+await packing.voidPackingList(r45Order.id, r45B.id, 'R45 这批没走成')
+// 作废期间这一批不算件数，空出来的 60 件会被新批次吃掉
+const r45C = (
+  await packing.createPackingList({
+    orderId: r45Order.id,
+    containerNo: 'R45-C',
+    lines: [{ boxNo: 'NO.3', styleNo: 'R45-SKU', color: 'Black', size: 'M', quantity: 60 }]
+  })
+).find((p) => p.containerNo === 'R45-C')!
+const r45UnvoidErr = await r8err(async () => await packing.unvoidPackingList(r45Order.id, r45B.id, 'R45 客户又要了'))
+check('翻案会让累计装得比订单多：当场拦下', r45UnvoidErr.includes('撤销作废会被件数守门拦下'), r45UnvoidErr)
+check('拦下时把「还能装几件、这一批要加回几件」说清楚', r45UnvoidErr.includes('还能装 0 件') && r45UnvoidErr.includes('这一批填了 60 件'), r45UnvoidErr)
+eq('拦下后这一批照旧躺着（作废状态没被改动）', (await packing.listPackingLists(r45Order.id)).find((p) => p.id === r45B.id)!.voidedAt != null, true)
+eq('拦下后已装件数不变', (await shipmentSummary(r45Order.id)).packedQuantity, 100)
+eq('拦下后不留撤销的留痕（守门在事务里，事件也不能写）', (await orders.listEvents(r45Order.id)).filter((e) => e.kind === 'pl_unvoid').length, 0)
+// 把新批次改小到 20 件：仍然装不下这一批的 60 件
+await packing.updatePackingListLine(r45Order.id, r45C.id, r45C.lines[0].id, { quantity: 20 })
+const r45UnvoidErr2 = await r8err(async () => await packing.unvoidPackingList(r45Order.id, r45B.id, 'R45 客户又要了'))
+check('改小一档还是拦：这次还能装 40 件，这一批要加回 60 件', r45UnvoidErr2.includes('还能装 40 件'), r45UnvoidErr2)
+eq('改小后已装 60 件', (await shipmentSummary(r45Order.id)).packedQuantity, 60)
+// 腾位置：删掉占位的批次，这一批才翻得过来
+await packing.deletePackingList(r45Order.id, r45C.id)
+await packing.unvoidPackingList(r45Order.id, r45B.id, 'R45 客户又要了')
+eq('位置腾出来后果然翻案成功', (await packing.listPackingLists(r45Order.id)).find((p) => p.id === r45B.id)!.voidedAt == null, true)
+eq('首批那 40 件全程没被动过', (await packing.listPackingLists(r45Order.id)).find((p) => p.id === r45A.id)!.lines[0].quantity, 40)
+eq('翻案后合计回到订单量', (await shipmentSummary(r45Order.id)).packedQuantity, 100)
+eq('翻案成功才留下那笔历史', (await orders.listEvents(r45Order.id)).filter((e) => e.kind === 'pl_unvoid').length, 1)
+
+section('R45 存档前验纸面指纹：预览期间数据变了就不存这一版')
+const r45DocCust = await customers.saveCustomer({ company: 'R45-DOC-CO' })
+const r45DocOrder = await orders.createOrder({
+  customerId: r45DocCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R45-DOC'
+})
+await orders.addOrderItem(r45DocOrder.id, { styleNo: 'R45-DOC', color: 'Black', size: 'M', quantity: 1, unitPrice: 100 })
+const r45Pdf = Buffer.from('%PDF-1.4 r45 fingerprint')
+const r45Fp = docPageFingerprint({
+  kind: 'pi',
+  docNo: 'PI-R45-DOC',
+  order: await orders.getOrder(r45DocOrder.id),
+  settings: getSettings()
+})
+const r45StaleErr = await r8err(
+  async () =>
+    await docs.saveDocFile({
+      pdf: r45Pdf,
+      docNo: 'PI-R45-DOC',
+      kind: 'pi',
+      orderId: r45DocOrder.id,
+      amount: 100,
+      pageFingerprint: 'deadbeefdeadbeef'
+    })
+)
+check('纸面指纹对不上：拒存并叫人重开预览', r45StaleErr.includes('纸面已经过时') && r45StaleErr.includes('重新打开'), r45StaleErr)
+eq('拒存后库里没记这一版', docs.listDocVersions(r45DocOrder.id).length, 0)
+const r45Saved = await docs.saveDocFile({
+  pdf: r45Pdf,
+  docNo: 'PI-R45-DOC',
+  kind: 'pi',
+  orderId: r45DocOrder.id,
+  amount: 100,
+  pageFingerprint: r45Fp
+})
+eq('数据没动过：带着预览那份指纹存得进去', r45Saved.version, 1)
+// 预览期间的真实改动：加一件明细，旧指纹立刻对不上
+await orders.addOrderItem(r45DocOrder.id, { styleNo: 'R45-DOC2', color: 'Black', size: 'L', quantity: 2, unitPrice: 50 })
+const r45Stale2Err = await r8err(
+  async () =>
+    await docs.saveDocFile({
+      pdf: r45Pdf,
+      docNo: 'PI-R45-DOC',
+      kind: 'pi',
+      orderId: r45DocOrder.id,
+      amount: 100,
+      pageFingerprint: r45Fp
+    })
+)
+check('改过明细后用旧指纹存第 2 版被拦（不然 PDF 和账各说各话）', r45Stale2Err.includes('纸面已经过时'), r45Stale2Err)
+eq('被拦的这一次没多出第 2 版', docs.listDocVersions(r45DocOrder.id).length, 1)
+check(
+  '不带指纹的老调用照样存得进（脚本与老入口不能凭空判死）',
+  (await docs.saveDocFile({ pdf: r45Pdf, docNo: 'PI-R45-DOC', kind: 'pi', orderId: r45DocOrder.id, amount: 200 })).version,
+  2
+)
+
+section('R45 CI 存档要先有 PI 号：空号会让所有闸门认错单')
+const r45NoPiCust = await customers.saveCustomer({ company: 'R45-NOPI-CO' })
+const r45NoPi = await orders.createOrder({
+  customerId: r45NoPiCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(r45NoPi.id, { styleNo: 'R45-NOPI', quantity: 1, unitPrice: 80 })
+// 现在建单都会自动补号，空 PI 号只剩升级前那份老数据：照老数据的样子直接清
+getDb().run("UPDATE orders SET pi_no = '' WHERE id = ?", [r45NoPi.id])
+const r45CiErr = await r8err(
+  async () => await docs.saveDocFile({ pdf: r45Pdf, docNo: 'CI', kind: 'ci', orderId: r45NoPi.id, amount: 80 })
+)
+check('这张单还没 PI 号：CI 存档当场拒绝', r45CiErr.includes('还没有 PI 号'), r45CiErr)
+check('拒存时把闸门认错单这件事说给人听', r45CiErr.includes('补上 PI 号'), r45CiErr)
+eq('没落库，不会留下一个光秃秃的 CI 键', docs.listDocVersions(r45NoPi.id).length, 0)
+check('拦在落盘之前：盘上没多出 CI 目录', !fs.existsSync(join(docsDir(), 'CI')))
+await orders.updateOrder(r45NoPi.id, { customerId: r45NoPiCust.id, piNo: 'PI-R45-NOPI' })
+const r45CiOk = await docs.saveDocFile({
+  pdf: r45Pdf,
+  docNo: ciNoOf('PI-R45-NOPI'),
+  kind: 'ci',
+  orderId: r45NoPi.id,
+  amount: 80
+})
+eq('补上 PI 号就能正常出这一版', r45CiOk.version, 1)
+check('出的号是 CI 由 PI 派生（闸门认得这张单）', r45CiOk.filePath.includes('CI-R45-NOPI'), r45CiOk.filePath)
+
+section('R45 抵扣与退款的守门在事务里：拦下时台账与余额都不许动')
+const r45CrCust = await customers.saveCustomer({ company: 'R45-CREDIT-CO' })
+const r45CrSrc = await orders.createOrder({
+  customerId: r45CrCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R45-CRSRC'
+})
+await orders.addOrderItem(r45CrSrc.id, { styleNo: 'R45-CR', quantity: 1, unitPrice: 100 })
+await orders.addPayment(r45CrSrc.id, { paidAt: localDate(), amount: 150, bankRef: 'R45-IN' })
+eq('多收 50 进预收', await money.customerCreditAvailable(r45CrCust.id, 'USD'), 50)
+const r45CrTarget = await orders.createOrder({
+  customerId: r45CrCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R45-CRTGT'
+})
+await orders.addOrderItem(r45CrTarget.id, { styleNo: 'R45-CR2', quantity: 1, unitPrice: 30 })
+const r45OverErr = await r8err(
+  async () =>
+    await credits.applyCredit({
+      customerId: r45CrCust.id,
+      currency: 'USD',
+      targetKind: 'order',
+      targetId: r45CrTarget.id,
+      amount: 45
+    })
+)
+check('抵超过这张单待收的钱被拦', r45OverErr.includes('待收'), r45OverErr)
+eq('拦下的那次台账里没多一笔', (await money.customerCreditBalance(r45CrCust.id)).find((c) => c.currency === 'USD')!.applications.length, 0)
+eq('拦下的那次余额一分没动', await money.customerCreditAvailable(r45CrCust.id, 'USD'), 50)
+eq('拦下的那次也没把这张单的收款状态推上去', (await orders.getOrder(r45CrTarget.id))!.paymentStatus, 'confirmed')
+const r45CrAfterOk = await credits.applyCredit({
+  customerId: r45CrCust.id,
+  currency: 'USD',
+  targetKind: 'order',
+  targetId: r45CrTarget.id,
+  amount: 20
+})
+eq('抵成功才落下那一条台账', r45CrAfterOk.find((c) => c.currency === 'USD')!.applications.length, 1)
+check(
+  '抵完返回的余额就是 30（校验与落库同一个事务，返回的数即最终账）',
+  r45CrAfterOk.find((c) => c.currency === 'USD')!.available,
+  30
+)
+
+section('R45 备份打包：读不出来的文件必须留痕，不能记成「备份成功」')
+const r45Skipped: string[] = []
+const r45Collected = collectDir(join(dataDir(), 'ikanbot.db'), 'docs', r45Skipped)
+eq('拿文件当目录：一个也没收进来', r45Collected.length, 0)
+eq('但这条记在了缺件清单里', r45Skipped.length, 1)
+check('缺件的话术说的是中文，不是 ENOTDIR', r45Skipped[0].includes('整个目录读不出来'), r45Skipped[0])
+const r45FsErr = new Error('boom') as NodeJS.ErrnoException
+r45FsErr.code = 'EACCES'
+check('没权限说成「没权限读」，不是裸错误码', zhFsError(r45FsErr).includes('权限'), zhFsError(r45FsErr))
+r45FsErr.code = 'ENOENT'
+check('找不到文件说成「正被删除」这条线', zhFsError(r45FsErr).includes('已经不在了'), zhFsError(r45FsErr))
+
+section('R45 提醒里要说清预收抵过多少：那部分钱不是现金')
+const r45RemSettings = getSettings()
+await saveSettings({ ...r45RemSettings, remindBalanceDays: 0 })
+const r45RemCust = await customers.saveCustomer({ company: 'R45-REM-CO' })
+const r45RemSrc = await orders.createOrder({
+  customerId: r45RemCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R45-REMSRC'
+})
+await orders.addOrderItem(r45RemSrc.id, { styleNo: 'R45-REMS', quantity: 1, unitPrice: 100 })
+await orders.addPayment(r45RemSrc.id, { paidAt: localDate(), amount: 240, bankRef: 'R45-REM-IN' })
+eq('多收 140 进预收', await money.customerCreditAvailable(r45RemCust.id, 'USD'), 140)
+const r45RemUnpaid = await orders.createOrder({
+  customerId: r45RemCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R45-REMUP'
+})
+await orders.addOrderItem(r45RemUnpaid.id, { styleNo: 'R45-REMU', quantity: 1, unitPrice: 100 })
+await credits.applyCredit({
+  customerId: r45RemCust.id,
+  currency: 'USD',
+  targetKind: 'order',
+  targetId: r45RemUnpaid.id,
+  amount: 40
+})
+await orders.setShipStatus(r45RemUnpaid.id, 'shipped', 'R45 评审：出运')
+const r45RemUnpaidRow = (await dashboard.reminders()).find((r) => r.orderId === r45RemUnpaid.id && r.kind === 'balance')
+check('现金一分未收的单照样催', !!r45RemUnpaidRow, JSON.stringify(r45RemUnpaidRow))
+check(
+  '催款里写明其中 40 是预收抵的（不是现金）',
+  (r45RemUnpaidRow?.message ?? '').includes('现金一分未收') &&
+    (r45RemUnpaidRow?.message ?? '').includes('其中 40.00 已用客户预收抵扣'),
+  r45RemUnpaidRow?.message
+)
+const r45RemBal = await orders.createOrder({
+  customerId: r45RemCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  depositRatio: 0.3,
+  piNo: 'PI-R45-REMBAL'
+})
+await orders.addOrderItem(r45RemBal.id, { styleNo: 'R45-REMB', quantity: 1, unitPrice: 1000 })
+await orders.addPayment(r45RemBal.id, { paidAt: localDate(), amount: 300, bankRef: 'R45-REM-BAL' })
+await orders.setShipStatus(r45RemBal.id, 'shipped', 'R45 评审：出运')
+const r45RemBalRow = (await dashboard.reminders()).find((r) => r.orderId === r45RemBal.id && r.kind === 'balance')
+check(
+  '没收过预收的尾款单：提醒里不多出那句话',
+  (r45RemBalRow?.message ?? '').includes('已收 300.00 / 待收 700.00 USD，尾款') &&
+    !(r45RemBalRow?.message ?? '').includes('预收抵扣'),
+  r45RemBalRow?.message
+)
+await credits.applyCredit({
+  customerId: r45RemCust.id,
+  currency: 'USD',
+  targetKind: 'order',
+  targetId: r45RemBal.id,
+  amount: 10
+})
+const r45RemBalRow2 = (await dashboard.reminders()).find((r) => r.orderId === r45RemBal.id && r.kind === 'balance')
+check(
+  '抵了一笔之后提醒改口：待收 690，其中 10 走的是客户预收',
+  (r45RemBalRow2?.message ?? '').includes('待收 690.00 USD，其中 10.00 已用客户预收抵扣（非现金），尾款'),
+  r45RemBalRow2?.message
+)
+await saveSettings(r45RemSettings)
 
 /* ---------------- 汇总 ---------------- */
 

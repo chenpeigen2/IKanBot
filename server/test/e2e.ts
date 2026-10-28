@@ -644,6 +644,29 @@ async function main(): Promise<void> {
     const plUnvoid = await http.post('/api/pl/unvoid').send({ orderId: oid, plId, reason: '重新订舱' })
     check('撤销作废后回到活批次', plUnvoid.status === 200 && plUnvoid.body[0].voidedAt === null)
 
+    // R45：作废期间这一款的空间会被别的批次用掉，翻案前必须重算一遍守恒
+    const plVoid2 = await http.post('/api/pl/void').send({ orderId: oid, plId, reason: '再作废一次' })
+    check('为了守恒场景再作废一次', plVoid2.status === 200 && plVoid2.body[0].voidedAt !== null)
+    const plFill = await http
+      .post('/api/pl/create')
+      .send({ input: { orderId: oid, containerNo: 'TCLU2', lines: [{ boxNo: '2', styleNo: 'OC-1', quantity: 10 }] } })
+    check('作废期间新批次能把 10 件全装走', plFill.status === 200 && plFill.body.length === 2)
+    const plUnvoidOver = await http.post('/api/pl/unvoid').send({ orderId: oid, plId, reason: '重新订舱' })
+    check(
+      '翻案会让同款累计超过订单量：后端同一份守门照样拦下（话术原样传回）',
+      plUnvoidOver.status === 400 &&
+        String(plUnvoidOver.body.error.message).includes('撤销作废会被件数守门拦下') &&
+        String(plUnvoidOver.body.error.message).includes('还能装 0 件')
+    )
+    const plStillVoided = await http.post('/api/pl/list').send({ orderId: oid })
+    check(
+      '拦下后这一批照旧是作废留档（状态没被半路改动）',
+      plStillVoided.body.find((p: any) => p.id === plId).voidedAt !== null
+    )
+    await http.post('/api/pl/delete').send({ orderId: oid, plId: Number(plFill.body[1].id) })
+    const plUnvoidOk = await http.post('/api/pl/unvoid').send({ orderId: oid, plId, reason: '位置腾出来了' })
+    check('腾出位置后翻案放行（与桌面同一个结果）', plUnvoidOk.status === 200 && plUnvoidOk.body[0].voidedAt === null)
+
     const plDel = await http.post('/api/pl/delete').send({ orderId: oid, plId })
     check('没出过 CI 的批次可以删', plDel.status === 200 && plDel.body.length === 0)
 

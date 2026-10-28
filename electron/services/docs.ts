@@ -7,8 +7,12 @@ import { isAbsolute, join, relative, resolve, sep } from 'path'
 import { dataDir, docsDir, getDb, transactAsync } from '../db'
 import { logEvent } from './events'
 import { computeOrderMoney, parseCharges } from './money'
+import { getOrder } from './orders'
+import { getQuotation } from './quotations'
+import { getSettings } from './settings'
 import { assertDocNo } from '../../src/shared/guards'
 import { ciNoOf, latestAmountPerDocNo } from '../../src/shared/documents'
+import { docPageFingerprint, stalePageMessage } from '../../src/shared/docFingerprint'
 import type { DocKind } from '../../src/shared/types'
 
 export interface DocVersion {
@@ -199,12 +203,45 @@ export function saveDocFile(input: {
   quotationId?: number | null
   amount?: number
   expectedVersion?: number
+  /** 预览打开时算出的纸面数据指纹；存档前重算一次，纸面过时就不存 */
+  pageFingerprint?: string
   /** CI 与已存档批次/整单 CI 重叠时是否已由人确认（预览弹窗勾选后带来） */
   confirmOverlap?: boolean
 }): Promise<{ filePath: string; absolutePath: string; version: number }> {
   const docNo = assertDocNo(input.docNo)
   const kind = assertDocKind(input.kind)
   return serializeDocSave(`${docNo}::${kind}`, () => writeDocVersion(docNo, kind, input))
+}
+
+/**
+ * 存档前核对纸面指纹：预览开着的那段时间，底下的单可能已经被改过。
+ * 版次号只管「存过几版」，管不了内容——旧纸会被当成新版本存进档案。
+ * 指纹不吃图片，所以这里也不需要读图。
+ * 老调用方（没带指纹）跳过：这条通道还有脚本在用，不能凭空把它们全判死。
+ */
+async function assertPageStillCurrent(input: {
+  docNo: string
+  kind: DocKind
+  orderId?: number | null
+  quotationId?: number | null
+  pageFingerprint?: string
+}): Promise<void> {
+  const sent = String(input.pageFingerprint ?? '').trim()
+  if (!sent) return
+  const settings = getSettings()
+  let current = ''
+  if (input.kind === 'quotation') {
+    if (input.quotationId == null) throw new Error('报价单存档没有带上报价单 id，不能核对纸面。')
+    const quotation = await getQuotation(Number(input.quotationId))
+    if (!quotation) throw new Error(`报价单 #${String(input.quotationId)} 已经不在了，这一版不能存。`)
+    current = docPageFingerprint({ kind: input.kind, docNo: input.docNo, quotation, settings })
+  } else {
+    if (input.orderId == null) throw new Error('单据存档没有带上订单 id，不能核对纸面。')
+    const order = await getOrder(Number(input.orderId))
+    if (!order) throw new Error(`订单 #${String(input.orderId)} 已经不在了，这一版不能存。`)
+    current = docPageFingerprint({ kind: input.kind, docNo: input.docNo, order, settings })
+  }
+  if (current !== sent) throw new Error(stalePageMessage(input.docNo, input.kind))
 }
 
 async function writeDocVersion(
@@ -226,6 +263,30 @@ async function writeDocVersion(
         `请关掉预览重新打开再存，别把两版内容混在一起。`
     )
   }
+  // CI 的号、以及「出过 CI 就锁单价/锁箱明细/批次金额按存档钉」「有存档禁删」这四道闸门，
+  // 全都是按 CI{PI 号} 认账的。PI 号空着时 ciNoOf('') 只剩一个光秃秃的 "CI"，
+  // 每张空号单都会挤进同一个键：闸门查的是别人的存档，本单看着「没出过 CI」随便改。
+  // 所以 PI 号必须先补上——补号是出口，不用改表结构。
+  if (kind === 'ci' && input.orderId != null) {
+    const piNo = String(
+      (getDb().get('SELECT pi_no FROM orders WHERE id = ?', [input.orderId]) as { pi_no?: string } | null)?.pi_no ??
+        ''
+    ).trim()
+    if (!piNo) {
+      throw new Error(
+        `这张单还没有 PI 号，CI 存档不能出：CI 的编号、以及「出过 CI 就锁单价、锁箱明细、批次金额按存档钉」` +
+          `这几道闸门都按 PI 号认单。PI 号空着，它们会认错别家的单，这张单看着却像「还没出过 CI」，想怎么改就怎么改。` +
+          `请先到订单里补上 PI 号，再出这一版。`
+      )
+    }
+  }
+  await assertPageStillCurrent({
+    docNo,
+    kind,
+    orderId: input.orderId,
+    quotationId: input.quotationId,
+    pageFingerprint: input.pageFingerprint
+  })
 
   const dir = join(docsDir(), docNo)
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })

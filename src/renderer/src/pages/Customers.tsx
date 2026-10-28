@@ -81,7 +81,8 @@ const rowKey = (r: { kind: string; docId: number }) => `${r.kind}:${r.docId}`
 
 /**
  * 水单总额核对：填了总额就说一句分配合不平。
- * 只提示不拦——分期到账、尾款、汇损都会让水单和待收本来就不等，硬拦等于把人往回赶。
+ * 提示在弹窗里常驻，保存前还要当场确认一次——不平不拦是给人留余地（分期、尾款、汇损本来就不等），
+ * 但「不确认就登记」会让账上凭空少一笔或多一笔，这一步得让人看清楚。
  */
 function splitMismatch(rows: any[], amounts: Record<string, string>, bankTotal: string): string {
   const total = Number(bankTotal)
@@ -90,10 +91,11 @@ function splitMismatch(rows: any[], amounts: Record<string, string>, bankTotal: 
   const allocated = rows.reduce((s, r) => s + Number(amounts[rowKey(r)] ?? 0), 0)
   const diff = total - allocated
   if (Math.abs(diff) <= 0.005) return ''
+  // 预收是「某一单上实收超过了它的待收」才产生的，不是水单剩下的自动进账——话术别把人误导
   return `水单总额 ${total.toFixed(2)}，这里已分 ${allocated.toFixed(2)}：${
     diff > 0
-      ? `还有 ${diff.toFixed(2)} 没分到单上——不分的钱会变成这家客户的预收`
-      : `多分了 ${(-diff).toFixed(2)}，超出这些单的待收合计`
+      ? `还有 ${diff.toFixed(2)} 没分到单上。登记只入账分下去的这些，剩下的钱不会自己变成预收——要让它进预收台账，得把它分到某张单上（超过那张单待收的部分才算多收）`
+      : `多分了 ${(-diff).toFixed(2)}，超出这些单的待收合计：超出部分会记成这家客户的预收，请确认金额没填错`
   }`
 }
 
@@ -299,6 +301,11 @@ export default function Customers() {
         `${over.map((x) => x.row.docNo).join('、')} 本次收款超过了该单待收金额。超额一般意味着金额填错了，确认按实收登记吗？`
       )
     ) {
+      return
+    }
+    // 水单和分下去的钱对不平：不拦，但要人当场点一次头，别让人事后翻账才发现
+    const mismatch = splitMismatch(split.rows, split.amounts, split.bankTotal)
+    if (mismatch && !window.confirm(`${mismatch}。\n\n确认就按现在这些金额登记？`)) {
       return
     }
     setSplit({ ...split, saving: true })

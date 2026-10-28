@@ -9,8 +9,8 @@
 目前 153 处调用全部住在 services 层（orders.ts 47 处最多），renderer 与 IPC 层（`electron/ipc/index.ts`）只认函数不认 SQL。
 任何新代码想把 SQL 写进 IPC handler、组件或 `src/` 里，都是在凿沉这条船的洞。
 
-接口面就是 IPC 边界的 118 个通道：`electron/ipc/index.ts` 里的每个 `handle('域:动作', …)`
-就是一份已经定型的 API。换后端 = 把这 118 个 handler 的实现从「调本地 service」换成「调远程 API」，
+接口面就是 IPC 边界的 119 个通道：`electron/ipc/index.ts` 里的每个 `handle('域:动作', …)`
+就是一份已经定型的 API。换后端 = 把这 119 个 handler 的实现从「调本地 service」换成「调远程 API」，
 **不另起一层 repository 抽象**——那层抽象和 IPC 边界是同一个东西，写两遍只会漂移。
 
 ## 换后端必须先解的五只拦路虎

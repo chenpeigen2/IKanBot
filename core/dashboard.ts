@@ -605,6 +605,10 @@ export function dashboardCore(db: Db) {
       if (r.receivable <= 0.001) continue
       const row = orderById.get(r.orderId)
       if (!row) continue
+      // 预收抵扣不是现金，但已经把这笔待收覆盖了一截：提醒里不说，
+      // 催款的人会按「已收 X」去对账，发现账上的钱比数少一截。
+      const credit = Number(r.creditApplied ?? 0)
+      const creditNote = credit > 0.001 ? `，其中 ${credit.toFixed(2)} 已用客户预收抵扣（非现金）` : ''
       if (r.paidAmount > 0) {
         // 定金都还没收齐时，欠的钱就是定金，不是尾款：上面那条「催定金」才说得对。
         // 这里再喊一条「尾款 N 天未到账」，等于同一笔钱两个名分，还把真该催的定金淹掉
@@ -629,7 +633,7 @@ export function dashboardCore(db: Db) {
             orderNo: r.orderNo,
             customerName: r.customerName,
             kind: 'balance',
-            message: `已收 ${r.paidAmount.toFixed(2)} / 待收 ${r.receivable.toFixed(2)} ${r.currency}，尾款 ${days} 天未到账（${from}）`,
+            message: `已收 ${r.paidAmount.toFixed(2)} / 待收 ${r.receivable.toFixed(2)} ${r.currency}${creditNote}，尾款 ${days} 天未到账（${from}）`,
             days
           },
           'balance'
@@ -654,7 +658,7 @@ export function dashboardCore(db: Db) {
           kind: 'balance',
           message:
             `${shipAt ? `货已出运 ${days} 天` : `货已出运（出运日期没记录，按建单日起算 ${days} 天）`}，` +
-            `一分未收（待收 ${r.receivable.toFixed(2)} ${r.currency}，付款方式 ${method}）`,
+            `现金一分未收（待收 ${r.receivable.toFixed(2)} ${r.currency}${creditNote}，付款方式 ${method}）`,
           days
         },
         'unpaid-shipped'
