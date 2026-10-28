@@ -133,7 +133,7 @@
 
 | 阶段 | 内容 | 验收 |
 | --- | --- | --- |
-| M0 | `server/` 骨架、异步 `Db` 接口、SQLite/MySQL 两个实现、`transact`（钉连接 + SAVEPOINT）、`/healthz`、样板域 | 骨架 typecheck + SQLite 冒烟（嵌套事务回滚）全绿 |
+| M0 | `server/` 骨架、异步 `Db` 接口、SQLite/MySQL 两个实现、`transact`（钉连接 + SAVEPOINT）、`/healthz`、样板域；`npm run dev` 拷开发库到 `.tmp/` 起来，`GET /api` 自描述已实现路由 | 骨架 typecheck + SQLite 冒烟（嵌套事务回滚）全绿；curl 能打到真数据 |
 | M1 | `electron/services/*` 逐域提升为 `core/`：异步化、注入 `Db` 与目录（去掉 electron 依赖）；桌面本地模式接 core | **现有 1800+ 断言全绿**（这是硬门槛），桌面全功能真跑 |
 | M2 | 后端服务：118 路由 + 鉴权 + 统一错误 + 请求日志，跑同一份 core + MySQL | 通道清单逐条对拍；错误文案与现在一致 |
 | M3 | 桌面双模式：转发器按配置走本地 core 或 HTTP；本地配置文件存服务器地址/账号；登录态存 safeStorage | 两模式各跑一遍全功能（打印/存档/备份）；断网有明确提示；切换需重启 |

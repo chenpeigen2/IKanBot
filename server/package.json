@@ -7,6 +7,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "smoke": "tsc -p tsconfig.json && node dist/test/smoke.js",
+    "dev": "tsc -p tsconfig.json && node dev.mjs",
     "start": "tsc -p tsconfig.json && node dist/src/index.js"
   },
   "dependencies": {

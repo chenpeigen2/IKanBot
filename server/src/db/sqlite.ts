@@ -1,4 +1,6 @@
 import { Database } from 'node-sqlite3-wasm'
+import { existsSync, mkdirSync, renameSync, rmdirSync, statSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
 import type { Db, Row, RunResult } from './types'
 
 /** 本地模式与测试用：同步驱动包成 Promise，事务语义与 electron/db 的 transact 一致 */
@@ -8,8 +10,14 @@ export class SqliteDb implements Db {
   private depth = 0
 
   constructor(file: string) {
-    this.db = new Database(file)
+    const path = resolve(file)
+    const dir = dirname(path)
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    clearStaleLock(path)
+    this.db = new Database(path)
     this.db.exec('PRAGMA foreign_keys = ON;')
+    // 备份/恢复/桌面端偶尔会同时握着同一个文件，没有 busy_timeout 就是裸的 database is locked
+    this.db.exec('PRAGMA busy_timeout = 5000;')
   }
 
   async get(sql: string, params: unknown[] = []): Promise<Row | undefined> {
@@ -54,5 +62,28 @@ export class SqliteDb implements Db {
 
   async close(): Promise<void> {
     this.db.close()
+  }
+}
+
+/**
+ * node-sqlite3-wasm 用「建一个 <db>.lock 目录」当排他锁，正常 close() 会删。
+ * 进程被强杀（Ctrl+C 没来得及关、taskkill、崩溃）时锁目录留在原地，
+ * 下次启动直接抛 database is locked——本地跑服务最常见的一次性故障。
+ * 只删空目录：非空说明可能真有别的进程握着，改名挪开留个案底，不硬抢。
+ */
+function clearStaleLock(file: string): void {
+  try {
+    const lockPath = `${file}.lock`
+    if (!existsSync(lockPath) || !statSync(lockPath).isDirectory()) return
+    try {
+      rmdirSync(lockPath)
+      return
+    } catch {
+      /* 非空：往下改名 */
+    }
+    renameSync(lockPath, `${lockPath}.stale-${Date.now()}`)
+    console.warn(`[db] 锁目录不为空，已挪开（${lockPath}）：可能是上次异常退出留下的`)
+  } catch {
+    /* 删不掉就交给驱动报错 */
   }
 }

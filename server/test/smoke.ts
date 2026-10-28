@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SqliteDb } from '../src/db/sqlite'
@@ -14,6 +14,7 @@ import { createApp } from '../src/http/server'
 async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'ikan-m0-'))
   const file = join(dir, 'smoke.db')
+  mkdirSync(`${file}.lock`) // 模拟上次被强杀留下的空锁目录
   const db = new SqliteDb(file)
   let passed = 0
   const check = (name: string, cond: boolean): void => {
@@ -23,6 +24,7 @@ async function main(): Promise<void> {
   }
 
   try {
+    check('残留的锁目录不挡启动', !existsSync(`${file}.lock`))
     await db.exec(
       `CREATE TABLE customers (
          id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,6 +105,27 @@ async function main(): Promise<void> {
     const notFound = await fetch(`${base}/api/nope`, { method: 'POST' })
     const body = (await notFound.json()) as { error?: { message?: string } }
     check('未知路由回中文错误体', notFound.status === 404 && !!body.error?.message)
+
+    const index = (await (await fetch(`${base}/api`)).json()) as { routes: string[] }
+    check(
+      'GET /api 列出已实现接口',
+      index.routes.includes('POST /api/customers/list') && index.routes.includes('GET /healthz')
+    )
+
+    const wrongMethod = await fetch(`${base}/api/customers/list`)
+    const wrongBody = (await wrongMethod.json()) as { error?: { message?: string } }
+    check('路径对、方法错时说清是什么错', wrongBody.error?.message === '这个接口不接 GET')
+
+    const arrayBody = await fetch(`${base}/api/customers/list`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '[]'
+    })
+    const arrayBodyText = (await arrayBody.json()) as { error?: { message?: string } }
+    check(
+      '顶层不是对象时拒收（不静默当成空条件）',
+      arrayBodyText.error?.message === '请求体必须是一个 JSON 对象'
+    )
 
     await new Promise<void>((resolve) => app.close(() => resolve()))
     console.log(`\nM0 冒烟通过 ${passed} 项`)
