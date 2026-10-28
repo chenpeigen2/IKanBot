@@ -10749,6 +10749,162 @@ eq(
 )
 getDb().run("DELETE FROM counters WHERE name LIKE 'ZZ-R46-TX%'")
 
+section('R47 明细写口也守合计：抽走货值不许把样品费抵扣顶成负数')
+const r47Cust = await customers.saveCustomer({ company: 'R47-GUARD-CO' })
+const r47Order = await orders.createOrder({
+  customerId: r47Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R47-GUARD'
+})
+await orders.addOrderItem(r47Order.id, { styleNo: 'R47-A1', quantity: 10, unitPrice: 20 })
+const r47OffsetLabel = '样品费及快递费抵扣 Sample Fee & Courier (offset)'
+await orders.updateOrderCharges(r47Order.id, [{ label: r47OffsetLabel, amount: -120 }], 'ZZ-R47 抵扣挂上')
+eq('抵扣行存住了（货值 200，合计 80）', (await orders.getOrder(r47Order.id))!.grandTotal, 80)
+const r47Item = (await orders.getOrder(r47Order.id))!.items[0]
+for (const [name, run] of [
+  ['改小数量', () => orders.updateOrderItem(r47Order.id, r47Item.id, { quantity: 3 })],
+  ['删掉这一行', () => orders.removeOrderItem(r47Order.id, r47Item.id)],
+  ['整批换成更小的货', () => orders.replaceOrderItems(r47Order.id, [{ styleNo: 'R47-A1', quantity: 1, unitPrice: 20 }])]
+] as const) {
+  check(`${name} 也拦得住（货值撑不住抵扣）`, (await r40err(run)).includes('合计'), await r40err(run))
+}
+eq('拦下后原单一个数没变', (await orders.getOrder(r47Order.id))!.grandTotal, 80)
+eq('抵扣行也还在', (await orders.getOrder(r47Order.id))!.chargesTotal, -120)
+
+section('R47 抵扣行 ↔ 打样单：改一张脸，另一张跟着变')
+const r47SmpCust = await customers.saveCustomer({ company: 'R47-LINK-CO' })
+const r47Sample = await samples.saveSample({
+  customerId: r47SmpCust.id,
+  expressFee: 5,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: '2026-10-21',
+  items: [{ styleNo: 'R47-SP1', productName: '联动测试', color: 'Grey', size: 'M', quantity: 4, unitPrice: 5, goodsUnitPrice: 20 }]
+})
+const r47Conv = await samples.convertSampleToOrder(r47Sample.id, { offsetSampleFee: true, paymentStatus: 'confirmed' })
+const r47Offset0 = (await samples.getSample(r47Sample.id))!.offsetAmount
+eq('转单时打样单记下的抵扣 = 订单那条负费用行', Math.abs(r47Conv.chargesTotal + r47Offset0) < 0.001, true)
+await orders.updateOrderCharges(
+  r47Conv.id,
+  [{ label: r47OffsetLabel, amount: -(r47Offset0 / 2) }],
+  'ZZ-R47 只抵一半'
+)
+const r47Half = (await samples.getSample(r47Sample.id))!
+eq('抵扣行改成一半，打样单那个数跟着走', r47Half.offsetAmount, r47Offset0 / 2)
+check('打样单备注说清这次是费用行调的', r47Half.feeNote.includes('费用行调整后抵扣'), r47Half.feeNote)
+check(
+  '改让利不写原因照样拦住：这条正门不含抵扣行也算让利',
+  (await r40err(async () => await orders.updateOrderCharges(r47Conv.id, [{ label: r47OffsetLabel, amount: -1 }, { label: '折让', amount: -1 }])))
+    .includes('让利'),
+  await r40err(async () => await orders.updateOrderCharges(r47Conv.id, [{ label: r47OffsetLabel, amount: -1 }, { label: '折让', amount: -1 }]))
+)
+await orders.updateOrderCharges(r47Conv.id, [], 'ZZ-R47 取消抵扣')
+const r47Back = (await samples.getSample(r47Sample.id))!
+eq('抵扣行整条删掉，打样单退回未收', r47Back.feeStatus, 'unpaid')
+check('退回去也留了话', r47Back.feeNote.includes('抵扣行已取消'), r47Back.feeNote)
+check('订单历史里有抵扣回退', (await orders.listEvents(r47Conv.id)).some((e) => e.kind === 'sample_offset_back'))
+check('退回的样品费重新进客户应收', await money.sampleReceivable(r47SmpCust.id) > 0.001)
+
+const r47AmbSample = await samples.saveSample({
+  customerId: r47SmpCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: '2026-10-21',
+  items: [{ styleNo: 'R47-SP2', productName: '第二张', color: 'Navy', size: 'L', quantity: 1, unitPrice: 9, goodsUnitPrice: 30 }]
+})
+// 历史脏数据：两张打样单挂着同一张转出的订单，订单上却只有一条抵扣金额
+getDb().run('UPDATE sample_orders SET fee_status = ? WHERE id = ?', ['offset', r47Sample.id])
+getDb().run('UPDATE sample_orders SET converted_order_id = ?, fee_status = ? WHERE id = ?', [r47Conv.id, 'offset', r47AmbSample.id])
+const r47AmbErr = await r40err(async () => await orders.updateOrderCharges(r47Conv.id, [{ label: r47OffsetLabel, amount: -10 }], 'ZZ-R47 说不清抵给谁'))
+check('说不清抵在哪张打样单上就拒落，不猜', r47AmbErr.includes('张已抵扣的打样单'), r47AmbErr)
+eq('拒下后订单费用行一个数没落', (await orders.getOrder(r47Conv.id))!.chargesTotal, 0)
+getDb().run('UPDATE sample_orders SET converted_order_id = NULL, fee_status = ? WHERE id = ?', ['unpaid', r47AmbSample.id])
+
+section('R47 编辑订单改让利也要留话：正门补好的闸门，侧门不能不设')
+const r47WhyCust = await customers.saveCustomer({ company: 'R47-WHY-CO' })
+const r47Why = await orders.createOrder({
+  customerId: r47WhyCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R47-WHY'
+})
+await orders.addOrderItem(r47Why.id, { styleNo: 'R47-W1', quantity: 10, unitPrice: 20 })
+check(
+  '不带原因改负费用行：当场拦下',
+  (await r40err(async () => await orders.updateOrder(r47Why.id, { customerId: r47WhyCust.id, charges: [{ label: '折让', amount: -50 }] }))).includes(
+    '让利'
+  ),
+  await r40err(async () => await orders.updateOrder(r47Why.id, { customerId: r47WhyCust.id, charges: [{ label: '折让', amount: -50 }] }))
+)
+eq('拦下后费用行一个字没改', (await orders.getOrder(r47Why.id))!.chargesTotal, 0)
+await orders.updateOrder(r47Why.id, {
+  customerId: r47WhyCust.id,
+  charges: [{ label: '折让', amount: -50 }],
+  chargeReason: 'ZZ-R47 老客户运费对折'
+})
+const r47WhyNotes = (await orders.listEvents(r47Why.id)).map((e) => e.note)
+check('原因跟着数字进历史', r47WhyNotes.some((n) => n.includes('让利原因：ZZ-R47 老客户运费对折')), JSON.stringify(r47WhyNotes))
+check(
+  '合计让过头（负数）照样拦：报错说清是哪笔让出去的',
+  (await r40err(async () => await orders.updateOrder(r47Why.id, { customerId: r47WhyCust.id, charges: [{ label: '折让', amount: -250 }], chargeReason: 'ZZ-R47 让过头' }))).includes(
+    '让利'
+  ),
+  await r40err(async () => await orders.updateOrder(r47Why.id, { customerId: r47WhyCust.id, charges: [{ label: '折让', amount: -250 }], chargeReason: 'ZZ-R47 让过头' }))
+)
+
+section('R47 同一笔欠款只喊一遍：船期那句折进催款卡，不再叠三条')
+const r47RemCust = await customers.saveCustomer({ company: 'R47-ETA-CO' })
+const r47RemOrder = await orders.createOrder({
+  customerId: r47RemCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentMethod: 'oa',
+  paymentStatus: 'confirmed',
+  depositRatio: 0.3,
+  piNo: 'PI-R47-ETA'
+})
+await orders.addOrderItem(r47RemOrder.id, { styleNo: 'R47-ETA', quantity: 10, unitPrice: 10 })
+const r47RemPl = await packing.createPackingList({ orderId: r47RemOrder.id, lines: [{ styleNo: 'R47-ETA', quantity: 10 }] })
+await packing.updatePackingListInfo(r47RemOrder.id, r47RemPl[0].id, { shipStatus: 'shipped', atdDate: dAgo(20), etaDate: dAgo(10) })
+const r47Set0 = getSettings()
+await saveSettings({ ...r47Set0, remindPaymentDays: 0, remindBalanceDays: 0 })
+const r47RemList = (await dashboard.reminders()).filter((x) => x.orderId === r47RemOrder.id)
+const r47DebtCards = r47RemList.filter((x) => x.kind === 'payment' || x.kind === 'balance')
+eq('催定金 / 催全款 / ETA 清款三条收成一条', r47DebtCards.length, 1)
+const r47Debt = r47DebtCards[0]?.message ?? ''
+check('留下的是说得最全的那条：货已出运、一分未收', r47Debt.includes('一分未收') && r47Debt.includes('赊销'), r47Debt)
+check('整单欠款还是那句话里的数', r47Debt.includes('100.00'), r47Debt)
+check('船期那句折进话尾，批次号没丢', r47Debt.includes('预计到港已过期') && r47Debt.includes(r47RemPl[0].plNo), r47Debt)
+check('到港已过期，这张卡排在逾期区', (r47DebtCards[0]?.days ?? 0) < 0, String(r47DebtCards[0]?.days))
+const r47RemOther = (await dashboard.reminders()).find((x) => x.kind === 'payment' && x.orderId !== r47RemOrder.id)
+check('别的单该催定金照催，没被一起压掉', !!r47RemOther, '全场一条催定金都没有')
+await saveSettings(r47Set0)
+
+section('R47 商品 CSV：分批提交、坏行只跳自己、行数有上限')
+const r47Row = (i: number): string => {
+  const cols = new Array(15).fill('')
+  cols[0] = `R47-I${i}`
+  cols[1] = `批量导入款${i}`
+  cols[2] = '80% Cotton'
+  cols[5] = i === 120 ? '-5' : '10'
+  return cols.join(',')
+}
+const r47Imp = await products.importProductsCsv(
+  [products.CSV_TEMPLATE_HEADER, ...Array.from({ length: 250 }, (_, i) => r47Row(i))].join('\n'),
+  'skip'
+)
+eq('250 行里 249 款落库（跨过 200 行的批界）', r47Imp.created, 249)
+eq('坏的那一行只跳自己', r47Imp.skipped, 1)
+check('坏行按行号报出来', r47Imp.errors.some((e) => e.includes('第 122 行')), JSON.stringify(r47Imp.errors))
+check('坏行前后都留下了', !!(await products.findProductByStyleNo('R47-I119')) && !!(await products.findProductByStyleNo('R47-I121')))
+check('第二批也没被牵连', !!(await products.findProductByStyleNo('R47-I249')))
+const r47TooMany = [products.CSV_TEMPLATE_HEADER, ...Array.from({ length: 5001 }, (_, i) => `R47-X${i},超上限的款`)].join('\n')
+check('整份超过上限直接拒绝，不写一行', (await r40err(async () => await products.importProductsCsv(r47TooMany, 'skip'))).includes('一次最多导 5000 行'))
+eq('拒下后库里没有那批款', (await products.findProductByStyleNo('R47-X0')) ?? null, null)
+
 /* ---------------- 汇总 ---------------- */
 
 console.log(`\n${'='.repeat(46)}`)

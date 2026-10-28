@@ -82,6 +82,17 @@ export default function EditOrderModal({
     sealNo: order.sealNo ?? ''
   })
   const chargesTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
+  const [chargeReason, setChargeReason] = useState('')
+  /** 动了让利（负费用行）就要写原因——和订单详情里「只改费用」那条正门同一道闸门 */
+  const negativeSnap = (cs: { label: string; amount: number }[]): string =>
+    cs
+      .filter((c) => Number(c.amount) < 0)
+      .map((c) => `${c.label.trim()}\u0000${Number(c.amount)}`)
+      .sort()
+      .join('\u0001')
+  const negativeTouched =
+    negativeSnap(charges.filter((c) => c.label.trim())) !==
+    negativeSnap((order.charges ?? []).map((c: any) => ({ label: String(c.label ?? ''), amount: Number(c.amount) || 0 })))
 
   useEffect(() => {
     // 已停用的客户也要能选：改历史单时下拉里必须还有当时那个客户
@@ -133,6 +144,11 @@ export default function EditOrderModal({
       )
       if (!ok) return
     }
+    // 让利的「为什么」不落一句话，半年后只剩应收少了一块，没人答得出是谁答应的
+    if (negativeTouched && !chargeReason.trim()) {
+      toast('这次动了让利（负费用行），请写明原因：这句话会记进订单操作历史。', 'error')
+      return
+    }
     setBusy(true)
     try {
       await window.api.orders.update(order.id, {
@@ -158,7 +174,8 @@ export default function EditOrderModal({
         etdDate: form.etdDate || null,
         vessel: form.vessel,
         sealNo: form.sealNo,
-        charges: charges.filter((c) => c.label.trim()).map((c) => ({ label: c.label, amount: c.amount }))
+        charges: charges.filter((c) => c.label.trim()).map((c) => ({ label: c.label, amount: c.amount })),
+        chargeReason: chargeReason.trim() || undefined
       })
       toast('订单已更新')
       await onSaved()
@@ -507,6 +524,17 @@ export default function EditOrderModal({
       <div className="hint mt-1">
         含费用合计 {money((order.totalAmount ?? 0) + chargesTotal, form.currency)}
       </div>
+      {negativeTouched ? (
+        <div className="field mt-1">
+          <label>让利原因 *</label>
+          <input
+            value={chargeReason}
+            onChange={(e) => setChargeReason(e.target.value)}
+            placeholder="为什么让这一步，如「老客户运费对折」「补上次多收的 20」"
+          />
+          <div className="hint">负费用行会直接改变客户该付的钱，这句原因会记进订单操作历史。</div>
+        </div>
+      ) : null}
 
       <div className="field">
         <label>备注（会原样印在 PI / CI 的 Remarks 上）</label>

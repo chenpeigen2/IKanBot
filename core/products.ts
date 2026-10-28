@@ -150,6 +150,10 @@ const CSV_ALIASES: Record<string, string> = {
 
 export const CSV_TEMPLATE_HEADER = '款号,品名,成分,尺码,颜色,成本价,工厂,工厂货号,每箱件数,箱规,单件净重,类目,品牌,季节,备注'
 
+/** CSV 导入：一批提交 200 款，一次最多 5000 行（见 importCsv） */
+const IMPORT_BATCH_ROWS = 200
+const IMPORT_MAX_ROWS = 5000
+
 /** 一行 CSV：支持双引号包裹、引号内逗号和换行 */
 function splitCsvLine(line: string): string[] {
   const out: string[] = []
@@ -475,14 +479,19 @@ export function productsCore(db: Db) {
     let created = 0
     let updated = 0
     let skipped = 0
-    for (let i = 1; i < rows.length; i++) {
-      const r = rows[i]
-      const lineNo = i + 1
+    if (rows.length - 1 > IMPORT_MAX_ROWS) {
+      throw new BizError(
+        `这份 CSV 有 ${rows.length - 1} 行商品，一次最多导 ${IMPORT_MAX_ROWS} 行。请拆成几份分别导：` +
+          `整份塞进来会把界面按住转圈，看不出是卡在导入还是程序没了响应。`
+      )
+    }
+    /** 逐行导入：坏行只跳自己，错误按行号报回去 */
+    const importRow = async (r: string[], lineNo: number): Promise<void> => {
       const styleNo = normalizeStyleNo(need(r, col('styleNo')))
       if (!styleNo) {
         skipped++
         errors.push(`第 ${lineNo} 行没有款号，跳过了`)
-        continue
+        return
       }
       const boxRaw = need(r, col('box'))
       const box = boxRaw.split(/[×x*X*\s]+/).filter(Boolean).map((n) => Number(n))
@@ -527,7 +536,7 @@ export function productsCore(db: Db) {
         if (existing) {
           if (mode !== 'overwrite') {
             skipped++
-            continue
+            return
           }
           await save(input)
           updated++
@@ -539,6 +548,15 @@ export function productsCore(db: Db) {
         skipped++
         errors.push(`第 ${lineNo} 行 ${styleNo} 没导入：${(e as Error).message}`)
       }
+    }
+    // 分批提交（save 自己开存点，坏行回滚只回滚那一行）：整份挤在一个事务里，
+    // 第 900 行出意外会把前 899 款一起退掉；批间让出一次事件循环，导入期间界面才答得出话
+    for (let start = 1; start < rows.length; start += IMPORT_BATCH_ROWS) {
+      const end = Math.min(start + IMPORT_BATCH_ROWS, rows.length)
+      await db.transact(async () => {
+        for (let i = start; i < end; i++) await importRow(rows[i], i + 1)
+      })
+      if (end < rows.length) await new Promise<void>((resolve) => setImmediate(resolve))
     }
     return { created, updated, skipped, errors }
   }

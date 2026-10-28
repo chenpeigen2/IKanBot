@@ -179,6 +179,12 @@ export function dashboardCore(db: Db) {
       out.push({ ...r, key: `${r.kind}:${r.orderNo}:${r.plId ?? r.sampleId ?? 0}:${suffix}` })
     }
 
+    /** 卡尾的后缀，用来认出「这单的钱由哪几张卡在喊」 */
+    const tagOf = (r: Reminder): string => r.key.slice(r.key.lastIndexOf(':') + 1)
+    // 「预计到港已过期」里那句船期话（批次号 + 过期天数）先记着：催尾款 / 催全款那张卡顺手带上，
+    // 就不用再单独占一行说同一笔钱；没有别的欠款卡在喊的单，ETA 卡自己留在台上
+    const etaClauseOf = new Map<string, { clause: string; days: number }>()
+
     /** 两个本地日期相差几天（b − a）；任一侧不是合法本地日期就返回 null */
     const dayDiff = (a: string, b: string): number | null => {
       if (!isLocalDate(a) || !isLocalDate(b)) return null
@@ -445,14 +451,6 @@ export function dashboardCore(db: Db) {
       // 工厂交期：只认批次状态已推进（已包装及以上）的件数，光建装箱单不算工厂交了货
       const factoryRaw = String(r.factory_due_date ?? '').trim()
       if (factoryRaw) {
-        const ordered = Number(
-          (await db.get('SELECT COALESCE(SUM(quantity),0) AS q FROM order_items WHERE order_id = ? AND quantity > 0', [
-            orderId
-          ]) as { q?: number })?.q ?? 0
-        )
-        // 口径只认 shipping 里那一份「工厂已交货件数」：以前这里自己写 SQL 用
-        // 「状态非空」判定，结果被改回备货中的批次还算工厂已交，催单直接不响
-        const deliveredQty = await factoryDeliveredQuantity(db, orderId)
         const diff = daysTo(factoryRaw)
         const gone = ['shipped', 'cleared', 'delivered'].includes(String(r.ship_status))
         if (diff === null) {
@@ -467,18 +465,29 @@ export function dashboardCore(db: Db) {
             },
             'bad-factory'
           )
-        } else if (!gone && ordered > 0 && deliveredQty + 0.0001 < ordered && diff <= s.remindShipDays) {
-          add(
-            {
-              orderId,
-              orderNo: String(r.order_no),
-              customerName: String(r.customer_name),
-              kind: 'ship',
-              message: `工厂交期 ${factoryRaw} ${dueWords(diff)}，货还没交够（工厂已交 ${deliveredQty} / ${ordered} 件）`,
-              days: diff
-            },
-            'factory'
+        } else if (!gone && diff <= s.remindShipDays) {
+          // 天数没过线、货已经走了就不必算件数：两条聚合查询留给真要催的那几张单
+          const ordered = Number(
+            (await db.get('SELECT COALESCE(SUM(quantity),0) AS q FROM order_items WHERE order_id = ? AND quantity > 0', [
+              orderId
+            ]) as { q?: number })?.q ?? 0
           )
+          // 口径只认 shipping 里那一份「工厂已交货件数」：以前这里自己写 SQL 用
+          // 「状态非空」判定，结果被改回备货中的批次还算工厂已交，催单直接不响
+          const deliveredQty = await factoryDeliveredQuantity(db, orderId)
+          if (ordered > 0 && deliveredQty + 0.0001 < ordered) {
+            add(
+              {
+                orderId,
+                orderNo: String(r.order_no),
+                customerName: String(r.customer_name),
+                kind: 'ship',
+                message: `工厂交期 ${factoryRaw} ${dueWords(diff)}，货还没交够（工厂已交 ${deliveredQty} / ${ordered} 件）`,
+                days: diff
+              },
+              'factory'
+            )
+          }
         }
       }
 
@@ -548,6 +557,8 @@ export function dashboardCore(db: Db) {
       // 到港后清款：见提单副本付款的钱不能只凭记忆。
       // 一张单可能有多批已过 ETA：欠款是整单一个数，逐批各喊一遍会把「同一笔钱」
       // 刷成 N 条提醒，老板看不出还欠多少，只会以为催款越堆越多。整单只出一条，批次号列在消息里。
+      // 这条其实是备胎：同单已经有催定金 / 催尾款 / 催全款在喊同一笔钱时，船期那句折进那张卡，本条撤掉
+      // （见函数末尾的「同一笔欠款只喊一遍」）；船期话先记进 etaClauseOf，供后面的卡带上
       const etaMissed = batches
         .filter((b) => ['shipped', 'cleared'].includes(String(b.ship_status ?? '')))
         .map((b) => ({ b, diff: daysTo(b.eta_date) }))
@@ -560,15 +571,15 @@ export function dashboardCore(db: Db) {
             const nos = etaMissed.map((x) => String(x.b.pl_no))
             return nos.slice(0, cap).join('、') + (nos.length > cap ? ` 等 ${nos.length} 批` : '')
           }
+          const shipClause = `批次 ${listed()} 预计到港已过期（最久 ${-oldest} 天）`
+          etaClauseOf.set(String(r.order_no), { clause: shipClause, days: oldest })
           add(
             {
               orderId,
               orderNo: String(r.order_no),
               customerName: String(r.customer_name),
               kind: 'balance',
-              message: `批次 ${listed()} 预计到港已过期（最久 ${-oldest} 天），这单仍有 ${m.receivable.toFixed(2)} ${
-                m.currency
-              } 未收`,
+              message: `${shipClause}，这单仍有 ${m.receivable.toFixed(2)} ${m.currency} 未收`,
               days: oldest
             },
             'eta'
@@ -897,6 +908,35 @@ export function dashboardCore(db: Db) {
           )
         }
       }
+    }
+
+    // 同一笔欠款只喊一遍：「预计到港已过期」那张卡报的欠款数，催定金 / 催尾款 / 催全款那张卡已经报过了，
+    // 这里把船期那句（批次号 + 过期天数）折进它们的结尾，重复的 ETA 卡撤掉。
+    // 这张单没有其他欠款卡在喊时（比如尾款钟还没走到），ETA 卡是唯一的声音，留着。
+    // 一分未收那张把待收总额和付款方式都说全了，同单再挂一条「催定金」只是同一块钱换个名分
+    const DEBT_LOUDNESS: string[] = ['unpaid-shipped', 'balance', 'deposit']
+    /** 同一单有几张欠款卡时，船期那句挂在最响的一张上（催全款 > 催尾款 > 催定金） */
+    const loudnessOf = (r: Reminder): number => DEBT_LOUDNESS.indexOf(tagOf(r))
+    const mainDebtOf = new Map<string, Reminder>()
+    const fullyUnpaid = new Set<string>()
+    for (const r of out) {
+      const loud = loudnessOf(r)
+      if (loud < 0) continue
+      if (tagOf(r) === 'unpaid-shipped') fullyUnpaid.add(r.orderNo)
+      const cur = mainDebtOf.get(r.orderNo)
+      if (!cur || loudnessOf(cur) > loud) mainDebtOf.set(r.orderNo, r)
+    }
+    for (const [orderNo, eta] of etaClauseOf) {
+      const main = mainDebtOf.get(orderNo)
+      if (!main) continue
+      main.message += `；${eta.clause}`
+      // 到港都过了的，这张卡该待在逾期区，不能被「出运 30 天」这种正数天数挤到后面去
+      main.days = Math.min(main.days, eta.days)
+    }
+    for (let i = out.length - 1; i >= 0; i--) {
+      const r = out[i]
+      const tag = tagOf(r)
+      if ((tag === 'eta' && mainDebtOf.has(r.orderNo)) || (tag === 'deposit' && fullyUnpaid.has(r.orderNo))) out.splice(i, 1)
     }
 
     // 逾期最前（越久越靠前）→ 按还剩几天升序 → 「待修」垫底：

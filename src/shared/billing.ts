@@ -28,3 +28,17 @@ export function shownRemaining(status: string | null | undefined, remaining: num
   const v = Number(remaining ?? 0)
   return v > 0 ? v : 0
 }
+
+/**
+ * 转单时勾「样品费抵货款」，会在订单上留一条负费用行，同时在打样单上记一笔 offset_amount。
+ * 这两处是同一笔钱的两张脸，认脸就靠这个行名的前缀（后半段是印在纸面上的英文，改英文不影响认账）。
+ */
+export const SAMPLE_OFFSET_LABEL_PREFIX = '样品费及快递费抵扣'
+
+/** 这笔样品费从订单上抵掉了多少钱（正数；没有抵扣行就是 0） */
+export function sampleOffsetFromCharges(charges: { label: string; amount: number }[]): number {
+  const sum = charges
+    .filter((c) => String(c.label ?? '').trim().startsWith(SAMPLE_OFFSET_LABEL_PREFIX))
+    .reduce((s, c) => s + (Number(c.amount) || 0), 0)
+  return sum < 0 ? -sum : 0
+}

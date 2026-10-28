@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { money, moneyOrDash, num, fmtDate, PaymentTag, ShipTag, Button, LoadError } from '../ui'
+import { money, moneyOrDash, num, fmtDate, PaymentTag, ShipTag, Button, LoadError, useLoadGuard } from '../ui'
 import type { DashboardStats, Reminder } from '../../../shared/types'
 
 /** 待办类型的中文短标签（2 个字，扫一眼就知道该干什么） */
@@ -34,25 +34,28 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
   const [openGroups, setOpenGroups] = useState<Set<string>>(new Set())
 
   const aliveRef = useRef(true)
+  /** 定时器刷新、窗口聚焦、后台切回来可能同时触发：后到的旧结果不许盖住新的一次 */
+  const beginLoad = useLoadGuard()
   const load = useCallback(async () => {
+    const { isCurrent } = beginLoad()
     try {
       const [s, r, o] = await Promise.all([
         window.api.dashboard.stats(),
         window.api.dashboard.reminders(),
         window.api.orders.list({})
       ])
-      if (!aliveRef.current) return
+      if (!aliveRef.current || !isCurrent()) return
       setStats(s)
       setReminders(r)
       setRecent(o.rows.slice(0, 10))
       setLoadError('')
     } catch (e) {
-      if (!aliveRef.current) return
+      if (!aliveRef.current || !isCurrent()) return
       setLoadError((e as Error).message || '工作台数据没算出来')
     } finally {
-      if (aliveRef.current) setLoading(false)
+      if (aliveRef.current && isCurrent()) setLoading(false)
     }
-  }, [])
+  }, [beginLoad])
 
   useEffect(() => {
     aliveRef.current = true

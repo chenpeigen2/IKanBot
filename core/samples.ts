@@ -20,7 +20,7 @@ import { moneyCore, costInOrderCurrency } from './money'
 import { mapCustomer, mapPayment } from '../electron/db/mappers'
 import { likeAny } from '../electron/services/search'
 import { assertLocalDate, localDate } from '../src/shared/date'
-import { isBillingStatus } from '../src/shared/billing'
+import { isBillingStatus, SAMPLE_OFFSET_LABEL_PREFIX } from '../src/shared/billing'
 import { assertQuantity, assertUnitPrice, assertOptionalMoney } from '../src/shared/guards'
 import type { OrderDetail } from '../src/shared/types'
 import type {
@@ -746,7 +746,7 @@ export function samplesCore(db: Db) {
     }
     const charges =
       offsetTotal > 0
-        ? [{ label: '样品费及快递费抵扣 Sample Fee & Courier (offset)', amount: -offsetTotal }]
+        ? [{ label: `${SAMPLE_OFFSET_LABEL_PREFIX} Sample Fee & Courier (offset)`, amount: -offsetTotal }]
         : []
 
     // 转单要一次做完：订单头 + 明细 + 打样单标记。中途失败就整单回滚，

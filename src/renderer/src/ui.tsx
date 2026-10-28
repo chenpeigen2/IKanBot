@@ -469,11 +469,13 @@ export function useDebounced<T>(value: T, delayMs = 250): T {
  */
 export function useLoadGuard(): () => { isCurrent: () => boolean } {
   const seq = useRef(0)
-  return () => {
+  // 返回的函数必须每次渲染都是同一个：它只有 useRef 可变状态，
+  // 不 memo 的话调用方把它写进 useCallback/useEffect 依赖，每次渲染都换人 → 定时器无限重建
+  return useCallback(() => {
     seq.current += 1
     const my = seq.current
     return { isCurrent: () => seq.current === my }
-  }
+  }, [])
 }
 
 export function useToast() {
