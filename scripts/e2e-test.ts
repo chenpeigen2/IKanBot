@@ -1457,7 +1457,7 @@ getDb().run(
   `INSERT INTO packing_lists(order_id, pl_no, created_at) VALUES(?,?, datetime('now'))`,
   [soSkipOrder.id, stalePl]
 )
-const plsBeforeNos = packing.listPackingLists(soSkipOrder.id).map((p) => p.plNo)
+const plsBeforeNos = (await packing.listPackingLists(soSkipOrder.id)).map((p) => p.plNo)
 const plsAfter = await packing.createPackingList({
   orderId: soSkipOrder.id,
   lines: [{ boxNo: 'NO.1', styleNo: 'SKIP-1', quantity: 1 }]
@@ -2126,7 +2126,7 @@ await packing.createPackingList({
   orderId: batchOrder.id,
   lines: [{ boxNo: 'NO.2', styleNo: 'BATCH-1', color: 'Black', size: 'M', quantity: 60 }]
 })
-eq('第二批装剩下的 60 件放行', packing.listPackingLists(batchOrder.id).length, 2)
+eq('第二批装剩下的 60 件放行', (await packing.listPackingLists(batchOrder.id)).length, 2)
 eq('全部装完：未装箱数量归 0', (await orders.summarizeSkus(batchOrder.id))[0].remainingQuantity, 0)
 
 const bLine = bPl1[0].lines[0]
@@ -2197,7 +2197,7 @@ const sumB = await shipmentSummary(shipOrder.id)
 eq('首批出运、货没装够 → 部分出运', sumB.derivedStatus, 'partial_shipped')
 eq('已出运件数 = 首批 40 件', sumB.shippedQuantity, 40)
 eq('订单缓存也变成部分出运', (await orders.getOrder(shipOrder.id))!.shipStatus, 'partial_shipped')
-const plA = packing.listPackingLists(shipOrder.id)[0]
+const plA = (await packing.listPackingLists(shipOrder.id))[0]
 eq('批次船名航次存住了', plA.vessel, 'EVER GIVEN V.001')
 eq('批次 ETD/ATD/ETA 存住了', [plA.etdDate, plA.atdDate, plA.etaDate], [shipEtd, shipAtd, '2026-12-01'])
 eq('批次封条号/提单号存住了', [plA.sealNo, plA.blNo], ['SEAL-1', 'BL-1'])
@@ -2246,7 +2246,7 @@ eq('两批都签收 → 已签收', sumDelivered.derivedStatus, 'delivered')
 eq('已签收后订单缓存同步', (await orders.getOrder(shipOrder.id))!.shipStatus, 'delivered')
 eq(
   '签收日期按本地日期落档',
-  packing.listPackingLists(shipOrder.id).map((p) => p.deliveredAt),
+  (await packing.listPackingLists(shipOrder.id)).map((p) => p.deliveredAt),
   [localDate(), localDate()]
 )
 
@@ -2349,10 +2349,10 @@ getDb().run(
 eq('老批次（状态为空）不接管整单状态', (await shipmentSummary(legacyOrder.id)).derivedStatus, null)
 const legacyManual = await orders.setShipStatus(legacyOrder.id, 'delivered')
 eq('老单还能按手工状态走', legacyManual.shipStatus, 'delivered')
-const legacyPl = packing.listPackingLists(legacyOrder.id)[0]
+const legacyPl = (await packing.listPackingLists(legacyOrder.id))[0]
 await packing.updatePackingListInfo(legacyOrder.id, legacyPl.id, { containerNo: 'C-OLD', vessel: 'OLD V.1' })
 eq('只补老批次柜号/船期，不动整单手工状态', (await orders.getOrder(legacyOrder.id))!.shipStatus, 'delivered')
-eq('老批次状态仍为空（没有选就不接管）', packing.listPackingLists(legacyOrder.id)[0].shipStatus, null)
+eq('老批次状态仍为空（没有选就不接管）', (await packing.listPackingLists(legacyOrder.id))[0].shipStatus, null)
 let lastLineErr = ''
 try {
   await packing.deletePackingListLine(legacyOrder.id, legacyPl.id, legacyPl.lines[0].id)
@@ -2389,12 +2389,12 @@ await packing.createPackingList({
 })
 eq('混有老批次时不推导', (await shipmentSummary(mixedOrder.id)).derivedStatus, null)
 eq('加新批次不会把手工「已签收」拉回来', (await orders.getOrder(mixedOrder.id))!.shipStatus, 'delivered')
-const mixedLegacyPl = packing.listPackingLists(mixedOrder.id)[0]
+const mixedLegacyPl = (await packing.listPackingLists(mixedOrder.id))[0]
 await packing.updatePackingListInfo(mixedOrder.id, mixedLegacyPl.id, { shipStatus: 'packed' })
 eq('老批次补上状态后，整单才由批次汇总', (await shipmentSummary(mixedOrder.id)).derivedStatus, 'preparing')
 
 const shipOrderFull = (await orders.getOrder(shipOrder.id))!
-const plPaperBatch = renderPl({ order: shipOrderFull, settings: getSettings(), images: {} }, packing.listPackingLists(shipOrder.id)[0])
+const plPaperBatch = renderPl({ order: shipOrderFull, settings: getSettings(), images: {} }, (await packing.listPackingLists(shipOrder.id))[0])
 check('PL 纸面用批次的船名航次', plPaperBatch.includes('EVER GIVEN V.001'), plPaperBatch)
 check('PL 纸面用批次的 ETD', plPaperBatch.includes(shipEtd))
 check('PL 纸面用批次的封条号', plPaperBatch.includes('SEAL-1'))
@@ -2833,7 +2833,7 @@ for (const line of r4pl.lines) {
 }
 const plManual = renderPl(
   { order: (await orders.getOrder(order.id))!, settings: getSettings(), images: {} },
-  packing.listPackingLists(order.id).find((p) => p.id === r4pl.id)!
+  (await packing.listPackingLists(order.id)).find((p) => p.id === r4pl.id)!
 )
 check('PL 手工毛重按实测值印', plManual.includes('20.50'))
 check('PL 全部填了实测毛重后不再标 (est.)', !plManual.includes('(est.)'), plManual.includes('(est.)') ? '仍有 est.' : '')
@@ -3538,7 +3538,8 @@ const r8err = async (fn: () => unknown): Promise<string> => {
   }
 }
 const r8of = (qty: unknown) => [{ boxNo: 'NO.1', styleNo: 'R8G', color: 'Sky', size: 'L', quantity: qty }]
-const r8get = (orderId: number, plId: number) => packing.listPackingLists(orderId).find((p) => p.id === plId)!
+const r8get = async (orderId: number, plId: number) =>
+  (await packing.listPackingLists(orderId)).find((p) => p.id === plId)!
 check(
   '件数填 0 拦下，并告诉她该删行而不是填 0',
   (await r8err(async () => await packing.createPackingList({ orderId: r8g.id, lines: r8of(0) }))).includes('删掉那一行'),
@@ -3606,11 +3607,11 @@ check('实收不可能比这批发出去的还多，并指路去另开装箱单'
 check('实收要 0 以上整数（半件客户也不会签收）', (await r8err(async () => await packing.updatePackingListInfo(r8g.id, r8A.id, { receivedQty: 30.5 }))).includes('整数'))
 check('实收留空等于按发数全收，不是记成 0', (await r8err(async () => await packing.updatePackingListInfo(r8g.id, r8A.id, { receivedQty: '' as any }))) === '')
 await packing.updatePackingListInfo(r8g.id, r8A.id, { receivedQty: 68 })
-eq('短卸 2 件记下来了', r8get(r8g.id, r8A.id).receivedQty, 68)
+eq('短卸 2 件记下来了', (await r8get(r8g.id, r8A.id)).receivedQty, 68)
 await packing.updatePackingListInfo(r8g.id, r8A.id, { receivedQty: null })
-eq('清空实收回到「没记录」', r8get(r8g.id, r8A.id).receivedQty, null)
+eq('清空实收回到「没记录」', (await r8get(r8g.id, r8A.id)).receivedQty, null)
 await packing.updatePackingListInfo(r8g.id, r8A.id, { receivedQty: 0 })
-eq('实收 0 件是合法事实（一件没收到），和留空不是一回事', r8get(r8g.id, r8A.id).receivedQty, 0)
+eq('实收 0 件是合法事实（一件没收到），和留空不是一回事', (await r8get(r8g.id, r8A.id)).receivedQty, 0)
 await packing.updatePackingListInfo(r8g.id, r8A.id, { receivedQty: null })
 
 section('R8 单据日期与签收日期：补录的是那天的事，不是点这一下的今天')
@@ -3620,17 +3621,17 @@ check(
 )
 check('ETD 写脏日期同样拦下（脏日期会把催单时钟带错）', (await r8err(async () => await packing.updatePackingListInfo(r8g.id, r8A.id, { etdDate: '13/05/2026' }))).includes('不是合法日期'))
 await packing.updatePackingListInfo(r8g.id, r8A.id, { docDate: '2026-10-08' })
-eq('单据日期存住了', r8get(r8g.id, r8A.id).docDate, '2026-10-08')
+eq('单据日期存住了', (await r8get(r8g.id, r8A.id)).docDate, '2026-10-08')
 const r8OrderFull = (await orders.getOrder(r8g.id))!
-const r8Paper = renderPl({ order: r8OrderFull, settings: getSettings(), images: {} }, r8get(r8g.id, r8A.id))
+const r8Paper = renderPl({ order: r8OrderFull, settings: getSettings(), images: {} }, (await r8get(r8g.id, r8A.id)))
 check('纸面 Date 用的是补录的单据日期', r8Paper.includes('2026-10-08'))
 check('箱号留空的那几箱也计入「N 箱」合计（箱单和提单件数对得上）', r8Paper.includes('3 箱 / 3 cartons'), r8Paper.slice(r8Paper.indexOf('TOTAL'), r8Paper.indexOf('TOTAL') + 80))
-eq('还没签收时没有签收日期', r8get(r8g.id, r8A.id).deliveredAt, null)
+eq('还没签收时没有签收日期', (await r8get(r8g.id, r8A.id)).deliveredAt, null)
 await packing.updatePackingListInfo(r8g.id, r8A.id, { shipStatus: 'delivered' })
-eq('没填签收日期时按今天落档', r8get(r8g.id, r8A.id).deliveredAt, localDate())
+eq('没填签收日期时按今天落档', (await r8get(r8g.id, r8A.id)).deliveredAt, localDate())
 await packing.updatePackingListInfo(r8g.id, r8A.id, { shipStatus: 'packed' })
 await packing.updatePackingListInfo(r8g.id, r8A.id, { shipStatus: 'delivered', deliveredDate: '2026-10-09' })
-eq('补录签收用客户实际签收那一天', r8get(r8g.id, r8A.id).deliveredAt, '2026-10-09')
+eq('补录签收用客户实际签收那一天', (await r8get(r8g.id, r8A.id)).deliveredAt, '2026-10-09')
 
 section('R8 整单状态跃迁留痕：批次推着走，但历史不刷屏')
 const r8EvCount = (kind: string): number =>
@@ -3692,7 +3693,7 @@ check(
     return true
   })()
 )
-const r8C = packing.listPackingLists(r8g.id).find((p) => p.containerNo === 'CONT-R8-C')!
+const r8C = (await packing.listPackingLists(r8g.id)).find((p) => p.containerNo === 'CONT-R8-C')!
 eq('补开后已装量正好回到 100 件', (await shipmentSummary(r8g.id)).packedQuantity, 100)
 await packing.deletePackingList(r8g.id, r8C.id)
 const r8UnvoidEv0 = r8EvCount('pl_unvoid')
@@ -3777,7 +3778,7 @@ check(
 eq('迁移一路跑到程序认得的最高版本（v16）', Number((getDb().get('PRAGMA user_version') as { user_version?: number })?.user_version ?? 0), LATEST_DB_VERSION)
 eq(
   '作废批次仍留在装箱单列表里（只多一个 voidedAt，纸面存档不丢）',
-  packing.listPackingLists(r8a.id).filter((p) => p.voidedAt != null).length,
+  (await packing.listPackingLists(r8a.id)).filter((p) => p.voidedAt != null).length,
   1
 )
 
@@ -4093,42 +4094,43 @@ const r9plId = r9pls[0].id
 const r9l1 = r9pls[0].lines[0].id
 const r9l2 = r9pls[0].lines[1].id
 /** 每次都从库里重读这一箱，不看内存里的旧值 */
-const r9line = (lineId: number) => packing.listPackingLists(r9w.id)[0].lines.find((l) => l.id === lineId)!
+const r9line = async (lineId: number) =>
+  (await packing.listPackingLists(r9w.id))[0].lines.find((l) => l.id === lineId)!
 /** 纸面这一批上印了几个 (est.)（只数箱明细行里的，页脚那句说明不算） */
 const r9estCount = async (): Promise<number> => {
-  const html = renderPl({ order: (await orders.getOrder(r9w.id))!, settings: getSettings(), images: {} }, packing.listPackingLists(r9w.id)[0])
+  const html = renderPl({ order: (await orders.getOrder(r9w.id))!, settings: getSettings(), images: {} }, (await packing.listPackingLists(r9w.id))[0])
   return (html.match(/\(est\.\)<\/span>/g) ?? []).length
 }
-eq('没填毛重的那箱落库标为「算出来的」', r9line(r9l1).grossEst, true)
-eq('填了实测毛重的那箱落库标为「实测」', r9line(r9l2).grossEst, false)
+eq('没填毛重的那箱落库标为「算出来的」', (await r9line(r9l1)).grossEst, true)
+eq('填了实测毛重的那箱落库标为「实测」', (await r9line(r9l2)).grossEst, false)
 eq('纸面只给算出来的那箱印 (est.)', (await r9estCount()), 1)
 
 const r9added = await packing.addPackingListLine(r9w.id, r9plId, { styleNo: 'R9W', color: 'Grey', size: 'M', quantity: 10 })
 const r9l3 = r9added[0].lines.find((l) => l.quantity === 10)!.id
-eq('现场补的一箱没填毛重，也标估算', r9line(r9l3).grossEst, true)
+eq('现场补的一箱没填毛重，也标估算', (await r9line(r9l3)).grossEst, true)
 eq('补完这箱，纸面上两个 (est.)', (await r9estCount()), 2)
 
 // 关键：把系数调到 1.3，20 × 1.3 = 26 恰好等于那箱手填的过磅值
 await saveSettings(r9set({ grossWeightFactor: 1.3 }))
 eq('改了毛重系数，老单据上的 (est.) 一个都没翻面', (await r9estCount()), 2)
-eq('手填的 26kg 仍按实测印（没被新系数认成推算值）', r9line(r9l2).grossEst, false)
+eq('手填的 26kg 仍按实测印（没被新系数认成推算值）', (await r9line(r9l2)).grossEst, false)
 await saveSettings(r9set({ grossWeightFactor: 1.1 }))
 eq('系数调回来，标记还是原来那几个（标记不跟系数走）', (await r9estCount()), 2)
 
 // 编辑时的来源判定：改件数不动 / 只改净重退回估算 / 手填毛重算实测
 await packing.updatePackingListLine(r9w.id, r9plId, r9l2, { quantity: 25 })
-eq('只改件数：毛重按比例跟着走（50 箱 26kg → 25 箱 13kg）', r9line(r9l2).grossWeight, 13)
-eq('只改件数：来源判定不动（还是实测）', r9line(r9l2).grossEst, false)
+eq('只改件数：毛重按比例跟着走（50 箱 26kg → 25 箱 13kg）', (await r9line(r9l2)).grossWeight, 13)
+eq('只改件数：来源判定不动（还是实测）', (await r9line(r9l2)).grossEst, false)
 eq('只改件数：这一箱的 (est.) 不会冒出来', (await r9estCount()), 2)
 await packing.updatePackingListLine(r9w.id, r9plId, r9l2, { netWeight: 30 })
-eq('只改净重：毛重按当前系数重算（30 × 1.1 = 33）', r9line(r9l2).grossWeight, 33)
-eq('只改净重：这一箱退回「算出来的」', r9line(r9l2).grossEst, true)
+eq('只改净重：毛重按当前系数重算（30 × 1.1 = 33）', (await r9line(r9l2)).grossWeight, 33)
+eq('只改净重：这一箱退回「算出来的」', (await r9line(r9l2)).grossEst, true)
 eq('只改净重之后，纸面三个 (est.)', (await r9estCount()), 3)
 await packing.updatePackingListLine(r9w.id, r9plId, r9l2, { grossWeight: 35.5 })
-eq('手填毛重即视为实测（哪怕 35.5 看着也像算出来的）', r9line(r9l2).grossEst, false)
+eq('手填毛重即视为实测（哪怕 35.5 看着也像算出来的）', (await r9line(r9l2)).grossEst, false)
 eq('手填之后这一箱的 (est.) 消失', (await r9estCount()), 2)
 await packing.updatePackingListLine(r9w.id, r9plId, r9l2, { grossWeight: null })
-eq('清空毛重：来源标记一起清掉（不谎称实测）', r9line(r9l2).grossEst, null)
+eq('清空毛重：来源标记一起清掉（不谎称实测）', (await r9line(r9l2)).grossEst, null)
 eq('清空的这箱按「没填」处理，重新标上 (est.)', (await r9estCount()), 3)
 
 // 老数据（v15 之前建的）没有这个标记，只能按系数猜——这正是标记要解决的问题
@@ -4562,7 +4564,7 @@ section('R12 守门：收款状态白名单 / 箱号查重')
     dupBox = (e as Error).message
   }
   check('同一批重复箱号被拒', dupBox.includes('箱号') && dupBox.includes('两次'), dupBox)
-  eq('被拒后没有留下半截装箱单', packing.listPackingLists(o.id).length, 0)
+  eq('被拒后没有留下半截装箱单', (await packing.listPackingLists(o.id)).length, 0)
 
   const pls = await packing.createPackingList({
     orderId: o.id,
@@ -4580,7 +4582,7 @@ section('R12 守门：收款状态白名单 / 箱号查重')
     dupEdit = (e as Error).message
   }
   check('把箱号改成同批已有的号也被拒', dupEdit.includes('已经用过'), dupEdit)
-  eq('被拒的改箱号没有落库', packing.listPackingLists(o.id)[0].lines.find((l) => l.id === second.id)!.boxNo, 'B2')
+  eq('被拒的改箱号没有落库', (await packing.listPackingLists(o.id))[0].lines.find((l) => l.id === second.id)!.boxNo, 'B2')
 }
 
 /* ============================================================
@@ -4694,7 +4696,7 @@ check(
   '往后接 B-3 放行',
   await (async () => {
     await packing.createPackingList({ orderId: r13Box.id, containerNo: 'R13-C', lines: [{ boxNo: 'B-3', styleNo: 'R13-BOX', quantity: 10 }] })
-    return packing.listPackingLists(r13Box.id).some((p) => p.containerNo === 'R13-C')
+    return (await packing.listPackingLists(r13Box.id)).some((p) => p.containerNo === 'R13-C')
   })()
 )
 check('同一批 A 的 B-1 还能改箱明细（不误伤自己）', (await packing.updatePackingListLine(r13Box.id, r13BoxA.id, r13BoxA.lines[0].id, { quantity: 40 })).length > 0)
@@ -5292,7 +5294,7 @@ eq(
   (await money.packingAmounts(r16Order.id)).reduce((s, b) => s + b.charges, 0),
   260
 )
-const r16Line = packing.listPackingLists(r16Order.id).find((p) => p.id === r16Pl.id)!.lines[0]
+const r16Line = (await packing.listPackingLists(r16Order.id)).find((p) => p.id === r16Pl.id)!.lines[0]
 check(
   '出过 CI 的批次箱明细不能改',
   (await r8err(async () => await packing.updatePackingListLine(r16Order.id, r16Pl.id, r16Line.id, { quantity: 40 }))).includes(
@@ -5322,7 +5324,7 @@ eq(
   (await packing.updatePackingListInfo(r16Order.id, r16Pl.id, { vessel: 'R16 V.1' })).find((p) => p.id === r16Pl.id)!.vessel,
   'R16 V.1'
 )
-eq('被拦后箱明细数量没变', packing.listPackingLists(r16Order.id).find((p) => p.id === r16Pl.id)!.lines[0].quantity, 50)
+eq('被拦后箱明细数量没变', (await packing.listPackingLists(r16Order.id)).find((p) => p.id === r16Pl.id)!.lines[0].quantity, 50)
 eq('补货后整单数量仍可改（批次金额按箱单件数算）', (await orders.updateOrderItem(r16Order.id, (await orders.getOrder(r16Order.id))!.items[0].id, { quantity: 120 })).items[0].quantity, 120)
 
 section('R16 有单据存档后 PI 号不许改')
@@ -5434,14 +5436,14 @@ const r16RecvPl = (await packing.createPackingList({
   ]
 }))[0]
 await packing.updatePackingListInfo(r16Recv.id, r16RecvPl.id, { receivedQty: 40 })
-const r16RecvLineA = packing.listPackingLists(r16Recv.id)[0].lines.find((l) => l.boxNo === 'R16-A')!
+const r16RecvLineA = (await packing.listPackingLists(r16Recv.id))[0].lines.find((l) => l.boxNo === 'R16-A')!
 await packing.updatePackingListLine(r16Recv.id, r16RecvPl.id, r16RecvLineA.id, { quantity: 20 })
-eq('改箱后件数正好等于实收，放行', packing.listPackingLists(r16Recv.id)[0].lines.reduce((s, l) => s + l.quantity, 0), 40)
+eq('改箱后件数正好等于实收，放行', (await packing.listPackingLists(r16Recv.id))[0].lines.reduce((s, l) => s + l.quantity, 0), 40)
 check(
   '删箱后件数少于已登记的实收，拦下',
   (await r8err(async () => await packing.deletePackingListLine(r16Recv.id, r16RecvPl.id, r16RecvLineA.id))).includes('实收')
 )
-eq('被拦后两箱都还在（事务回滚）', packing.listPackingLists(r16Recv.id)[0].lines.length, 2)
+eq('被拦后两箱都还在（事务回滚）', (await packing.listPackingLists(r16Recv.id))[0].lines.length, 2)
 
 /* ---------------- R17 时间与口径 ---------------- */
 section('R17 报价时间线：发出日与确认日各记各的')
@@ -5604,7 +5606,7 @@ const r18Saved = await docs.saveDocFile({
 eq('存档按第 1 版记账', r18Saved.version, 1)
 const r18Ver = docs.listDocVersions(r18Order.id).find((d) => d.docNo === ciNoOf('PI-R18-VOID', r18Pl.plNo))!
 check('存档记录在且未作废', r18Ver != null && r18Ver.voidedAt == null)
-const r18Line = packing.listPackingLists(r18Order.id).find((p) => p.id === r18Pl.id)!.lines[0]
+const r18Line = (await packing.listPackingLists(r18Order.id)).find((p) => p.id === r18Pl.id)!.lines[0]
 check(
   '存档后箱明细锁住',
   (await r8err(async () => await packing.updatePackingListLine(r18Order.id, r18Pl.id, r18Line.id, { quantity: 60 }))).includes(
@@ -5945,7 +5947,7 @@ try {
 check('撤销作废不写原因也被拦下', r21UnvoidNoReasonErr.includes('原因'), r21UnvoidNoReasonErr)
 
 await packing.unvoidPackingList(r21PlOrder.id, r21Pl.id, '货代恢复订舱')
-check('写了原因的撤销作废放行', packing.listPackingLists(r21PlOrder.id).find((p) => p.id === r21Pl.id)!.voidedAt == null)
+check('写了原因的撤销作废放行', (await packing.listPackingLists(r21PlOrder.id)).find((p) => p.id === r21Pl.id)!.voidedAt == null)
 const r21UnvoidEvt = (await orders.listEvents(r21PlOrder.id)).filter((e) => e.kind === 'pl_unvoid').pop()
 check('撤销原因也进了操作历史', !!r21UnvoidEvt && r21UnvoidEvt.note.includes('货代恢复订舱'), r21UnvoidEvt?.note ?? '没有 pl_unvoid 事件')
 
@@ -8485,13 +8487,13 @@ const r35DelErr = (await r8err(async () =>
   await packing.updatePackingListInfo(r35O.id, r35Pl[0].id, { shipStatus: 'delivered', deliveredDate: r35Future })
 ))
 check('签收日期填未来同样被拦', r35DelErr.includes('签收日期'), r35DelErr)
-check('被拦的两次一笔没写（不留半截）', !packing.listPackingLists(r35O.id)[0].atdDate)
+check('被拦的两次一笔没写（不留半截）', !(await packing.listPackingLists(r35O.id))[0].atdDate)
 // 预计类日期本来就是排未来，不能一起拦死
 await packing.updatePackingListInfo(r35O.id, r35Pl[0].id, { etdDate: r35Future, etaDate: r35Future })
-const r35PlAfter = packing.listPackingLists(r35O.id)[0]
+const r35PlAfter = (await packing.listPackingLists(r35O.id))[0]
 eq('预计开船 / 预计到港仍允许未来', [r35PlAfter.etdDate, r35PlAfter.etaDate], [r35Future, r35Future])
 await packing.updatePackingListInfo(r35O.id, r35Pl[0].id, { shipStatus: 'shipped', atdDate: localDate() })
-eq('实际开船填今天照常放行', packing.listPackingLists(r35O.id)[0].atdDate, localDate())
+eq('实际开船填今天照常放行', (await packing.listPackingLists(r35O.id))[0].atdDate, localDate())
 
 section('R35 商品主图：有图就必须恰好有一张主图')
 
@@ -8706,7 +8708,7 @@ await packing.createPackingList({
   containerNo: 'CONT-R36-B',
   lines: [{ boxNo: 'R36-2', styleNo: 'R36-SEAL', quantity: 10 }]
 })
-const r36PlB = packing.listPackingLists(r36SealOrder.id).find((p) => p.containerNo === 'CONT-R36-B')!
+const r36PlB = (await packing.listPackingLists(r36SealOrder.id)).find((p) => p.containerNo === 'CONT-R36-B')!
 const r36SealFull = (await orders.getOrder(r36SealOrder.id))!
 const r36PaperA = renderCi(
   { order: r36SealFull, settings: getSettings(), images: {} },
