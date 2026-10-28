@@ -471,7 +471,7 @@ eq('转单后金额一致', converted.totalAmount, q1.totalAmount)
 eq('转单后客户一致', converted.customer?.company, c1.company)
 eq('转单后装运港一致', converted.portOfLoading, 'Ningbo')
 eq('转单后汇率一致', converted.exchangeRate, 7.15)
-const qAfter = quotations.getQuotation(q1.id)!
+const qAfter = (await quotations.getQuotation(q1.id))!
 eq('报价单状态变已转订单', qAfter.status, 'converted')
 eq('报价单结果变成交', qAfter.result, 'won')
 check('报价单记住了转出来的订单', qAfter.convertedOrderId === converted.id)
@@ -523,7 +523,7 @@ try {
   legacyErr = (e as Error).message
 }
 check('旧报价单（无汇率日期）转订单会报错而不是编一个日期', legacyErr.includes('汇率日期'), legacyErr)
-const legacyAfter = quotations.getQuotation(legacyQ.id)
+const legacyAfter = (await quotations.getQuotation(legacyQ.id))
 eq('转单失败后订单没被创建', legacyAfter?.convertedOrderId ?? null, null)
 
 /* ---------------- N31/N32：删除拦截（已转订单的报价单 / 有记录的客户） ---------------- */
@@ -531,13 +531,13 @@ section('删除拦截：已转订单的报价单、有记录的客户')
 // N31：已转订单的报价单是原始报价凭据，删了以后订单只剩一个查不到的编号
 let qDelErr = ''
 try {
-  quotations.deleteQuotation(qRate.id) // qRate 前面已转成 qRateOrder
+  (await quotations.deleteQuotation(qRate.id)) // qRate 前面已转成 qRateOrder
 } catch (e) {
   qDelErr = (e as Error).message
 }
 check('已转订单的报价单删不掉', qDelErr.includes('转成订单'), qDelErr)
 check('拦截提示里给出替代方案（已失效）', qDelErr.includes('已失效'), qDelErr)
-check('拦截后报价单还在', quotations.getQuotation(qRate.id) !== null)
+check('拦截后报价单还在', (await quotations.getQuotation(qRate.id)) !== null)
 // 负向对照：未转订单的报价单可以真删
 const qDelOk = await quotations.saveQuotation({
   customerId: c1.id,
@@ -546,8 +546,8 @@ const qDelOk = await quotations.saveQuotation({
   exchangeRateDate: '2026-09-01',
   items: [{ styleNo: 'A001', quantity: 10, unitPrice: 7.5 }]
 })
-quotations.deleteQuotation(qDelOk.id)
-check('未转订单的报价单可以删', quotations.getQuotation(qDelOk.id) === null)
+await quotations.deleteQuotation(qDelOk.id)
+check('未转订单的报价单可以删', (await quotations.getQuotation(qDelOk.id)) === null)
 
 // N32：有订单/报价/打样单的客户删不掉，报错要人话（不许 FOREIGN KEY 英文裸奔）
 let cDelErr = ''
@@ -593,26 +593,26 @@ eq('改完报价号不变', qEdited.qNo, qNoBefore)
 eq('改完版次 +1', qEdited.revision, 2)
 eq('改完数量已更新', qEdited.items.find((i) => i.size === 'L' && i.styleNo === 'A001')?.quantity, 700)
 eq('改完货值重算', qEdited.totalAmount, 700 * 7.5 + 200 * 9.9)
-const qEvents = quotations.listQuotationEvents(qEdit.id)
+const qEvents = (await quotations.listQuotationEvents(qEdit.id))
 check('报价单修改有留痕', qEvents.some((e) => e.note.includes('数量 500 → 700')), JSON.stringify(qEvents))
 eq('改完汇率日期不变', qEdited.exchangeRateDate, '2026-09-01')
 
 /* ---------------- 报价单：状态可改 / 能按款号搜 ---------------- */
 section('报价单状态与搜索')
-const qStatus = quotations.updateQuotationMeta(qEdit.id, { status: 'sent' })
+const qStatus = (await quotations.updateQuotationMeta(qEdit.id, { status: 'sent' }))
 eq('报价单状态改成已发送', qStatus.status, 'sent')
 eq('报价单结果没被改掉', qStatus.result, 'pending')
-const byStatus = quotations.listQuotations({ status: 'sent' })
+const byStatus = (await quotations.listQuotations({ status: 'sent' }))
 check('按状态能筛出报价单', byStatus.some((q) => q.id === qEdit.id))
-const byStyle = quotations.listQuotations({ keyword: 'A002' })
+const byStyle = (await quotations.listQuotations({ keyword: 'A002' }))
 check('按款号能搜到报价单', byStyle.some((q) => q.id === qEdit.id))
-const byNo = quotations.listQuotations({ keyword: qNoBefore })
+const byNo = (await quotations.listQuotations({ keyword: qNoBefore }))
 check('按报价号能搜到报价单', byNo.some((q) => q.id === qEdit.id))
 
 /* ---------------- R3：报价版本快照、按版本转单、过期沿用审批 ---------------- */
 section('R3 报价版本：按哪一版转，就按哪一版的钱')
 
-const versions = quotations.listQuotationVersions(qEdit.id)
+const versions = (await quotations.listQuotationVersions(qEdit.id))
 eq('改过一次 → 两个版本快照', versions.length, 2)
 eq('版本号从新到旧', versions.map((v) => v.revision).join(','), '2,1')
 const v1 = versions.find((v) => v.revision === 1)!
@@ -648,7 +648,7 @@ try {
   expiredErr = (e as Error).message
 }
 check('过期报价没批准人/原因不让转', expiredErr.includes('批准人') && expiredErr.includes('原因'), expiredErr)
-check('被拦住时没有偷偷生成订单', quotations.getQuotation(qExpired.id)?.convertedOrderId == null)
+check('被拦住时没有偷偷生成订单', (await quotations.getQuotation(qExpired.id))?.convertedOrderId == null)
 const expiredOrder = await quotations.convertToOrder(qExpired.id, {
   override: { approvedBy: '周文娟', reason: '老客户翻单，老板同意按旧价做' }
 })
@@ -672,8 +672,8 @@ check(
 )
 check(
   '报价单操作历史记下了沿用审批',
-  quotations.listQuotationEvents(qExpired.id).some((e) => e.note.includes('周文娟')),
-  JSON.stringify(quotations.listQuotationEvents(qExpired.id))
+  (await quotations.listQuotationEvents(qExpired.id)).some((e) => e.note.includes('周文娟')),
+  JSON.stringify((await quotations.listQuotationEvents(qExpired.id)))
 )
 
 /* ---------------- 报价单：费用转成订单的正式费用行 ---------------- */
@@ -1475,7 +1475,7 @@ const allSoNos = allOrders.map((o) => o.orderNo)
 eq('全库订单号无重号', allSoNos.length, new Set(allSoNos).size)
 const allPiNos = allOrders.map((o) => o.piNo).filter(Boolean)
 eq('全库 PI 号无重号', allPiNos.length, new Set(allPiNos).size)
-const allQNos = quotations.listQuotations().map((q) => q.qNo)
+const allQNos = (await quotations.listQuotations()).map((q) => q.qNo)
 eq('全库报价号无重号', allQNos.length, new Set(allQNos).size)
 
 // 清理：手工占位行 + 本节造的空单（不影响后面的金额口径断言）
@@ -1488,7 +1488,7 @@ getDb().run('DELETE FROM packing_lists WHERE order_id = ?', [soSkipOrder.id])
 await orders.deleteOrder(soSkipOrder.id)
 await orders.deleteOrder(piDupSrc.id)
 await orders.deleteOrder(piSkipOrder.id)
-quotations.deleteQuotation(qSkip.id)
+await quotations.deleteQuotation(qSkip.id)
 
 /* ============================================================
  * 第 5 轮：金额口径唯一真源（N29） + 改单重算状态（N27）
@@ -3249,8 +3249,8 @@ check(
 await quotations.saveQuotation({ ...qR6, status: 'confirmed' })
 check(
   '报价状态变化单独进历史：谁把报价发出去、什么时候改口，都要查得到',
-  quotations.listQuotationEvents(qR6.id).some((e) => e.kind === 'status' && e.note.includes('sent')),
-  JSON.stringify(quotations.listQuotationEvents(qR6.id).map((e) => e.note))
+  (await quotations.listQuotationEvents(qR6.id)).some((e) => e.kind === 'status' && e.note.includes('sent')),
+  JSON.stringify((await quotations.listQuotationEvents(qR6.id)).map((e) => e.note))
 )
 
 section('R6 待收款拆分与「本月完成」口径')
@@ -4260,7 +4260,7 @@ section('R11-1 保存中途抛错：整单回滚，不留半截明细')
     rbErr = (e as Error).message
   }
   check('坏明细让整次保存失败', rbErr !== '', rbErr)
-  const afterRb = quotations.getQuotation(rbQ.id)!
+  const afterRb = (await quotations.getQuotation(rbQ.id))!
   eq('回滚后明细行数没少', afterRb.items.length, 2)
   eq('回滚后第一行还是原来那个数量（新值没写进去）', afterRb.items[0].quantity, 10)
 
@@ -4330,7 +4330,7 @@ section('R11-2 明细闸门：负数、半件、没填价格都进不了库')
       })
     )).includes('1 件以上')
   )
-  eq('报错的这次保存没把报价明细改掉', quotations.getQuotation(gq.id)!.items.length, 1)
+  eq('报错的这次保存没把报价明细改掉', (await quotations.getQuotation(gq.id))!.items.length, 1)
 
   // 免费样是真实业务：样品行的单价允许 0，数量仍然要 ≥1
   const free = await samples.saveSample({
@@ -5348,9 +5348,9 @@ const r16Q = await quotations.saveQuotation({
   items: [{ styleNo: 'R16-Q', quantity: 10, unitPrice: 7.5 }]
 })
 await docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r16 quote'), docNo: r16Q.qNo, kind: 'quotation', quotationId: r16Q.id })
-check('有存档的报价单删不掉', (await r8err(async () => quotations.deleteQuotation(r16Q.id))).includes('单据存档'))
-check('拦截提示给出替代方案（已失效）', (await r8err(async () => quotations.deleteQuotation(r16Q.id))).includes('已失效'))
-check('拦截后报价单还在', quotations.getQuotation(r16Q.id) !== null)
+check('有存档的报价单删不掉', (await r8err(async () => (await quotations.deleteQuotation(r16Q.id)))).includes('单据存档'))
+check('拦截提示给出替代方案（已失效）', (await r8err(async () => (await quotations.deleteQuotation(r16Q.id)))).includes('已失效'))
+check('拦截后报价单还在', (await quotations.getQuotation(r16Q.id)) !== null)
 
 section('R16 坏账追回登记的钱不能直接删（核销台账会悬空）')
 const r16Rec = await orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed' })
@@ -5469,12 +5469,12 @@ const r17QMeta = await quotations.saveQuotation({
   exchangeRate: 7,
   items: [{ styleNo: 'R17-Q2', quantity: 20, unitPrice: 6 }]
 })
-quotations.updateQuotationMeta(r17QMeta.id, { status: 'sent' })
+await quotations.updateQuotationMeta(r17QMeta.id, { status: 'sent' })
 const r17QMetaSent = getDb().get('SELECT sent_at FROM quotations WHERE id = ?', [r17QMeta.id]) as
   | Record<string, unknown>
   | null
 check('从「草稿」改成「已发出」也补上发出日', Boolean(r17QMetaSent?.sent_at))
-quotations.updateQuotationMeta(r17QMeta.id, { status: 'confirmed' })
+await quotations.updateQuotationMeta(r17QMeta.id, { status: 'confirmed' })
 const r17QConfirmed = getDb().get('SELECT confirmed_at FROM quotations WHERE id = ?', [r17QMeta.id]) as
   | Record<string, unknown>
   | null
@@ -5483,7 +5483,7 @@ check('改成「已确认」时写下确认日', Boolean(r17QConfirmed?.confirme
 // 把确认日改成 30 天前，再补一次报价结果：等待天数必须还按确认日算
 const r17ConfirmOld = addDays(localDate(), -30)
 getDb().run('UPDATE quotations SET confirmed_at = ? WHERE id = ?', [r17ConfirmOld, r17QMeta.id])
-quotations.updateQuotationMeta(r17QMeta.id, { result: 'pending' })
+await quotations.updateQuotationMeta(r17QMeta.id, { result: 'pending' })
 const r17QAfter = getDb().get('SELECT confirmed_at FROM quotations WHERE id = ?', [r17QMeta.id]) as
   | Record<string, unknown>
   | null
@@ -6094,7 +6094,7 @@ await orders.voidOrder(r22FirstOrder.id, 'R22 客户换抬头重做')
 const r22SecondOrder = await quotations.convertToOrder(r22Q.id)
 check('转出订单作废后能按新单重转', r22SecondOrder.id !== r22FirstOrder.id)
 check('重转出的不是作废单', (await orders.getOrder(r22SecondOrder.id))!.paymentStatus !== 'void')
-eq('报价挂到了新单上', quotations.getQuotation(r22Q.id)!.convertedOrderId, r22SecondOrder.id)
+eq('报价挂到了新单上', (await quotations.getQuotation(r22Q.id))!.convertedOrderId, r22SecondOrder.id)
 
 // ④ 应收账龄 + 客户对账单导出（收款对账动线的缩水版）
 section('R22 应收账龄与客户对账单')
@@ -6324,19 +6324,19 @@ const r24Q = await quotations.saveQuotation({
 await quotations.convertToOrder(r24Q.id)
 let r24QMetaErr = ''
 try {
-  quotations.updateQuotationMeta(r24Q.id, { status: 'expired' })
+  (await quotations.updateQuotationMeta(r24Q.id, { status: 'expired' }))
 } catch (e) {
   r24QMetaErr = (e as Error).message
 }
 check('已转单的报价不能改回失效', r24QMetaErr.includes('已经转成订单'), r24QMetaErr)
 let r24QResultErr = ''
 try {
-  quotations.updateQuotationMeta(r24Q.id, { result: 'lost' })
+  (await quotations.updateQuotationMeta(r24Q.id, { result: 'lost' }))
 } catch (e) {
   r24QResultErr = (e as Error).message
 }
 check('已转单的报价不能标成流失', r24QResultErr.includes('已经转成订单'), r24QResultErr)
-eq('原状态原样保存不被误拦', quotations.updateQuotationMeta(r24Q.id, { status: 'converted' }).status, 'converted')
+eq('原状态原样保存不被误拦', (await quotations.updateQuotationMeta(r24Q.id, { status: 'converted' })).status, 'converted')
 
 section('R24 让利留痕：负费用行一变就必须写原因')
 
@@ -7987,7 +7987,7 @@ check('新建时没给有效期仍按设置补默认（今天+N）', String(r32V
 
 await quotations.saveQuotation({ id: r32Q.id, customerId: c1.id, currency: 'USD', exchangeRate: 7.2, validUntil: '', items: r32Items })
 eq('把有效期清空后库里就是 NULL', r32ValidCell(), null)
-const r32ClearEv = quotations.listQuotationEvents(r32Q.id).find((e) => e.note.includes('有效期'))
+const r32ClearEv = (await quotations.listQuotationEvents(r32Q.id)).find((e) => e.note.includes('有效期'))
 check('留痕写清「→ 未填」，答得出是谁把它改没的', !!r32ClearEv && r32ClearEv.note.includes('未填'), r32ClearEv?.note)
 
 await quotations.saveQuotation({ id: r32Q.id, customerId: c1.id, currency: 'USD', exchangeRate: 7.2, items: r32Items })
@@ -8425,12 +8425,12 @@ const r35Q = await quotations.saveQuotation({
   exchangeRateDate: localDate(),
   items: [{ styleNo: 'R35-A', quantity: 2, unitPrice: 10 }]
 })
-eq('新建即冻住第 1 版', quotations.listQuotationVersions(r35Q.id).length, 1)
+eq('新建即冻住第 1 版', (await quotations.listQuotationVersions(r35Q.id)).length, 1)
 // 模拟升级前建的老报价：单子还在、版本存档没有、落笔在 90 天前
 const r35OldTs = new Date(Date.now() - 90 * 86400000).toISOString()
 getDb().run('DELETE FROM quotation_versions WHERE quotation_id = ?', [r35Q.id])
 getDb().run('UPDATE quotations SET created_at = ?, updated_at = ? WHERE id = ?', [r35OldTs, r35OldTs, r35Q.id])
-const r35Backfill = quotations.listQuotationVersions(r35Q.id)
+const r35Backfill = (await quotations.listQuotationVersions(r35Q.id))
 eq('只是打开版本历史就会把这一版补出来', r35Backfill.length, 1)
 eq('补出来的这一版写的是单子自己的日子', r35Backfill[0].createdAt, r35OldTs)
 check(
@@ -8446,7 +8446,7 @@ await quotations.saveQuotation({
   exchangeRateDate: localDate(),
   items: [{ styleNo: 'R35-A', quantity: 2, unitPrice: 11 }]
 })
-const r35Vers = quotations.listQuotationVersions(r35Q.id)
+const r35Vers = (await quotations.listQuotationVersions(r35Q.id))
 eq('改了价，第 1 版的时间也不会被这次编辑顶掉', r35Vers.find((v) => v.revision === 1)!.createdAt, r35OldTs)
 check('新冻的第 2 版写在本次保存的当下', r35Vers.find((v) => v.revision === 2)!.createdAt.startsWith(localDate()))
 
@@ -8676,7 +8676,7 @@ eq('但系统知道这一句是档案现取的', (await orders.getOrder(r35NoteO
 getDb().run("UPDATE quotations SET bill_to_json = '' WHERE id = ?", [r35NoteQ.id])
 check(
   '报价纸面同理',
-  !renderQuotation({ quotation: quotations.getQuotation(r35NoteQ.id)!, settings: getSettings(), images: {} }).includes(
+  !renderQuotation({ quotation: (await quotations.getQuotation(r35NoteQ.id))!, settings: getSettings(), images: {} }).includes(
     'Agreed Terms'
   )
 )
@@ -9100,7 +9100,7 @@ const r37Q = await quotations.saveQuotation({
 const r37QOrder = await quotations.convertToOrder(r37Q.id)
 eq(
   '报价单带出转出订单的状态（界面据此决定还能不能编辑）',
-  quotations.getQuotation(r37Q.id)!.convertedOrderStatus,
+  (await quotations.getQuotation(r37Q.id))!.convertedOrderStatus,
   r37QOrder.paymentStatus
 )
 check(
@@ -9115,7 +9115,7 @@ check(
   )).includes('原始报价凭据')
 )
 await orders.voidOrder(r37QOrder.id, 'R37 客户改款')
-eq('订单作废后状态看得见', quotations.getQuotation(r37Q.id)!.convertedOrderStatus, 'void')
+eq('订单作废后状态看得见', (await quotations.getQuotation(r37Q.id))!.convertedOrderStatus, 'void')
 const r37QEdit = await quotations.saveQuotation({
   id: r37Q.id,
   customerId: r37QCust.id,
@@ -9123,19 +9123,19 @@ const r37QEdit = await quotations.saveQuotation({
   items: [{ styleNo: 'R37Q', quantity: 10, unitPrice: 11 }]
 })
 eq('作废之后报价可以改价（不再逼人另建一张）', r37QEdit.items[0].unitPrice, 11)
-quotations.updateQuotationMeta(r37Q.id, { result: 'lost' })
-eq('作废之后结果也能改', quotations.getQuotation(r37Q.id)!.result, 'lost')
+await quotations.updateQuotationMeta(r37Q.id, { result: 'lost' })
+eq('作废之后结果也能改', (await quotations.getQuotation(r37Q.id))!.result, 'lost')
 
 // 「发后改过」= status=sent 且 updated_at > sent_at：只改结果绝不能把时钟推走
 getDb().run(
   "UPDATE quotations SET status = 'sent', sent_at = '2026-01-01T00:00:00.000Z', updated_at = '2026-02-01T00:00:00.000Z' WHERE id = ?",
   [r37Q.id]
 )
-const r37QMetaOnly = quotations.updateQuotationMeta(r37Q.id, { result: 'won' })
+const r37QMetaOnly = (await quotations.updateQuotationMeta(r37Q.id, { result: 'won' }))
 eq('只改结果不动「最后修改」（否则「待重发」天天误报）', r37QMetaOnly.updatedAt, '2026-02-01T00:00:00.000Z')
-const r37QStatus = quotations.updateQuotationMeta(r37Q.id, { status: 'draft' })
+const r37QStatus = (await quotations.updateQuotationMeta(r37Q.id, { status: 'draft' }))
 check('改状态照常刷新「最后修改」', r37QStatus.updatedAt > '2026-02-01T00:00:00.000Z')
-const r37QResend = quotations.updateQuotationMeta(r37Q.id, { status: 'sent' })
+const r37QResend = (await quotations.updateQuotationMeta(r37Q.id, { status: 'sent' }))
 eq('重发那一刻两条时间对齐（不该一发出去就标待重发）', r37QResend.updatedAt, r37QResend.sentAt)
 getDb().run("UPDATE quotations SET sent_at = '2026-01-01T00:00:00.000Z' WHERE id = ?", [r37Q.id])
 const r37QAgain = await quotations.saveQuotation({
