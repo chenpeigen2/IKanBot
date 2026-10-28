@@ -41,7 +41,7 @@ function monthStart(): string {
   return localDate(new Date(d.getFullYear(), d.getMonth(), 1))
 }
 
-export function dashboard(): DashboardStats {
+export async function dashboard(): Promise<DashboardStats> {
   const db = getDb()
   const settings = getSettings()
   const mStart = monthStart()
@@ -49,13 +49,13 @@ export function dashboard(): DashboardStats {
   // 金额口径统一走 services/money.ts（唯一真源）：
   // 货值 / 费用 / 含费用合计 / 待收 / 毛利 全部用同一套计算
   // 草稿单、已失效、已作废不算正式订单：不进在途、待收、销售额、毛利、订单数
-  const all = listOrderMoney()
+  const all = await listOrderMoney()
   const monthRows = all.filter((r) => localDateOf(r.createdAt) >= mStart)
 
   // 待收款金额 = Σ(含费用合计 − 已收) + 未收打样费，折算成基准币
   // 直接吃已经拿到的 all，不再让 totalReceivable() 把同一批单重算一遍
   const goodsReceivable = all.reduce((s, r) => s + r.receivableBase, 0)
-  const samplePending = sampleReceivable()
+  const samplePending = await sampleReceivable()
   const pendingAmount = goodsReceivable + samplePending
 
   // 待收款拆成四桶给界面用（纯展示，加起来必须等于 pendingAmount）：
@@ -122,10 +122,10 @@ export function dashboard(): DashboardStats {
   // 本月到账：走 money.ts 里唯一一份「按到账月算收到多少钱」的实现。
   // 以前这里和月度报表各写一遍 SUM，两处会各自漂出两个数。
   const thisMonth = localMonthOf(localDate())
-  const monthReceived = receivedByMonth().find((m) => m.month === thisMonth)?.amount ?? 0
+  const monthReceived = (await receivedByMonth()).find((m) => m.month === thisMonth)?.amount ?? 0
   // 退款是钱流出，不并进到账（到账就是到账）；但当月退过钱要在这里点一笔，
   // 否则老板看着「本月收款 8 万」去对银行流水，怎么也对不上。
-  const monthRefunded = refundedByMonth().find((m) => m.month === thisMonth)?.count ?? 0
+  const monthRefunded = (await refundedByMonth()).find((m) => m.month === thisMonth)?.count ?? 0
 
   return {
     ...mapDashboard({
@@ -163,7 +163,7 @@ export function dashboard(): DashboardStats {
  * 铁律：天数一律用本地日期算；脏日期不许印成「还有 NaN 天」，改成单独亮一条「日期格式待修」；
  *      金额一律取自 services/money.ts，这里不再自己写 SQL 算钱。
  */
-export function reminders(): Reminder[] {
+export async function reminders(): Promise<Reminder[]> {
   const db = getDb()
   const s = getSettings()
   const today = localDate()
@@ -197,7 +197,7 @@ export function reminders(): Reminder[] {
   const dueWords = (diff: number): string => (diff < 0 ? `已逾期 ${-diff} 天` : `还有 ${diff} 天`)
 
   // 钱只看一个真源：待收 / 定金 / 已收都取自 listOrderMoney，出运后催款也必须用它
-  const moneyRows = listOrderMoney()
+  const moneyRows = await listOrderMoney()
 
   // 催款时钟按「真正进入这个状态的时间」算：改备注、补成本不能把拖了几个星期的单子刷新成 0 天
   const statusClock = new Map<string, string>()
@@ -764,7 +764,7 @@ export function reminders(): Reminder[] {
       ) as Record<string, unknown>[]
     ).map((r) => [Number(r.id), r])
   )
-  for (const m of sampleMoneyRows()) {
+  for (const m of await sampleMoneyRows()) {
     if (m.status === 'cancelled') continue
     const disp = sampleDisplay.get(m.sampleId)
     if (!disp) continue
@@ -908,7 +908,7 @@ export function reminders(): Reminder[] {
  * 成本没录全的月份，毛利一律给 null（不可信），不许拿 0 成本凑一个漂亮的数，
  * 也不许再加一列「已录成本单的毛利」——半可信的毛利列比空白更容易被当成真数。
  */
-export function monthlyReport(): MonthlyReportRow[] {
+export async function monthlyReport(): Promise<MonthlyReportRow[]> {
   interface MonthAcc {
     month: string
     orders: number
@@ -934,7 +934,7 @@ export function monthlyReport(): MonthlyReportRow[] {
     missingCostOrders: 0
   })
   const byMonth = new Map<string, MonthAcc>()
-  for (const r of listOrderMoney()) {
+  for (const r of await listOrderMoney()) {
     const cur = byMonth.get(r.month) ?? empty(r.month)
     const rate = r.exchangeRate
     cur.orders += 1
@@ -950,7 +950,7 @@ export function monthlyReport(): MonthlyReportRow[] {
   }
 
   // 收款：按实际到账月份归集（现金流口径的实现在 money.ts，这里只搬运不加总）
-  for (const p of receivedByMonth()) {
+  for (const p of await receivedByMonth()) {
     const cur = byMonth.get(p.month) ?? empty(p.month)
     cur.received += p.amount
     byMonth.set(p.month, cur)
@@ -959,7 +959,7 @@ export function monthlyReport(): MonthlyReportRow[] {
   // 退款单列一份：customer_refunds 没有汇率快照，硬折基准币只能猜汇率，
   // 所以只报笔数和原币合计，让「本月收款」与银行流水差出来的那截有地方解释。
   const refundByMonth = new Map(
-    refundedByMonth().map((m) => [
+    (await refundedByMonth()).map((m) => [
       m.month,
       {
         count: m.count,
@@ -1000,7 +1000,7 @@ export function monthlyReport(): MonthlyReportRow[] {
  *   monthly     —— 月度汇总，与报表页同一份数
  * 状态一律中文标签，别再出现一张表写「void」、另一张写「已作废」。
  */
-export function exportCsv(kind: ExportKind, filter?: OrderExportFilter): string {
+export async function exportCsv(kind: ExportKind, filter?: OrderExportFilter): Promise<string> {
   const db = getDb()
   const base = getSettings().baseCurrency
   switch (kind) {
@@ -1012,8 +1012,8 @@ export function exportCsv(kind: ExportKind, filter?: OrderExportFilter): string 
       // Excel 里 SUM 出来的数就不等于销售额了。只有筛的本身就是非计费状态才放开全量行集。
       return ordersCsv(
         kind === 'orders_all' || (filter?.paymentStatus && !isBillingStatus(filter.paymentStatus))
-          ? listOrderMoney({ includeVoided: true })
-          : listOrderMoney(),
+          ? await listOrderMoney({ includeVoided: true })
+          : await listOrderMoney(),
         base,
         kind === 'orders' ? filter : undefined
       )
@@ -1129,7 +1129,7 @@ function ordersCsv(rows: OrderMoneyRow[], base: string, filter?: OrderExportFilt
 }
 
 /** 款号明细台账：款号×颜色×尺码，退税、对账、报关核数用 */
-function itemsCsv(db: ReturnType<typeof getDb>, base: string): string {
+async function itemsCsv(db: ReturnType<typeof getDb>, base: string): Promise<string> {
   const sales = notInStatuses('o.payment_status', EXCLUDED_STATUSES)
   const rows = db.all(
     `SELECT o.id AS order_id, o.order_no, o.pi_no, c.company, c.country, o.currency, o.exchange_rate,
@@ -1145,7 +1145,7 @@ function itemsCsv(db: ReturnType<typeof getDb>, base: string): string {
   ) as Record<string, unknown>[]
   // 明细行加起来只等于「货值」，PI 上的 TOTAL 还含运费/折让等费用行。
   // 报关核数时那截差额最容易被当成漏单，所以把整单的货值/费用一起带上。
-  const orderMoney = new Map(listOrderMoney().map((r) => [r.orderId, r]))
+  const orderMoney = new Map((await listOrderMoney()).map((r) => [r.orderId, r]))
   const header = [
     '订单号',
     'PI号',
@@ -1204,7 +1204,7 @@ function itemsCsv(db: ReturnType<typeof getDb>, base: string): string {
 }
 
 /** 月度汇总：与报表页同一份数（销售额按下单月、收款按到账月，列名里写清楚） */
-function monthlyCsv(base: string): string {
+async function monthlyCsv(base: string): Promise<string> {
   const header = [
     '月份',
     '订单数',
@@ -1220,7 +1220,7 @@ function monthlyCsv(base: string): string {
     '本月退款笔数',
     '退款(原币·按出账月，未折基准币)'
   ]
-  const lines = monthlyReport().map((r) => [
+  const lines = (await monthlyReport()).map((r) => [
     r.month,
     r.orders,
     money2(r.sales),
@@ -1241,10 +1241,10 @@ function monthlyCsv(base: string): string {
  *  作废/失效单的钱确实到账了，但看的人得知道这单已经作废。
  *  R30 起退款也在这里出一条原币负行：钱真从账上出去了，台账不能只记进不记出。
  *  退款没有汇率快照，基准币列留空（宁可空着，不猜一个汇率把月报折错）。 */
-function paymentsCsv(base: string): string {
+async function paymentsCsv(base: string): Promise<string> {
   // 取数与月报到账同一份（cashFlowRows）：订单收款 + 打样实收。
   // 打样抵扣不落流水，这里也不会出现——同一笔钱只能有一条来路。
-  const rows = cashFlowRows()
+  const rows = await cashFlowRows()
   // 「单据类型」加在最后一列：前面的列序是别人报表的下游约定，插在中间会错位
   const header = [
     '收款日期',
@@ -1279,7 +1279,7 @@ function paymentsCsv(base: string): string {
       ]
     }))
     .concat(
-      refundFlowRows().map((f) => ({
+      (await refundFlowRows()).map((f) => ({
         date: f.refundAt,
         cells: [
           f.refundAt,
@@ -1321,14 +1321,14 @@ function money2(v: number): number {
  * 已收一律按单据汇率折算，与待收同一套数；每笔收款行只列原币到账额——
  * 拿逐笔快照去合计会和待收差一个汇兑差，对账单是应收账，不是现金流量表。
  */
-function statementCsv(customerId: number, base: string): string {
+async function statementCsv(customerId: number, base: string): Promise<string> {
   const today = localDate()
-  const orders = listOrderMoney({ customerId, includeVoided: true }).filter(
+  const orders = (await listOrderMoney({ customerId, includeVoided: true })).filter(
     // 草稿还没发出去，客户手里没有这张单，别放上对账单
     (r) => r.paymentStatus !== 'draft'
   )
-  const samples = sampleStatementRows(customerId)
-  const flows = cashFlowRows({ customerId })
+  const samples = await sampleStatementRows(customerId)
+  const flows = await cashFlowRows({ customerId })
   if (orders.length === 0 && samples.length === 0 && flows.length === 0) {
     throw new Error('这家客户还没有订单或打样单，没有可对账的内容。')
   }
@@ -1509,7 +1509,7 @@ function statementCsv(customerId: number, base: string): string {
   // 预收结余：多收的钱、作废/取消单留在账上的实收，都从 money.ts 的同一份余额派生，
   // 减去已经抵到别的单上的部分、也减去已经退还给客户的部分。
   // 压进待收会变负数，客户会以为我们算错了
-  const credit = customerCreditBalance(customerId)
+  const credit = await customerCreditBalance(customerId)
   const prepaidRows: StatementRow[] = credit.map((c) => {
     const parts = `来源 ${money2(c.gross)} − 已抵扣 ${money2(c.applied)}${c.refunded > 0.001 ? ` − 已退还 ${money2(c.refunded)}` : ''}`
     return {

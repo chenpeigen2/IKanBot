@@ -40,8 +40,8 @@ async function main(): Promise<void> {
     const routes: string[] = meta.body.routes ?? []
     check('GET /api 自描述已接接口', routes.includes('POST /api/customers/list') && routes.includes('GET /healthz'))
     check(
-      '路由数与控制器一致（26 个：客户 6 + 商品 12 + 图片 3 + 设置 3 + 自带 2）',
-      routes.length === 26
+      '路由数与控制器一致（30 个：客户 6 + 商品 12 + 图片 3 + 设置 3 + 金额只读 4 + 自带 2）',
+      routes.length === 30
     )
 
     console.log('客户域')
@@ -340,6 +340,50 @@ async function main(): Promise<void> {
     check(
       '有账后换基准币拒收（说清要重算历史）',
       sSwitch.status === 400 && String(sSwitch.body.error.message).includes('基准币不能换')
+    )
+
+    console.log('金额只读面')
+    const moneyCust = await http.post('/api/customers/save').send({ input: { company: 'Money Co' } })
+    const mcid = Number(moneyCust.body.id)
+    await db.run(
+      `INSERT INTO orders(order_no, customer_id, payment_status, currency, exchange_rate, charges, deposit_ratio, created_at, updated_at)
+       VALUES('SO-M1', ?, 'issued', 'USD', 7, ?, 0.3, '', '')`,
+      [mcid, JSON.stringify([{ label: '运费', amount: 100 }])]
+    )
+    const mOrderId = Number((await db.get(`SELECT id FROM orders WHERE order_no = 'SO-M1'`))?.['id'])
+    await db.run(
+      `INSERT INTO order_items(order_id, style_no, quantity, unit_price, unit_cost) VALUES(?, 'M-1', 10, 5, 3)`,
+      [mOrderId]
+    )
+
+    const recv = await http.post('/api/report/receivables').send({})
+    const recvRow = (recv.body as { customerId: number; orders: number; totalBase: number }[]).find(
+      (r) => r.customerId === mcid
+    )
+    check(
+      '待收榜：货值 50 + 运费 100，折基准币 1050，按 1 张未结单挂榜',
+      recv.status === 200 && recvRow?.orders === 1 && recvRow?.totalBase === 1050
+    )
+
+    const openRows = await http.post('/api/report/customerOrderRows').send({ customerId: mcid })
+    check(
+      '客户未结单行：原币待收 150（不是折后金额）',
+      openRows.status === 200 && openRows.body.length === 1 && openRows.body[0].receivable === 150
+    )
+
+    const noPl = await http.post('/api/pl/amounts').send({ orderId: mOrderId })
+    check('没装箱批次的单，本批金额是空表', noPl.status === 200 && Array.isArray(noPl.body) && noPl.body.length === 0)
+
+    const noCredit = await http.post('/api/credits/balance').send({ customerId: mcid })
+    check(
+      '没抵扣过预收的客户，余额是空表而不是一堆 0',
+      noCredit.status === 200 && Array.isArray(noCredit.body) && noCredit.body.length === 0
+    )
+
+    const badCustomer = await http.post('/api/report/customerOrderRows').send({ customerId: 0 })
+    check(
+      '金额接口的编号守门：不是正整数当场说清',
+      badCustomer.status === 400 && String(badCustomer.body.error.message).includes('客户编号')
     )
 
     console.log('错误体')

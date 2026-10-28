@@ -462,7 +462,7 @@ export function registerIpc(): void {
   handle('export:csv', async (kind: ExportKind, filter?: OrderExportFilter) => {
     const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
     // 先算再弹框：对账单没有内容时要在用户挑路径之前就拦住，别让人选完文件才看到报错
-    const csv = dashboard.exportCsv(kind, filter)
+    const csv = await dashboard.exportCsv(kind, filter)
     // 文件名带上导出当天：两张台账撞在一起时，得能看出哪份是哪一次刷的数；
     // 对账单还要带客户名，同一天导两家不能同名
     const name =

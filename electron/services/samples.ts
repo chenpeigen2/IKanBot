@@ -6,7 +6,7 @@
  *  - 但公司垫的钱（快递费、样品费）要记账，所以单独一张表、单独一个页面
  *  - 样品单号、快递单号都能查（客户来问「上次那个样品寄到哪了」）
  */
-import { getDb, nextNo, transact } from '../db'
+import { getDb, nextNo, transact, transactAsync } from '../db'
 import { mapCustomer, mapPayment } from '../db/mappers'
 import { assertLocalDate, localDate } from '../../src/shared/date'
 import { isBillingStatus } from '../../src/shared/billing'
@@ -120,7 +120,7 @@ function mapSampleItem(r: Record<string, unknown>): SampleOrderItem {
   }
 }
 
-function hydrate(s: SampleOrder): SampleOrderDetail {
+async function hydrate(s: SampleOrder): Promise<SampleOrderDetail> {
   const db = getDb()
   const customerRow = db.get('SELECT * FROM customers WHERE id = ?', [s.customerId]) as
     | Record<string, unknown>
@@ -185,7 +185,7 @@ function hydrate(s: SampleOrder): SampleOrderDetail {
   // 汇率必须有，否则工作台会少算 → 标记 rateMissing 提示补
   const cancelled = s.status === 'cancelled'
   // 预收抵扣（R27）：客户账上的钱先垫了样品费，这部分不再是待收，也不是现金
-  const creditApplied = creditAppliedForSample(s.id)
+  const creditApplied = await creditAppliedForSample(s.id)
   // 抵扣被挂起时，样品费重新成为待收——和 sampleOpenRows / 对账单 / 催款提醒同一份口径
   const owed =
     !cancelled && (s.feeStatus === 'unpaid' || offsetSuspended)
@@ -224,7 +224,9 @@ function hydrate(s: SampleOrder): SampleOrderDetail {
   }
 }
 
-export function listSamples(filter: { keyword?: string; customerId?: number; status?: string } = {}): SampleOrderDetail[] {
+export async function listSamples(
+  filter: { keyword?: string; customerId?: number; status?: string } = {}
+): Promise<SampleOrderDetail[]> {
   const db = getDb()
   const where: string[] = []
   const params: (string | number)[] = []
@@ -252,25 +254,27 @@ export function listSamples(filter: { keyword?: string; customerId?: number; sta
      ORDER BY s.created_at DESC, s.id DESC`,
     params
   ) as Record<string, unknown>[]
-  return rows.map((r) => hydrate(mapSample(r)))
+  const list: SampleOrderDetail[] = []
+  for (const r of rows) list.push(await hydrate(mapSample(r)))
+  return list
 }
 
-export function getSample(id: number): SampleOrderDetail | null {
+export async function getSample(id: number): Promise<SampleOrderDetail | null> {
   const row = getDb().get(
     `SELECT s.*, o.payment_status AS converted_order_status
      FROM sample_orders s LEFT JOIN orders o ON o.id = s.converted_order_id
      WHERE s.id = ?`,
     [id]
   ) as Record<string, unknown> | null
-  return row ? hydrate(mapSample(row)) : null
+  return row ? await hydrate(mapSample(row)) : null
 }
 
 /** 新建 / 修改打样单 */
-export function saveSample(input: SampleInput): SampleOrderDetail {
-  return transact(() => saveSampleInner(input))
+export function saveSample(input: SampleInput): Promise<SampleOrderDetail> {
+  return transactAsync(() => saveSampleInner(input))
 }
 
-function saveSampleInner(input: SampleInput): SampleOrderDetail {
+async function saveSampleInner(input: SampleInput): Promise<SampleOrderDetail> {
   const db = getDb()
   const ts = now()
   // 编辑时先把旧行取出来：字段「没传」不等于「是 0 / 是空」，
@@ -600,15 +604,15 @@ function saveSampleInner(input: SampleInput): SampleOrderDetail {
   // 任何改动都可能让这家客户的预收来源变小——改小总额、换客户、取消后恢复成在途、免单改回待收——
   // 已经抵/退出去的钱就会穿仓，所以不挑方向。assertCreditSolvent 自带「没抵扣/退款就放行」的早退，
   // 所以这里不再挑方向，改完统一复查；报错由外层事务整单回滚。
-  if (before) assertCreditSolvent(Number(before.customer_id))
-  return getSample(id)!
+  if (before) await assertCreditSolvent(Number(before.customer_id))
+  return (await getSample(id))!
 }
 
-export function deleteSample(id: number): void {
-  const s = getSample(id)
+export async function deleteSample(id: number): Promise<void> {
+  const s = await getSample(id)
   if (!s) return
   if (s.convertedOrderId) {
-    const o = getOrder(s.convertedOrderId)
+    const o = await getOrder(s.convertedOrderId)
     // 活着的订单还靠这张打样单作原始凭据；订单已作废，留档订单本身就能追溯，同意删
     if (o && o.paymentStatus !== 'void') {
       throw new Error(
@@ -643,7 +647,7 @@ export function deleteSample(id: number): void {
  * 打样转订单（N24）：客户确认样品后，款号/颜色/尺码/数量/样品单价原样带过去，
  * 数量按打样件数带（大货数量客户确认后自己改），样品费可以选择抵扣。
  */
-export function convertSampleToOrder(
+export async function convertSampleToOrder(
   id: number,
   opts: {
     /** 15=0：0=不抵扣，原价收；1=样品费从订单里扣掉（标记为下单抵扣） */
@@ -651,12 +655,12 @@ export function convertSampleToOrder(
     /** 转出来的订单落什么收款状态：sent = PI 现在就发 */
     paymentStatus?: 'draft' | 'sent'
   } = {}
-): OrderDetail {
-  const s = getSample(id)
+): Promise<OrderDetail> {
+  const s = await getSample(id)
   if (!s) throw new Error('打样单不存在')
   if (s.status === 'cancelled') throw new Error('这张打样单已取消，不能再转订单（要转请先把状态改回来）')
   if (s.convertedOrderId) {
-    const exist = getOrder(s.convertedOrderId)
+    const exist = await getOrder(s.convertedOrderId)
     // 上次转出的单还活着就复用；已经作废了要继续做生意，只能按新单重转
     if (exist && exist.paymentStatus !== 'void') return exist
   }
@@ -721,8 +725,8 @@ export function convertSampleToOrder(
   // 转单要一次做完：订单头 + 明细 + 打样单标记。中途失败就整单回滚，
   // 不留下「有订单头没明细」或「打样单标了已转、订单却是空的」半截数据
   // （createOrder 自己也开事务，这里嵌套 SAVEPOINT，回滚时两层一起退）
-  return transact(() => {
-    const order = createOrder({
+  return transactAsync(async () => {
+    const order = await createOrder({
       customerId: s.customerId,
       currency,
       exchangeRate: rate,
@@ -796,7 +800,7 @@ export function convertSampleToOrder(
         offsetTotal > 0 ? `样品费及快递费 ${offsetTotal.toFixed(2)} 抵扣` : '样品费未抵扣'
       }${s.note ? `；打样单备注：${s.note}` : ''}`
     )
-    return getOrder(order.id)!
+    return (await getOrder(order.id))!
   })
 }
 /* ---------------- 打样费收款（R25） ---------------- */
@@ -860,14 +864,14 @@ export function listSamplePayments(sampleId: number): Payment[] {
  * 登记一笔打样费实收（R25）。只有真金白银进这张表；
  * 「下单抵扣」是订单里的负费用行，绝不在这里再落一笔（同一块钱算两遍）。
  */
-export function addSamplePayment(sampleId: number, p: SamplePaymentInput): SampleOrderDetail {
-  const s = getSample(sampleId)
+export async function addSamplePayment(sampleId: number, p: SamplePaymentInput): Promise<SampleOrderDetail> {
+  const s = await getSample(sampleId)
   if (!s) throw new Error('打样单不存在')
   if (s.status === 'cancelled') {
     throw new Error(`打样单 ${s.sampleNo} 已取消：取消的单不再收钱。如果客户确实付了，请先把状态改回来（备注写明原因）再登记。`)
   }
   if (s.convertedOrderId) {
-    const o = getOrder(s.convertedOrderId)
+    const o = await getOrder(s.convertedOrderId)
     if (o && o.paymentStatus !== 'void') {
       throw new Error(
         `这张打样单已经转成订单 ${o.orderNo}：样品费的钱请直接登记在订单上，这里只留转单前的实收。` +
@@ -882,7 +886,7 @@ export function addSamplePayment(sampleId: number, p: SamplePaymentInput): Sampl
   if (s.feeStatus === 'offset') {
     // 这里不开「挂起就能收」的口子：转出的订单一旦恢复计费，抵扣会自动再生效，
     // 那时这张单上又落了一笔现金，同一块钱就收了两次（应收口径也解释不了）。
-    const co = s.convertedOrderId ? getOrder(s.convertedOrderId) : null
+    const co = s.convertedOrderId ? await getOrder(s.convertedOrderId) : null
     const suspended = !!s.convertedOrderStatus && !isBillingStatus(s.convertedOrderStatus)
     throw new Error(
       `打样单 ${s.sampleNo} 的样品费已经抵扣进${co ? `订单 ${co.orderNo}` : '订单'}，这里再落一笔会重复计。` +
@@ -932,22 +936,26 @@ export function addSamplePayment(sampleId: number, p: SamplePaymentInput): Sampl
     )
     syncSampleFeeStatus(sampleId)
   })
-  return getSample(sampleId)!
+  return (await getSample(sampleId))!
 }
 
 /**
  * 撤销一笔打样费实收：真删流水（这是录错/退汇，不是坏账），原因写进 fee_note。
  * 转单前撤销会同时把「已收齐」回退成未收，待收跟着回来。
  */
-export function deleteSamplePayment(sampleId: number, paymentId: number, reason: string): SampleOrderDetail {
+export async function deleteSamplePayment(
+  sampleId: number,
+  paymentId: number,
+  reason: string
+): Promise<SampleOrderDetail> {
   const why = String(reason ?? '').trim()
   if (!why) {
     throw new Error('撤销打样收款要写原因（例如“金额录错”“客户退汇”），操作历史里要留痕。')
   }
-  const s = getSample(sampleId)
+  const s = await getSample(sampleId)
   if (!s) throw new Error('打样单不存在')
   if (s.convertedOrderId) {
-    const o = getOrder(s.convertedOrderId)
+    const o = await getOrder(s.convertedOrderId)
     if (o && o.paymentStatus !== 'void') {
       throw new Error(
         `这张打样单已经转成订单 ${o.orderNo}：转单前的实收已经参与抵扣计算，不能回头撤销。要更正请到订单里处理。`
@@ -972,7 +980,7 @@ export function deleteSamplePayment(sampleId: number, paymentId: number, reason:
   const amount = Number(row.amount ?? 0)
   const paidAt = String(row.paid_at ?? '')
   const bankRef = String(row.bank_ref ?? '')
-  transact(() => {
+  await transactAsync(async () => {
     db.run('DELETE FROM payments WHERE id = ? AND sample_order_id = ?', [paymentId, sampleId])
     appendFeeNote(
       sampleId,
@@ -980,9 +988,9 @@ export function deleteSamplePayment(sampleId: number, paymentId: number, reason:
     )
     syncSampleFeeStatus(sampleId)
     // 取消/免收单的实收、多收的钱都是客户预收的来源：撤销不能把已抵出去的余额撤成负数
-    assertCreditSolvent(s.customerId)
+    await assertCreditSolvent(s.customerId)
   })
-  return getSample(sampleId)!
+  return (await getSample(sampleId))!
 }
 
 /** 客户档案里的默认条款（打样转订单时用） */

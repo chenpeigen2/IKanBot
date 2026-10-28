@@ -6,6 +6,7 @@ import { migrate } from '../src/db/migrate'
 import { customersCore } from '../../core/customers'
 import { productsCore } from '../../core/products'
 import { settingsCore } from '../../core/settings'
+import { moneyCore } from '../../core/money'
 import { loadConfig } from '../src/config/config'
 import { LATEST_DB_VERSION } from '../../electron/db/schema'
 
@@ -221,6 +222,45 @@ async function main(): Promise<void> {
       '坏 JSON 退回默认值而不是留空',
       sBroken.piValidDays === 15 && sBroken.baseCurrency === 'CNY' && sBroken.banks.length === 0
     )
+
+    console.log('金额口径 SQL')
+    const mc = moneyCore(db)
+    await db.run(
+      `INSERT INTO orders(order_no, customer_id, payment_status, currency, exchange_rate, charges, deposit_ratio, created_at, updated_at)
+       VALUES('SO-M1', ?, 'issued', 'USD', 7, ?, 0.3, '', '')`,
+      [id, JSON.stringify([{ label: '运费', amount: 100 }])]
+    )
+    const mOrderId = Number((await db.get(`SELECT id FROM orders WHERE order_no = 'SO-M1'`))?.['id'])
+    await db.run(
+      `INSERT INTO order_items(order_id, style_no, quantity, unit_price, unit_cost) VALUES(?, 'M-1', 10, 5, 3)`,
+      [mOrderId]
+    )
+
+    const one = (
+      await mc.moneyForOrders([
+        { id: mOrderId, charges: JSON.stringify([{ label: '运费', amount: 100 }]), depositRatio: 0.3 }
+      ])
+    ).get(mOrderId)!
+    check(
+      '单张口径：货值 50 + 运费 100 = 含费用合计 150，定金 45',
+      one.goodsValue === 50 && one.grandTotal === 150 && one.depositAmount === 45
+    )
+    check('成本录全了才算毛利：50 − 30 = 20', one.profit === 20 && one.missingCostItems === 0)
+
+    const listed = (await mc.listOrderMoney()).find((r) => r.orderId === mOrderId)
+    check(
+      '列表与单张同一口径，折基准币 150 × 7',
+      listed?.grandTotal === 150 && listed?.receivableBase === 1050
+    )
+    check('没装箱批次的单，本批金额是空表', (await mc.packingAmounts(mOrderId)).length === 0)
+    check('没抵扣/退过款的客户，预收余额是空表', (await mc.customerCreditBalance(id)).length === 0)
+    check('客户待收按同一口径汇总（折基准币）', (await mc.customerReceivable(id)) === 1050)
+    check(
+      '客户未结单行给原币待收',
+      (await mc.customerOpenRows(id)).some((r) => r.docId === mOrderId && r.receivable === 150)
+    )
+    const rank = (await mc.receivableByCustomer()).find((r) => r.customerId === id)
+    check('待收榜：一张未结单、合计 1050', rank?.orders === 1 && rank?.totalBase === 1050)
 
     console.log('并发与幂等')
     await Promise.all(

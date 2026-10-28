@@ -6,7 +6,7 @@
  * 「把余额用掉」和「撤销用掉」——抵扣是非现金动作，绝不进 payments/现金流，
  * 也不改单据总额和毛利，只冲目标单的待收。
  */
-import { getDb, transact } from '../db'
+import { getDb, transact, transactAsync } from '../db'
 import { getSettings } from './settings'
 import { logEvent } from './events'
 import { getOrder, recomputePaymentStatus } from './orders'
@@ -41,7 +41,7 @@ interface Target {
   open: number
 }
 
-function readOrderTarget(id: number): Target {
+async function readOrderTarget(id: number): Promise<Target> {
   const row = getDb().get(
     'SELECT id, order_no, customer_id, currency, payment_status, charges, deposit_ratio FROM orders WHERE id = ?',
     [id]
@@ -56,7 +56,7 @@ function readOrderTarget(id: number): Target {
   if (!isBillingStatus(status)) {
     throw new Error(`订单 ${String(row.order_no ?? '')} 已失效/作废：它已经没有待收，预收抵扣无处可落。`)
   }
-  const detail = getOrder(id)
+  const detail = await getOrder(id)
   // 坏账已经从待收里拿掉过一次：再拿预收抵，同一笔欠款会同时算「坏账损失」和「预收抵扣」，
   // 待收、坏账余额、客户余额三处对不上。追回款走「坏账追回」，别用预收替客户补。
   if (detail && detail.badDebtOutstanding > 0.001) {
@@ -65,7 +65,9 @@ function readOrderTarget(id: number): Target {
         `先走「坏账追回」或撤销那笔坏账，再拿预收抵扣——否则同一笔欠款会同时算坏账损失和预收抵扣。`
     )
   }
-  const money = moneyForOrders([{ id, charges: row.charges, depositRatio: Number(row.deposit_ratio ?? 0) }]).get(id)
+  const money = (
+    await moneyForOrders([{ id, charges: row.charges, depositRatio: Number(row.deposit_ratio ?? 0) }])
+  ).get(id)
   return {
     kind: 'order',
     id,
@@ -76,7 +78,7 @@ function readOrderTarget(id: number): Target {
   }
 }
 
-function readSampleTarget(id: number): Target {
+async function readSampleTarget(id: number): Promise<Target> {
   const row = getDb().get(
     `SELECT s.id, s.sample_no, s.customer_id, s.currency, s.status, s.fee_status, o.order_no AS converted_order_no
      FROM sample_orders s LEFT JOIN orders o ON o.id = s.converted_order_id
@@ -96,7 +98,7 @@ function readSampleTarget(id: number): Target {
         `如果转出的订单退回了草稿/失效，请先把订单恢复成正式单，抵扣会自动生效。`
     )
   }
-  const hit = sampleOpenRows(customerId).find((r) => r.sampleId === id)
+  const hit = (await sampleOpenRows(customerId)).find((r) => r.sampleId === id)
   if (!hit) {
     throw new Error(
       `打样单 ${String(row.sample_no ?? '')} 没有待收（已收齐/已抵扣/已取消/已免单），不能再用预收抵扣。`
@@ -112,7 +114,7 @@ function readSampleTarget(id: number): Target {
   }
 }
 
-function readTarget(kind: 'order' | 'sample', id: number): Target {
+function readTarget(kind: 'order' | 'sample', id: number): Promise<Target> {
   return kind === 'sample' ? readSampleTarget(id) : readOrderTarget(id)
 }
 
@@ -125,7 +127,7 @@ function readTarget(kind: 'order' | 'sample', id: number): Target {
  *  - 金额不能超过目标单待收，也不能超过客户可用预收；
  *  - 草稿/失效/作废/取消的单不抵（它们没有应收）。
  */
-export function applyCredit(input: ApplyCreditInput): CustomerCreditCurrency[] {
+export async function applyCredit(input: ApplyCreditInput): Promise<CustomerCreditCurrency[]> {
   const customerId = Number(input.customerId)
   const currency = String(input.currency ?? '').trim().toUpperCase()
   if (!customerId) throw new Error('没有指定客户，不能抵扣预收。')
@@ -142,7 +144,7 @@ export function applyCredit(input: ApplyCreditInput): CustomerCreditCurrency[] {
     throw new Error('抵扣日期不能填未来：对账单按这一天排序，未来的日期会把余额排到还没发生的月份。')
   }
 
-  const target = readTarget(input.targetKind, input.targetId)
+  const target = await readTarget(input.targetKind, input.targetId)
   if (target.customerId !== customerId) {
     throw new Error('这张单不属于当前客户：预收只能抵同一家客户的单，不能串账。')
   }
@@ -156,7 +158,7 @@ export function applyCredit(input: ApplyCreditInput): CustomerCreditCurrency[] {
       `${target.no} 当前待收只有 ${target.open.toFixed(2)} ${currency}，不能再抵 ${amount.toFixed(2)}。`
     )
   }
-  const available = customerCreditAvailable(customerId, currency)
+  const available = await customerCreditAvailable(customerId, currency)
   if (available < -0.001) {
     throw new Error(
       `客户 ${currency} 预收出现缺口（${available.toFixed(2)}）：来源单据被改动过。请先在客户页撤销部分抵扣，再继续使用。`
@@ -171,7 +173,7 @@ export function applyCredit(input: ApplyCreditInput): CustomerCreditCurrency[] {
   const appliedAt = input.appliedAt && isLocalDate(input.appliedAt) ? input.appliedAt : localDate()
   const note = String(input.note ?? '').trim() || '客户预收抵扣'
   const actor = getSettings().operator
-  transact(() => {
+  await transactAsync(async () => {
     getDb().run(
       `INSERT INTO credit_applications(customer_id, currency, amount, target_kind, target_id, applied_at, note, actor, created_at)
        VALUES(?,?,?,?,?,?,?,?,?)`,
@@ -186,14 +188,14 @@ export function applyCredit(input: ApplyCreditInput): CustomerCreditCurrency[] {
         `客户预收抵扣 ${amount.toFixed(2)} ${currency}（客户余额另记，不算现金到账，冲减待收）`
       )
       // 抵扣过后这张单可能已经收齐：收款状态要跟着走，不能再在工作台上催
-      recomputePaymentStatus(target.id)
+      await recomputePaymentStatus(target.id)
     }
   })
   return customerCreditBalance(customerId)
 }
 
 /** 撤销一笔抵扣：不删行，写 reversed_at；余额和待收一起回来 */
-export function reverseCredit(applicationId: number, reason = ''): CustomerCreditCurrency[] {
+export async function reverseCredit(applicationId: number, reason = ''): Promise<CustomerCreditCurrency[]> {
   const db = getDb()
   const row = db.get(
     'SELECT id, customer_id, currency, amount, target_kind, target_id, reversed_at FROM credit_applications WHERE id = ?',
@@ -211,7 +213,7 @@ export function reverseCredit(applicationId: number, reason = ''): CustomerCredi
   const targetId = Number(row.target_id)
   const amount = Number(row.amount ?? 0)
   const currency = String(row.currency ?? '')
-  transact(() => {
+  await transactAsync(async () => {
     db.run('UPDATE credit_applications SET reversed_at = ?, reversed_reason = ? WHERE id = ?', [
       new Date().toISOString(),
       why,
@@ -226,7 +228,7 @@ export function reverseCredit(applicationId: number, reason = ''): CustomerCredi
         `撤销客户预收抵扣 ${amount.toFixed(2)} ${currency}：${why}`
       )
       // 撤销后这张单又欠钱了：收款状态要退回「部分收款/已发出」
-      recomputePaymentStatus(targetId)
+      await recomputePaymentStatus(targetId)
     }
   })
   return customerCreditBalance(customerId)
@@ -250,7 +252,7 @@ export interface RefundCreditInput {
  * 这里绝不删来源流水（作废前的收款是留档凭据），只记一笔退还对冲。
  * 日期、水单、原因都是凭据：日期不许填未来，水单必须能对上银行，原因要能回答「为什么退」。
  */
-export function refundCredit(input: RefundCreditInput): CustomerCreditCurrency[] {
+export async function refundCredit(input: RefundCreditInput): Promise<CustomerCreditCurrency[]> {
   const customerId = Number(input.customerId)
   const currency = String(input.currency ?? '').trim().toUpperCase()
   const amount = Math.round((Number(input.amount) || 0) * 100) / 100
@@ -268,7 +270,7 @@ export function refundCredit(input: RefundCreditInput): CustomerCreditCurrency[]
   if (!note) {
     throw new Error('退还预收要写原因（例如“客户取消尾单，多付退回”）：这笔钱离开公司账上，必须留痕。')
   }
-  const available = customerCreditAvailable(customerId, currency)
+  const available = await customerCreditAvailable(customerId, currency)
   if (available < -0.001) {
     throw new Error(
       `客户 ${currency} 预收已经有缺口（${available.toFixed(2)}）：来源单据被改动过。请先核对来源和抵扣，再办理退款。`
@@ -306,7 +308,7 @@ export function refundCredit(input: RefundCreditInput): CustomerCreditCurrency[]
 }
 
 /** 撤销一笔退款（登记错了才用）：写 reversed_at，余额回来，不删行 */
-export function reverseRefund(refundId: number, reason = ''): CustomerCreditCurrency[] {
+export async function reverseRefund(refundId: number, reason = ''): Promise<CustomerCreditCurrency[]> {
   const db = getDb()
   const row = db.get('SELECT id, customer_id, reversed_at FROM customer_refunds WHERE id = ?', [refundId]) as
     | Record<string, unknown>
@@ -367,7 +369,7 @@ export function hasActiveCredit(targetKind: 'order' | 'sample', targetId: number
 }
 
 /** 有预收抵扣的单，金额/客户/币种被改动后仍要兜得住那笔抵扣 */
-export function assertCreditFitsOrder(orderId: number): void {
+export async function assertCreditFitsOrder(orderId: number): Promise<void> {
   const db = getDb()
   const row = db.get('SELECT customer_id, currency, charges, deposit_ratio FROM orders WHERE id = ?', [orderId]) as
     | Record<string, unknown>
@@ -385,9 +387,9 @@ export function assertCreditFitsOrder(orderId: number): void {
   if (applications.some((a) => String(a.currency ?? '') !== String(row.currency ?? ''))) {
     throw new Error('这张单上已经有客户预收抵扣：币种不能再改，那笔抵扣是按原币记的。请先在客户页撤销抵扣。')
   }
-  const money = moneyForOrders([
-    { id: orderId, charges: row.charges, depositRatio: Number(row.deposit_ratio ?? 0) }
-  ]).get(orderId)
+  const money = (
+    await moneyForOrders([{ id: orderId, charges: row.charges, depositRatio: Number(row.deposit_ratio ?? 0) }])
+  ).get(orderId)
   if (money && money.remaining < -0.001) {
     const applied = applications.reduce((s, a) => s + Number(a.amount ?? 0), 0)
     throw new Error(
@@ -401,7 +403,7 @@ export function assertCreditFitsOrder(orderId: number): void {
  * 余额不能变负——那意味着已经抵出去的钱比客户实际多付的还多。
  * 报错由外层事务回滚，不留下「账已经改了、预收却穿仓」的半截状态。
  */
-export function assertCreditSolvent(customerId: number): void {
+export async function assertCreditSolvent(customerId: number): Promise<void> {
   const db = getDb()
   // 绝大多数客户从没抵扣/退过预收：一次索引查找就放行，
   // 这样把守门挂到每条改金额的路径上也不会拖慢日常编辑。
@@ -414,7 +416,7 @@ export function assertCreditSolvent(customerId: number): void {
     [customerId, customerId]
   )
   if (!hit) return
-  const gaps = customerCreditBalance(customerId).filter((c) => c.available < -0.001)
+  const gaps = (await customerCreditBalance(customerId)).filter((c) => c.available < -0.001)
   if (!gaps.length) return
   const detail = gaps.map((c) => `${c.currency} ${c.available.toFixed(2)}`).join('、')
   throw new Error(

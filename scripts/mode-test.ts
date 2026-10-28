@@ -273,8 +273,8 @@ async function main(): Promise<void> {
 
     const state = await ipc('mode:get')
     check(
-      `覆盖率口径：21 / 118（实得 ${(state as any).data?.covered} / ${(state as any).data?.total}）`,
-      state.ok && (state as any).data.covered === 21 && (state as any).data.total === 118
+      `覆盖率口径：25 / 118（实得 ${(state as any).data?.covered} / ${(state as any).data?.total}）`,
+      state.ok && (state as any).data.covered === 25 && (state as any).data.total === 118
     )
     const probe = await ipc('mode:test')
     check('设置页的「测试连接」走真后端', probe.ok && (probe as any).data.ok === true)
@@ -411,6 +411,28 @@ async function main(): Promise<void> {
     )
     const remoteLocked = await ipc('settings:baseLocked')
     check('后端模式：基准币锁状态也问后端（空库未锁）', remoteLocked.ok && (remoteLocked as any).data === false)
+
+    // 金额只读面：待收榜 / 客户未结单 / 预收余额 / 批次金额，后端空库都该是空表而不是报错
+    const remoteRecv = await ipc('report:receivables')
+    check(
+      '后端模式：待收榜走后端（后端空库是空表）',
+      remoteRecv.ok && Array.isArray((remoteRecv as any).data) && (remoteRecv as any).data.length === 0
+    )
+    const remoteOpen = await ipc('report:customerOrderRows', remoteId)
+    check(
+      '后端模式：客户未结单行走后端（这家后端还没下单）',
+      remoteOpen.ok && Array.isArray((remoteOpen as any).data) && (remoteOpen as any).data.length === 0
+    )
+    const remoteCredit = await ipc('credits:balance', remoteId)
+    check(
+      '后端模式：预收余额走后端（没抵扣过就是空表）',
+      remoteCredit.ok && Array.isArray((remoteCredit as any).data) && (remoteCredit as any).data.length === 0
+    )
+    const remotePl = await ipc('pl:amounts', 1)
+    check(
+      '后端模式：批次金额走后端（没有批次就是空表）',
+      remotePl.ok && Array.isArray((remotePl as any).data) && (remotePl as any).data.length === 0
+    )
 
     // 不碰数据的通道没必要绕一趟网络
     const tpl = await ipc('products:csvTemplate')

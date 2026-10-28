@@ -10,7 +10,7 @@ export type { CustomerInput }
 /**
  * 客户档案本体已经搬到 core/customers.ts（本机与后端共用一份）。
  * 这里只剩两件还没搬的东西：聚合统计与订单摘要——它们吃 services/money.ts，
- * 而 money 还是同步实现（一堆单据服务都在用），等它异步化后再一起搬。
+ * 而 money 已异步化（core/money.ts 的薄壳），这两件等有空再一起搬。
  */
 const core = customersCore(coreDb)
 
@@ -37,12 +37,12 @@ export const stylePriceHistory = (filter: { customerId?: number; styleNo?: strin
  *  - 未收   = Σ(含费用合计 − 已收)
  *  - 毛利   = Σ(货值 − 成本)，有成本没录全 → null（不可信）
  */
-export function customerStats(customerId: number): CustomerStats {
-  const rows = listOrderMoney({ customerId })
+export async function customerStats(customerId: number): Promise<CustomerStats> {
+  const rows = await listOrderMoney({ customerId })
   const totalAmount = rows.reduce((s, r) => s + r.grandTotalBase, 0)
   // 未收走统一口径（money.ts）：订单待收 + 打样未收（N23：客户页不能比工作台少数一笔打样费）
   const outstandingOrders = rows.reduce((s, r) => s + r.receivableBase, 0)
-  const outstandingSamples = sampleReceivable(customerId)
+  const outstandingSamples = await sampleReceivable(customerId)
   const outstanding = outstandingOrders + outstandingSamples
   // 名下打样单总数：只打过样的客户也要能导出对账单
   const sampleCount = Number(
@@ -78,7 +78,7 @@ export function customerStats(customerId: number): CustomerStats {
 }
 
 /** 客户历史订单简要（金额口径走 services/money.ts） */
-export function customerOrderBriefs(customerId: number): {
+export async function customerOrderBriefs(customerId: number): Promise<{
   id: number
   orderNo: string
   piNo: string
@@ -95,8 +95,8 @@ export function customerOrderBriefs(customerId: number): {
   /** 这条是否计入上面的「订单数 / 成交额」（草稿、失效、作废不计） */
   counted: boolean
   createdAt: string
-}[] {
-  const rows = listOrderMoney({ customerId, includeVoided: true })
+}[]> {
+  const rows = await listOrderMoney({ customerId, includeVoided: true })
   return rows.map((r) => ({
     id: r.orderId,
     orderNo: r.orderNo,

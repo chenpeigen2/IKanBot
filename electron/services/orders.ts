@@ -1,4 +1,4 @@
-import { getDb, imagesDir, nextNo, transact } from '../db'
+import { getDb, imagesDir, nextNo, transact, transactAsync } from '../db'
 import { existsSync, unlinkSync } from 'fs'
 import { basename, join } from 'path'
 import { mapOrder, mapOrderItem, mapPayment, mapPackingList, mapPackingListLine, mapEvent, mapSkuSummary, mapOrderPhoto, mapCustomer, mapSettlement } from '../db/mappers'
@@ -327,14 +327,16 @@ export function listOrderIds(filter: OrderListFilter = {}): number[] {
  * 全量展开的订单列表：每张单都要展开明细 / 收款 / 装箱 / 抬头。
  * 页面列表不许用它（用 listOrderRows），这里留给脚本和口径校验当参照。
  */
-export function listOrders(filter: OrderListFilter = {}): OrderDetail[] {
+export async function listOrders(filter: OrderListFilter = {}): Promise<OrderDetail[]> {
   const db = getDb()
   const w = listWhere(filter)
   const rows = db.all(
     `SELECT o.* FROM orders o JOIN customers c ON c.id = o.customer_id ${w.sql}`,
     w.params
   ) as Record<string, unknown>[]
-  return sortRows(rows.map((r) => hydrate(mapOrder(r), r)), filter.sort ?? 'created_desc')
+  const list: OrderDetail[] = []
+  for (const r of rows) list.push(await hydrate(mapOrder(r), r))
+  return sortRows(list, filter.sort ?? 'created_desc')
 }
 
 /**
@@ -347,9 +349,9 @@ export function listOrders(filter: OrderListFilter = {}): OrderDetail[] {
  * 排序要先看全筛选集才能排（金额、待收、逾期都不是数据库里的列），
  * 所以先算完再切页；总数按筛选条件给，分页拿的是它而不是本页行数。
  */
-export function listOrderRows(
+export async function listOrderRows(
   filter: OrderListFilter & { limit?: number; offset?: number } = {}
-): OrderListPage {
+): Promise<OrderListPage> {
   const db = getDb()
   const w = listWhere(filter)
   const rows = db.all(
@@ -363,7 +365,7 @@ export function listOrderRows(
     w.params
   ) as Record<string, unknown>[]
 
-  const moneyBy = moneyForOrders(
+  const moneyBy = await moneyForOrders(
     rows.map((r) => ({
       id: Number(r.id),
       charges: r.charges,
@@ -468,13 +470,13 @@ export function listOrderRows(
 }
 
 /** 读取订单并展开关联数据与汇总 */
-export function getOrder(id: number): OrderDetail | null {
+export async function getOrder(id: number): Promise<OrderDetail | null> {
   const row = getDb().get('SELECT * FROM orders WHERE id = ?', [id]) as Record<string, unknown> | null
   if (!row) return null
   return hydrate(mapOrder(row), row)
 }
 
-function hydrate(order: Order, row?: Record<string, unknown>): OrderDetail {
+async function hydrate(order: Order, row?: Record<string, unknown>): Promise<OrderDetail> {
   const db = getDb()
   const customerRow = db.get('SELECT * FROM customers WHERE id = ?', [order.customerId]) as
     | Record<string, unknown>
@@ -530,7 +532,7 @@ function hydrate(order: Order, row?: Record<string, unknown>): OrderDetail {
     payments: payments.map((p) => ({ amount: p.amount })),
     settlements: settlements.map((s) => ({ kind: s.kind, amount: s.amount })),
     depositRatio: order.depositRatio,
-    creditApplied: creditAppliedForOrder(order.id)
+    creditApplied: await creditAppliedForOrder(order.id)
   })
 
   return {
@@ -593,7 +595,7 @@ function partiesForOrder(
   }
 }
 
-export function createOrder(input: OrderInput): OrderDetail {
+export async function createOrder(input: OrderInput): Promise<OrderDetail> {
   const db = getDb()
   const settings = getSettings()
   const ts = now()
@@ -672,10 +674,10 @@ export function createOrder(input: OrderInput): OrderDetail {
     logEvent(id, 'create', null, status, `创建订单 ${orderNo}`)
     return id
   })
-  return getOrder(orderId)!
+  return (await getOrder(orderId))!
 }
 
-export function updateOrder(id: number, input: OrderInput): OrderDetail {
+export async function updateOrder(id: number, input: OrderInput): Promise<OrderDetail> {
   const db = getDb()
   const ts = now()
   const before = db.get('SELECT * FROM orders WHERE id = ?', [id]) as Record<string, unknown> | null
@@ -870,31 +872,31 @@ export function updateOrder(id: number, input: OrderInput): OrderDetail {
     ['bill_to_json', billJson],
     ['ship_to_json', shipJson]
   ]
-  transact(() => {
+  await transactAsync(async () => {
     db.run(
       `UPDATE orders SET ${cells.map(([col]) => `${col}=?`).join(', ')}, updated_at=? WHERE id=?`,
       [...cells.map(([, v]) => v as string | number | null), ts, id]
     )
     logEvent(id, 'update', null, null, describeOrderChange(before, input))
     // 收款金额变了，状态可能需要重算
-    recomputePaymentStatus(id)
+    await recomputePaymentStatus(id)
     // 有预收抵扣的单：换客户/币种或金额改小不能让那笔抵扣悬空
-    assertCreditFitsOrder(id)
+    await assertCreditFitsOrder(id)
     // 换客户/换币种：原客户账上的「多收」跟着这单走了，已经抵出去的钱可能穿仓
-    if (customerChanged || newCurrency !== oldCurrency) assertCreditSolvent(Number(before.customer_id))
-    assertCreditSolvent(nextCustomerId)
+    if (customerChanged || newCurrency !== oldCurrency) await assertCreditSolvent(Number(before.customer_id))
+    await assertCreditSolvent(nextCustomerId)
   })
-  return getOrder(id)!
+  return (await getOrder(id))!
 }
 
 /**
  * 单独改这张单的抬头（客户这单要送别的仓 / 抬头写错了）。
  * 只动快照，不动客户档案——档案改了不能把已经发出去的单据改掉。
  */
-export function setOrderParties(
+export async function setOrderParties(
   orderId: number,
   patch: { billTo?: Partial<PartySnapshot>; shipTo?: Partial<PartySnapshot> }
-): OrderDetail {
+): Promise<OrderDetail> {
   const db = getDb()
   const row = db.get('SELECT * FROM orders WHERE id = ?', [orderId]) as Record<string, unknown> | null
   if (!row) throw new Error('订单不存在')
@@ -939,7 +941,7 @@ export function setOrderParties(
     ])
     logEvent(orderId, 'party_update', null, null, note)
   })
-  return getOrder(orderId)!
+  return (await getOrder(orderId))!
 }
 
 /** 生成一条人话版的「改了什么」记录 */
@@ -1011,13 +1013,13 @@ function describeOrderChange(before: Record<string, unknown>, input: OrderInput)
  * 记录全部保留（收款流水、操作历史、单据存档），但不再进货值 / 待收 / 毛利。
  * 老板的规矩：所有订单必须留痕，真删除只留给「建错字」的空单。
  */
-export function voidOrder(id: number, reason = '', opts: { confirmDocs?: boolean } = {}): OrderDetail {
+export async function voidOrder(id: number, reason = '', opts: { confirmDocs?: boolean } = {}): Promise<OrderDetail> {
   const db = getDb()
   const cur = db.get('SELECT order_no, payment_status FROM orders WHERE id = ?', [id]) as
     | { order_no: string; payment_status: string }
     | null
   if (!cur) throw new Error('订单不存在')
-  if (cur.payment_status === 'void') return getOrder(id)!
+  if (cur.payment_status === 'void') return (await getOrder(id))!
   // 凭据核对闸门：PI/CI 已发到客户手里、批次已出运的单不能一键作废——
   // 作废后系统退出应收口径，但客户手里的纸面凭据不会消失，报关/收汇在途的钱会和系统脱节。
   // 不拦死（真要作废是合法终态），但要人先核对再勾确认，操作历史里留下核对痕迹。
@@ -1079,7 +1081,7 @@ export function voidOrder(id: number, reason = '', opts: { confirmDocs?: boolean
       }`
     )
   })
-  return getOrder(id)!
+  return (await getOrder(id))!
 }
 
 /**
@@ -1171,7 +1173,11 @@ export function assertOrderTotalNonNegative(goodsTotal: number, charges: Quotati
 }
 
 /** 只改费用行（运费/保险），其他字段一个都不动 */
-export function updateOrderCharges(orderId: number, charges: QuotationCharge[], reason = ''): OrderDetail {
+export async function updateOrderCharges(
+  orderId: number,
+  charges: QuotationCharge[],
+  reason = ''
+): Promise<OrderDetail> {
   const db = getDb()
   const before = db.get('SELECT charges, customer_id FROM orders WHERE id = ?', [orderId]) as Record<
     string,
@@ -1194,17 +1200,17 @@ export function updateOrderCharges(orderId: number, charges: QuotationCharge[], 
     )
   }
   // 改费用、留痕、重算状态必须同生同死：中途失败留着「费用改了、应收没重算」的单
-  transact(() => {
+  await transactAsync(async () => {
     db.run('UPDATE orders SET charges=?, updated_at=? WHERE id=?', [JSON.stringify(clean), now(), orderId])
     const parts = describeChargeChange(beforeCharges, clean)
     const detail = parts.length ? `修改费用：${parts.join('；')}` : '修改费用行'
     logEvent(orderId, 'update', null, null, reasonText ? `${detail}；原因：${reasonText}` : detail)
-    recomputePaymentStatus(orderId)
-    assertCreditFitsOrder(orderId)
+    await recomputePaymentStatus(orderId)
+    await assertCreditFitsOrder(orderId)
     // 让利/加费都会改变这单的「多收」残差：客户账上已抵/已退的钱不能被架空
-    assertCreditSolvent(Number(before.customer_id))
+    await assertCreditSolvent(Number(before.customer_id))
   })
-  return getOrder(orderId)!
+  return (await getOrder(orderId))!
 }
 
 /** 负费用行（让利）有没有被增删/改额；正费用行的变化不在此列 */
@@ -1356,7 +1362,7 @@ function insertOrderItem(orderId: number, item: OrderItemInput): void {
   logEvent(orderId, 'item_add', null, null, `添加 SKU ${item.styleNo} ${item.color}/${item.size} × ${item.quantity}`)
 }
 
-export function addOrderItem(orderId: number, item: OrderItemInput): OrderDetail {
+export function addOrderItem(orderId: number, item: OrderItemInput): Promise<OrderDetail> {
   return addOrderItems(orderId, [item])
 }
 
@@ -1365,24 +1371,24 @@ export function addOrderItem(orderId: number, item: OrderItemInput): OrderDetail
  * 以前是前端循环调 addItem——第 3 行没过校验时前两行已经躺在库里，
  * 订单明细半截，用户只看到一条报错，不知道单子已经多了两行来路不明的 SKU。
  */
-export function addOrderItems(orderId: number, items: OrderItemInput[]): OrderDetail {
+export async function addOrderItems(orderId: number, items: OrderItemInput[]): Promise<OrderDetail> {
   const db = getDb()
   assertOrderWritable(orderId, '加明细')
   const customerId = Number(
     (db.get('SELECT customer_id FROM orders WHERE id = ?', [orderId]) as { customer_id?: number } | null)
       ?.customer_id ?? 0
   )
-  transact(() => {
+  await transactAsync(async () => {
     for (const item of items) insertOrderItem(orderId, item)
     db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
     // 件数变了，订单的「装够没有 / 走了没有」跟着变
     applyShipStatus(orderId)
     // 金额变了，应收总额 / 定金 / 待收都变了，收款状态要重算（可以往上也可以往下）
-    recomputePaymentStatus(orderId)
+    await recomputePaymentStatus(orderId)
     // 加行会把客户原来的「多收」吃掉：已经抵/退出去的钱不能因此穿仓
-    if (customerId) assertCreditSolvent(customerId)
+    if (customerId) await assertCreditSolvent(customerId)
   })
-  return getOrder(orderId)!
+  return (await getOrder(orderId))!
 }
 
 /** 这一款（款号×颜色×尺码）在所有装箱单里已经装了多少件 */
@@ -1410,11 +1416,11 @@ function assertNotBelowPacked(orderId: number, sku: { styleNo: string; color: st
   }
 }
 
-export function updateOrderItem(
+export async function updateOrderItem(
   orderId: number,
   itemId: number,
   patch: Partial<OrderItemInput>
-): OrderDetail {
+): Promise<OrderDetail> {
   const db = getDb()
   assertOrderWritable(orderId, '改明细')
   const customerId = Number(
@@ -1473,7 +1479,7 @@ export function updateOrderItem(
         }）`
   const changes = baseChanges + costNote
   // 改行、留痕、重算状态必须一起成一起败：以前中途抛错会留下「行改了、状态没改」的单
-  transact(() => {
+  await transactAsync(async () => {
     db.run(
       `UPDATE order_items SET product_id=?, style_no=?, product_name=?, composition=?, color=?, size=?, quantity=?, unit_price=?, unit_cost=?
        WHERE id=? AND order_id=?`,
@@ -1496,12 +1502,12 @@ export function updateOrderItem(
     // 件数变了，订单的「装够没有 / 走了没有」跟着变
     applyShipStatus(orderId)
     // 金额变了，收款状态要重算（加单加到收不够要从「已收款」退回「部分收款」）
-    recomputePaymentStatus(orderId)
-    assertCreditFitsOrder(orderId)
+    await recomputePaymentStatus(orderId)
+    await assertCreditFitsOrder(orderId)
     // 调大数量/单价会吃掉这家客户的「多收」残差，已抵/已退的钱不能被架空
-    if (customerId) assertCreditSolvent(customerId)
+    if (customerId) await assertCreditSolvent(customerId)
   })
-  return getOrder(orderId)!
+  return (await getOrder(orderId))!
 }
 
 /** 生成明细行变更说明 */
@@ -1525,7 +1531,7 @@ function describeItemChange(cur: Record<string, unknown>, patch: Partial<OrderIt
   return parts.join('；')
 }
 
-export function removeOrderItem(orderId: number, itemId: number): OrderDetail {
+export async function removeOrderItem(orderId: number, itemId: number): Promise<OrderDetail> {
   const db = getDb()
   assertOrderWritable(orderId, '删明细')
   // 删行也要留痕：客户要过 50 件后来取消了，这件事系统必须记得
@@ -1543,7 +1549,7 @@ export function removeOrderItem(orderId: number, itemId: number): OrderDetail {
       `款号 ${String(cur.style_no)} ${String(cur.color)}/${String(cur.size)} 已经装了 ${packed} 件箱，不能直接删这一行；请先到「装箱单」里删掉对应箱明细（已出运的批次要先把状态改回「已包装」）。`
     )
   }
-  transact(() => {
+  await transactAsync(async () => {
     db.run('DELETE FROM order_items WHERE id = ? AND order_id = ?', [itemId, orderId])
     db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
     logEvent(
@@ -1558,14 +1564,14 @@ export function removeOrderItem(orderId: number, itemId: number): OrderDetail {
     // 件数变了，订单的「装够没有 / 走了没有」跟着变
     applyShipStatus(orderId)
     // 金额变了，收款状态要重算
-    recomputePaymentStatus(orderId)
-    assertCreditFitsOrder(orderId)
+    await recomputePaymentStatus(orderId)
+    await assertCreditFitsOrder(orderId)
   })
-  return getOrder(orderId)!
+  return (await getOrder(orderId))!
 }
 
 /** 批量替换订单行（从商品库选款生成 SKU 矩阵时用） */
-export function replaceOrderItems(orderId: number, items: OrderItemInput[]): OrderDetail {
+export async function replaceOrderItems(orderId: number, items: OrderItemInput[]): Promise<OrderDetail> {
   const db = getDb()
   assertOrderWritable(orderId, '整体替换明细')
   const customerId = Number(
@@ -1603,7 +1609,7 @@ export function replaceOrderItems(orderId: number, items: OrderItemInput[]): Ord
     seenSku.set(key, i + 1)
   })
   // 整批替换连同留痕、状态重算放进同一个事务：只删干净一半就失败，是最难查的那种单
-  transact(() => {
+  await transactAsync(async () => {
     db.run('DELETE FROM order_items WHERE order_id = ?', [orderId])
     for (const item of items) {
       db.run(
@@ -1627,12 +1633,12 @@ export function replaceOrderItems(orderId: number, items: OrderItemInput[]): Ord
     applyShipStatus(orderId)
     logEvent(orderId, 'item_replace', null, null, `批量生成 ${items.length} 个 SKU 行`)
     // 金额变了，收款状态要重算
-    recomputePaymentStatus(orderId)
-    assertCreditFitsOrder(orderId)
+    await recomputePaymentStatus(orderId)
+    await assertCreditFitsOrder(orderId)
     // 替换后的总额变大 = 原来客户多付的那截变小，已抵/已退的钱不能被架空
-    if (customerId) assertCreditSolvent(customerId)
+    if (customerId) await assertCreditSolvent(customerId)
   })
-  return getOrder(orderId)!
+  return (await getOrder(orderId))!
 }
 
 /**
@@ -1721,7 +1727,7 @@ export function assertBankRefUnused(
   )
 }
 
-export function addPayment(orderId: number, p: PaymentInput): OrderDetail {
+export async function addPayment(orderId: number, p: PaymentInput): Promise<OrderDetail> {
   const db = getDb()
   // 作废单不再有「待收」，但钱真的到账时要能落账：
   // 现金流口径（只排除草稿）本来就把作废单的到账算进月报——闸门拦死只会让银行流水与系统账脱节。
@@ -1751,7 +1757,7 @@ export function addPayment(orderId: number, p: PaymentInput): OrderDetail {
   // 有预收抵扣的单：现金只能收「预收之外还欠的那部分」，
   // 否则同一块钱会被收两遍（预收抵一次、现金又收满全额）
   if (!isVoided) {
-    const detail = getOrder(orderId)!
+    const detail = (await getOrder(orderId))!
     // 坏账已经从待收里拿掉过一次：再按普通收款记，同一笔钱会同时被算成
     // 「坏账损失」和「客户多付」，凭空铸出可退的预收。钱到账请走「坏账追回」。
     if (detail.badDebtOutstanding > 0.001) {
@@ -1772,7 +1778,7 @@ export function addPayment(orderId: number, p: PaymentInput): OrderDetail {
     (db.get('SELECT exchange_rate FROM orders WHERE id = ?', [orderId]) as { exchange_rate?: number } | null)
       ?.exchange_rate ?? 1
   )
-  transact(() => {
+  await transactAsync(async () => {
     // 查重放在事务里：拆分收款整批落账时，同一张单被填两次会在这里当场拦下
     assertBankRefUnused({ orderId }, p.bankRef)
     db.run(
@@ -1789,9 +1795,9 @@ export function addPayment(orderId: number, p: PaymentInput): OrderDetail {
         // 补录过去日期的到账也是按「录入时刻」的订单汇率钉快照：口径写进历史，月报对不上时查得到原因
         `；汇率按 ${rate} 钉快照`
     )
-    recomputePaymentStatus(orderId)
+    await recomputePaymentStatus(orderId)
   })
-  return getOrder(orderId)!
+  return (await getOrder(orderId))!
 }
 
 /** 一笔水单拆到多张单：每笔的落账参数（流水号必须整批一致，对账靠它归组） */
@@ -1812,7 +1818,7 @@ export interface BatchPaymentEntry {
  * 落一半会让「水单总额」和「系统里的收款」对不上。
  * R25：打样单的样品费也接进同一笔水单（客户一笔钱同时付订单和打样费是常事）。
  */
-export function batchAddPayments(entries: BatchPaymentEntry[]): (OrderDetail | SampleOrderDetail)[] {
+export async function batchAddPayments(entries: BatchPaymentEntry[]): Promise<(OrderDetail | SampleOrderDetail)[]> {
   if (!entries.length) throw new Error('没有要登记的收款：至少选一张单填金额。')
   const bankRef = String(entries[0].bankRef ?? '').trim()
   if (!bankRef) {
@@ -1831,14 +1837,14 @@ export function batchAddPayments(entries: BatchPaymentEntry[]): (OrderDetail | S
     }
   }
   const results: (OrderDetail | SampleOrderDetail)[] = []
-  transact(() => {
+  await transactAsync(async () => {
     for (let i = 0; i < entries.length; i++) {
       const e = entries[i]
       const isSample = e.sampleOrderId != null
       try {
         results.push(
           isSample
-            ? addSamplePayment(Number(e.sampleOrderId), {
+            ? await addSamplePayment(Number(e.sampleOrderId), {
                 paidAt: e.paidAt,
                 amount: Number(e.amount),
                 method: e.method,
@@ -1847,7 +1853,7 @@ export function batchAddPayments(entries: BatchPaymentEntry[]): (OrderDetail | S
                   .filter(Boolean)
                   .join('；')
               })
-            : addPayment(Number(e.orderId), {
+            : await addPayment(Number(e.orderId), {
                 paidAt: e.paidAt,
                 amount: Number(e.amount),
                 method: e.method,
@@ -1876,7 +1882,7 @@ export function batchAddPayments(entries: BatchPaymentEntry[]): (OrderDetail | S
   return results
 }
 
-export function deletePayment(orderId: number, paymentId: number, reason = ''): OrderDetail {
+export async function deletePayment(orderId: number, paymentId: number, reason = ''): Promise<OrderDetail> {
   const db = getDb()
   // 打样单的流水也在这张表里：走错门删不掉，但得说清楚该去哪儿
   const sampleRow = db.get(
@@ -1940,7 +1946,7 @@ export function deletePayment(orderId: number, paymentId: number, reason = ''): 
   const bankRef = String(row.bank_ref ?? '')
   const paidAt = String(row.paid_at ?? '')
   const customerId = Number(row.customer_id ?? 0)
-  transact(() => {
+  await transactAsync(async () => {
     db.run('DELETE FROM payments WHERE id = ? AND order_id = ?', [paymentId, orderId])
     logEvent(
       orderId,
@@ -1949,11 +1955,11 @@ export function deletePayment(orderId: number, paymentId: number, reason = ''): 
       null,
       `删除收款 ${currency} ${amount.toFixed(2)}（${paidAt}${bankRef ? `，流水号 ${bankRef}` : ''}）原因：${why}`
     )
-    recomputePaymentStatus(orderId)
+    await recomputePaymentStatus(orderId)
     // 作废单的钱、多收的钱都是客户预收的来源：删掉这笔流水不能把已经抵到别的单上的余额删成负数
-    if (customerId) assertCreditSolvent(customerId)
+    if (customerId) await assertCreditSolvent(customerId)
   })
-  return getOrder(orderId)!
+  return (await getOrder(orderId))!
 }
 
 /* ---------------- 核销 / 坏账 ---------------- */
@@ -2006,9 +2012,9 @@ function settlementSums(orderId: number): { shortage: number; badDebt: number; r
  *  - recovery 坏账追回：钱真的到账，先落一条收款，再冲减坏账余额。
  * 都只追加；要改就撤销后重登，历史里每一步都在。
  */
-export function addSettlement(orderId: number, input: SettlementInput): OrderDetail {
+export async function addSettlement(orderId: number, input: SettlementInput): Promise<OrderDetail> {
   const db = getDb()
-  const order = getOrder(orderId)
+  const order = await getOrder(orderId)
   if (!order) throw new Error('订单不存在')
   // 核销准入就是「要不要向客户收钱」这条口径：以后加免催状态只改 billing.ts 一处
   if (!isBillingStatus(order.paymentStatus)) {
@@ -2051,7 +2057,7 @@ export function addSettlement(orderId: number, input: SettlementInput): OrderDet
       )
     }
     const rate = Number(order.exchangeRate ?? 1)
-    transact(() => {
+    await transactAsync(async () => {
       // 追回来的钱和普通收款住在同一张表里，查重就得走同一道门。
       // 少查这一次，同一张水单可以既当「追回」又当「收款」记两遍：已收翻倍、坏账冲两遍、
       // 多出来的部分还变成能退给客户的预收——R38 在前门拦掉的，别从后门放进来。
@@ -2082,9 +2088,9 @@ export function addSettlement(orderId: number, input: SettlementInput): OrderDet
         null,
         `坏账追回 ${currency} ${amount.toFixed(2)}（${paidAt}${input.bankRef ? `，流水号 ${input.bankRef}` : ''}）原因：${reason}`
       )
-      recomputePaymentStatus(orderId)
+      await recomputePaymentStatus(orderId)
     })
-    return getOrder(orderId)!
+    return (await getOrder(orderId))!
   }
 
   const outstanding = order.remaining
@@ -2100,7 +2106,7 @@ export function addSettlement(orderId: number, input: SettlementInput): OrderDet
     )
   }
   const label = kind === 'shortage' ? '短款核销' : '坏账'
-  transact(() => {
+  await transactAsync(async () => {
     db.run(
       `INSERT INTO order_settlements(order_id, kind, amount, reason, evidence, reverses_id, payment_id, at, created_at)
        VALUES(?,?,?,?,?,?,?,?,?)`,
@@ -2113,13 +2119,17 @@ export function addSettlement(orderId: number, input: SettlementInput): OrderDet
       null,
       `${label} ${currency} ${amount.toFixed(2)}（${at}）原因：${reason}${evidence ? `；证据：${evidence}` : ''}`
     )
-    recomputePaymentStatus(orderId)
+    await recomputePaymentStatus(orderId)
   })
-  return getOrder(orderId)!
+  return (await getOrder(orderId))!
 }
 
 /** 撤销一笔核销：记一条负数并指向原记录，原记录不动 */
-export function reverseSettlement(orderId: number, settlementId: number, reason = ''): OrderDetail {
+export async function reverseSettlement(
+  orderId: number,
+  settlementId: number,
+  reason = ''
+): Promise<OrderDetail> {
   const db = getDb()
   const row = db.get('SELECT * FROM order_settlements WHERE id = ? AND order_id = ?', [
     settlementId,
@@ -2144,7 +2154,7 @@ export function reverseSettlement(orderId: number, settlementId: number, reason 
   // 只追加负数核销，钱还留在现金流和坏账抵扣里；只删收款，核销就指向一条不存在的流水。
   // 记错客户/金额时这是唯一能退回原状的出口，两条必须同一个事务一起动。
   const payId = Number(row.payment_id ?? 0)
-  transact(() => {
+  await transactAsync(async () => {
     if (kind === 'recovery' && payId) {
       db.run('DELETE FROM payments WHERE id = ? AND order_id = ?', [payId, orderId])
     }
@@ -2160,11 +2170,11 @@ export function reverseSettlement(orderId: number, settlementId: number, reason 
       null,
       `撤销${label} ${amount.toFixed(2)}${kind === 'recovery' && payId ? '（同时删除自动登记的收款）' : ''} 原因：${why}`
     )
-    recomputePaymentStatus(orderId)
+    await recomputePaymentStatus(orderId)
     // 撤销核销会把这单的「多收」残差缩小：客户账上已抵/已退的钱不能被架空
-    if (customerId) assertCreditSolvent(customerId)
+    if (customerId) await assertCreditSolvent(customerId)
   })
-  return getOrder(orderId)!
+  return (await getOrder(orderId))!
 }
 
 /**
@@ -2182,7 +2192,7 @@ export function reverseSettlement(orderId: number, settlementId: number, reason 
  * 人工设定的 draft / expired / void 保持不变；sent 只在真收到钱后往上走，
  * 否则客户已付定金，工作台还会天天催「客户还没确认」。
  */
-export function recomputePaymentStatus(orderId: number): PaymentStatus {
+export async function recomputePaymentStatus(orderId: number): Promise<PaymentStatus> {
   const db = getDb()
   const order = db.get('SELECT * FROM orders WHERE id = ?', [orderId]) as Record<string, unknown> | null
   if (!order) throw new Error('订单不存在')
@@ -2190,9 +2200,9 @@ export function recomputePaymentStatus(orderId: number): PaymentStatus {
   // 草稿 / 已失效 / 已作废 不参与自动流转
   if (status === 'draft' || status === 'expired' || status === 'void') return status
 
-  const money = moneyForOrders([
-    { id: orderId, charges: order.charges, depositRatio: Number(order.deposit_ratio ?? 0) }
-  ]).get(orderId)!
+  const money = (
+    await moneyForOrders([{ id: orderId, charges: order.charges, depositRatio: Number(order.deposit_ratio ?? 0) }])
+  ).get(orderId)!
   const total = money.grandTotal
   const paid = money.paidAmount
   // 核销过的钱不用再收：短款 + 坏账算「结清」，撤销记负数自然退回
@@ -2223,7 +2233,7 @@ export function recomputePaymentStatus(orderId: number): PaymentStatus {
 
 /* ---------------- 出货状态 ---------------- */
 
-export function setShipStatus(orderId: number, next: ShipStatus, note = ''): OrderDetail {
+export async function setShipStatus(orderId: number, next: ShipStatus, note = ''): Promise<OrderDetail> {
   const db = getDb()
   const cur = db.get('SELECT ship_status FROM orders WHERE id = ?', [orderId]) as
     | { ship_status: string }
@@ -2249,11 +2259,11 @@ export function setShipStatus(orderId: number, next: ShipStatus, note = ''): Ord
     db.run('UPDATE orders SET ship_status = ?, updated_at = ? WHERE id = ?', [next, now(), orderId])
     logEvent(orderId, 'ship_status', cur.ship_status, next, note)
   })
-  return getOrder(orderId)!
+  return (await getOrder(orderId))!
 }
 
 /** 人工设置收款状态（会打断自动流转） */
-export function setPaymentStatus(orderId: number, next: PaymentStatus, note = ''): OrderDetail {
+export async function setPaymentStatus(orderId: number, next: PaymentStatus, note = ''): Promise<OrderDetail> {
   const db = getDb()
   // 与出货状态同一套守门：非法值一旦入库，这单就从待收、月报、催款里静默消失
   if (!(next in PAYMENT_STATUS_LABEL)) {
@@ -2277,7 +2287,7 @@ export function setPaymentStatus(orderId: number, next: PaymentStatus, note = ''
   }
   // 同值就是没发生任何事：不早返回会重写 updated_at（把状态时钟挪后，尾款/催款提醒跟着变）、
   // 多一条「确认 → 确认」的历史事件，还会对非计费状态再跑一遍预收抵扣回退。
-  if (cur.payment_status === next) return getOrder(orderId)!
+  if (cur.payment_status === next) return (await getOrder(orderId))!
   // 草稿不进应收、不进现金流，也不认收款状态：已经有流水/核销/预收抵扣的单退回草稿，
   // 这些账就从系统里静默消失（以前会顺手把抵扣回退掉，等于替客户把决定做了）。
   // 真不要这单请走作废：凭据核对、留痕、抵扣回退都按正门走。
@@ -2322,7 +2332,7 @@ export function setPaymentStatus(orderId: number, next: PaymentStatus, note = ''
       )
     }
   }
-  transact(() => {
+  await transactAsync(async () => {
     // 改成草稿/失效就退出应收口径：抵在这张单上的客户预收无处可落，先退回余额
     if (!isBillingStatus(next)) {
       reverseCreditsForTarget('order', orderId, `订单转为「${PAYMENT_STATUS_LABEL[next]}」，预收抵扣回退`)
@@ -2331,13 +2341,13 @@ export function setPaymentStatus(orderId: number, next: PaymentStatus, note = ''
     logEvent(orderId, 'payment_status', cur.payment_status, next, note)
     // 失效单改回计费状态：预收来源从「全部到账」收回成「只有多收的部分」，
     // 已经抵出去的钱可能就多于客户实际多付的了
-    if (isBillingStatus(next)) assertCreditSolvent(cur.customer_id)
+    if (isBillingStatus(next)) await assertCreditSolvent(cur.customer_id)
     // 退出应收口径期间（失效/草稿）recompute 直接返回，钱到了状态也不动：
     // 回到计费状态必须按账重算一次，否则一张早已收齐的单恢复后还顶着「已确认」，
     // 工作台继续催款、报表把它算进待收，要等下一笔流水进来才自己纠正
-    if (isBillingStatus(next) && !isBillingStatus(cur.payment_status)) recomputePaymentStatus(orderId)
+    if (isBillingStatus(next) && !isBillingStatus(cur.payment_status)) await recomputePaymentStatus(orderId)
   })
-  return getOrder(orderId)!
+  return (await getOrder(orderId))!
 }
 
 export function listEvents(orderId: number): OrderEvent[] {

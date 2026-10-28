@@ -36,7 +36,11 @@ export const REMOTE_ROUTES: Record<string, RouteSpec> = {
   'products:importCsv': { path: '/api/products/importCsv', args: ['text', 'mode'] },
   'settings:get': { path: '/api/settings/get', args: [] },
   'settings:save': { path: '/api/settings/save', args: ['input'] },
-  'settings:baseLocked': { path: '/api/settings/baseLocked', args: [] }
+  'settings:baseLocked': { path: '/api/settings/baseLocked', args: [] },
+  'report:receivables': { path: '/api/report/receivables', args: [] },
+  'report:customerOrderRows': { path: '/api/report/customerOrderRows', args: ['customerId'] },
+  'credits:balance': { path: '/api/credits/balance', args: ['customerId'] },
+  'pl:amounts': { path: '/api/pl/amounts', args: ['orderId'] }
 }
 
 export function isRemoteChannel(channel: string): boolean {
@@ -49,7 +53,7 @@ export function remoteChannelCount(): number {
 
 /** 一句话说清覆盖到哪儿：设置页和远端模式的报错都用这一句 */
 export function coverageWords(): string {
-  return `后端目前只接了客户档案、商品和系统设置（${remoteChannelCount()} 个接口）`
+  return `后端目前只接了客户档案、商品、系统设置和待收金额（${remoteChannelCount()} 个接口）`
 }
 
 interface ErrorBody {

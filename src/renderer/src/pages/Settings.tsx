@@ -90,7 +90,7 @@ export default function Settings() {
       setProbe(null)
       toast(
         mode === 'remote'
-          ? '已切到后端模式：客户档案、商品与系统设置改由后端提供，其它功能仍在本机'
+          ? '已切到后端模式：客户档案、商品、系统设置与待收账目改由后端提供，其它功能仍在本机'
           : '已切回本机模式，数据再次来自这台电脑'
       )
     } catch (e) {
@@ -188,13 +188,13 @@ export default function Settings() {
 
           {source.mode === 'remote' ? (
             <div className="alert warn">
-              现在是<strong>后端模式</strong>：客户档案、商品与系统设置读写后端那份数据（已搬到后端{' '}
+              现在是<strong>后端模式</strong>：客户档案、商品、系统设置与待收账目读写后端那份数据（已搬到后端{' '}
               {source.covered} / {source.total} 个接口）。订单、打样、报价、单据这些还没搬，点了会当场报错，绝不会悄悄改本机那一份。
               要干正经活，先切回本机。
             </div>
           ) : (
             <div className="hint">
-              后端目前接好了 {source.covered} / {source.total} 个接口（客户档案、商品、系统设置）。其余功能搬完之前，后端模式只适合试接口。
+              后端目前接好了 {source.covered} / {source.total} 个接口（客户档案、商品、系统设置、待收账目）。其余功能搬完之前，后端模式只适合试接口。
             </div>
           )}
         </>

@@ -4,7 +4,7 @@
  * 关键约定：报价单存在自己的表里，完全不参与销售额 / 毛利 / 待收款统计，
  * 也不会出现在订单列表里。它只有一个出口：转成正式订单。
  */
-import { getDb, nextNo, transact } from '../db'
+import { getDb, nextNo, transact, transactAsync } from '../db'
 import { mapQuotation, mapQuotationItem, mapCustomer } from '../db/mappers'
 import { getSettings } from './settings'
 import { createOrder, getOrder, assertSkuListUnique, assertChargeAmounts } from './orders'
@@ -719,7 +719,7 @@ export function updateQuotationMeta(
  * 报价单转订单：款号、颜色、尺码、数量、单价一个数字都不用重敲。
  * 转出来的订单是「草稿」状态，由业务员核对后再发 PI。
  */
-export function convertToOrder(
+export async function convertToOrder(
   id: number,
   opts: {
     paymentStatus?: 'draft' | 'sent'
@@ -728,11 +728,11 @@ export function convertToOrder(
     /** 过期报价要沿用：必须写清批准人和原因 */
     override?: { approvedBy?: string; reason?: string }
   } = {}
-): OrderDetail {
+): Promise<OrderDetail> {
   const q = getQuotation(id)
   if (!q) throw new Error('报价单不存在')
   if (q.convertedOrderId) {
-    const exist = getOrder(q.convertedOrderId)
+    const exist = await getOrder(q.convertedOrderId)
     // 上次转出的单还活着就复用；已经作废了要继续做生意，按新单重转（对齐打样转单口径）
     if (exist && exist.paymentStatus !== 'void') return exist
   }
@@ -788,8 +788,8 @@ export function convertToOrder(
   // 转单挡：存档里的同款两行不能原样带进订单（老数据；新存的报价单在源头已拦）
   assertSkuListUnique(snap.items, `报价单 ${q.qNo} 第 ${targetRevision} 版存档`)
 
-  return transact(() => {
-    const order = createOrder({
+  return transactAsync(async () => {
+    const order = await createOrder({
       customerId: snap.customerId,
       currency: snap.currency,
       exchangeRate: snap.exchangeRate,
@@ -860,7 +860,7 @@ export function convertToOrder(
     // 过期报价的审批话术**只进操作历史**（下面那条 quotation_convert 事件），绝不写进订单备注：
     // note 会原样印在 PI/CI 上发给客户，「经谁批准、为什么让步、有效期重置」都是我方内部口径，
     // 客户看见议价底线，下次报价就拿它压人。原来这里还会整句覆盖掉「由报价单…转成」的凭据句。
-    const saved = getOrder(order.id)!
+    const saved = (await getOrder(order.id))!
     if (Math.abs(saved.grandTotal - snapGrand) > 0.005) {
       throw new Error(
         `按第 ${targetRevision} 版转单后金额对不上：存档合计 ${snapGrand.toFixed(2)}，订单算出来 ${saved.grandTotal.toFixed(2)}。已回滚，请检查报价明细。`

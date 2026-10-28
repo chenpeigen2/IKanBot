@@ -246,3 +246,12 @@ export const coreDb: Db = {
     closeDb()
   }
 }
+
+/**
+ * transact 的异步版：回调里有 await（core 化后的金额守门 / 状态重算）时用它。
+ * 直接复用 coreDb.transact——同一个连接、同一套 BEGIN/SAVEPOINT 语义，
+ * 提交和回滚仍然包住整段 await，抛错照样整体回滚。
+ */
+export function transactAsync<T>(fn: () => Promise<T>): Promise<T> {
+  return coreDb.transact(fn)
+}
