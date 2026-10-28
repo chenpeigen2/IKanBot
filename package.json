@@ -15,6 +15,8 @@
     "pack": "npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder",
     "test:e2e": "node scripts/build-test.cjs && node out/test/e2e-test.cjs",
+    "test:mode": "node scripts/build-mode-test.cjs && npm run build --prefix server && node out/test/mode-test.cjs",
+    "test:all": "npm run test:e2e && npm run test:mode && npm test --prefix server",
     "build:test": "node scripts/build-test.cjs",
     "test:pdf": "node scripts/build-pdftest.cjs && electron out/test/pdftest.cjs",
     "seed": "node scripts/build-seed.cjs && node out/test/seed.cjs",

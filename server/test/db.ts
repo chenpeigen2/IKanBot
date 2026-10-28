@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { SqliteDb } from '../src/db/sqlite'
 import { migrate } from '../src/db/migrate'
 import { CustomersRepository } from '../src/customers/customers.repository'
+import { loadConfig } from '../src/config/config'
 import { LATEST_DB_VERSION } from '../../electron/db/schema'
 
 /**
@@ -27,6 +28,30 @@ async function main(): Promise<void> {
 
   try {
     check('残留的锁目录不挡启动', !existsSync(`${file}.lock`))
+
+    console.log('配置')
+    const def = loadConfig({})
+    check('默认端口 8787 + 本地 sqlite', def.port === 8787 && def.db.kind === 'sqlite')
+    check(
+      '默认库落在 .tmp 下（不碰开发库）',
+      def.db.kind === 'sqlite' && def.db.file.includes('.tmp')
+    )
+    const mysql = loadConfig({ IKAN_DB: 'mysql', IKAN_MYSQL_HOST: 'db.local', IKAN_MYSQL_PORT: '3307' })
+    check(
+      'IKAN_DB=mysql 且给了 host 才走 MySQL（默认端口 3306）',
+      mysql.db.kind === 'mysql' && mysql.db.port === 3307 && mysql.db.user === 'ikanbot'
+    )
+    const noHost = loadConfig({ IKAN_DB: 'mysql' })
+    check('只说 mysql 没给 host 不瞎连，落回 sqlite', noHost.db.kind === 'sqlite')
+    const badPort = (() => {
+      try {
+        loadConfig({ IKAN_PORT: 'abc' })
+        return ''
+      } catch (e) {
+        return (e as Error).message
+      }
+    })()
+    check('端口不合法当场拒（中文说清是哪个变量）', badPort.includes('IKAN_PORT'))
 
     console.log('建库与事务')
     await migrate(db)
@@ -77,6 +102,50 @@ async function main(): Promise<void> {
     const got = await repo.get(id)
     check('插入后按 id 取回（mapCustomer 与桌面端同一份）', got?.company === 'Acme' && got?.country === 'US')
     check('同名查重忽略大小写与首尾空格', (await repo.sameName('  acme ')).length === 1)
+
+    await repo.insert({ company: '100% Cotton Ltd' }, new Date().toISOString())
+    await repo.insert({ company: '100X Cotton Ltd' }, new Date().toISOString())
+    const pct = await repo.list('100%', false)
+    check(
+      'LIKE 转义：% 按字面找，不漏成通配符',
+      pct.length === 1 && pct[0]?.company === '100% Cotton Ltd'
+    )
+    const under = await repo.list('100_', false)
+    check('LIKE 转义：_ 也不当单字符通配', under.length === 0)
+
+    await db.run(`INSERT INTO orders(order_no, customer_id, created_at, updated_at) VALUES('SO-T1', ?, '', '')`, [id])
+    const refs = await repo.refCounts(id)
+    check('引用计数认订单', refs.orders === 1 && refs.quotations === 0 && refs.samples === 0)
+
+    console.log('并发与幂等')
+    await Promise.all(
+      Array.from({ length: 10 }, (_, i) =>
+        db.run(`INSERT INTO customers(company, created_at, updated_at) VALUES(?, '', '')`, [`Bulk${i}`])
+      )
+    )
+    const bulk = await db.all(`SELECT id FROM customers WHERE company LIKE 'Bulk%'`)
+    check('并发写入十条一条不少（异步接口下不假设串行）', bulk.length === 10)
+
+    await migrate(db)
+    const verAgain = await db.get('PRAGMA user_version')
+    check('重复迁移是幂等的', Number(verAgain?.['user_version'] ?? 0) === LATEST_DB_VERSION)
+
+    // 升级过的库被老程序打开：必须当场拦住，不能拿老 schema 去改新数据
+    const future = join(dir, 'future.db')
+    const fdb = new SqliteDb(future)
+    try {
+      await migrate(fdb)
+      await fdb.exec(`PRAGMA user_version = ${LATEST_DB_VERSION + 1}`)
+      let msg = ''
+      try {
+        await migrate(fdb)
+      } catch (e) {
+        msg = (e as Error).message
+      }
+      check('库比程序新时拒绝打开（中文说清怎么办）', msg.includes(`v${LATEST_DB_VERSION + 1}`) && msg.includes('升级'))
+    } finally {
+      await fdb.close()
+    }
 
     console.log(`\n数据层冒烟通过 ${passed} 项`)
   } finally {

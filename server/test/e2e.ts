@@ -6,6 +6,8 @@ import type { NestExpressApplication } from '@nestjs/platform-express'
 import request from 'supertest'
 import { AppModule } from '../src/app.module'
 import { configureApp } from '../src/app.setup'
+import { DB } from '../src/db/db.module'
+import type { Db } from '../src/db/types'
 
 /**
  * HTTP 面冒烟：跑的就是线上那套 AppModule + configureApp（不另搭一条测试路径）。
@@ -87,6 +89,76 @@ async function main(): Promise<void> {
     check('没有关联单据的客户可以删', removed.status === 200)
     check('删完再查确实没了', (await http.post('/api/customers/get').send({ id })).status === 404)
 
+    console.log('边界与守门')
+    const metaShape = await http.get('/api')
+    check(
+      '自描述带上服务名与版本（探活靠它识别是不是自家后端）',
+      metaShape.body.service === 'ikanbot-server' && metaShape.body.version === 1 && metaShape.body.db === 'sqlite'
+    )
+
+    const noBody = await http.post('/api/customers/list')
+    check('一个字节都不带也能回空列表（不白屏、不 500）', noBody.status === 200 && Array.isArray(noBody.body))
+
+    const arrayBody = await http.post('/api/customers/save').send([])
+    check('请求体是数组时拒收档案', arrayBody.status === 400 && arrayBody.body.error.message.includes('客户档案'))
+
+    const sneaky = await http
+      .post('/api/customers/save')
+      .send({ input: { company: 'Whitelist Co', evil: 'DROP TABLE', id: 'not-a-number' } })
+    check('白名单读字段：多余键进不了库', sneaky.status === 200 && sneaky.body.company === 'Whitelist Co')
+    check('多传的字段不会回显（查库也没有）', !('evil' in sneaky.body))
+    const sneakyId = sneaky.body.id as number
+    check(
+      '字符串 id 不当作修改（按新建处理，不会误改别的客户）',
+      sneakyId > 0 && sneakyId !== id
+    )
+
+    const nullRatio = await http
+      .post('/api/customers/save')
+      .send({ input: { company: 'Null Ratio Co', defaultDepositRatio: null } })
+    check('定金比例可以留空（null 是合法值）', nullRatio.status === 200 && nullRatio.body.defaultDepositRatio === null)
+
+    const same1 = await http.post('/api/customers/sameName').send({ company: '  acme TRADING ' })
+    check('同名查重忽略大小写与首尾空格', same1.status === 200 && same1.body.length >= 1)
+    const sameSelf = await http
+      .post('/api/customers/sameName')
+      .send({ company: 'whitelist co', selfId: sneakyId })
+    check('查重时排除自己（改名不该提示重名）', sameSelf.status === 200 && sameSelf.body.length === 0)
+
+    const pct = await http.post('/api/customers/save').send({ input: { company: '100% Cotton Ltd' } })
+    check('含 % 的公司名能存', pct.status === 200)
+    const pctHit = await http.post('/api/customers/list').send({ keyword: '100%' })
+    check('搜 100% 只命中它（LIKE 通配符已转义）', pctHit.status === 200 && pctHit.body.length === 1)
+
+    const coerced = await http.post('/api/customers/get').send({ id: String(sneakyId) })
+    check('字符串数字编号照收（跨语言调用常见）', coerced.status === 200 && coerced.body.id === sneakyId)
+
+    const on = await http.post('/api/customers/setActive').send({ id: sneakyId, active: true })
+    check('active 传 true 落 1', on.status === 200 && on.body.active === 1)
+    const strict = await http.post('/api/customers/setActive').send({ id: sneakyId, active: '1' })
+    check('active 传字符串不当真（严格布尔）', strict.status === 200 && strict.body.active === 0)
+
+    // 有单据的客户删不掉：先直接落一张订单（订单域还没搬过来，这里只造引用）
+    const db = app.get<Db>(DB)
+    await db.run(
+      `INSERT INTO orders(order_no, customer_id, created_at, updated_at) VALUES('SO-R1', ?, '', '')`,
+      [sneakyId]
+    )
+    const blocked = await http.post('/api/customers/delete').send({ id: sneakyId })
+    check(
+      '有订单的客户删不掉，并说清有几张单、该改用停用',
+      blocked.status === 400 &&
+        blocked.body.error.message.includes('1 个订单') &&
+        blocked.body.error.message.includes('停用')
+    )
+
+    const parallel = await Promise.all(
+      Array.from({ length: 6 }, (_, i) =>
+        http.post('/api/customers/list').send({ keyword: i % 2 === 0 ? 'acme' : '' })
+      )
+    )
+    check('并发六个请求互不串数据（全 200）', parallel.every((r) => r.status === 200))
+
     console.log('错误体')
     const unknown = await http.post('/api/no-such-route').send({})
     check('未知路由回中文错误体', unknown.status === 404 && unknown.body.error.message === '没有这个接口')
@@ -95,6 +167,12 @@ async function main(): Promise<void> {
     check(
       '路径对方法错时说清该用什么方法',
       wrongMethod.status === 404 && wrongMethod.body.error.message === '这个接口不接 GET（只接 POST）'
+    )
+
+    const putMethod = await http.put('/api/customers/list').send({})
+    check(
+      'PUT 也当场说清（不让人对着 404 猜）',
+      putMethod.status === 404 && putMethod.body.error.message === '这个接口不接 PUT（只接 POST）'
     )
 
     const badJson = await http

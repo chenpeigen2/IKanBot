@@ -36,13 +36,30 @@ export function normalizeBaseUrl(raw: unknown): string {
 }
 
 /** 环境变量钉住时不读文件——自动化验收入口靠它，不受上次在界面上点的模式影响 */
-function envMode(): DataMode | null {
-  const v = process.env['IKAN_MODE']
+export function envLocked(env: NodeJS.ProcessEnv = process.env): boolean {
+  return envMode(env) !== null || Boolean(env['IKAN_REMOTE_URL'])
+}
+
+function envMode(env: NodeJS.ProcessEnv): DataMode | null {
+  const v = env['IKAN_MODE']
   return v === 'local' || v === 'remote' ? v : null
 }
 
-export function envLocked(): boolean {
-  return envMode() !== null || Boolean(process.env['IKAN_REMOTE_URL'])
+/**
+ * 文件里存的 + 环境变量 → 最终生效的连接。纯函数，测试和小工具可以直接喂假 env，
+ * 不必去动真实配置文件或模块缓存。
+ */
+export function resolveConnection(saved: Partial<Connection> | null, env: NodeJS.ProcessEnv): Connection {
+  let remoteUrl = DEFAULTS.remoteUrl
+  try {
+    remoteUrl = normalizeBaseUrl(env['IKAN_REMOTE_URL'] ?? saved?.remoteUrl) || DEFAULTS.remoteUrl
+  } catch {
+    // 存进去的地址不合法（手改坏了）：先用默认值把程序带起来，设置页里再改
+  }
+  return {
+    mode: envMode(env) ?? (saved?.mode === 'remote' ? 'remote' : 'local'),
+    remoteUrl
+  }
 }
 
 export function getConnection(): Connection {
@@ -53,16 +70,7 @@ export function getConnection(): Connection {
   } catch {
     // 文件坏了按默认走。这里不能抛：抛了就整台程序起不来，而它只是「上次选了哪个来源」
   }
-  let remoteUrl = DEFAULTS.remoteUrl
-  try {
-    remoteUrl = normalizeBaseUrl(process.env['IKAN_REMOTE_URL'] ?? saved.remoteUrl) || DEFAULTS.remoteUrl
-  } catch {
-    // 存进去的地址不合法（手改坏了）：先用默认值把程序带起来，设置页里再改
-  }
-  cache = {
-    mode: envMode() ?? (saved.mode === 'remote' ? 'remote' : 'local'),
-    remoteUrl
-  }
+  cache = resolveConnection(saved, process.env)
   return cache
 }
 
