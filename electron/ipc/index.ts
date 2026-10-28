@@ -20,7 +20,9 @@ import { EXPORT_FILE_NAME } from '../../src/shared/types'
 import type { ExportKind, OrderExportFilter } from '../../src/shared/types'
 import { localDate } from '../../src/shared/date'
 import { registerUpdaterIpc } from '../services/updater'
-import { handle } from './handle'
+import { getConnection, saveConnection, envLocked } from '../mode'
+import { probeRemote, remoteChannelCount } from '../remote/client'
+import { handle, registeredChannels } from './handle'
 import { copyFileSync } from 'fs'
 import { randomUUID } from 'crypto'
 
@@ -104,6 +106,26 @@ export function registerIpc(): void {
     docs: docsDir(),
     backups: backupsDir()
   }))
+
+  /* ---- 数据来源：本机库 / 后端服务 ---- */
+  /**
+   * 覆盖数按运行时注册的通道算，不手抄数字：
+   * 以后每搬一个域到后端，设置页那句「已接入 N 个」自己会跟着变。
+   * mode:（来源本身）和 updater:（本机装更新）永远在本机，不算业务接口——
+   * 加上它们分母就不是接口契约里那 118 个了。
+   */
+  const dataSource = () => ({
+    ...getConnection(),
+    envLocked: envLocked(),
+    covered: remoteChannelCount(),
+    total: registeredChannels().filter((c) => !c.startsWith('mode:') && !c.startsWith('updater:')).length
+  })
+  handle('mode:get', dataSource)
+  handle('mode:set', (patch: { mode?: unknown; remoteUrl?: unknown }) => {
+    saveConnection(patch ?? {})
+    return dataSource()
+  })
+  handle('mode:test', (url?: string) => probeRemote(url))
 
   /* ---- 商品 ---- */
   handle('products:list', (keyword?: string, includeInactive?: boolean) =>

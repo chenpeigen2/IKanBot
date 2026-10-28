@@ -137,6 +137,11 @@ const api: IKanApi = {
   shell: {
     openExternal: (url: string) => call<boolean>('shell:openExternal', url)
   },
+  mode: {
+    get: () => call<any>('mode:get'),
+    set: (patch: { mode?: any; remoteUrl?: string }) => call<any>('mode:set', patch),
+    test: (url?: string) => call<any>('mode:test', url)
+  },
   /** 数据目录完整路径 */
   app: {
     dataDir: () => call<string>('app:dataDir'),

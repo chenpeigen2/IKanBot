@@ -1,16 +1,30 @@
 {
   "name": "ikanbot-server",
   "private": true,
-  "version": "0.0.0",
-  "description": "IKanBot 后端数据服务",
-  "main": "dist/src/index.js",
+  "version": "0.1.0",
+  "description": "IKanBot 后端数据服务（NestJS + SQLite/MySQL 双实现）",
+  "main": "dist/server/src/main.js",
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "smoke": "tsc -p tsconfig.json && node dist/test/smoke.js",
-    "dev": "tsc -p tsconfig.json && node dev.mjs",
-    "start": "tsc -p tsconfig.json && node dist/src/index.js"
+    "build": "tsc -p tsconfig.json",
+    "db": "npm run build && node dist/server/test/db.js",
+    "e2e": "npm run build && node dist/server/test/e2e.js",
+    "test": "npm run build && node dist/server/test/db.js && node dist/server/test/e2e.js",
+    "dev": "npm run build && node dev.mjs",
+    "start": "npm run build && node dist/server/src/main.js"
   },
   "dependencies": {
-    "mysql2": "^3.24.6"
+    "@nestjs/common": "^11.2.8",
+    "@nestjs/core": "^11.2.8",
+    "@nestjs/platform-express": "^11.2.8",
+    "mysql2": "^3.24.6",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@nestjs/testing": "^11.2.8",
+    "@types/express": "^5.0.6",
+    "@types/supertest": "^7.2.1",
+    "supertest": "^7.3.1"
   }
 }

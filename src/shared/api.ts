@@ -270,6 +270,17 @@ export interface IKanApi {
   shell: {
     openExternal(url: string): Promise<boolean>
   }
+  /**
+   * 数据来源：本机库，还是后端服务。
+   * 换来源之后已打开的页面要重新加载才看到另一份数据（主进程每次调用都现取模式，不用重启）。
+   */
+  mode: {
+    get(): Promise<DataSourceState>
+    /** 切换来源 / 改后端地址；返回切换后的完整状态 */
+    set(patch: { mode?: DataMode; remoteUrl?: string }): Promise<DataSourceState>
+    /** 探活：连不上、连错、少接口都给人话，不抛错 */
+    test(url?: string): Promise<RemoteProbe>
+  }
   /** 数据目录完整路径 */
   app: {
     dataDir(): Promise<string>
@@ -278,6 +289,32 @@ export interface IKanApi {
     /** 一次拿全：主进程用 join 拼好，界面只管显示，不许自己拼斜杠 */
     paths(): Promise<DataPaths>
   }
+}
+
+export type DataMode = 'local' | 'remote'
+
+/** 当前数据来源 + 后端覆盖到哪儿 */
+export interface DataSourceState {
+  mode: DataMode
+  remoteUrl: string
+  /** 环境变量 IKAN_MODE / IKAN_REMOTE_URL 钉住了：界面上改了也不生效 */
+  envLocked: boolean
+  /** 已搬到后端的通道数 */
+  covered: number
+  /** 业务通道总数 */
+  total: number
+}
+
+/** 后端探活结果：连不上也返回（ok:false），不抛错 */
+export interface RemoteProbe {
+  ok: boolean
+  url: string
+  /** 给人看的一句话结论 */
+  message: string
+  db?: string
+  routeCount?: number
+  /** 服务端缺哪几条桌面端要用的路由 */
+  missing: string[]
 }
 
 /** 本机各数据目录的绝对路径 */

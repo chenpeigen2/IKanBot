@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useToast, Card, Button, clientKey, LoadError } from '../ui'
 import { imageUrl } from '../imageUrl'
 import { CURRENCIES } from '../../../shared/types'
-import type { BackupPreview, DataPaths, UpdateStatus } from '../../../shared/api'
+import type { BackupPreview, DataPaths, DataSourceState, RemoteProbe, UpdateStatus } from '../../../shared/api'
 
 /** 把 ISO 时刻说成人话：今天的说几点，更早的说几天前 */
 function sinceWords(iso: string | null): string {
@@ -46,6 +46,11 @@ export default function Settings() {
   const [restoring, setRestoring] = useState(false)
   /** 设置读不出来时别停在「加载中…」：给一句话和一次重试 */
   const [loadError, setLoadError] = useState('')
+  /** 数据来源：本机 / 后端。与上面那份设置分开存，它不在库里 */
+  const [source, setSource] = useState<DataSourceState | null>(null)
+  const [urlDraft, setUrlDraft] = useState('')
+  const [probe, setProbe] = useState<RemoteProbe | null>(null)
+  const [probing, setProbing] = useState(false)
 
   const loadSettings = async () => {
     try {
@@ -53,6 +58,16 @@ export default function Settings() {
       setLoadError('')
     } catch (e) {
       setLoadError((e as Error).message || '设置没读出来')
+    }
+  }
+
+  const loadSource = async () => {
+    try {
+      const v = await window.api.mode.get()
+      setSource(v)
+      setUrlDraft(v.remoteUrl)
+    } catch (e) {
+      toast(`数据来源没读出来：${(e as Error).message}`, 'error')
     }
   }
 
@@ -64,7 +79,49 @@ export default function Settings() {
     window.api.app.paths().then(setPaths, fail('数据目录'))
     // 一进来先问主进程要当前状态：进度那一份只认主进程存的，页面刷新也不会丢
     window.api.updater.state().then(setUpdate, fail('更新状态'))
+    void loadSource()
   }, [])
+
+  const switchMode = async (mode: 'local' | 'remote') => {
+    try {
+      const v = await window.api.mode.set({ mode, remoteUrl: urlDraft })
+      setSource(v)
+      setUrlDraft(v.remoteUrl)
+      setProbe(null)
+      toast(
+        mode === 'remote'
+          ? '已切到后端模式：客户档案改由后端提供，其它功能仍在本机'
+          : '已切回本机模式，数据再次来自这台电脑'
+      )
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
+  }
+
+  const saveUrl = async () => {
+    try {
+      const v = await window.api.mode.set({ remoteUrl: urlDraft })
+      setSource(v)
+      setUrlDraft(v.remoteUrl)
+      setProbe(null)
+      toast('后端地址已保存')
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
+  }
+
+  const testConn = async () => {
+    setProbing(true)
+    try {
+      const r = await window.api.mode.test(urlDraft)
+      setProbe(r)
+      toast(r.message, r.ok ? 'ok' : 'error')
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    } finally {
+      setProbing(false)
+    }
+  }
 
   // 订阅自动更新事件
   useEffect(() => {
@@ -437,6 +494,74 @@ export default function Settings() {
               </div>
             </div>
           </div>
+        </Card>
+
+        <Card title="数据来源" actions={<span className="faint">决定单据读写哪一份数据</span>}>
+          {!source ? (
+            <div className="hint">数据来源读取中…</div>
+          ) : (
+            <>
+              <div className="field">
+                <label>当前使用</label>
+                <select
+                  value={source.mode}
+                  disabled={source.envLocked}
+                  onChange={(e) => void switchMode(e.target.value as 'local' | 'remote')}
+                >
+                  <option value="local">本机（这台电脑上的数据库）</option>
+                  <option value="remote">后端服务（局域网 / 云上的 IKanBot 后端）</option>
+                </select>
+                <div className="hint">
+                  本机模式数据就在这台电脑上；后端模式把读写交给后端服务，几台电脑可以共用同一份账。
+                </div>
+              </div>
+
+              <div className="field">
+                <label>后端地址</label>
+                <div className="row">
+                  <input
+                    className="w-lg"
+                    value={urlDraft}
+                    disabled={source.envLocked}
+                    placeholder="http://192.168.1.10:8787"
+                    onChange={(e) => {
+                      setUrlDraft(e.target.value)
+                      setProbe(null)
+                    }}
+                  />
+                  <Button onClick={saveUrl} disabled={source.envLocked}>
+                    保存地址
+                  </Button>
+                  <Button onClick={testConn} disabled={probing || !urlDraft.trim()}>
+                    {probing ? '连接中…' : '测试连接'}
+                  </Button>
+                </div>
+                {probe ? (
+                  <div className={`alert ${probe.ok ? 'info' : 'warn'}`} style={{ marginTop: 8 }}>
+                    {probe.message}
+                  </div>
+                ) : null}
+              </div>
+
+              {source.envLocked ? (
+                <div className="alert warn">
+                  这次的来源由环境变量 IKAN_MODE / IKAN_REMOTE_URL 指定，上面改了也不生效——去掉变量重启后，以这里的设置为准。
+                </div>
+              ) : null}
+
+              {source.mode === 'remote' ? (
+                <div className="alert warn">
+                  现在是<strong>后端模式</strong>：客户档案读写后端那份数据（已搬到后端 {source.covered} /{' '}
+                  {source.total} 个接口）。订单、打样、报价、单据这些还没搬，点了会当场报错，绝不会悄悄改本机那一份。
+                  要干正经活，先切回本机。
+                </div>
+              ) : (
+                <div className="hint">
+                  后端目前接好了 {source.covered} / {source.total} 个接口（客户档案）。其余功能搬完之前，后端模式只适合试接口。
+                </div>
+              )}
+            </>
+          )}
         </Card>
 
         <Card title="数据备份">
