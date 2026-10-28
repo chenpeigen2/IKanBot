@@ -5,7 +5,7 @@ import { coverageWords, isRemoteChannel, remoteCall } from '../remote/client'
 /**
  * 这些通道天生只能在本机做：开文件框、出 PDF、写备份包、装更新、还有「改去哪找数据」本身。
  * 远端模式下它们照旧走本机实现——把打印送去服务器没有任何意义。
- * settings 暂时也留在本机：后端还没接设置，而切回来那个按钮自己得能用。
+ * 设置本身不在此列：公司抬头、收款账户、提醒阈值是后端那份账的一部分，跟着模式走。
  */
 const LOCAL_ONLY = [
   'app:',
@@ -16,8 +16,7 @@ const LOCAL_ONLY = [
   'backup:',
   'export:',
   'updater:',
-  'mode:',
-  'settings:'
+  'mode:'
 ]
 
 /**

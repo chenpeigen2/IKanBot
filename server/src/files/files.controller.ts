@@ -52,6 +52,8 @@ export class FilesController {
 
   @Get('images/:name')
   @Header('cache-control', 'public, max-age=31536000, immutable')
+  // SVG 里能带脚本：只在 <img> 里用不会执行，但有人直接浏览器打开这个地址时得挡住
+  @Header('content-security-policy', "default-src 'none'; style-src 'unsafe-inline'")
   serve(@Param('name') name: string): StreamableFile {
     const buf = this.store.read(name)
     // 图不在就说图不在：前端会退回本机目录再找一次（公司 Logo 还在本机设置里）

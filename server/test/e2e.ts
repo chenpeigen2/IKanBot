@@ -40,8 +40,8 @@ async function main(): Promise<void> {
     const routes: string[] = meta.body.routes ?? []
     check('GET /api 自描述已接接口', routes.includes('POST /api/customers/list') && routes.includes('GET /healthz'))
     check(
-      '路由数与控制器一致（23 个：客户 6 + 商品 12 + 图片 3 + 自带 2）',
-      routes.length === 23
+      '路由数与控制器一致（26 个：客户 6 + 商品 12 + 图片 3 + 设置 3 + 自带 2）',
+      routes.length === 26
     )
 
     console.log('客户域')
@@ -254,6 +254,21 @@ async function main(): Promise<void> {
       '非图片扩展名拒收（说清只接哪几种）',
       badExt.status === 400 && String(badExt.body.error.message).includes('只接')
     )
+
+    const svgUp = await http
+      .post('/api/files/upload?name=logo.svg')
+      .set('content-type', 'application/octet-stream')
+      .send(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>'))
+    check('公司 Logo 收 SVG（放大到纸面也不糊）', svgUp.status === 200 && /\.svg$/.test(String(svgUp.body.fileName)))
+    const svgGot = await http.get(`/api/files/images/${String(svgUp.body.fileName)}`)
+    check(
+      'SVG 取回带 CSP 沙箱头（单独打开也跑不了脚本）',
+      svgGot.status === 200 &&
+        String(svgGot.headers['content-type']).includes('image/svg+xml') &&
+        String(svgGot.headers['content-security-policy'] ?? '').includes("default-src 'none'")
+    )
+    await http.post('/api/files/discard').send({ names: [String(svgUp.body.fileName)] })
+
     check(
       '目录穿越读不到目录外的文件',
       (await http.get('/api/files/images/..%2F..%2Fpackage.json')).status === 404
@@ -262,6 +277,70 @@ async function main(): Promise<void> {
     const disc = await http.post('/api/files/discard').send({ names: [storedName, 'nope.png'] })
     check('丢弃图片只删存在的那张', disc.status === 200 && disc.body.removed === 1)
     check('删完再取确实没了', (await http.get(`/api/files/images/${storedName}`)).status === 404)
+
+    console.log('设置域')
+    const sDefault = await http.post('/api/settings/get').send({})
+    check(
+      '空库读设置给的是完整默认值（不是空对象）',
+      sDefault.status === 200 && sDefault.body.baseCurrency === 'CNY' && sDefault.body.piValidDays === 15
+    )
+
+    const sSaved = await http.post('/api/settings/save').send({
+      input: {
+        company: { name: '  接口工厂  ', logoFile: '', address: '', phone: '', email: '', website: '' },
+        banks: [{ currency: 'USD', bankName: 'BOA', accountName: '', accountNo: '001', swift: '', address: '' }],
+        piValidDays: 20,
+        defaultDepositRatio: 0.3,
+        remindConfirmDays: 7,
+        remindPaymentDays: 10,
+        remindBalanceDays: 15,
+        remindShipDays: 3,
+        grossWeightFactor: 1.1,
+        baseCurrency: 'CNY',
+        operator: '接口测试'
+      }
+    })
+    check(
+      '保存去掉首尾空格并原样返回',
+      sSaved.status === 200 && sSaved.body.company.name === '接口工厂' && sSaved.body.banks.length === 1
+    )
+    check('再读回来就是刚存的那份', (await http.post('/api/settings/get').send({})).body.piValidDays === 20)
+
+    const sBadDay = await http.post('/api/settings/save').send({
+      input: { ...sSaved.body, piValidDays: 7.5 }
+    })
+    check(
+      '天数填小数拒收（守门文案原样透出）',
+      sBadDay.status === 400 && String(sBadDay.body.error.message).includes('整数')
+    )
+
+    const sDupBank = await http.post('/api/settings/save').send({
+      input: {
+        ...sSaved.body,
+        banks: [
+          { currency: 'USD', bankName: 'A' },
+          { currency: 'USD', bankName: 'B' }
+        ]
+      }
+    })
+    check(
+      '同币种两个收款账户拒收（PI 不知道印哪个）',
+      sDupBank.status === 400 && String(sDupBank.body.error.message).includes('加了两遍')
+    )
+
+    const sBadShape = await http.post('/api/settings/save').send({ input: 'abc' })
+    check('设置内容不是对象当场拒收', sBadShape.status === 400)
+
+    const sLock = await http.post('/api/settings/baseLocked').send({})
+    check('库里有单据时基准币锁死', sLock.status === 200 && sLock.body === true)
+
+    const sSwitch = await http
+      .post('/api/settings/save')
+      .send({ input: { ...sSaved.body, baseCurrency: 'USD' } })
+    check(
+      '有账后换基准币拒收（说清要重算历史）',
+      sSwitch.status === 400 && String(sSwitch.body.error.message).includes('基准币不能换')
+    )
 
     console.log('错误体')
     const unknown = await http.post('/api/no-such-route').send({})

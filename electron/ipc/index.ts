@@ -365,6 +365,8 @@ export function registerIpc(): void {
     })
     if (res.canceled) return ''
     const src = res.filePaths[0]
+    // 后端模式下 Logo 跟着设置走：存在本机，别的电脑打开单据就是空抬头
+    if (isRemoteMode()) return remoteUploadImage(basename(src), readFileSync(src))
     const ext = src.split('.').pop()?.toLowerCase() ?? 'png'
     const name = `logo-${randomUUID()}.${ext}`
     copyFileSync(src, join(imagesDir(), name))

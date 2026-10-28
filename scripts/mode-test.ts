@@ -255,14 +255,26 @@ async function main(): Promise<void> {
     })
     check('本机模式：新建商品走本机库', localProd.ok === true && (localProd as any).data.styleNo === 'LOCAL-ONLY-1')
 
+    // 设置也是「这份账自己的」：公司抬头、提醒阈值跟着数据来源走
+    const localSet0 = await ipc('settings:get')
+    const localSetSaved = await ipc('settings:save', {
+      ...(localSet0 as any).data,
+      company: { ...(localSet0 as any).data.company, name: '本机工厂' },
+      piValidDays: 20
+    })
+    check(
+      '本机模式：设置存进本机库',
+      localSetSaved.ok && (localSetSaved as any).data.company.name === '本机工厂'
+    )
+
     // 切到后端：同一批通道，数据换了一整套
     const conn = saveConnection({ mode: 'remote', remoteUrl: serverUrl })
     check('切到后端模式（地址带端口）', conn.mode === 'remote' && conn.remoteUrl === serverUrl)
 
     const state = await ipc('mode:get')
     check(
-      `覆盖率口径：18 / 118（实得 ${(state as any).data?.covered} / ${(state as any).data?.total}）`,
-      state.ok && (state as any).data.covered === 18 && (state as any).data.total === 118
+      `覆盖率口径：21 / 118（实得 ${(state as any).data?.covered} / ${(state as any).data?.total}）`,
+      state.ok && (state as any).data.covered === 21 && (state as any).data.total === 118
     )
     const probe = await ipc('mode:test')
     check('设置页的「测试连接」走真后端', probe.ok && (probe as any).data.ok === true)
@@ -373,6 +385,33 @@ async function main(): Promise<void> {
       afterDel.ok && (afterDel as any).data === ''
     )
 
+    // 设置：同一批通道，读的也是后端那份
+    const remoteSettings = await ipc('settings:get')
+    check(
+      '后端模式：设置读的是后端那份（看不到本机工厂抬头）',
+      remoteSettings.ok && (remoteSettings as any).data.company.name === ''
+    )
+    const remoteSettingsSaved = await ipc('settings:save', {
+      ...(remoteSettings as any).data,
+      company: { ...(remoteSettings as any).data.company, name: '  后端工厂  ' },
+      piValidDays: 25,
+      banks: [{ currency: 'USD', bankName: '后端银行', accountName: '', accountNo: '', swift: '', address: '' }]
+    })
+    check(
+      '后端模式：保存设置去掉首尾空格',
+      remoteSettingsSaved.ok && (remoteSettingsSaved as any).data.company.name === '后端工厂'
+    )
+    const remoteSettingsAgain = await ipc('settings:get')
+    check('后端模式：再读就是刚存的那份', remoteSettingsAgain.ok && (remoteSettingsAgain as any).data.piValidDays === 25)
+
+    const remoteBadDay = await ipc('settings:save', { ...(remoteSettings as any).data, piValidDays: 7.5 })
+    check(
+      '后端模式：设置守门文案与原句一致',
+      !remoteBadDay.ok && (remoteBadDay as any).error.includes('整数')
+    )
+    const remoteLocked = await ipc('settings:baseLocked')
+    check('后端模式：基准币锁状态也问后端（空库未锁）', remoteLocked.ok && (remoteLocked as any).data === false)
+
     // 不碰数据的通道没必要绕一趟网络
     const tpl = await ipc('products:csvTemplate')
     check('远端模式下 CSV 模板仍走本机（不白跑一趟网络）', tpl.ok && String((tpl as any).data).includes('款号'))
@@ -413,6 +452,16 @@ async function main(): Promise<void> {
       '切回本机：后端那份商品不会混进来',
       backProducts.ok && !(backProducts as any).data.some((p: any) => p.styleNo === 'REMOTE-1')
     )
+
+    const backSettings = await ipc('settings:get')
+    check(
+      '切回本机：设置回到本机那一份',
+      backSettings.ok &&
+        (backSettings as any).data.company.name === '本机工厂' &&
+        (backSettings as any).data.piValidDays === 20
+    )
+    const remoteSettingsStill = (await remoteCall('settings:get', [])) as any
+    check('后端设置仍在后端', remoteSettingsStill?.company?.name === '后端工厂')
 
     console.log(`\n${'='.repeat(46)}`)
     console.log(`双模式通过 ${passed} 项`)

@@ -14,7 +14,9 @@ const MIME: Record<string, string> = {
   jpeg: 'image/jpeg',
   png: 'image/png',
   webp: 'image/webp',
-  gif: 'image/gif'
+  gif: 'image/gif',
+  // 公司 Logo 允许 SVG：纸面是按 data URL 塞进 <img> 里印的，脚本不会执行
+  svg: 'image/svg+xml'
 }
 
 /**
@@ -42,7 +44,7 @@ export class ImageStore {
   save(bytes: Buffer, originalName: string): string {
     const ext = extname(basename(originalName)).replace('.', '').toLowerCase()
     if (!MIME[ext]) {
-      throw new BizError(`不认这种图片格式（${ext ? '.' + ext : '没有扩展名'}）：只接 JPG、PNG、WebP、GIF。`)
+      throw new BizError(`不认这种图片格式（${ext ? '.' + ext : '没有扩展名'}）：只接 JPG、PNG、WebP、GIF、SVG。`)
     }
     if (bytes.length === 0) throw new BizError('图片内容是空的')
     mkdirSync(this.dir(), { recursive: true })

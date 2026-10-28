@@ -31,11 +31,11 @@ export async function createBackup(note = ''): Promise<string> {
     verifyZip(onDisk, entries)
     renameSync(temp, target)
     pruneBackups(30)
-    markBackupOk(new Date().toISOString())
+    await markBackupOk(new Date().toISOString())
     // 快照降级过的备份能用于恢复，但不是事务一致快照：留一句在 lastBackupError 里，
     // 工作台会挂起提示，别让人以为这份和平时的是同一种口径
     if (snapshotFallbackReason) {
-      markBackupFail(
+      await markBackupFail(
         `备份已生成，但数据库快照降级为直接拷贝（${snapshotFallbackReason}）。这份备份可用于恢复，但不是事务一致快照，建议查明原因后再备一次。`
       )
     }
@@ -47,7 +47,7 @@ export async function createBackup(note = ''): Promise<string> {
       /* 临时文件删不掉不影响报错 */
     }
     const msg = (e as Error).message
-    markBackupFail(msg)
+    await markBackupFail(msg)
     throw new Error(msg)
   }
 }

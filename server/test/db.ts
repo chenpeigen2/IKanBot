@@ -5,6 +5,7 @@ import { SqliteDb } from '../src/db/sqlite'
 import { migrate } from '../src/db/migrate'
 import { customersCore } from '../../core/customers'
 import { productsCore } from '../../core/products'
+import { settingsCore } from '../../core/settings'
 import { loadConfig } from '../src/config/config'
 import { LATEST_DB_VERSION } from '../../electron/db/schema'
 
@@ -182,6 +183,43 @@ async function main(): Promise<void> {
     check(
       'CSV 覆盖导入：表头里没有的列保留（尺码没被抹平）',
       imp.updated === 1 && t300?.name === '改名' && t300?.sizes.join(',') === 'M,L'
+    )
+
+    console.log('设置域 SQL')
+    const sc = settingsCore(db)
+    const sDef = await sc.get()
+    check('空库读设置给完整默认值（界面不会出现空白表单）', sDef.piValidDays === 15 && sDef.baseCurrency === 'CNY')
+
+    const sOne = await sc.save({ ...sDef, company: { ...sDef.company, name: '  测试工厂  ' }, piValidDays: 30 })
+    check('保存去掉首尾空格', sOne.company.name === '测试工厂' && sOne.piValidDays === 30)
+    check('再读就是刚存的那份', (await sc.get()).piValidDays === 30)
+
+    const sLocked = await sc.baseCurrencyLocked()
+    check('库里有订单（上面插过一张）基准币就锁死', sLocked === true)
+    let lockMsg = ''
+    try {
+      await sc.save({ ...sOne, baseCurrency: 'EUR' })
+    } catch (e) {
+      lockMsg = (e as Error).message
+    }
+    check('锁死后换基准币被拦，并说清后果', lockMsg.includes('基准币不能换') && lockMsg.includes('重算'))
+
+    // 备份服务只盖自己那两个戳：设置页传什么都不认
+    await sc.patchBackup({ lastBackupAt: '2026-10-01T08:00:00.000Z', lastBackupError: null })
+    const sAfter = await sc.save({ ...sOne, lastBackupAt: '瞎填的', lastBackupError: '瞎填的' })
+    check(
+      '设置页保存不会抹掉备份凭据',
+      sAfter.lastBackupAt === '2026-10-01T08:00:00.000Z' && sAfter.lastBackupError === null
+    )
+
+    // 库里的 JSON 被改坏：按字段退默认，不把默认值一起冲掉
+    await db.run(`UPDATE settings SET value = ? WHERE key = 'app_settings'`, [
+      JSON.stringify({ company: { name: 123 }, piValidDays: null, baseCurrency: 'BTC', banks: [{ currency: 'BTC' }] })
+    ])
+    const sBroken = await sc.get()
+    check(
+      '坏 JSON 退回默认值而不是留空',
+      sBroken.piValidDays === 15 && sBroken.baseCurrency === 'CNY' && sBroken.banks.length === 0
     )
 
     console.log('并发与幂等')

@@ -90,7 +90,7 @@ export default function Settings() {
       setProbe(null)
       toast(
         mode === 'remote'
-          ? '已切到后端模式：客户档案改由后端提供，其它功能仍在本机'
+          ? '已切到后端模式：客户档案、商品与系统设置改由后端提供，其它功能仍在本机'
           : '已切回本机模式，数据再次来自这台电脑'
       )
     } catch (e) {
@@ -128,11 +128,88 @@ export default function Settings() {
     return window.api.updater.on((info) => setUpdate(info))
   }, [])
 
+  /**
+   * 数据来源卡片单独拿出来：设置本身读不出来时（后端掉线、地址写错），
+   * 这恰恰是最需要它的时候——把人挡在「加载失败」页面里，就再也切不回本机了。
+   */
+  const sourceCard = (
+    <Card title="数据来源" actions={<span className="faint">决定单据读写哪一份数据</span>}>
+      {!source ? (
+        <div className="hint">数据来源读取中…</div>
+      ) : (
+        <>
+          <div className="field">
+            <label>当前使用</label>
+            <select
+              value={source.mode}
+              disabled={source.envLocked}
+              onChange={(e) => void switchMode(e.target.value as 'local' | 'remote')}
+            >
+              <option value="local">本机（这台电脑上的数据库）</option>
+              <option value="remote">后端服务（局域网 / 云上的 IKanBot 后端）</option>
+            </select>
+            <div className="hint">
+              本机模式数据就在这台电脑上；后端模式把读写交给后端服务，几台电脑可以共用同一份账。
+            </div>
+          </div>
+
+          <div className="field">
+            <label>后端地址</label>
+            <div className="row">
+              <input
+                className="w-lg"
+                value={urlDraft}
+                disabled={source.envLocked}
+                placeholder="http://192.168.1.10:8787"
+                onChange={(e) => {
+                  setUrlDraft(e.target.value)
+                  setProbe(null)
+                }}
+              />
+              <Button onClick={saveUrl} disabled={source.envLocked}>
+                保存地址
+              </Button>
+              <Button onClick={testConn} disabled={probing || !urlDraft.trim()}>
+                {probing ? '连接中…' : '测试连接'}
+              </Button>
+            </div>
+            {probe ? (
+              <div className={`alert ${probe.ok ? 'info' : 'warn'}`} style={{ marginTop: 8 }}>
+                {probe.message}
+              </div>
+            ) : null}
+          </div>
+
+          {source.envLocked ? (
+            <div className="alert warn">
+              这次的来源由环境变量 IKAN_MODE / IKAN_REMOTE_URL 指定，上面改了也不生效——去掉变量重启后，以这里的设置为准。
+            </div>
+          ) : null}
+
+          {source.mode === 'remote' ? (
+            <div className="alert warn">
+              现在是<strong>后端模式</strong>：客户档案、商品与系统设置读写后端那份数据（已搬到后端{' '}
+              {source.covered} / {source.total} 个接口）。订单、打样、报价、单据这些还没搬，点了会当场报错，绝不会悄悄改本机那一份。
+              要干正经活，先切回本机。
+            </div>
+          ) : (
+            <div className="hint">
+              后端目前接好了 {source.covered} / {source.total} 个接口（客户档案、商品、系统设置）。其余功能搬完之前，后端模式只适合试接口。
+            </div>
+          )}
+        </>
+      )}
+    </Card>
+  )
+
   if (!s) {
     return (
       <div className="content">
         {loadError ? (
-          <LoadError what="设置" message={loadError} onRetry={() => void loadSettings()} />
+          <>
+            <LoadError what="设置" message={loadError} onRetry={() => void loadSettings()} />
+            {sourceCard}
+          </>
         ) : (
           <div className="empty loading">加载中…</div>
         )}
@@ -496,73 +573,7 @@ export default function Settings() {
           </div>
         </Card>
 
-        <Card title="数据来源" actions={<span className="faint">决定单据读写哪一份数据</span>}>
-          {!source ? (
-            <div className="hint">数据来源读取中…</div>
-          ) : (
-            <>
-              <div className="field">
-                <label>当前使用</label>
-                <select
-                  value={source.mode}
-                  disabled={source.envLocked}
-                  onChange={(e) => void switchMode(e.target.value as 'local' | 'remote')}
-                >
-                  <option value="local">本机（这台电脑上的数据库）</option>
-                  <option value="remote">后端服务（局域网 / 云上的 IKanBot 后端）</option>
-                </select>
-                <div className="hint">
-                  本机模式数据就在这台电脑上；后端模式把读写交给后端服务，几台电脑可以共用同一份账。
-                </div>
-              </div>
-
-              <div className="field">
-                <label>后端地址</label>
-                <div className="row">
-                  <input
-                    className="w-lg"
-                    value={urlDraft}
-                    disabled={source.envLocked}
-                    placeholder="http://192.168.1.10:8787"
-                    onChange={(e) => {
-                      setUrlDraft(e.target.value)
-                      setProbe(null)
-                    }}
-                  />
-                  <Button onClick={saveUrl} disabled={source.envLocked}>
-                    保存地址
-                  </Button>
-                  <Button onClick={testConn} disabled={probing || !urlDraft.trim()}>
-                    {probing ? '连接中…' : '测试连接'}
-                  </Button>
-                </div>
-                {probe ? (
-                  <div className={`alert ${probe.ok ? 'info' : 'warn'}`} style={{ marginTop: 8 }}>
-                    {probe.message}
-                  </div>
-                ) : null}
-              </div>
-
-              {source.envLocked ? (
-                <div className="alert warn">
-                  这次的来源由环境变量 IKAN_MODE / IKAN_REMOTE_URL 指定，上面改了也不生效——去掉变量重启后，以这里的设置为准。
-                </div>
-              ) : null}
-
-              {source.mode === 'remote' ? (
-                <div className="alert warn">
-                  现在是<strong>后端模式</strong>：客户档案读写后端那份数据（已搬到后端 {source.covered} /{' '}
-                  {source.total} 个接口）。订单、打样、报价、单据这些还没搬，点了会当场报错，绝不会悄悄改本机那一份。
-                  要干正经活，先切回本机。
-                </div>
-              ) : (
-                <div className="hint">
-                  后端目前接好了 {source.covered} / {source.total} 个接口（客户档案）。其余功能搬完之前，后端模式只适合试接口。
-                </div>
-              )}
-            </>
-          )}
-        </Card>
+        {sourceCard}
 
         <Card title="数据备份">
           <div className="hint" style={{ marginBottom: 6 }}>
