@@ -204,15 +204,37 @@
   本轮自查出一个 R45 自己引入的 P0：`Settings.tsx` 里 `loadBackupResult` 写在「没读到设置就 return」
   那道闸门之后，首帧提前返回时这个 const 还没初始化，挂载 effect 一调就是 TDZ 报错、整页白屏——
   断言全绿也照样漏，是 UI 探针（sweep 在 `/settings` 上「no probe output」）抓出来的。
+- **R46 「一个数只许一张嘴」（2026-10-29，覆盖率仍 87 / 119，本轮不加路由）**：钱相关的数字以前各自有嘴，
+  这一轮把它们接到同一张脸上。① 收款状态自动流转的定金/尾款两注算式并成一个 `depositDueOf`，
+  「定金收齐」不再由两处各自判断；② 按流水还欠着钱却要勾「已结清」，后端先拦下并要求写明原因（必填），
+  「按流水仍欠 X」连同原因一起进历史——这单从此不进待收、月报和催款，差额必须有个人认；
+  ③ 待收排序改用屏幕上那个数（`shownRemaining`），作废/失效单不再顶着「待收 —」排在欠款前面；
+  ④ 新增 `baseAmountOf`：外币流水没汇率返回 `null` 而不是 0，折不出来的钱不再伪装成「本月收到 0」，
+  工作台本月收款、报表累计收款、月度汇总收款列、导出 CSV 四处同一口径说出「N 笔没折进来」；
+  ⑤ 费用变更话术 `describeChargeChange` 收进 `core/money.ts`，订单与报价共用一份（原来两份措辞会漂）；
+  ⑥ 桌面与服务端的 savepoint 序号都改成全局单调（`tx_${seq++}`），手写 `BEGIN` 想插队当场拦下，
+  嵌套事务炸了不牵连外层已写的那段；⑦ 撤销抵扣/退款用 `WHERE … AND reversed_at IS NULL` 的 CAS，
+  改动 0 行即报「刚刚已经被撤销过了」，不再静默成功；⑧ 对账单话术拆成短款（已减免，无需支付）/
+  坏账（我方账上没收到、也不再向贵司计收）/ 追回（补付早前欠款）三套，列头「已让利(原币)」改「不必再付(原币)」。
+  本轮验收：服务端 47+135 项、双模式 99 项、桌面 e2e 1976 项（+41）、sweep 与 HEAD 基线一致，
+  三处「没折进来」的提示用 `out/probe-data` 副本（把一条外币流水的汇率改成 0）在渲染层实拍验到。
+  挂账：真并发的 `reverseCredit` 对拍没做——现有单连接同步驱动下，顶层 ROLLBACK 会连别人已提交的链一起抹掉，
+  要测得先上 AsyncLocalStorage，不在本轮裁定范围。
 - **下一刀**：剩下 32 个通道里，客户聚合统计（`customers:stats` / `orders` / `stylePriceHistory`）
   是唯一的「读了会静默错」的面，先搬这三个；打印与单据渲染（`docs:`）、备份与更新（`backup:` / `updater:`）
   按 M2/M5 的鉴权与多机并发一起做，不单独提前接。
-- **搬后端前必须先解的两笔技术账（本轮数出来的）**：
-  1. 三处 SQLite 方言混在 core 里，换 MySQL 会当场炸——`core/next-no.ts:41` 的 `ON CONFLICT DO UPDATE`、
-     `core/orders.ts:2105` 的 `last_insert_rowid()`、`core/money.ts:607` 的 `strftime`。
+- **搬后端前必须先解的技术账（R46 数完，六处方言 + 一笔时间账）**：
+  1. SQLite 方言混在 core 里，换 MySQL 会当场炸或静默出错——`core/next-no.ts:42` 与
+     `core/settings.ts:284` 的 `ON CONFLICT DO UPDATE`、`core/orders.ts:2067` 的 `last_insert_rowid()`、
+     `core/money.ts:672` 的 `strftime(…, 'localtime')`、`core/quotations.ts:215` 的 `INSERT OR IGNORE`、
+     `core/orders.ts:452` 的 `GROUP_CONCAT(DISTINCT …)`。最后一处最阴：MySQL 的 `group_concat_max_len`
+     默认 1024 字节，箱号一多就在纸面单据上**静默截断**，不报错。
   2. 时间戳存的是 UTC（`toISOString()`），界面与断言却按 `localDate()` 比日期：`quotation_versions.created_at`
      与 `settings.lastBackupAt` 都中招，本地凌晨 0~8 点必然跨日假失败（R35/R45 两轮都在同一处踩过）。
      要么统一存带本地语义的字符串，要么比较一律用时刻而不是「落在哪一天」。
+  3. `images:baseDir` 走的是 `sendSync` 旁路，没进 `REMOTE_ROUTES`；换后端时要一并收编。
+  4. 备份/恢复留下的孤儿目录（`.restore-check-*` / `.pre-restore-*` / `.restoring`）目前只写不清，
+     服务端上会越攒越多——只做报告，不自动删。
 
 ## 四、事务与并发
 
