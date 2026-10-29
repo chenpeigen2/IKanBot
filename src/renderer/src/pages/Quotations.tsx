@@ -676,9 +676,11 @@ function QuotationDetailModal({
           <div>
             <span className="muted">币种 / 汇率</span>
             <span>
-              {quotation.currency} / 1{quotation.currency}={quotation.exchangeRate}
-              {quotation.baseCurrency}
-              {quotation.exchangeRateDate ? ` （${quotation.exchangeRateDate} 锁定）` : ' （没记日期）'}
+              {quotation.currency === quotation.baseCurrency
+                ? `${quotation.currency}（本币结算，不涉汇率）`
+                : `${quotation.currency} / 1${quotation.currency}=${quotation.exchangeRate}${quotation.baseCurrency}${
+                    quotation.exchangeRateDate ? ` （${quotation.exchangeRateDate} 锁定）` : ' （没记日期）'
+                  }`}
             </span>
           </div>
           <div>
@@ -1117,6 +1119,9 @@ function QuotationModal({
   const productOf = (l: LineRow): any =>
     products.find((p) => (l.productId ? p.id === l.productId : p.styleNo === l.styleNo))
 
+  // 本币报价没有汇率这回事：系统按 1 记，界面也不许人往里填一个假的
+  const isHomeCurrency = form.currency === (settings?.baseCurrency ?? 'CNY')
+
   // 按住第二次点击：存一次就烧一个报价单号，双击等于两张单、两个号
   const [busy, setBusy] = useState(false)
 
@@ -1126,7 +1131,8 @@ function QuotationModal({
       toast('请先选择客户', 'error')
       return
     }
-    if (form.exchangeRate === '' || Number(form.exchangeRate) <= 0) {
+    // 本币单不用填汇率（系统按 1 记）；外币单不填就是不填，不许拿默认值蒙人
+    if (!isHomeCurrency && (form.exchangeRate === '' || Number(form.exchangeRate) <= 0)) {
       toast('请先按今天钉盘的汇率填写汇率', 'error')
       return
     }
@@ -1148,8 +1154,8 @@ function QuotationModal({
         id: draft.id,
         customerId: form.customerId,
         currency: form.currency,
-        exchangeRate: Number(form.exchangeRate),
-        exchangeRateDate: form.exchangeRateDate || null,
+        exchangeRate: isHomeCurrency ? 1 : Number(form.exchangeRate),
+        exchangeRateDate: isHomeCurrency ? null : form.exchangeRateDate || null,
         baseCurrency: settings?.baseCurrency ?? 'CNY',
         incoterm: form.incoterm,
         portOfLoading: form.portOfLoading,
@@ -1240,45 +1246,56 @@ function QuotationModal({
             </select>
           </div>
           <div className="field">
-            <label>汇率（1 {form.currency} = ? {settings?.baseCurrency ?? 'CNY'}）*</label>
+            <label>
+              汇率（1 {form.currency} = ? {settings?.baseCurrency ?? 'CNY'}）{isHomeCurrency ? '' : '*'}
+            </label>
             <input
               type="number"
               step="0.0001"
-              value={form.exchangeRate}
+              value={isHomeCurrency ? 1 : form.exchangeRate}
+              disabled={isHomeCurrency}
               onChange={(e) =>
                 setForm({ ...form, exchangeRate: e.target.value === '' ? '' : Number(e.target.value) })
               }
               placeholder="请按今天钉盘的汇率填"
             />
-            <div className="hint">
-              请按今天钉盘的汇率填写，填了才能保存。（这里不会自动填数字）
-            </div>
-            {lastRate ? (
-              <div className="row" style={{ marginTop: 4, gap: 5 }}>
-                <Button size="sm"
-                  
-                  onClick={() =>
-                    setForm({
-                      ...form,
-                      exchangeRate: lastRate.rate,
-                      exchangeRateDate: lastRate.date || today()
-                    })
-                  }
-                >
-                  填入上次用的 {lastRate.rate}
-                  {lastRate.date ? `（${lastRate.date}）` : ''}
-                </Button>
+            {isHomeCurrency ? (
+              <div className="hint">
+                本币报价不用填汇率：系统按 1 记，转订单时也不会拿别的数去折成本。
               </div>
-            ) : null}
-            <div style={{ marginTop: 6 }}>
-              <label>汇率日期（这个汇率是哪天的）*</label>
-              <input
-                type="date"
-                value={form.exchangeRateDate}
-                onChange={(e) => setForm({ ...form, exchangeRateDate: e.target.value })}
-              />
-              <div className="hint">转订单时这个日期原样带过去，不会拿转单当天冒充。</div>
-            </div>
+            ) : (
+              <>
+                <div className="hint">
+                  请按今天钉盘的汇率填写，填了才能保存。（这里不会自动填数字）
+                </div>
+                {lastRate ? (
+                  <div className="row" style={{ marginTop: 4, gap: 5 }}>
+                    <Button size="sm"
+                      
+                      onClick={() =>
+                        setForm({
+                          ...form,
+                          exchangeRate: lastRate.rate,
+                          exchangeRateDate: lastRate.date || today()
+                        })
+                      }
+                    >
+                      填入上次用的 {lastRate.rate}
+                      {lastRate.date ? `（${lastRate.date}）` : ''}
+                    </Button>
+                  </div>
+                ) : null}
+                <div style={{ marginTop: 6 }}>
+                  <label>汇率日期（这个汇率是哪天的）*</label>
+                  <input
+                    type="date"
+                    value={form.exchangeRateDate}
+                    onChange={(e) => setForm({ ...form, exchangeRateDate: e.target.value })}
+                  />
+                  <div className="hint">转订单时这个日期原样带过去，不会拿转单当天冒充。</div>
+                </div>
+              </>
+            )}
           </div>
           <div className="field">
             <label>贸易术语</label>

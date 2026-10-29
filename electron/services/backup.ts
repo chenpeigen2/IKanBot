@@ -5,7 +5,7 @@ import { app, dialog } from 'electron'
 import { Database } from 'node-sqlite3-wasm'
 import { dataDir, imagesDir, backupsDir, docsDir, closeDb, openDb, getDb } from '../db'
 import { LATEST_DB_VERSION } from '../db/schema'
-import { createZip, collectDir, readZip, verifyZip, type ZipEntry } from './zip'
+import { createZip, collectDir, readZip, verifyZip, ZIP_MAX_BYTES, type ZipBudget, type ZipEntry } from './zip'
 import { markBackupFail, markBackupOk } from './settings'
 import { localDate } from '../../src/shared/date'
 
@@ -132,11 +132,12 @@ let skippedFiles: string[] = []
 export function collectBackupEntries(): ZipEntry[] {
   const entries: ZipEntry[] = []
   const dbFile = join(dataDir(), 'ikanbot.db')
-  if (existsSync(dbFile)) {
-    entries.push({ name: 'ikanbot.db', data: snapshotDb(dbFile) })
-  }
-  entries.push(...collectDir(imagesDir(), 'images', skippedFiles))
-  entries.push(...collectDir(docsDir(), 'docs', skippedFiles))
+  const dbData = existsSync(dbFile) ? snapshotDb(dbFile) : null
+  if (dbData) entries.push({ name: 'ikanbot.db', data: dbData })
+  // 图片/单据存档先按盘上的体积合计：越线就不读，别等全读进内存才发现包超了 4GB
+  const budget: ZipBudget = { used: dbData?.length ?? 0, limit: ZIP_MAX_BYTES }
+  entries.push(...collectDir(imagesDir(), 'images', skippedFiles, budget))
+  entries.push(...collectDir(docsDir(), 'docs', skippedFiles, budget))
   return entries
 }
 

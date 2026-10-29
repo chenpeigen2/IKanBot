@@ -12,7 +12,7 @@ import { nextNo } from './next-no'
 import { logEvent } from './events'
 import { settingsCore } from './settings'
 import { ordersCore } from './orders'
-import { computeOrderMoney, costInOrderCurrency, describeChargeChange } from './money'
+import { baseRateOf, computeOrderMoney, costInOrderCurrency, describeChargeChange } from './money'
 import { mapQuotation, mapQuotationItem, mapCustomer } from '../electron/db/mappers'
 import { likeAny } from '../electron/services/search'
 import { billPartyOf, emptyParty, parseParty, patchParty, stringifyParty } from '../src/shared/party'
@@ -145,8 +145,13 @@ export function quotationsCore(db: Db) {
     // 抬头：有快照用快照，老报价单（升级前存的）沿用客户档案当前值
     const fromDoc = parseParty(row?.bill_to_json)
     const billTo = fromDoc ?? (liveCustomer ? billPartyOf(liveCustomer) : null)
+    // 本币单的汇率对外只有一个真值：1（升级前的老单可能存着 7.15 这类数，
+    // 原样显示会让人以为这是笔外币单，也会被报表再折一次）
+    const isHome = q.currency === q.baseCurrency
     return {
       ...q,
+      exchangeRate: isHome ? 1 : q.exchangeRate,
+      exchangeRateDate: isHome ? null : q.exchangeRateDate,
       customer: liveCustomer,
       billTo,
       billFromProfile: !fromDoc,
@@ -190,13 +195,18 @@ export function quotationsCore(db: Db) {
     } catch {
       charges = []
     }
+    // 存档是转单取数的唯一来源：本币单在这里就得归一成 1，
+    // 否则一张升级前的老报价转出订单，成本会按 7.15 再折一遍
+    const currency = String(row.currency ?? 'USD') as Currency
+    const baseCurrency = String(row.base_currency ?? 'CNY') as Currency
+    const isHome = currency === baseCurrency
     const snap: QuotationSnapshot = {
       qNo: String(row.q_no ?? ''),
       customerId: Number(row.customer_id),
-      currency: String(row.currency ?? 'USD') as Currency,
-      exchangeRate: Number(row.exchange_rate ?? 0),
-      exchangeRateDate: row.exchange_rate_date == null ? null : String(row.exchange_rate_date),
-      baseCurrency: String(row.base_currency ?? 'CNY') as Currency,
+      currency,
+      exchangeRate: isHome ? 1 : Number(row.exchange_rate ?? 0),
+      exchangeRateDate: isHome ? null : row.exchange_rate_date == null ? null : String(row.exchange_rate_date),
+      baseCurrency,
       incoterm: String(row.incoterm ?? 'FOB') as Incoterm,
       portOfLoading: String(row.port_of_loading ?? ''),
       portOfDestination: String(row.port_of_destination ?? ''),
@@ -363,9 +373,15 @@ export function quotationsCore(db: Db) {
      */
     const sentValidUntil = input.validUntil === undefined ? undefined : String(input.validUntil ?? '').trim() || null
     const validUntil = sentValidUntil ?? addDays(localDate(), settings.piValidDays)
-    // 汇率必须手动填：系统不拿默认值蒙人，也不替人编锁定日期
-    const rate = Number(input.exchangeRate ?? 0)
-    if (!rate || rate <= 0) throw bizError('请先按今天钉盘的汇率填写汇率')
+    // 货值现算：负合计守门和转单用的是同一份口径（Σ 数量×单价）
+    const goodsTotal = input.items.reduce(
+      (s, it) => s + (Number(it.quantity) || 0) * (Number(it.unitPrice) || 0),
+      0
+    )
+    // 汇率：本币不用填，系统按 1 记——否则按汇率折算的报表会把 ¥ 当 $ 再乘一遍。
+    // 外币必须手动填：系统不拿默认值蒙人，也不替人编锁定日期
+    let rate = Number(input.exchangeRate ?? 0)
+    const isHome = (currency: string, base: string): boolean => currency === base
 
     let qId = input.id
     let rateDate = input.exchangeRateDate ?? null
@@ -416,8 +432,34 @@ export function quotationsCore(db: Db) {
       // 否则编辑一次就把费用表写成空、有效期推到「今天+N」，客户手里那张纸悄悄变了
       const keepCharges = input.charges === undefined ? oldCharges : input.charges
       const keepValidUntil = sentValidUntil === undefined ? ((before.valid_until as string | null) ?? null) : sentValidUntil
-      // 汇率没变就沿用原来的日期；变了就记今天（谁改的谁负责）
-      if (!rateDate) rateDate = oldRate === rate ? oldDate ?? localDate() : localDate()
+      const nextCurrency = String(input.currency ?? before.currency ?? '') || 'USD'
+      const nextBase = String(input.baseCurrency ?? before.base_currency ?? '') || settings.baseCurrency
+      const homeCurrency = isHome(nextCurrency, nextBase)
+      // 本币单的汇率只有一个真值；外币单必须真填过汇率才许存。
+      // 编辑时没传汇率＝这次只动了明细/费用，沿用库里原来那份（客户端、脚本都能这么改）；
+      // 但换了币种就不能沿用：USD 的 7.15 填到 EUR 上等于凭空改价
+      if (homeCurrency) rate = 1
+      else if (input.exchangeRate === undefined) {
+        if (!(oldRate > 0)) throw bizError('请先按今天钉盘的汇率填写汇率')
+        if (nextCurrency !== String(before.currency ?? '')) {
+          throw bizError(
+            `币种从 ${String(before.currency ?? '')} 换成 ${nextCurrency}，汇率不能沿用原来的 ${oldRate}；请按 ${nextCurrency} 重新填写汇率再保存。`
+          )
+        }
+        rate = oldRate
+      } else if (!(rate > 0)) throw bizError('请先按今天钉盘的汇率填写汇率')
+      // 负合计不许落库：转单时它会原样变成订单的负合计，被当成客户多付
+      ordersOf().assertOrderTotalNonNegative(
+        goodsTotal,
+        keepCharges.filter((c) => c.label.trim()),
+        '让利（负费用行）',
+        '报价单，转成订单后'
+      )
+      // 汇率没变就沿用原来的日期；变了就记今天（谁改的谁负责）。
+      // 本币没有「哪天锁的汇」这回事，日期一律留空
+      rateDate = homeCurrency
+        ? null
+        : rateDate || (oldRate === rate ? oldDate ?? localDate() : localDate())
       // 状态/结果没传就保持原样（编辑一张已转订单的报价单不能把状态打回草稿）
       oldStatus = String(before.status ?? '')
       status = input.status ?? (before.status as QuotationStatus)
@@ -430,9 +472,11 @@ export function quotationsCore(db: Db) {
       const nextPayment = input.paymentMethod ?? (before.payment_method as PaymentMethod)
       if (nextIncoterm !== before.incoterm) termBits.push(`贸易术语 ${before.incoterm} → ${nextIncoterm}`)
       if (nextPayment !== before.payment_method) termBits.push(`付款方式 ${before.payment_method} → ${nextPayment}`)
+      if (nextCurrency !== String(before.currency ?? 'USD')) termBits.push(`币种 ${before.currency} → ${nextCurrency}`)
       if (keepValidUntil !== before.valid_until)
         termBits.push(`有效期 ${before.valid_until || '未填'} → ${keepValidUntil || '未填'}`)
-      if (Math.abs(oldRate - rate) > 0.0001) termBits.push(`汇率 ${oldRate} → ${rate}`)
+      // 本币单把老汇率归一到 1 是修数据，不是改了条款，不能记成一次「汇率变更」
+      if (!homeCurrency && Math.abs(oldRate - rate) > 0.0001) termBits.push(`汇率 ${oldRate} → ${rate}`)
       if (termBits.length) changeNote = changeNote ? `${changeNote}；${termBits.join('；')}` : termBits.join('；')
 
       // 改之前先把当前版冻结：客户手里那张纸必须能原样找回来
@@ -460,10 +504,10 @@ export function quotationsCore(db: Db) {
       }
       const cells: Array<[string, unknown]> = [
         ['customer_id', nextCustomerId],
-        ['currency', keepText('currency', 'currency') || 'USD'],
+        ['currency', nextCurrency],
         ['exchange_rate', rate],
         ['exchange_rate_date', rateDate],
-        ['base_currency', keepText('baseCurrency', 'base_currency') || settings.baseCurrency],
+        ['base_currency', nextBase],
         ['incoterm', keepText('incoterm', 'incoterm') || 'FOB'],
         ['port_of_loading', keepText('portOfLoading', 'port_of_loading')],
         ['port_of_destination', keepText('portOfDestination', 'port_of_destination')],
@@ -486,7 +530,22 @@ export function quotationsCore(db: Db) {
       )
       await db.run('DELETE FROM quotation_items WHERE quotation_id = ?', [qId])
     } else {
-      if (!rateDate) rateDate = localDate()
+      const createCurrency = String(input.currency ?? '') || 'USD'
+      const createBase = String(input.baseCurrency ?? '') || settings.baseCurrency
+      if (isHome(createCurrency, createBase)) {
+        rate = 1
+        rateDate = null
+      } else {
+        if (!(rate > 0)) throw bizError('请先按今天钉盘的汇率填写汇率')
+        if (!rateDate) rateDate = localDate()
+      }
+      // 负合计不许落库：转单时它会原样变成订单的负合计，被当成客户多付
+      ordersOf().assertOrderTotalNonNegative(
+        goodsTotal,
+        (input.charges ?? []).filter((c) => c.label.trim()),
+        '让利（负费用行）',
+        '报价单，转成订单后'
+      )
       const qNo = await nextNo(db, 'Q')
       const billJson = await billForQuotation(input.customerId, input, null)
       const res = await db.run(
@@ -499,10 +558,10 @@ export function quotationsCore(db: Db) {
           input.customerId,
           status,
           result,
-          input.currency ?? 'USD',
+          createCurrency,
           rate,
           rateDate,
-          input.baseCurrency ?? settings.baseCurrency,
+          createBase,
           input.incoterm ?? 'FOB',
           input.portOfLoading ?? '',
           input.portOfDestination ?? '',
@@ -746,8 +805,9 @@ export function quotationsCore(db: Db) {
       // 上次转出的单还活着就复用；已经作废了要继续做生意，按新单重转（对齐打样转单口径）
       if (exist && exist.paymentStatus !== 'void') return exist
     }
-    // 汇率日期必须是真的：没有就不许转单，绝不拿转单当天冒充
-    if (!q.exchangeRateDate) {
+    // 汇率日期必须是真的：外币没有就不许转单，绝不拿转单当天冒充。
+    // 本币单不涉汇率，自然也没有「哪天的汇率」
+    if (q.currency !== q.baseCurrency && !q.exchangeRateDate) {
       throw bizError('这张报价单没有汇率日期，请先编辑报价单把汇率日期补上再转订单')
     }
 
@@ -769,6 +829,10 @@ export function quotationsCore(db: Db) {
       throw bizError(`报价单 ${q.qNo} 第 ${targetRevision} 版的存档读不出来，不能拿它转单。请在报价页重新保存一版。`)
     }
     const snapGrand = Number(versionRow.grand_total ?? 0)
+    // 存档里的汇率也归一：升级前冻结的本币单可能存着 7.15，
+    // 直接拿去建单会把成本再折一遍，毛利全错
+    const snapIsHome = snap.currency === snap.baseCurrency
+    const snapRate = baseRateOf(snap.currency, snap.baseCurrency, snap.exchangeRate)
 
     // 有效期是锁汇的承诺：过期、失效、丢单都必须有人明确批准才能沿用
     const today = localDate()
@@ -796,13 +860,20 @@ export function quotationsCore(db: Db) {
 
     // 转单挡：存档里的同款两行不能原样带进订单（老数据；新存的报价单在源头已拦）
     await ordersOf().assertSkuListUnique(snap.items, `报价单 ${q.qNo} 第 ${targetRevision} 版存档`)
+    // 老存档可能是在负合计守门之前冻结的：转出去就是一张被当成客户多付的订单
+    ordersOf().assertOrderTotalNonNegative(
+      snap.items.reduce((s, it) => s + (Number(it.quantity) || 0) * (Number(it.unitPrice) || 0), 0),
+      (snap.charges ?? []).filter((c) => c.label.trim()),
+      '让利（负费用行）',
+      '报价单存档，转成订单后'
+    )
 
     return db.transact(async () => {
       const order = await ordersOf().createOrder({
         customerId: snap.customerId,
         currency: snap.currency,
-        exchangeRate: snap.exchangeRate,
-        exchangeRateDate: snap.exchangeRateDate,
+        exchangeRate: snapRate,
+        exchangeRateDate: snapIsHome ? null : snap.exchangeRateDate,
         baseCurrency: snap.baseCurrency,
         incoterm: snap.incoterm,
         portOfLoading: snap.portOfLoading,
@@ -842,7 +913,7 @@ export function quotationsCore(db: Db) {
         }
         // 商品成本是工厂价（基准币），订单明细的成本要落在本单币种上，
         // 直接抄进 unit_cost 会把 ¥30 当成 $30，毛利全错
-        const cost = costInOrderCurrency(costBase, snap.exchangeRate)
+        const cost = costInOrderCurrency(costBase, snapRate)
         await db.run(
           `INSERT INTO order_items(order_id, product_id, style_no, product_name, composition, color, size, quantity, unit_price, unit_cost)
            VALUES(?,?,?,?,?,?,?,?,?,?)`,
@@ -884,7 +955,8 @@ export function quotationsCore(db: Db) {
         'quotation_convert',
         null,
         null,
-        `由报价单 ${snap.qNo} 第 ${targetRevision} 版转成订单，商品明细原样带入（汇率 ${snap.exchangeRate}，汇率日期 ${snap.exchangeRateDate}）` +
+        `由报价单 ${snap.qNo} 第 ${targetRevision} 版转成订单，商品明细原样带入` +
+          (snapIsHome ? '（本币单，不涉汇率）' : `（汇率 ${snapRate}，汇率日期 ${snap.exchangeRateDate}）`) +
           (targetRevision !== Number(q.revision ?? 1)
             ? `；当前最新第 ${q.revision} 版合计 ${currentGrand.toFixed(2)}，差额 ${diff.toFixed(2)}`
             : '') +

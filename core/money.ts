@@ -150,6 +150,12 @@ export interface SettlementTotals {
    * 追回款已经作为现金进了「已收」，不能再按坏账毛额扣一次，否则会显示成多收。
    */
   netWrittenOff: number
+  /**
+   * 追回款里真正抵掉坏账的那一截（≤ 坏账）。
+   * 它不是客户多付的钱，是还那笔已经核销掉的欠款——算客户预收余额时必须扣掉，
+   * 否则同一笔钱既当坏账损失、又能抵别的单、还能退给客户。
+   */
+  recoveredApplied: number
 }
 
 /** 计算口径的输入 */
@@ -209,6 +215,8 @@ export interface OrderMoney {
   writtenOff: number
   /** 净核销 = 短款 + 坏账 − 已追回（用于算待收） */
   netWrittenOff: number
+  /** 追回款里抵掉坏账的那一截：是还欠款，不是客户多付（见 SettlementTotals） */
+  badDebtRecovered: number
 }
 
 /** 核销台账汇总：撤销是负数，求和即可；追回只冲减坏账余额，不重开待收 */
@@ -230,7 +238,8 @@ export function summarizeSettlements(rows: SettlementInput[]): SettlementTotals 
     recovered,
     badDebtOutstanding: Math.max(0, badDebt - recovered),
     writtenOff: shortage + badDebt,
-    netWrittenOff: shortage + badDebt - recoveredApplied
+    netWrittenOff: shortage + badDebt - recoveredApplied,
+    recoveredApplied
   }
 }
 
@@ -278,7 +287,8 @@ export function computeOrderMoney(input: MoneyInput): OrderMoney {
     badDebtAmount: st.badDebt,
     badDebtOutstanding: st.badDebtOutstanding,
     writtenOff: st.writtenOff,
-    netWrittenOff: st.netWrittenOff
+    netWrittenOff: st.netWrittenOff,
+    badDebtRecovered: st.recoveredApplied
   }
 }
 
@@ -1010,9 +1020,11 @@ export function moneyCore(db: Db) {
     return rows.map((r) => {
       const docType = String(r.doc_type) === 'sample' ? 'sample' : 'order'
       const status = String(r.doc_status ?? '')
-      const exchangeRate = Number(r.exchange_rate ?? 0)
       const amount = Number(r.amount ?? 0)
       const currency = String(r.currency ?? '')
+      // 折算用的汇率与台账同一份派生：本币旧单存着的 7.15 不许印到对账单上，
+      // 外币没填汇率才是 0（折不出来，给 null 让报表说「N 笔未折算」）
+      const rate = baseRateOf(currency, base, Number(r.exchange_rate ?? 0))
       return {
         docType,
         docId: Number(r.doc_id ?? 0),
@@ -1025,11 +1037,11 @@ export function moneyCore(db: Db) {
             : PAYMENT_STATUS_LABEL[status as keyof typeof PAYMENT_STATUS_LABEL] ?? status,
         currency,
         paidAt: String(r.paid_at ?? ''),
-        exchangeRate,
+        exchangeRate: rate,
         amount,
         // 汇率没填过的外币单折不出基准币：给 null，让报表露出「N 笔未折算」，
         // 而不是悄悄算成 0（银行里真有过这笔钱）
-        amountBase: baseAmountOf(currency, base, exchangeRate, amount),
+        amountBase: baseAmountOf(currency, base, rate, amount),
         method: String(r.method ?? ''),
         bankRef: String(r.bank_ref ?? ''),
         note: String(r.note ?? '')
@@ -1432,11 +1444,14 @@ export function moneyCore(db: Db) {
       // 核销（短款/坏账）不参与这里的减法：那是「我们知道这笔收不回来」，
       // 不是客户多付的钱。以前写成 实收 + 核销 − 合计，一旦单据金额被改小，
       // 多出来的核销额就变成一笔从没收到的预收——能抵别的单、还能退真钱出去（R50）。
+      // 作废/失效单：收到的现金都在这单上没有去处，算客户预收——除了坏账追回那一截。
+      // 追回款是客户把已经核销掉的欠款补上了，不是多付；算成预收等于同一笔钱
+      // 既记了坏账损失、又能抵别的单、还能退真钱出去。
       const amount = isBillingStatus(r.paymentStatus)
         ? r.grandTotal > 0
           ? Math.max(0, r.paidAmount - r.grandTotal)
           : Math.max(0, r.paidAmount)
-        : r.paidAmount
+        : Math.max(0, r.paidAmount - r.badDebtRecovered)
       if (amount <= 0.001) continue
       const b = bucket(r.currency)
       b.gross += amount
