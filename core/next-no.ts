@@ -16,6 +16,27 @@ const NO_RESERVATION: Record<string, { table: string; col: string }> = {
   SM: { table: 'sample_orders', col: 'sample_no' }
 }
 
+/**
+ * 号段往前推一格，返回推完后的值。
+ *
+ * 必须写成 `value = value + 1` 让数据库自己加：读出来 +1 再写回去，
+ * 两张同时建的单会读到同一个数、各发同一个号（桌面双击建单、
+ * 报价转单撞上手工建单、后端多请求并发都是这个形状），
+ * 而 order_no 没有唯一索引，撞了号事后查不出来。
+ */
+async function bumpCounter(db: Db, prefix: string): Promise<number> {
+  const bumped = await db.run('UPDATE counters SET value = value + 1 WHERE name = ?', [prefix])
+  if (bumped.changes !== 1) {
+    // 这个号段今天第一次用到：建行同样走数据库的加法，别让并发各自插一行
+    await db.run(
+      'INSERT INTO counters(name, value) VALUES(?, 1) ON CONFLICT(name) DO UPDATE SET value = value + 1',
+      [prefix]
+    )
+  }
+  const row = await db.get('SELECT value FROM counters WHERE name = ?', [prefix])
+  return Number(row?.value ?? 1)
+}
+
 export async function nextNo(
   db: Db,
   kind: 'PI' | 'PL' | 'SO' | 'Q' | 'SM' | 'SMP',
@@ -25,8 +46,7 @@ export async function nextNo(
   const m = String(date.getMonth() + 1).padStart(2, '0')
   const d = String(date.getDate()).padStart(2, '0')
   const prefix = `${kind}${y}${m}${d}`
-  const row = await db.get('SELECT value FROM counters WHERE name = ?', [prefix])
-  let next = Number(row?.value ?? 0) + 1
+  let next = await bumpCounter(db, prefix)
   let no = `${prefix}${String(next).padStart(3, '0')}`
   const resv = NO_RESERVATION[kind]
   if (resv) {
@@ -34,13 +54,9 @@ export async function nextNo(
     for (let i = 0; i < 100000; i++) {
       const hit = await db.get(`SELECT 1 FROM ${resv.table} WHERE ${resv.col} = ?`, [no])
       if (!hit) break
-      next += 1
+      next = await bumpCounter(db, prefix)
       no = `${prefix}${String(next).padStart(3, '0')}`
     }
   }
-  await db.run(
-    'INSERT INTO counters(name, value) VALUES(?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value',
-    [prefix, next]
-  )
   return no
 }

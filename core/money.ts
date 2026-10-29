@@ -314,7 +314,10 @@ export interface OrderMoneyRow extends OrderMoney {
   creditAppliedBase: number
   goodsValueBase: number
   costBase: number
-  profitBase: number
+  /** 毛利折基准币；成本没录全的单没有毛利可言，是 null（不许拿 0 凑一个好看的数） */
+  profitBase: number | null
+  /** 外币单汇率没填过：折不出基准币，上面的 *Base 全是 0，靠「汇率待修」追人补 */
+  rateMissing: boolean
   /** 尚未追回的坏账（基准币） */
   badDebtBase: number
 }
@@ -484,6 +487,15 @@ export interface SampleMoneyRow {
   convertedStatus: string
   /** 已收回 = 实收 + 抵扣；旧「已收无流水」按全额认 */
   recovered: number
+  /**
+   * 这张单多出来的钱（原币，进客户预收结余）：
+   *   取消 / 客户免单 —— 单子不再收钱，已经进来的现金必须有个去处，全额算多付；
+   *   其余 —— 实收 + 生效的抵扣 − 应收，只认超出单据的那截。
+   * 对账单的「预收结余」行和 customerCreditBalance 共用这个数（R48）：
+   * 以前对账单只看现金（collected − totalFee），抵扣过的单两边各说一套，
+   * 客户页写着「可用 300」，发出去的对账单却一行都不提。
+   */
+  prepaid: number
   /** 标了「已收」但一条单笔水单都没有（升级前的老记录），recovered 走的是全额兜底 */
   legacyPaidNoFlow: boolean
   /** 用客户预收抵扣的金额（非现金，R27） */
@@ -693,10 +705,21 @@ export function moneyCore(db: Db) {
       }))
     )
 
+    const base = (await settingsCore(db).get()).baseCurrency
     return rows.map((r) => {
       const id = Number(r.id)
       const m = byId.get(id) ?? computeOrderMoney({ items: [], charges: [], payments: [], depositRatio: 0 })
-      const rate = Number(r.exchange_rate ?? 1)
+      const currency = String(r.currency ?? 'USD')
+      const rateRaw = Number(r.exchange_rate ?? 0)
+      // 本币单本来就没有折算（老数据那一列是默认 0）：按 1 折，别把一笔真钱折成 0。
+      // 外币单汇率没填过（0 或空）折不出来，不许蒙成 1:1——把一笔 USD 当本币记进
+      // 销售额和待收，数字看着合理却全是错的。这里折成 0 并亮出 rateMissing，
+      // 由「汇率待修」提醒去追人补（与打样未收同一口径）。
+      const isHomeCurrency = currency === base
+      const rateMissing = !isHomeCurrency && !(rateRaw > 0)
+      // 折算用的汇率：本币单永远是 1（那一列存的是历史垃圾也别拿它乘），
+      // 外币单没填过就按 0 折（折不出来，交给「汇率待修」追人），照旧吐出存值
+      const rate = isHomeCurrency ? 1 : rateMissing ? 0 : rateRaw
       const createdAt = String(r.created_at ?? '')
       return {
         ...m,
@@ -706,8 +729,9 @@ export function moneyCore(db: Db) {
         customerId: Number(r.customer_id),
         customerName: String(r.customer_name ?? ''),
         country: String(r.country ?? ''),
-        currency: String(r.currency ?? 'USD'),
-        exchangeRate: rate,
+        currency,
+        exchangeRate: rateRaw,
+        rateMissing,
         createdAt,
         month: localMonthOf(createdAt),
         paymentStatus: String(r.payment_status ?? ''),
@@ -724,7 +748,10 @@ export function moneyCore(db: Db) {
         creditAppliedBase: m.creditApplied * rate,
         goodsValueBase: m.goodsValue * rate,
         costBase: m.totalCost * rate,
-        profitBase: (m.profit ?? m.profitRaw) * rate,
+        // 成本没录全的单没有毛利可言：profitRaw 是「当成本为 0」算出来的，
+        // 直接折进基准币就等于凭空报一笔高毛利。没有就是 null，让调用方去追（与 profit 同一个说法）。
+        // 外币单没填汇率同样折不出来：报 0 等于断言「这单没赚钱」，也一并 null
+        profitBase: m.profit === null || rateMissing ? null : m.profit * rate,
         badDebtBase: m.badDebtOutstanding * rate
       }
     })
@@ -1186,6 +1213,14 @@ export function moneyCore(db: Db) {
       // 「已收」却一笔单笔水单都没有 = 升级前手工勾的标记。钱认，但要能一眼看出
       // 这笔没有水单可对账，不能和客户自己下的银行流水混成一堆。
       const legacyPaidNoFlow = feeStatus === 'paid' && collected <= 0.001 && totalFee > 0.001
+      // 多收的钱（进客户预收结余）：唯一一份算法，对账单与预收区共用。
+      // 取消/免单的单子不再收钱，已经进来的现金必须有个去处，全额算多付；
+      // 其余按「实收 + 生效的抵扣 − 应收」——只看现金会把抵扣过的单漏掉，
+      // 客户页写着「可用 300」、发出去的对账单却一行都不提（R48 一个数只许一张嘴）。
+      const prepaid =
+        String(r.status ?? '') === 'cancelled' || feeStatus === 'waived'
+          ? collected
+          : Math.max(0, collected + offsetSettled - totalFee)
       return {
         sampleId: Number(r.id),
         sampleNo: String(r.sample_no ?? ''),
@@ -1198,6 +1233,7 @@ export function moneyCore(db: Db) {
         sampleFee,
         totalFee,
         collected,
+        prepaid,
         offsetSettled,
         offsetLive,
         convertedStatus,
@@ -1249,8 +1285,8 @@ export function moneyCore(db: Db) {
         (r.feeStatus === 'unpaid' || (r.feeStatus === 'offset' && r.offsetSettled <= 0.001))
           ? Math.max(0, r.totalFee - r.recovered - r.creditApplied)
           : 0
-      // 多付的钱要单独摆出来：压进待收里会变成负数，客户以为我们算错了
-      const over = r.collected - r.totalFee
+      // 多付的钱要单独摆出来：压进待收里会变成负数，客户以为我们算错了。
+      // 数额直接吃 sampleMoneyRows 那份 prepaid（与预收结余同一个数，不再另算一遍）
       out.push({
         sampleId: r.sampleId,
         sampleNo: r.sampleNo,
@@ -1264,7 +1300,7 @@ export function moneyCore(db: Db) {
         legacyPaidNoFlow: r.legacyPaidNoFlow,
         creditApplied: r.creditApplied,
         open,
-        prepaid: over > 0.001 ? over : 0,
+        prepaid: r.prepaid,
         convertedOrderNo: r.convertedOrderNo,
         offsetSuspended: !cancelled && r.feeStatus === 'offset' && r.offsetSettled <= 0.001
       })
@@ -1379,10 +1415,8 @@ export function moneyCore(db: Db) {
     }
 
     for (const r of await sampleMoneyRows(customerId)) {
-      const amount =
-        r.status === 'cancelled' || r.feeStatus === 'waived'
-          ? r.collected
-          : Math.max(0, r.collected + r.offsetSettled - r.totalFee)
+      // 多付的数只有一份算法（sampleMoneyRows.prepaid），对账单与预收结余共用
+      const amount = r.prepaid
       if (amount <= 0.001) continue
       const b = bucket(r.currency)
       b.gross += amount

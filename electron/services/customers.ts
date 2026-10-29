@@ -53,7 +53,7 @@ export async function customerStats(customerId: number): Promise<CustomerStats> 
   // 坏账不进待收，但客户页要能看见这家客户赖过多少钱
   const badDebt = rows.reduce((s, r) => s + r.badDebtBase, 0)
   const missingCostOrders = rows.filter((r) => r.missingCostItems > 0).length
-  const totalProfitRaw = rows.reduce((s, r) => s + r.profitRaw * r.exchangeRate, 0)
+  const totalProfitRaw = rows.reduce((s, r) => s + (r.profitBase ?? 0), 0)
   // 下面的历史列表会把草稿/失效/作废也列出来，成交额却不含它们；
   // 不写明条数，老板会以为系统漏单（N-口径一致）
   const excluded = getDb().all(

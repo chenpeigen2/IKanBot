@@ -21,7 +21,7 @@ import { mapCustomer, mapEvent, mapOrder, mapOrderItem, mapOrderPhoto, mapPackin
 import { likeAny } from '../electron/services/search'
 import { addDays, daysBetween, isLocalDate, localDate, localDayAfterUtc, localDayStartUtc } from '../src/shared/date'
 import { billPartyOf, emptyParty, parseParty, patchParty, shipPartyOf, stringifyParty } from '../src/shared/party'
-import { isBillingStatus, NON_BILLING_STATUSES, sampleOffsetFromCharges, shownRemaining } from '../src/shared/billing'
+import { isBillingStatus, NON_BILLING_STATUSES, sampleOffsetFromCharges, sampleOpenFeeOf, shownRemaining } from '../src/shared/billing'
 import { assertDepositRatio, assertDocNo, assertQuantity, assertUnitPrice } from '../src/shared/guards'
 import { PAYMENT_STATUS_LABEL, SETTLEMENT_KIND_LABEL, SHIP_STATUS_LABEL, SHIP_STATUS_ORDER } from '../src/shared/types'
 import type {
@@ -839,11 +839,13 @@ export function ordersCore(db: Db) {
     const cleanCharges = input.charges === undefined ? null : input.charges.filter((c) => c.label.trim())
     if (cleanCharges !== null) {
       assertChargeAmounts(input.charges!)
-      // 让利让过头（合计为负）的单不许落库；这里带的是这次真要存进去的行（未命名行存库时会被滤掉）
-      assertOrderTotalNonNegative(await orderGoodsTotal(id), cleanCharges, chargeCause(cleanCharges))
       if (!sameCharges(beforeCharges, cleanCharges)) {
         await assertPricingEditable(id, '改费用行')
       }
+      // 合计为负比「没写原因」更要紧：让利让过头的单根本落不了库，先按库内货值把这句话说在前面。
+      // 事务里还会按写入那一刻的货值再算一遍（那才是准的），这里只负责报错先后顺序，
+      // 免得用户按提示写好原因、保存又被打回一句「合计为负」。与 updateOrderCharges 的喊法保持一致。
+      assertOrderTotalNonNegative(await orderGoodsTotal(id), cleanCharges, chargeCause(cleanCharges))
       // 从「只改费用行」那个正门补过来的闸门：让利改一笔就要写原因。
       // 编辑弹窗走的是这里，以前只拦得住正门，跟单员在「编辑订单」里改负数行照样不留话。
       const reasonText = String(input.chargeReason ?? '').trim()
@@ -948,6 +950,12 @@ export function ordersCore(db: Db) {
         `UPDATE orders SET ${cells.map(([col]) => `${col}=?`).join(', ')}, updated_at=? WHERE id=?`,
         [...cells.map(([, v]) => v as string | number | null), ts, id]
       )
+      // 让利让过头（合计为负）的单不许落库。这道门在事务里按库内的货值现算：
+      // 事务外读到的货值可能在「守门 → 写入」之间被另一笔改小明细抽走，
+      // 两边各自看自己那一改都合法，库里就留下负合计单——负数会被当成客户多付，生出能抵能退的假预收。
+      if (cleanCharges !== null) {
+        assertOrderTotalNonNegative(await orderGoodsTotal(id), cleanCharges, chargeCause(cleanCharges))
+      }
       await logEvent(db, id, 'update', null, null, await describeOrderChange(before, input))
       // 抵扣行改了，打样单那半边必须跟着同一笔保存变脸，否则样品欠款长期对不上
       if (cleanCharges !== null) {
@@ -1248,6 +1256,22 @@ export function ordersCore(db: Db) {
     }
   }
 
+  /** 打样单「还该收多少」的三个原始数：总额（样品费+快递费）、已按水单收、已用预收抵 */
+  async function sampleFeePieces(sampleId: number): Promise<{ totalFee: number; collected: number; creditApplied: number }> {
+    const row = (await db.get(
+      `SELECT (SELECT COALESCE(SUM(quantity * unit_price), 0) FROM sample_order_items WHERE sample_order_id = ?)
+                 + COALESCE(express_fee, 0) AS total,
+              (SELECT COALESCE(SUM(amount), 0) FROM payments WHERE sample_order_id = ?) AS collected
+        FROM sample_orders WHERE id = ?`,
+      [sampleId, sampleId, sampleId]
+    )) as { total?: number; collected?: number } | null
+    return {
+      totalFee: Number(row?.total ?? 0),
+      collected: Number(row?.collected ?? 0),
+      creditApplied: await moneyOf().creditAppliedForSample(sampleId)
+    }
+  }
+
   /**
    * 抵扣行和打样单的 offset_amount 是同一块钱的两张脸：订单纸面上那条负数费用，
    * 对应打样单上「已经抵掉多少样品费」。以前只改一边——跟单员在费用行里把抵扣改成
@@ -1299,11 +1323,25 @@ export function ordersCore(db: Db) {
       )
     }
     const s = linked[0]
+    const sampleId = Number(s.id)
+    // 抵扣行的上限是「这张打样单还没收回来的钱」，跟转单同一个算式。
+    // 不封顶的话，费用行里写个样品费三倍的数也能存：打样单从此顶着一笔收不回来的
+    // 巨额「已抵扣」，样品欠款榜少算、对账单多算，而订单这边还照旧少收客户钱。
+    const sampleTotal = await sampleFeePieces(sampleId)
+    const cap = sampleOpenFeeOf(sampleTotal.totalFee, 'offset', sampleTotal.collected, sampleTotal.creditApplied)
+    if (after > cap + 0.001) {
+      throw bizError(
+        `抵扣行写了 ${after.toFixed(2)}，可打样单 ${String(s.sample_no ?? '')} 还没收回来的只有 ${cap.toFixed(2)}` +
+          `（样品费+快递费 − 已按水单收 − 已用预收抵）。多出来的部分没有任何一笔样品费可抵，` +
+          `抵的其实是从客户身上多收的钱。请把这条抵扣改回 ${cap.toFixed(2)} 以内，` +
+          `确实要少收客户这么多，请用正费用行之外的让利并写明原因。`
+      )
+    }
     await db.run('UPDATE sample_orders SET offset_amount = ?, fee_note = ?, updated_at = ? WHERE id = ?', [
       after,
       `${String(s.fee_note ?? '')}；订单 ${orderNo} 费用行调整后抵扣 ${after.toFixed(2)}`,
       now(),
-      Number(s.id)
+      sampleId
     ])
     await logEvent(
       db,
@@ -1318,15 +1356,6 @@ export function ordersCore(db: Db) {
   /** 合计为负时报错该指哪儿：这笔钱是从样品费抵扣让的，还是从让利行让的 */
   function chargeCause(charges: QuotationCharge[]): string {
     return sampleOffsetFromCharges(charges) > 0.001 ? '样品费抵扣（含快递费）' : '让利（负费用行）'
-  }
-
-  /** 改/删一行之后的货值：这一行按传入值算（删行传 0），其余行照旧 */
-  async function goodsTotalAfterLineChange(orderId: number, itemId: number, lineValue: number): Promise<number> {
-    const row = (await db.get(
-      'SELECT COALESCE(SUM(quantity * unit_price), 0) AS g FROM order_items WHERE order_id = ? AND id <> ?',
-      [orderId, itemId]
-    )) as { g?: number } | null
-    return Number(row?.g ?? 0) + lineValue
   }
 
   /**
@@ -1615,17 +1644,6 @@ export function ordersCore(db: Db) {
             nextCost == null ? '—' : nextCost
           }）`
     const changes = baseChanges + costNote
-    // 改小数量/单价会把费用行里的抵扣顶出去：合计一旦为负，抵扣静默蒸发、还生出假预收
-    if (patch.quantity !== undefined || patch.unitPrice !== undefined) {
-      await assertTotalNonNegativeAfter(
-        orderId,
-        await goodsTotalAfterLineChange(
-          orderId,
-          itemId,
-          Number(patch.quantity ?? cur.quantity) * Number(patch.unitPrice ?? cur.unit_price)
-        )
-      )
-    }
     // 改行、留痕、重算状态必须一起成一起败：以前中途抛错会留下「行改了、状态没改」的单
     await db.transact(async () => {
       await db.run(
@@ -1646,6 +1664,12 @@ export function ordersCore(db: Db) {
         ]
       )
       await db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
+      // 改小数量/单价会把费用行里的抵扣顶出去：合计一旦为负，抵扣静默蒸发、还生出假预收。
+      // 这道门在事务里按改完的库内货值现算：事务外那一次读挡不住并发的第二笔改行——
+      // 两个人各把一行砍半，彼此都只看见自己的改动，双双放行，库里留下的是一张负合计单
+      if (patch.quantity !== undefined || patch.unitPrice !== undefined) {
+        await assertTotalNonNegativeAfter(orderId, await orderGoodsTotal(orderId))
+      }
       if (changes) await logEvent(db, orderId, 'item_update', null, null, `修改明细 ${patch.styleNo ?? cur.style_no}：${changes}`)
       // 件数变了，订单的「装够没有 / 走了没有」跟着变
       await applyShipStatus(db, orderId)
@@ -1696,11 +1720,12 @@ export function ordersCore(db: Db) {
         `款号 ${String(cur.style_no)} ${String(cur.color)}/${String(cur.size)} 已经装了 ${packed} 件箱，不能直接删这一行；请先到「装箱单」里删掉对应箱明细（已出运的批次要先把状态改回「已包装」）。`
       )
     }
-    // 删掉这一行等于抽走一截货值：剩下的货撑不住费用行里的抵扣就成了负合计
-    await assertTotalNonNegativeAfter(orderId, await goodsTotalAfterLineChange(orderId, itemId, 0))
     await db.transact(async () => {
       await db.run('DELETE FROM order_items WHERE id = ? AND order_id = ?', [itemId, orderId])
       await db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
+      // 删掉这一行等于抽走一截货值：剩下的货撑不住费用行里的抵扣就成了负合计。
+      // 同改行那道门一样，守门读的是事务内已经删完的货值，不给并发插队留缝
+      await assertTotalNonNegativeAfter(orderId, await orderGoodsTotal(orderId))
       await logEvent(db, 
         orderId,
         'item_remove',
@@ -1756,11 +1781,6 @@ export function ordersCore(db: Db) {
       }
       seenSku.set(key, i + 1)
     })
-    // 换成一批更小的货，费用行里的抵扣可能顶不住新货值：整批替换前先把合计守一遍
-    await assertTotalNonNegativeAfter(
-      orderId,
-      items.reduce((s, it) => s + Number(it.quantity) * Number(it.unitPrice), 0)
-    )
     // 整批替换连同留痕、状态重算放进同一个事务：只删干净一半就失败，是最难查的那种单
     await db.transact(async () => {
       await db.run('DELETE FROM order_items WHERE order_id = ?', [orderId])
@@ -1783,6 +1803,8 @@ export function ordersCore(db: Db) {
         )
       }
       await db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
+      // 换成一批更小的货，费用行里的抵扣可能顶不住新货值：守门读事务内已经换完的货值
+      await assertTotalNonNegativeAfter(orderId, await orderGoodsTotal(orderId))
       await applyShipStatus(db, orderId)
       await logEvent(db, orderId, 'item_replace', null, null, `批量生成 ${items.length} 个 SKU 行`)
       // 金额变了，收款状态要重算
@@ -2235,6 +2257,17 @@ export function ordersCore(db: Db) {
          VALUES(?,?,?,?,?,?,?,?,?)`,
         [orderId, kind, amount, reason, evidence, null, null, at, now()]
       )
+      // 待收够不够这一笔，在事务里按落完账的库内余额复查一遍：
+      // 事务外读到的那个待收，可能在守门和插入之间被另一笔核销/改小金额抽走。
+      // 两个人各核 60%，两边都只看见自己那一笔，库里就留下一张「核销核多了」的多收单
+      const after = await getOrder(orderId)
+      const left = after?.remaining ?? 0
+      if (left < -0.001) {
+        throw bizError(
+          `${label} ${amount.toFixed(2)} 落下去之后，这张单反而多出 ${(-left).toFixed(2)} ${currency}：` +
+            `待收在这一瞬间被别的操作改小了（另核了一笔、或明细调小了）。请刷新后按当前待收重新核。`
+        )
+      }
       await logEvent(db, 
         orderId,
         'settlement',

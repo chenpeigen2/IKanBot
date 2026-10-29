@@ -183,6 +183,28 @@ function tradeTermsText(incoterm: string, loading?: string, destination?: string
   return `${incoterm} — ${l} → ${d}`
 }
 
+/**
+ * 纸面上的「汇率」那一行。
+ *
+ * 汇率没钉（0）或还是占位的 1 时整行不印：外币单印出「1 USD = 1 CNY」是当着客户的面
+ * 说一句假话，客户拿它对账、也拿它当我们报过的价。这个占位值内部由「汇率待修」提醒追人，
+ * 不该跑到纸面上。本币单本来就没有折算，同样不用印。
+ * 锁汇日期也不上纸面：那是我们自己记账的时点，客户看着像报价有效期。
+ */
+function exchangeRateLine(
+  currency: string,
+  baseCurrency: string,
+  rate: number | null | undefined,
+  style = ''
+): string {
+  const r = Number(rate ?? 0)
+  if (String(currency) === String(baseCurrency)) return ''
+  if (!Number.isFinite(r) || r <= 0 || r === 1) return ''
+  return `<div${style ? ` style="${style}"` : ''}>Exchange Rate: 1 ${esc(currency)} = ${esc(String(r))} ${esc(
+    baseCurrency
+  )}</div>`
+}
+
 const PRINT_CSS = `
   @page { size: A4 portrait; margin: 0; }
   * { box-sizing: border-box; }
@@ -413,9 +435,7 @@ export function renderPi(ctx: DocContext): string {
       <b>Trade Terms / 贸易条款</b>
       ${esc(tradeTermsText(order.incoterm, order.portOfLoading, order.portOfDestination))}
       <div style="margin-top:3px">Currency: ${esc(order.currency)}</div>
-      <div>Exchange Rate: 1 ${esc(order.currency)} = ${order.exchangeRate} ${esc(order.baseCurrency)}${
-        order.exchangeRateDate ? ` (${esc(order.exchangeRateDate)})` : ''
-      }</div>
+      ${exchangeRateLine(order.currency, order.baseCurrency, order.exchangeRate)}
     </div>
   </div>
 
@@ -741,9 +761,7 @@ export function renderQuotation(ctx: QuotationDocContext): string {
       <b>Trade Terms / 贸易条款</b>
       ${esc(tradeTermsText(q.incoterm, q.portOfLoading, q.portOfDestination))}
       <div style="margin-top:3px">Currency: ${esc(q.currency)}</div>
-      <div>Exchange Rate: 1 ${esc(q.currency)} = ${q.exchangeRate} ${esc(q.baseCurrency)}${
-        q.exchangeRateDate ? ` (${esc(q.exchangeRateDate)})` : ''
-      }</div>
+      ${exchangeRateLine(q.currency, q.baseCurrency, q.exchangeRate)}
     </div>
   </div>
 
@@ -960,9 +978,7 @@ export function renderCi(ctx: DocContext, opts: CiOptions = {}): string {
     <div class="term">
       <b>Amount / 金额</b>
       Currency: ${esc(order.currency)}
-      <div style="margin-top:3px">Exchange Rate: 1 ${esc(order.currency)} = ${order.exchangeRate} ${esc(
-        order.baseCurrency
-      )}${order.exchangeRateDate ? ` (${esc(order.exchangeRateDate)})` : ''}</div>
+      ${exchangeRateLine(order.currency, order.baseCurrency, order.exchangeRate, 'margin-top:3px')}
       <div>Total Payable: ${fmtMoney(total, order.currency)}</div>
     </div>
   </div>

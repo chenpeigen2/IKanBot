@@ -1256,7 +1256,7 @@ const offMonthMissing = offMonthOrders.filter((r) => r.missingCostItems > 0).len
 eq(
   '报表月度毛利：成本录全时 = Σ各单毛利（含抵扣单的负毛利，不许静默吞掉）',
   offMonthRow.profit,
-  offMonthMissing > 0 ? null : offMonthOrders.reduce((s, r) => s + r.profitRaw * r.exchangeRate, 0)
+  offMonthMissing > 0 ? null : offMonthOrders.reduce((s, r) => s + (r.profitBase ?? 0), 0)
 )
 
 // 催打样费提醒（N23）：寄出超过阈值（默认 10 天）且未收 → 提醒
@@ -10904,6 +10904,100 @@ check('第二批也没被牵连', !!(await products.findProductByStyleNo('R47-I2
 const r47TooMany = [products.CSV_TEMPLATE_HEADER, ...Array.from({ length: 5001 }, (_, i) => `R47-X${i},超上限的款`)].join('\n')
 check('整份超过上限直接拒绝，不写一行', (await r40err(async () => await products.importProductsCsv(r47TooMany, 'skip'))).includes('一次最多导 5000 行'))
 eq('拒下后库里没有那批款', (await products.findProductByStyleNo('R47-X0')) ?? null, null)
+
+/* ---------------- R48：本币不乘汇率、折不出来要说、多付只算一遍、抵扣留痕 ---------------- */
+
+section('R48 本币单那一列留着 0 也照样折：老数据不许把销售额吃掉')
+const r48Cust = await customers.saveCustomer({ company: 'R48-MONEY-CO' })
+const r48HomeOrder = await orders.createOrder({
+  customerId: r48Cust.id,
+  currency: 'CNY',
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R48-HOME'
+})
+await orders.addOrderItem(r48HomeOrder.id, { styleNo: 'R48-H', quantity: 10, unitPrice: 100 })
+getDb().run('UPDATE order_items SET unit_cost = 60 WHERE order_id = ?', [r48HomeOrder.id])
+// 模拟升级前的老数据：本币单没人填过汇率，那一列是默认 0
+getDb().run('UPDATE orders SET exchange_rate = 0 WHERE id = ?', [r48HomeOrder.id])
+const r48HomeRow = (await money.listOrderMoney()).find((r) => r.orderId === r48HomeOrder.id)!
+eq('本币单不乘汇率：含费用合计原样进基准币', r48HomeRow.grandTotalBase, r48HomeRow.grandTotal)
+eq('本币单不算「汇率待修」', r48HomeRow.rateMissing, false)
+eq('本币单毛利用全额折出来，不是 0', r48HomeRow.profitBase, r48HomeRow.profit)
+
+section('R48 外币单汇率没填：折不出来要亮出来，不许悄悄当 1:1 记账')
+const r48FxOrder = await orders.createOrder({
+  customerId: r48Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R48-FX'
+})
+await orders.addOrderItem(r48FxOrder.id, { styleNo: 'R48-FX', quantity: 10, unitPrice: 10 })
+getDb().run('UPDATE order_items SET unit_cost = 4 WHERE order_id = ?', [r48FxOrder.id])
+getDb().run('UPDATE orders SET exchange_rate = 0 WHERE id = ?', [r48FxOrder.id])
+const r48FxRow = (await money.listOrderMoney()).find((r) => r.orderId === r48FxOrder.id)!
+eq('折不出来 → 基准币待收按 0 计，不蒙成 1:1', r48FxRow.receivableBase, 0)
+eq('这一行标出「汇率待修」', r48FxRow.rateMissing, true)
+eq('毛利也折不出来 → null，不许报成 0 毛利', r48FxRow.profitBase, null)
+const r48FxRem = (await dashboard.reminders()).find((x) => x.orderId === r48FxOrder.id && x.kind === 'data')
+check('待修卡说的是「没填汇率、折不成基准币」', !!r48FxRem && r48FxRem.message.includes('没填汇率'), r48FxRem?.message ?? '<没有这条提醒>')
+check('没填汇率的单不再冒充 1:1 那条话术', !(r48FxRem?.message ?? '').includes('按 1:'), r48FxRem?.message ?? '')
+
+section('R48 打样单多付：对账单与客户预收结余说同一个数')
+const r48CrCust = await customers.saveCustomer({ company: 'R48-PREPAID-CO' })
+const r48Smp = await samples.saveSample({
+  customerId: r48CrCust.id,
+  sampleDate: dAgo(5),
+  expressFee: 15,
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: dAgo(5),
+  items: [{ styleNo: 'R48-S', productName: '取消的样', color: 'White', size: 'M', quantity: 1, unitPrice: 30 }]
+})
+await samples.addSamplePayment(r48Smp.id, { paidAt: localDate(), amount: 20, bankRef: 'R48-PRE-IN' })
+await samples.saveSample({ id: r48Smp.id, status: 'cancelled', note: 'R48 客户改走别家' })
+const r48Bal = (await money.customerCreditBalance(r48CrCust.id)).find((c) => c.currency === 'USD')!
+eq('取消单的实收 20 进了客户预收结余', r48Bal.gross, 20)
+const r48Csv = parseCsv(await dashboard.exportCsv('statement', { customerId: r48CrCust.id }))
+const r48Col = (name: string): number => r48Csv[0].indexOf(name)
+const r48SmpRow = r48Csv.slice(1).find((r) => r[r48Col('单据号')] === r48Smp.sampleNo)
+const r48SmpNote = r48SmpRow?.[r48Col('备注')] ?? ''
+check('对账单把这 20 说成「留在账上」，预收区才不会凭空多一笔', r48SmpNote.includes('留在账上'), r48SmpNote || '<缺行>')
+check('对账单同时点明已计入预收结余', r48SmpNote.includes('计入客户预收结余'), r48SmpNote)
+check(
+  '同一笔钱不重复出现在两句话里',
+  // 备注里的金额是数字直接拼进串的（money2 四舍五入到分但保持数字，免得 Excel 当公式），
+  // 20 就写成「20」，不会补成 20.00
+  (r48SmpNote.match(/20/g) ?? []).length === 1 && !r48SmpNote.includes('实收比单据多'),
+  r48SmpNote
+)
+
+section('R48 预收抵到打样单上要留痕：fee_note 就是这张单的账本')
+const r48Smp2 = await samples.saveSample({
+  customerId: r48CrCust.id,
+  sampleDate: dAgo(2),
+  currency: 'USD',
+  exchangeRate: 7,
+  exchangeRateDate: dAgo(2),
+  items: [{ styleNo: 'R48-S2', productName: '抵预收的样', color: 'Black', size: 'M', quantity: 1, unitPrice: 30 }]
+})
+await credits.applyCredit({
+  customerId: r48CrCust.id,
+  currency: 'USD',
+  targetKind: 'sample',
+  targetId: r48Smp2.id,
+  amount: 10,
+  note: 'R48 用取消单的实收抵'
+})
+const r48Smp2After = (await samples.getSample(r48Smp2.id))!
+check('抵扣落进打样单的账本备注', r48Smp2After.feeNote.includes('客户预收抵扣 10.00'), r48Smp2After.feeNote)
+check('备注带上人工写的原因', r48Smp2After.feeNote.includes('R48 用取消单的实收抵'), r48Smp2After.feeNote)
+const r48Apps = (await money.customerCreditBalance(r48CrCust.id)).find((c) => c.currency === 'USD')!
+await credits.reverseCredit(r48Apps.applications[0].id, 'R48 抵错了单')
+const r48Smp2Back = (await samples.getSample(r48Smp2.id))!
+check('撤销也在账本上留一句', r48Smp2Back.feeNote.includes('撤销客户预收抵扣'), r48Smp2Back.feeNote)
+check('撤销原因写进账本', r48Smp2Back.feeNote.includes('R48 抵错了单'), r48Smp2Back.feeNote)
+eq('撤销后待收回到 30', r48Smp2Back.owed, 30)
 
 /* ---------------- 汇总 ---------------- */
 

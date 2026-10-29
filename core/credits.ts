@@ -17,6 +17,7 @@ import { ordersCore } from './orders'
 import { moneyCore } from './money'
 import { isLocalDate, localDate } from '../src/shared/date'
 import { isBillingStatus } from '../src/shared/billing'
+import { appendSampleFeeNote } from './sample-note'
 import type { CustomerCreditCurrency } from '../src/shared/types'
 export interface ApplyCreditInput {
   customerId: number
@@ -208,6 +209,16 @@ export function creditsCore(db: Db) {
         )
         // 抵扣过后这张单可能已经收齐：收款状态要跟着走，不能再在工作台上催
         await ordersOf().recomputePaymentStatus(target.id)
+      } else {
+        // 打样域没有操作历史表：这句话就是这张单唯一的账本。
+        // 不留痕的话，样品费待收凭空少了一截，看单的人不知道那笔钱去哪了
+        await appendSampleFeeNote(
+          db,
+          target.id,
+          `客户预收抵扣 ${amount.toFixed(2)} ${currency}（${appliedAt}${
+            actor ? `，${actor}` : ''
+          }；客户余额另记，不算现金到账，冲减待收）${note && note !== '客户预收抵扣' ? `；${note}` : ''}`
+        )
       }
       return await moneyOf().customerCreditBalance(customerId)
     })
@@ -252,6 +263,14 @@ export function creditsCore(db: Db) {
         )
         // 撤销后这张单又欠钱了：收款状态要退回「部分收款/已发出」
         await ordersOf().recomputePaymentStatus(targetId)
+      } else {
+        // 打样单没有操作历史表：撤销也要在 fee_note 上留一句，
+        // 不然这张单的待收忽然涨回来，谁也说不清是撤销还是又记了一笔账
+        await appendSampleFeeNote(
+          db,
+          targetId,
+          `撤销客户预收抵扣 ${amount.toFixed(2)} ${currency}：${why}（这笔钱回到客户预收余额）`
+        )
       }
     })
     return await moneyOf().customerCreditBalance(customerId)

@@ -154,6 +154,29 @@ export function settingsCore(db: Db) {
     return parseSettings(typeof row?.['value'] === 'string' ? (row['value'] as string) : null)
   }
 
+  /**
+   * 写回之前的严格读：整块 JSON 解析不出来就停手。
+   *
+   * get() 对坏数据按字段退回默认值，那是给界面看的；而「读回来 → 盖一个戳 → 写回去」
+   * 这条路（每日备份收尾必走）要是也照默认值走，一次备份就把公司抬头、收款账户、
+   * 各种提醒阈值全换成了出厂设置，而且界面只会报「备份成功」。
+   * 字段个别坏了照样按默认值退回，这里只拦「整块读不出来」。
+   */
+  async function getStrict(): Promise<AppSettings> {
+    const row = await db.get('SELECT value FROM settings WHERE key = ?', [KEY])
+    const text = typeof row?.['value'] === 'string' ? (row['value'] as string) : null
+    if (!text) return structuredClone(SETTINGS_DEFAULTS)
+    try {
+      return normalizeSettings(JSON.parse(text))
+    } catch {
+      throw new BizError(
+        '设置里那一块 JSON 解析不出来，已停手不回写。' +
+          '这时候写一次就会把公司抬头、收款账户和提醒阈值全换成默认值。' +
+          '请到设置页重新填一遍存好，或者从备份恢复后再试。'
+      )
+    }
+  }
+
   /** 库里已经落地的单据数——基准币一旦有账就只能锁死，改动前先问它 */
   async function bookedDocCount(): Promise<number> {
     const one = async (table: string): Promise<number> => {
@@ -299,11 +322,11 @@ export function settingsCore(db: Db) {
 
   /** 备份服务专用：只盖自己那一两个戳，不碰用户在设置页填的东西 */
   async function patchBackup(patch: Partial<Pick<AppSettings, 'lastBackupAt' | 'lastBackupError'>>): Promise<void> {
-    const s = await get()
+    const s = await getStrict()
     await write({ ...s, ...patch })
   }
 
-  return { get, save, baseCurrencyLocked, patchBackup }
+  return { get, getStrict, save, baseCurrencyLocked, patchBackup }
 }
 
 export type SettingsCore = ReturnType<typeof settingsCore>

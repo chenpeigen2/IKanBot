@@ -16,11 +16,12 @@ import { logEvent } from './events'
 import { settingsCore } from './settings'
 import { ordersCore } from './orders'
 import { creditsCore } from './credits'
+import { appendSampleFeeNote } from './sample-note'
 import { moneyCore, costInOrderCurrency } from './money'
 import { mapCustomer, mapPayment } from '../electron/db/mappers'
 import { likeAny } from '../electron/services/search'
 import { assertLocalDate, localDate } from '../src/shared/date'
-import { isBillingStatus, SAMPLE_OFFSET_LABEL_PREFIX } from '../src/shared/billing'
+import { isBillingStatus, sampleOpenFeeOf, SAMPLE_OFFSET_LABEL_PREFIX } from '../src/shared/billing'
 import { assertQuantity, assertUnitPrice, assertOptionalMoney } from '../src/shared/guards'
 import type { OrderDetail } from '../src/shared/types'
 import type {
@@ -435,6 +436,27 @@ export function samplesCore(db: Db) {
         '「已抵扣」不能手工标记：这是样品费已经抵进某张订单的凭据，只有转订单时勾「样品费抵货款」才会自动记上。如果是真收到了钱，请选「已向客户收」。'
       )
     }
+    // 反向同一条闸门：把「已抵扣」手工改回未收/已收，订单上那条负费用行还在，
+    // 同一块样品费会在两张单上各收一遍；而改回「免收」更直接——钱既没抵也没收，账上凭空消失。
+    // 唯一的正规退路在订单侧：取消那条抵扣行（或作废转出单），系统会自动把这张单退回未收。
+    // 转出单已作废或早被删掉时不拦：那是留着「已抵扣」却没有抵扣对象的死档，
+    // 这里再拦一次，这张单除了删除重建就没有出口了。
+    if (before && String(before.fee_status ?? '') === 'offset' && feeStatus !== 'offset') {
+      const linkedId = Number(before.converted_order_id ?? 0)
+      const linked = linkedId
+        ? ((await db.get('SELECT order_no, payment_status FROM orders WHERE id = ?', [linkedId])) as
+            | { order_no?: string; payment_status?: string }
+            | null)
+        : null
+      if (linked?.order_no && linked.payment_status !== 'void') {
+        throw bizError(
+          `这张打样单已经转成订单 ${linked.order_no}，样品费的收款状态不能再改（现在是「已抵扣」）：` +
+            `改回「${SAMPLE_FEE_STATUS_LABEL[feeStatus] ?? feeStatus}」不会让那条抵扣从订单上消失，同一笔样品费会在两张单上各收一遍。` +
+            `要改成收现金，请在订单 ${linked.order_no} 的费用行里取消「${SAMPLE_OFFSET_LABEL_PREFIX}」那一行（或作废那张单），` +
+            `取消后这里会自动退回未收。`
+        )
+      }
+    }
     // 客户预收已经抵到这张单上：金额/币种/汇率/客户都是那笔抵扣的依据，改了余额就对不上。
     // 只抵过预收、没落过收款流水的单，上面的流水锁不会触发，得单独锁。
     const creditLocked = before ? await creditsOf().hasActiveCredit('sample', Number(before.id)) : false
@@ -728,8 +750,7 @@ export function samplesCore(db: Db) {
     // 一部分已经被客户预收抵掉了：能收的现金只剩「总额 − 已收 − 已抵扣」，
     // 不扣预收就会出现「现金和预收各付一遍」的双付
     const paidAlready = s.feeStatus === 'paid' ? s.totalFee : s.collected
-    const openFee =
-      s.feeStatus === 'waived' ? 0 : Math.max(0, s.totalFee - paidAlready - Number(s.creditApplied ?? 0))
+    const openFee = sampleOpenFeeOf(s.totalFee, s.feeStatus, s.collected, Number(s.creditApplied ?? 0))
     const offsetTotal = opts.offsetSampleFee && openFee > 0.001 ? openFee : 0
     // 抵扣行不能大于本单货值：合计一旦为负，系统会把 −合计 误当成客户多付，
     // 凭空生成一笔可抵扣、可退真钱的预收。宁可拦下让人先处理样品费。
@@ -842,14 +863,8 @@ export function samplesCore(db: Db) {
 
 
   /** 流水说明追加进 fee_note：打样单没有操作历史表，这句话就是唯一的账本 */
-  async function appendFeeNote(id: number, line: string): Promise<void> {
-    const row = await db.get('SELECT fee_note FROM sample_orders WHERE id = ?', [id]) as { fee_note?: string } | null
-    const prev = String(row?.fee_note ?? '').trim()
-    await db.run('UPDATE sample_orders SET fee_note = ?, updated_at = ? WHERE id = ?', [
-      prev ? `${prev}；${line}` : line,
-      now(),
-      id
-    ])
+  function appendFeeNote(id: number, line: string): Promise<void> {
+    return appendSampleFeeNote(db, id, line)
   }
 
   /**

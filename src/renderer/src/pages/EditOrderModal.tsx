@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Modal, useToast, today, money, Button, clientKey } from '../ui'
 import {
   CURRENCIES,
@@ -83,16 +83,12 @@ export default function EditOrderModal({
   })
   const chargesTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
   const [chargeReason, setChargeReason] = useState('')
-  /** 动了让利（负费用行）就要写原因——和订单详情里「只改费用」那条正门同一道闸门 */
-  const negativeSnap = (cs: { label: string; amount: number }[]): string =>
-    cs
-      .filter((c) => Number(c.amount) < 0)
-      .map((c) => `${c.label.trim()}\u0000${Number(c.amount)}`)
-      .sort()
-      .join('\u0001')
-  const negativeTouched =
-    negativeSnap(charges.filter((c) => c.label.trim())) !==
-    negativeSnap((order.charges ?? []).map((c: any) => ({ label: String(c.label ?? ''), amount: Number(c.amount) || 0 })))
+  // 让利要不要写原因只由服务层那一道门判（它看的是库里的原值 + 过滤掉空行之后的新值）。
+  // 界面自己再算一遍会得出第三种基准：同样的改动这儿放行、服务端拦下，
+  // 而原因框当时根本还没出现，用户只看到一个看不懂的报错。
+  // 这里只负责「被拦下时把原因框点亮并指过去」。
+  const [reasonRequired, setReasonRequired] = useState(false)
+  const reasonRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     // 已停用的客户也要能选：改历史单时下拉里必须还有当时那个客户
@@ -144,11 +140,6 @@ export default function EditOrderModal({
       )
       if (!ok) return
     }
-    // 让利的「为什么」不落一句话，半年后只剩应收少了一块，没人答得出是谁答应的
-    if (negativeTouched && !chargeReason.trim()) {
-      toast('这次动了让利（负费用行），请写明原因：这句话会记进订单操作历史。', 'error')
-      return
-    }
     setBusy(true)
     try {
       await window.api.orders.update(order.id, {
@@ -180,7 +171,14 @@ export default function EditOrderModal({
       toast('订单已更新')
       await onSaved()
     } catch (e) {
-      toast((e as Error).message, 'error')
+      const msg = (e as Error).message
+      // 服务端那道「动了让利要写原因」的门拦下来时，把原因框点亮并跳过去：
+      // 用户看到的不该只是一句报错，而是紧接着能填的那一格
+      if (msg.includes('让利') && msg.includes('原因')) {
+        setReasonRequired(true)
+        reasonRef.current?.focus()
+      }
+      toast(msg, 'error')
     } finally {
       setBusy(false)
     }
@@ -524,17 +522,23 @@ export default function EditOrderModal({
       <div className="hint mt-1">
         含费用合计 {money((order.totalAmount ?? 0) + chargesTotal, form.currency)}
       </div>
-      {negativeTouched ? (
-        <div className="field mt-1">
-          <label>让利原因 *</label>
-          <input
-            value={chargeReason}
-            onChange={(e) => setChargeReason(e.target.value)}
-            placeholder="为什么让这一步，如「老客户运费对折」「补上次多收的 20」"
-          />
-          <div className="hint">负费用行会直接改变客户该付的钱，这句原因会记进订单操作历史。</div>
-        </div>
-      ) : null}
+      <div className="field mt-1">
+        <label>让利原因</label>
+        <input
+          ref={reasonRef}
+          value={chargeReason}
+          onChange={(e) => {
+            setChargeReason(e.target.value)
+            if (e.target.value.trim()) setReasonRequired(false)
+          }}
+          placeholder="为什么让这一步，如「老客户运费对折」「补上次多收的 20」"
+        />
+        {reasonRequired ? (
+          <div className="alert error mt-1">这次动了让利（负费用行），必须先写明原因才能保存。</div>
+        ) : (
+          <div className="hint">动了负费用行（让利）时这句原因是必填的，它会记进订单操作历史。</div>
+        )}
+      </div>
 
       <div className="field">
         <label>备注（会原样印在 PI / CI 的 Remarks 上）</label>

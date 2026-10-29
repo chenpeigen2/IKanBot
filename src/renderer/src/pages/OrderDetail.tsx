@@ -1030,25 +1030,11 @@ function ChargesEditor({
   )
   const total = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
   const [reason, setReason] = useState('')
-  // 让利（负费用行）一动，客户该付的钱就变了：原因框先摆出来，别等保存才被拦
-  const negativeTouched = useMemo(() => {
-    const snap = (cs: { label: string; amount: number }[]): string =>
-      cs
-        .filter((c) => Number(c.amount) < 0)
-        .map((c) => `${c.label.trim()}\u0000${Number(c.amount)}`)
-        .sort()
-        .join('\u0001')
-    return (
-      snap(charges) !==
-      snap((order.charges ?? []).map((c: any) => ({ label: String(c.label ?? ''), amount: Number(c.amount) || 0 })))
-    )
-  }, [charges, order.charges])
+  // 让利要不要写原因由服务层那道门判（它比的是库里的原值和清掉空行之后的新值）。
+  // 界面自己再算一遍会得出第三套基准：这儿放行、服务端拦下，而原因框当时还没露出来。
+  const [reasonRequired, setReasonRequired] = useState(false)
 
   const save = async () => {
-    if (negativeTouched && !reason.trim()) {
-      toast('这次动了让利（负费用行），请写明原因：这句话会记进订单操作历史。', 'error')
-      return
-    }
     try {
       await window.api.orders.updateCharges(
         order.id,
@@ -1058,7 +1044,9 @@ function ChargesEditor({
       toast('费用已改，PI / CI 上的合计同步变了')
       await onSaved()
     } catch (e) {
-      toast((e as Error).message, 'error')
+      const msg = (e as Error).message
+      if (msg.includes('让利') && msg.includes('原因')) setReasonRequired(true)
+      toast(msg, 'error')
     }
   }
 
@@ -1144,17 +1132,22 @@ function ChargesEditor({
           保存费用
         </Button>
       </div>
-      {negativeTouched ? (
-        <div className="field mt-2">
-          <label>让利原因 *</label>
-          <input
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-            placeholder="为什么让这一步，如「老客户运费对折」「补上次多收的 20」"
-          />
-          <div className="hint">负费用行会直接改变客户该付的钱，这句原因会记进订单操作历史。</div>
-        </div>
-      ) : null}
+      <div className="field mt-2">
+        <label>让利原因</label>
+        <input
+          value={reason}
+          onChange={(e) => {
+            setReason(e.target.value)
+            if (e.target.value.trim()) setReasonRequired(false)
+          }}
+          placeholder="为什么让这一步，如「老客户运费对折」「补上次多收的 20」"
+        />
+        {reasonRequired ? (
+          <div className="alert error mt-1">这次动了让利（负费用行），必须先写明原因才能保存。</div>
+        ) : (
+          <div className="hint">动了负费用行（让利）时这句原因是必填的，它会记进订单操作历史。</div>
+        )}
+      </div>
     </div>
   )
 }

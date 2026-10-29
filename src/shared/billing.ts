@@ -42,3 +42,24 @@ export function sampleOffsetFromCharges(charges: { label: string; amount: number
     .reduce((s, c) => s + (Number(c.amount) || 0), 0)
   return sum < 0 ? -sum : 0
 }
+
+/**
+ * 一张打样单还没从客户身上收回来的钱——转单时能抵多少、订单上那条抵扣行最多能写多少，
+ * 都只认这一个数。免收的没有可抵的；整笔已按水单收的不再抵第二遍；
+ * 客户预收抵掉的那部分也不是还能再收的现金。
+ *
+ * 转单和改订单费用行是两条独立的路，以前各算各的：转单卡得死，事后在费用行里
+ * 把抵扣改成样品费的三倍照样过，打样单就顶着一个收不回来的巨额「已抵扣」，
+ * 样品欠款榜和对账单跟着一起失真。
+ */
+export function sampleOpenFeeOf(
+  totalFee: number,
+  feeStatus: string,
+  collected: number,
+  creditApplied: number
+): number {
+  if (feeStatus === 'waived') return 0
+  const paidAlready = feeStatus === 'paid' ? Number(totalFee) || 0 : Number(collected) || 0
+  const left = (Number(totalFee) || 0) - paidAlready - (Number(creditApplied) || 0)
+  return left > 0 ? left : 0
+}

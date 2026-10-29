@@ -11,7 +11,7 @@ import { bizError } from '../src/shared/errors'
 import type { Db } from './db'
 import { mapDashboard, mapMonthlyReport } from '../electron/db/mappers'
 import { settingsCore } from './settings'
-import { EXCLUDED_STATUSES, depositDueOf, notInStatuses, moneyCore } from './money'
+import { EXCLUDED_STATUSES, baseAmountOf, depositDueOf, notInStatuses, moneyCore } from './money'
 import { factoryDeliveredQuantity } from './shipping'
 import { ordersCore } from './orders'
 import { isLocalDate, localDate, localDateOf, localMonthOf } from '../src/shared/date'
@@ -68,7 +68,9 @@ export function dashboardCore(db: Db) {
     // 以前 partial 单整笔剩余都算进「尾款」，把还没到期的定金混进尾款里催
     const pendingDeposit = all.reduce(
       (s, r) =>
-        r.paymentStatus === 'confirmed' || r.paymentStatus === 'partial' ? s + depositDueOf(r) * r.exchangeRate : s,
+        r.paymentStatus === 'confirmed' || r.paymentStatus === 'partial'
+          ? s + (baseAmountOf(r.currency, settings.baseCurrency, r.exchangeRate, depositDueOf(r)) ?? 0)
+          : s,
       0
     )
     // 尾款这一桶用减法：以后再加状态，也不会出现「四个桶加起来 ≠ 待收总额」这种尴尬
@@ -79,8 +81,10 @@ export function dashboardCore(db: Db) {
 
     // 本月毛利：本月的单只要有一单成本没录全，毛利就不可信 → null（界面显示「—」）
     const monthMissingCost = monthRows.some((r) => r.missingCostItems > 0)
-    const monthProfitRaw = monthRows.reduce((s, r) => s + (r.profitRaw * r.exchangeRate), 0)
-    const monthProfit = monthMissingCost ? null : monthProfitRaw
+    // 折基准币吃 money.ts 那份 profitBase（本币单不乘汇率、成本没录全是 null），
+    // 这里再乘一次 exchangeRate 就会出现「本币单毛利被 0 吃掉」
+    const monthProfitBase = monthRows.reduce((s, r) => s + (r.profitBase ?? 0), 0)
+    const monthProfit = monthMissingCost ? null : monthProfitBase
 
     // 作废/失效单不进销售与在途（真收到的钱留在现金流里，那份口径在 money.receivedByMonth）
     const sales = notInStatuses('payment_status', EXCLUDED_STATUSES)
@@ -140,7 +144,7 @@ export function dashboardCore(db: Db) {
         month_unconverted: monthUnconverted,
         month_refunded: monthRefunded,
         month_sales: monthRows.reduce((s, r) => s + r.grandTotalBase, 0),
-        month_profit: monthProfitRaw
+        month_profit: monthProfitBase
       }),
       monthProfit,
       monthProfitReliable: !monthMissingCost,
@@ -184,6 +188,13 @@ export function dashboardCore(db: Db) {
     // 「预计到港已过期」里那句船期话（批次号 + 过期天数）先记着：催尾款 / 催全款那张卡顺手带上，
     // 就不用再单独占一行说同一笔钱；没有别的欠款卡在喊的单，ETA 卡自己留在台上
     const etaClauseOf = new Map<string, { clause: string; days: number }>()
+    /**
+     * 「同一张单的欠款卡」归组用的键：优先订单 id，单号只作兜底。
+     * 单号能改（PI 号 / 订单号都允许重写），也可以被手工导库塞成两张单共用；
+     * 拿它当键，两张不同的单会被当成一张——一张的船期话挂到另一张的催款卡上，
+     * 该喊的那张反而被撤掉。
+     */
+    const debtKeyOf = (orderId: number, orderNo: string): string => (orderId > 0 ? `#${orderId}` : orderNo)
 
     /** 两个本地日期相差几天（b − a）；任一侧不是合法本地日期就返回 null */
     const dayDiff = (a: string, b: string): number | null => {
@@ -311,6 +322,9 @@ export function dashboardCore(db: Db) {
     const loaded = (b: Record<string, unknown>): boolean => Number(b.line_count ?? 0) > 0
     const notGoneStatus = (b: Record<string, unknown>): boolean =>
       b.ship_status != null && !['shipped', 'cleared', 'delivered'].includes(String(b.ship_status))
+    /** 这批货是不是已经开走了（含签收）：整单的交期提醒要拿它当「别再多喊」的依据 */
+    const batchGone = (b: Record<string, unknown>): boolean =>
+      ['shipped', 'cleared', 'delivered'].includes(String(b.ship_status ?? ''))
 
     const batchesOf = new Map<number, Record<string, unknown>[]>()
     for (const b of batchRows) {
@@ -383,6 +397,10 @@ export function dashboardCore(db: Db) {
       const batches = batchesOf.get(orderId) ?? []
       const open = batches.filter((b) => loaded(b) && notGoneStatus(b) && String(b.etd_date ?? '').trim() !== '')
       const undated = batches.filter((b) => loaded(b) && notGoneStatus(b) && String(b.etd_date ?? '').trim() === '')
+      // 整单/截关这两类交期只盯「货还没上船」的单：已经开走一批或整单已出运，
+      // 「还没有批次标出运」就成了假话——提醒里喊的是一件根本没发生的事
+      const orderGone = ['shipped', 'cleared', 'delivered'].includes(String(r.ship_status))
+      const anyBatchGone = batches.some((b) => loaded(b) && batchGone(b))
 
       // 整单 ETD：没有带日期的批次时才用它盯，别跟单上的船期脱节
       const etdRaw = String(r.etd_date ?? '').trim()
@@ -400,7 +418,7 @@ export function dashboardCore(db: Db) {
             },
             'bad-order-etd'
           )
-        } else if (diff <= s.remindShipDays) {
+        } else if (diff <= s.remindShipDays && !orderGone && !anyBatchGone) {
           add(
             {
               orderId,
@@ -420,7 +438,6 @@ export function dashboardCore(db: Db) {
       if (cutoffRaw) {
         const diff = daysTo(cutoffRaw)
         const openAny = batches.some((b) => loaded(b) && notGoneStatus(b))
-        const gone = ['shipped', 'cleared', 'delivered'].includes(String(r.ship_status))
         if (diff === null) {
           add(
             {
@@ -433,7 +450,7 @@ export function dashboardCore(db: Db) {
             },
             'bad-cutoff'
           )
-        } else if (openAny && !gone && diff <= s.remindShipDays) {
+        } else if (openAny && !orderGone && diff <= s.remindShipDays) {
           add(
             {
               orderId,
@@ -452,7 +469,6 @@ export function dashboardCore(db: Db) {
       const factoryRaw = String(r.factory_due_date ?? '').trim()
       if (factoryRaw) {
         const diff = daysTo(factoryRaw)
-        const gone = ['shipped', 'cleared', 'delivered'].includes(String(r.ship_status))
         if (diff === null) {
           add(
             {
@@ -465,7 +481,7 @@ export function dashboardCore(db: Db) {
             },
             'bad-factory'
           )
-        } else if (!gone && diff <= s.remindShipDays) {
+        } else if (!orderGone && diff <= s.remindShipDays) {
           // 天数没过线、货已经走了就不必算件数：两条聚合查询留给真要催的那几张单
           const ordered = Number(
             (await db.get('SELECT COALESCE(SUM(quantity),0) AS q FROM order_items WHERE order_id = ? AND quantity > 0', [
@@ -560,7 +576,7 @@ export function dashboardCore(db: Db) {
       // 这条其实是备胎：同单已经有催定金 / 催尾款 / 催全款在喊同一笔钱时，船期那句折进那张卡，本条撤掉
       // （见函数末尾的「同一笔欠款只喊一遍」）；船期话先记进 etaClauseOf，供后面的卡带上
       const etaMissed = batches
-        .filter((b) => ['shipped', 'cleared'].includes(String(b.ship_status ?? '')))
+        .filter((b) => batchGone(b))
         .map((b) => ({ b, diff: daysTo(b.eta_date) }))
         .filter((x): x is { b: (typeof batches)[number]; diff: number } => x.diff !== null && x.diff <= 0 && -x.diff >= s.remindBalanceDays)
       if (etaMissed.length > 0) {
@@ -572,7 +588,7 @@ export function dashboardCore(db: Db) {
             return nos.slice(0, cap).join('、') + (nos.length > cap ? ` 等 ${nos.length} 批` : '')
           }
           const shipClause = `批次 ${listed()} 预计到港已过期（最久 ${-oldest} 天）`
-          etaClauseOf.set(String(r.order_no), { clause: shipClause, days: oldest })
+          etaClauseOf.set(debtKeyOf(orderId, String(r.order_no)), { clause: shipClause, days: oldest })
           add(
             {
               orderId,
@@ -840,15 +856,20 @@ export function dashboardCore(db: Db) {
 
     /* 7. 待修类：外币单汇率看着不像真的 */
     for (const r of moneyRows) {
-      // 外币单汇率正好等于 1 = 当初建单时没人填，被兜底成了 1:1（不阻断建单，但必须亮出来）
-      if (r.currency === s.baseCurrency || r.exchangeRate !== 1) continue
+      if (r.currency === s.baseCurrency) continue
+      // 没填过汇率有两种长相：被兜底成 1:1 的（不阻断建单，认 1 折）和压根没值的
+      // （0 或空，折不成基准币 = 这笔钱在销售额、待收、毛利里凭空消失）
+      const unfilled = r.rateMissing
+      if (!unfilled && r.exchangeRate !== 1) continue
       add(
         {
           orderId: r.orderId,
           orderNo: r.orderNo,
           customerName: r.customerName,
           kind: 'data',
-          message: `${r.currency} 的单按 1:${s.baseCurrency} 折算，汇率看着没填过——待收、销售额、毛利都被它带偏，请补真实汇率`,
+          message: unfilled
+            ? `${r.currency} 的单没填汇率，折不成 ${s.baseCurrency}——这笔的待收、销售额、毛利在月报里等于没记账，请补真实汇率`
+            : `${r.currency} 的单按 1:${s.baseCurrency} 折算，汇率看着没填过——待收、销售额、毛利都被它带偏，请补真实汇率`,
           days: 0
         },
         'rate'
@@ -922,12 +943,13 @@ export function dashboardCore(db: Db) {
     for (const r of out) {
       const loud = loudnessOf(r)
       if (loud < 0) continue
-      if (tagOf(r) === 'unpaid-shipped') fullyUnpaid.add(r.orderNo)
-      const cur = mainDebtOf.get(r.orderNo)
-      if (!cur || loudnessOf(cur) > loud) mainDebtOf.set(r.orderNo, r)
+      const key = debtKeyOf(r.orderId, r.orderNo)
+      if (tagOf(r) === 'unpaid-shipped') fullyUnpaid.add(key)
+      const cur = mainDebtOf.get(key)
+      if (!cur || loudnessOf(cur) > loud) mainDebtOf.set(key, r)
     }
-    for (const [orderNo, eta] of etaClauseOf) {
-      const main = mainDebtOf.get(orderNo)
+    for (const [key, eta] of etaClauseOf) {
+      const main = mainDebtOf.get(key)
       if (!main) continue
       main.message += `；${eta.clause}`
       // 到港都过了的，这张卡该待在逾期区，不能被「出运 30 天」这种正数天数挤到后面去
@@ -936,7 +958,8 @@ export function dashboardCore(db: Db) {
     for (let i = out.length - 1; i >= 0; i--) {
       const r = out[i]
       const tag = tagOf(r)
-      if ((tag === 'eta' && mainDebtOf.has(r.orderNo)) || (tag === 'deposit' && fullyUnpaid.has(r.orderNo))) out.splice(i, 1)
+      const key = debtKeyOf(r.orderId, r.orderNo)
+      if ((tag === 'eta' && mainDebtOf.has(key)) || (tag === 'deposit' && fullyUnpaid.has(key))) out.splice(i, 1)
     }
 
     // 逾期最前（越久越靠前）→ 按还剩几天升序 → 「待修」垫底：
@@ -986,17 +1009,21 @@ export function dashboardCore(db: Db) {
       missingCostOrders: 0
     })
     const byMonth = new Map<string, MonthAcc>()
+    const baseCurrency = (await settingsCore(db).get()).baseCurrency
     for (const r of await money.listOrderMoney()) {
       const cur = byMonth.get(r.month) ?? empty(r.month)
-      const rate = r.exchangeRate
+      // 折基准币只认 baseAmountOf：本币单不乘汇率（老数据那列是 0，乘完毛利/折让就凭空蒸发），
+      // 外币单没填汇率折不出 → 按 0 计，由「汇率待修」提醒去追人补
+      const inBase = (amount: number): number =>
+        baseAmountOf(r.currency, baseCurrency, r.exchangeRate, amount) ?? 0
       cur.orders += 1
       cur.sales += r.grandTotalBase
       cur.cost += r.costBase
-      cur.profit += r.profitBase
+      cur.profit += r.profitBase ?? 0
       // negativeCharges 本身是负数，报表里折让按「让出去多少」写正数
-      cur.discount += -r.negativeCharges * rate
-      cur.shortage += r.shortageAmount * rate
-      cur.badDebt += r.badDebtOutstanding * rate
+      cur.discount += -inBase(r.negativeCharges)
+      cur.shortage += inBase(r.shortageAmount)
+      cur.badDebt += inBase(r.badDebtOutstanding)
       if (r.missingCostItems > 0) cur.missingCostOrders += 1
       byMonth.set(r.month, cur)
     }
@@ -1474,11 +1501,16 @@ export function dashboardCore(db: Db) {
           ? '预收已抵清'
           : SAMPLE_FEE_STATUS_LABEL[s.feeStatus as keyof typeof SAMPLE_FEE_STATUS_LABEL] ?? s.feeStatus
       const notes: string[] = []
+      // 「钱留在客户账上」这件事，取消/免单两支行各自已经说清楚了：
+      // 纸面上同一笔钱不能既写「计入预收结余」又写「实收比单据多」
+      const prepaidTold = s.status === 'cancelled' || s.feeStatus === 'waived'
       if (s.status === 'cancelled') {
         notes.push(`已取消，实收 ${money2(s.recovered)} 留在账上`)
         if (s.recovered > 0.001) notes.push('这笔实收已计入客户预收结余')
-      } else if (s.feeStatus === 'waived') notes.push('客户免单，未收 0')
-      else if (s.feeStatus === 'offset') {
+      } else if (s.feeStatus === 'waived') {
+        notes.push('客户免单，未收 0')
+        if (s.prepaid > 0.001) notes.push(`已收的 ${money2(s.prepaid)} 留在贵司账上，可抵下一张单`)
+      } else if (s.feeStatus === 'offset') {
         // 抵扣挂起（转出订单草稿/失效/作废）时未收是全额，不能再说「账上已收回」——
         // 对账单发给客户，纸面必须和工作台、打样页说同一套话
         if (s.offsetSuspended)
@@ -1487,13 +1519,15 @@ export function dashboardCore(db: Db) {
           )
         else notes.push(`已抵扣入订单${s.convertedOrderNo ? ` ${s.convertedOrderNo}` : ''}（不是现金，但账上已收回）`)
       }
-      if (s.feeStatus === 'unpaid' && s.recovered > 0.001) notes.push(`已收 ${money2(s.recovered)}`)
+      // 已取消的单上面那句「实收 XX 留在账上」已经说过这笔钱了，这里不再叠一遍
+      if (s.feeStatus === 'unpaid' && s.recovered > 0.001 && s.status !== 'cancelled')
+        notes.push(`已收 ${money2(s.recovered)}`)
       // 升级前手工勾的「已收」没有单独的水单。钱照认，但对账单是发给客户的，
       // 不能印「历史记账/无银行流水」这种内部话术，说成「早前已确认」就好。
       if (s.legacyPaidNoFlow) notes.push(`其中 ${money2(s.recovered)} 为早前已确认的打样费，未单独列水单`)
       if (s.creditApplied > 0.001) notes.push(`其中预收抵扣 ${money2(s.creditApplied)}（非现金，从客户预收余额冲减）`)
       if (s.open > 0.001 && rate <= 0) notes.push('汇率未填，未折算')
-      if (s.prepaid > 0.001) notes.push(`实收比单据多 ${money2(s.prepaid)}（预收结余）`)
+      if (s.prepaid > 0.001 && !prepaidTold) notes.push(`实收比单据多 ${money2(s.prepaid)}（预收结余）`)
       docs.push({
         ...blank,
         kind: '打样单',
