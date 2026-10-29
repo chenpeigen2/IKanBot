@@ -53,6 +53,9 @@ export async function customerStats(customerId: number): Promise<CustomerStats> 
   // 坏账不进待收，但客户页要能看见这家客户赖过多少钱
   const badDebt = rows.reduce((s, r) => s + r.badDebtBase, 0)
   const missingCostOrders = rows.filter((r) => r.missingCostItems > 0).length
+  // 外币没填汇率的单：成交额/待收/毛利都按 0 折，上面的合计是「少算了这几单」的数。
+  // 不亮出来，老板会拿着一个偏小的成交额去对账
+  const rateMissingOrders = rows.filter((r) => r.rateMissing).length
   const totalProfitRaw = rows.reduce((s, r) => s + (r.profitBase ?? 0), 0)
   // 下面的历史列表会把草稿/失效/作废也列出来，成交额却不含它们；
   // 不写明条数，老板会以为系统漏单（N-口径一致）
@@ -66,14 +69,16 @@ export async function customerStats(customerId: number): Promise<CustomerStats> 
     order_count: rows.length,
     excluded_order_count: excluded.length,
     total_amount: totalAmount,
-    // 有成本没录全的订单 → 毛利不可信（null），不许拿 0 成本凑一个漂亮的数
-    total_profit: missingCostOrders > 0 ? null : totalProfitRaw,
+    // 有成本没录全的订单 → 毛利不可信（null），不许拿 0 成本凑一个漂亮的数；
+    // 缺汇率的单同理：那一单的毛利根本没折进合计，算出来的也不是真毛利
+    total_profit: missingCostOrders > 0 || rateMissingOrders > 0 ? null : totalProfitRaw,
     outstanding,
     outstanding_orders: outstandingOrders,
     outstanding_samples: outstandingSamples,
     sample_count: sampleCount,
     bad_debt: badDebt,
-    missing_cost_orders: missingCostOrders
+    missing_cost_orders: missingCostOrders,
+    rate_missing_orders: rateMissingOrders
   })
 }
 

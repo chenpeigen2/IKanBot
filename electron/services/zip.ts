@@ -57,6 +57,15 @@ export function createZip(entries: ZipEntry[]): Buffer {
     const body = useDeflate ? compressed : entry.data
     const method = useDeflate ? 8 : 0
 
+    // ZIP32 的体积/偏移都是 32 位无符号字段：越过 4GB 后 writeUInt32LE 会静默截断，
+    // 生成一个自己都读不回来的包。宁可在写到这里时停下来把话说清
+    if (offset + 30 + nameBuf.length + body.length > 0xffffffff || entry.data.length > 0xffffffff) {
+      throw new Error(
+        `备份内容超过单个备份包 4GB 的上限（写到「${entry.name}」时越线），备份没有生成。` +
+          `图片和单据存档都是重要凭据，请不要删除；请清理重复/废弃的附件，或联系技术支持做分卷备份。`
+      )
+    }
+
     const local = Buffer.alloc(30)
     local.writeUInt32LE(0x04034b50, 0)
     local.writeUInt16LE(20, 4) // version needed

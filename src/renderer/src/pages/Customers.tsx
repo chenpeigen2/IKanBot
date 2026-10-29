@@ -784,14 +784,24 @@ export default function Customers() {
             <div className="stat">
               <div className="stat-label">累计成交额</div>
               <div className="stat-value small">{money(detail.stats.totalAmount, detail.base)}</div>
+              {detail.stats.rateMissingOrders > 0 ? (
+                <div className="stat-hint">
+                  有 {detail.stats.rateMissingOrders} 单外币没填汇率，成交额/未收/毛利都没折进去
+                </div>
+              ) : null}
             </div>
             <div className="stat">
               <div className="stat-label">累计毛利</div>
               <div className="stat-value small">
-                {detail.stats.missingCostOrders ? '—' : money(detail.stats.totalProfit, detail.base)}
+                {detail.stats.missingCostOrders || detail.stats.rateMissingOrders
+                  ? '—'
+                  : money(detail.stats.totalProfit, detail.base)}
               </div>
               {detail.stats.missingCostOrders ? (
                 <div className="stat-hint">有 {detail.stats.missingCostOrders} 单成本没录全</div>
+              ) : null}
+              {detail.stats.rateMissingOrders ? (
+                <div className="stat-hint">有 {detail.stats.rateMissingOrders} 单汇率没填</div>
               ) : null}
             </div>
             {/* R4-S1：未收金额 = 钱还没到手，和工作台「待收款金额」同色（橙） */}

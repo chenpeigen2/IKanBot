@@ -302,13 +302,18 @@ export default function Settings() {
   const removeBank = (uid: string) => setS({ ...s, banks: s.banks.filter((b: any) => b.uid !== uid) })
 
   const importLogo = async () => {
-    const name = await window.api.images.importLogo()
-    if (!name) return
-    // 上一次导的那张被这张顶掉了：它从没进过库，当场清掉，别攒着
-    dropLogoDrafts(logoDrafts.current)
-    logoDrafts.current = [name]
-    setCompany('logoFile', name)
-    toast('Logo 已导入，记得保存设置')
+    try {
+      const name = await window.api.images.importLogo()
+      if (!name) return
+      // 上一次导的那张被这张顶掉了：它从没进过库，当场清掉，别攒着
+      dropLogoDrafts(logoDrafts.current)
+      logoDrafts.current = [name]
+      setCompany('logoFile', name)
+      toast('Logo 已导入，记得保存设置')
+    } catch (e) {
+      // 选图/复制失败得让人知道：以前这里静默吞掉，点了没反应像按钮坏了
+      toast(`Logo 没导进来：${(e as Error).message}`, 'error')
+    }
   }
 
   const runBackup = async () => {

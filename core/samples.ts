@@ -17,7 +17,7 @@ import { settingsCore } from './settings'
 import { ordersCore } from './orders'
 import { creditsCore } from './credits'
 import { appendSampleFeeNote } from './sample-note'
-import { moneyCore, costInOrderCurrency } from './money'
+import { baseRateOf, moneyCore, costInOrderCurrency } from './money'
 import { mapCustomer, mapPayment } from '../electron/db/mappers'
 import { likeAny } from '../electron/services/search'
 import { assertLocalDate, localDate } from '../src/shared/date'
@@ -157,7 +157,10 @@ export function samplesCore(db: Db) {
     ).map(mapSampleItem)
     const sampleFee = items.reduce((sum, i) => sum + i.quantity * i.unitPrice, 0)
     const totalFee = sampleFee + Number(s.expressFee ?? 0)
-    const rate = Number(s.exchangeRate ?? 0)
+    // 折算率与订单台账同一份口径（baseRateOf）：本币单恒为 1，库里存着的历史汇率不参与；
+    // 外币没填汇率则为 0 → rateMissing 亮出来，绝不拿 1 凑一个折得出来的数
+    const baseCurrency = (await settingsCore(db).get()).baseCurrency
+    const rate = baseRateOf(s.currency, baseCurrency, Number(s.exchangeRate ?? 0))
     const hasRate = rate > 0
     // 实收流水（R25）：打样费的钱也要有凭据。抵扣不落流水，所以这里只有真金白银。
     const paidRow = await db.get(
@@ -363,7 +366,14 @@ export function samplesCore(db: Db) {
       )
     }
     const feeStatus = rawFeeStatus as SampleFeeStatus
-    const exchangeRate = keepNum('exchangeRate', 'exchange_rate')
+    const currency = (before ? keepText('currency', 'currency') : String(input.currency ?? '')) || 'USD'
+    const baseCurrency = (await settingsCore(db).get()).baseCurrency
+    // 本币单没有汇率可折：统一落 1。库里可能还存着切基准币之前的外币汇率（比如 7.15），
+    // 读路径已经按 baseRateOf 折成 1，写回旧值只会让台账的「汇率」列和金额自相矛盾
+    const exchangeRate = currency === baseCurrency ? 1 : keepNum('exchangeRate', 'exchange_rate')
+    const beforeRate = before
+      ? baseRateOf(String(before.currency ?? ''), baseCurrency, Number(before.exchange_rate ?? 0))
+      : 0
     // 快递费是公司垫付、向客户收回的钱：负数会把净垫与应收一起算反，
     // 乱码会整列变成 NaN；服务层拦（IPC 任何调用方都能打）
     assertOptionalMoney(expressFee, '快递费')
@@ -373,7 +383,8 @@ export function samplesCore(db: Db) {
         `汇率「${String(keep('exchangeRate', 'exchange_rate'))}」不是有效汇率：请填大于 0 的数字（还没定就先留空）`
       )
     }
-    // N23：未收的打样费要进工作台待收款，折算必须有汇率——没有就不许存（跟订单一个规矩）
+    // N23：未收的打样费要进工作台待收款，折算必须有汇率——没有就不许存（跟订单一个规矩）。
+    // 本币单不用填：它按 1 折，上面已经归一
     if (feeStatus === 'unpaid' && sampleFee + expressFee > 0 && exchangeRate <= 0) {
       throw bizError('这张打样单还有应收没结（样品费+快递费），请先按今天钉盘的汇率填上汇率')
     }
@@ -390,7 +401,7 @@ export function samplesCore(db: Db) {
       const moneyChanged =
         Math.abs(storedFee - sampleFee) > 0.001 ||
         Math.abs(expressFee - Number(before.express_fee ?? 0)) > 0.001 ||
-        Math.abs(exchangeRate - Number(before.exchange_rate ?? 0)) > 0.001 ||
+        Math.abs(exchangeRate - beforeRate) > 0.001 ||
         (input.currency !== undefined && input.currency !== String(before.currency)) ||
         (input.exchangeRateDate !== undefined &&
           input.exchangeRateDate !== String(before.exchange_rate_date ?? ''))
@@ -464,7 +475,7 @@ export function samplesCore(db: Db) {
       const moneyChanged =
         Math.abs(storedFee - sampleFee) > 0.001 ||
         Math.abs(expressFee - Number(before.express_fee ?? 0)) > 0.001 ||
-        Math.abs(exchangeRate - Number(before.exchange_rate ?? 0)) > 0.001 ||
+        Math.abs(exchangeRate - beforeRate) > 0.001 ||
         (input.currency !== undefined && input.currency !== String(before.currency))
       if (moneyChanged) {
         throw bizError(
@@ -516,7 +527,7 @@ export function samplesCore(db: Db) {
         const moneyChanged =
           Math.abs(storedFee - sampleFee) > 0.001 ||
           Math.abs(expressFee - Number(before.express_fee ?? 0)) > 0.001 ||
-          Math.abs(exchangeRate - Number(before.exchange_rate ?? 0)) > 0.001 ||
+          Math.abs(exchangeRate - beforeRate) > 0.001 ||
           (input.currency !== undefined && input.currency !== String(before.currency)) ||
           (input.exchangeRateDate !== undefined &&
             input.exchangeRateDate !== String(before.exchange_rate_date ?? ''))
@@ -566,7 +577,7 @@ export function samplesCore(db: Db) {
         ['factory_cost', factoryCost],
         ['fee_status', feeStatus],
         ['fee_note', keepText('feeNote', 'fee_note')],
-        ['currency', keepText('currency', 'currency') || 'USD'],
+        ['currency', currency],
         ['exchange_rate', exchangeRate],
         ['exchange_rate_date', keepText('exchangeRateDate', 'exchange_rate_date')]
       ]
@@ -603,7 +614,7 @@ export function samplesCore(db: Db) {
           factoryCost,
           feeStatus,
           input.feeNote ?? '',
-          input.currency ?? 'USD',
+          currency,
           exchangeRate,
           input.exchangeRateDate ?? '',
           ts,
@@ -658,9 +669,8 @@ export function samplesCore(db: Db) {
     return (await getSample(id))!
   }
 
-  async function deleteSample(id: number): Promise<void> {
-    const s = await getSample(id)
-    if (!s) return
+  /** 能删的只有「没有凭据、也没有应收」的空档；拦下来时把出口说清楚 */
+  async function assertSampleDeletable(s: SampleOrderDetail): Promise<void> {
     if (s.convertedOrderId) {
       const o = await ordersOf().getOrder(s.convertedOrderId)
       // 活着的订单还靠这张打样单作原始凭据；订单已作废，留档订单本身就能追溯，同意删
@@ -671,7 +681,7 @@ export function samplesCore(db: Db) {
       }
     }
     // 预收抵扣记在这张单上：删单会让这笔余额「用到哪儿去了」失去凭据
-    if (await creditsOf().hasActiveCredit('sample', id)) {
+    if (await creditsOf().hasActiveCredit('sample', s.id)) {
       throw bizError(
         `这张打样单上还有未撤销的客户预收抵扣，不能删：删了这笔余额用到哪儿就查不到了。请先在客户页撤销抵扣，再删单。`
       )
@@ -690,7 +700,37 @@ export function samplesCore(db: Db) {
         `这张打样单还有 ${s.totalFee.toFixed(2)} ${s.currency} 没收回（样品费+快递费）。真要销掉，请先把状态改成「已取消」并写明原因——应收会跟着归零、为什么取消也留在档案里；之后再删。`
       )
     }
-    await db.run('DELETE FROM sample_orders WHERE id = ?', [id])
+  }
+
+  async function deleteSample(id: number): Promise<void> {
+    const before = await getSample(id)
+    if (!before) return
+    await assertSampleDeletable(before)
+    // 上面答完「为什么不能删」，真正删的时候还得再确认一次——中间这一小段里
+    // 可能刚登记了一笔收款、刚转出订单。闸门和删除写进同一条语句，新凭据才不会跟着单一起没
+    const res = await db.run(
+      `DELETE FROM sample_orders
+        WHERE id = ?
+          AND NOT EXISTS (SELECT 1 FROM orders o
+                          WHERE o.id = sample_orders.converted_order_id AND o.payment_status != 'void')
+          AND NOT EXISTS (SELECT 1 FROM credit_applications ca
+                          WHERE ca.target_kind = 'sample' AND ca.target_id = sample_orders.id
+                            AND ca.reversed_at IS NULL)
+          AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.sample_order_id = sample_orders.id)
+          AND NOT (fee_status = 'unpaid' AND status != 'cancelled'
+                   AND COALESCE((SELECT SUM(quantity * unit_price) FROM sample_order_items
+                                  WHERE sample_order_id = sample_orders.id), 0)
+                       + COALESCE(express_fee, 0) > 0.001)`,
+      [id]
+    )
+    if (res.changes === 1) return
+    // 已经被人删掉了：结果一样，不报错
+    const again = await getSample(id)
+    if (!again) return
+    await assertSampleDeletable(again)
+    throw bizError(
+      '这张打样单上刚刚落了新的记录（可能是收款流水或转单），这次删除没有执行。请刷新页面看一眼，再决定要不要取消。'
+    )
   }
 
   /**
@@ -954,7 +994,8 @@ export function samplesCore(db: Db) {
       )
     }
     const { paidAt, amount } = ordersOf().assertPaymentInput(p)
-    const rate = Number(s.exchangeRate)
+    // 本币单按 1 折（库里存着旧汇率也不算数），外币没填汇率才拦下来
+    const rate = baseRateOf(s.currency, (await settingsCore(db).get()).baseCurrency, Number(s.exchangeRate))
     if (!(rate > 0)) {
       throw bizError('这张打样单没有汇率：收款要折进月报，请先编辑打样单填上汇率再登记收款。')
     }

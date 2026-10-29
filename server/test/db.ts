@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SqliteDb } from '../src/db/sqlite'
@@ -23,14 +24,58 @@ async function main(): Promise<void> {
   const db = new SqliteDb(file)
 
   let passed = 0
-  const check = (name: string, cond: boolean): void => {
-    console.log(`${cond ? '  ✓' : '  ✗'} ${name}`)
+  const check = (name: string, cond: boolean, detail = ''): void => {
+    console.log(`${cond ? '  ✓' : '  ✗'} ${name}${!cond && detail ? `：${detail}` : ''}`)
     if (!cond) throw new Error(`断言失败：${name}`)
     passed++
   }
 
   try {
     check('残留的锁目录不挡启动', !existsSync(`${file}.lock`))
+
+    console.log('锁的主人')
+    // 锁被握着的时候锁目录也是空的，只靠「空」分不清真在用还是没退干净：
+    // 主人还活着就必须拒绝，否则两个进程同时写会把账写坏
+    const live = join(dir, 'live.db')
+    mkdirSync(`${live}.lock`)
+    writeFileSync(`${live}.lock.owner`, `${process.pid}\n`, 'utf8')
+    let liveErr = ''
+    try {
+      new SqliteDb(live)
+    } catch (e) {
+      liveErr = (e as Error).message
+    }
+    check(
+      '主人还活着就拒绝打开，并点名是哪个进程',
+      liveErr.includes('正被另一个') && liveErr.includes(String(process.pid)),
+      liveErr
+    )
+    check(
+      '拒绝的时候没有把人家正在用的锁挪走',
+      existsSync(`${live}.lock`) && existsSync(`${live}.lock.owner`)
+    )
+    rmSync(`${live}.lock`, { recursive: true, force: true })
+    rmSync(`${live}.lock.owner`, { force: true })
+
+    // 真死掉一个进程，拿它的 pid 当「上次没退干净」的证据，别让测试里的假 pid 撞上活进程
+    const deadPid = await new Promise<number>((res, rej) => {
+      const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' })
+      child.on('exit', () => res(child.pid ?? 0))
+      child.on('error', rej)
+    })
+    const dead = join(dir, 'dead.db')
+    mkdirSync(`${dead}.lock`)
+    writeFileSync(`${dead}.lock.owner`, `${deadPid}\n`, 'utf8')
+    const deadDb = new SqliteDb(dead)
+    await deadDb.exec('CREATE TABLE IF NOT EXISTS lock_probe (x INTEGER)')
+    const probe = await deadDb.all(`SELECT name FROM sqlite_master WHERE name = 'lock_probe'`)
+    check('主人已经退出的残留锁不挡启动，照常能写', probe.length === 1)
+    check(
+      '旧锁改名留案底，不直接抹掉',
+      readdirSync(dir).some((n) => n.startsWith('dead.db.lock.stale-'))
+    )
+    await deadDb.close()
+    check('正常关闭连旁注一起收走', !existsSync(`${dead}.lock.owner`))
 
     console.log('配置')
     const def = loadConfig({})
