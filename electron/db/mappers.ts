@@ -318,7 +318,9 @@ export function mapCustomerStats(r: Row): CustomerStats {
     sampleCount: num(r.sample_count),
     badDebt: num(r.bad_debt),
     missingCostOrders: num(r.missing_cost_orders),
-    rateMissingOrders: num(r.rate_missing_orders)
+    rateMissingOrders: num(r.rate_missing_orders),
+    rateMissingSamples: num(r.rate_missing_samples),
+    badDebtRateMissingOrders: num(r.bad_debt_rate_missing_orders)
   }
 }
 

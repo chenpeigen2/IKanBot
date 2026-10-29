@@ -31,8 +31,10 @@ import {
   remoteExportCsv,
   remoteImageBase,
   remoteUploadImage,
+  isRemoteChannel,
   REMOTE_ROUTES
 } from '../electron/remote/client'
+import { handle, isLocalOnlyChannel, registeredChannels } from '../electron/ipc/handle'
 
 const root = mkdtempSync(join(tmpdir(), 'ikan-mode-'))
 process.env['IKAN_DATA_DIR'] = join(root, 'data')
@@ -280,8 +282,8 @@ async function main(): Promise<void> {
 
     const state = await ipc('mode:get')
     check(
-      `覆盖率口径：87 / 119（实得 ${(state as any).data?.covered} / ${(state as any).data?.total}）`,
-      state.ok && (state as any).data.covered === 87 && (state as any).data.total === 119
+      `覆盖率口径：90 / 119（实得 ${(state as any).data?.covered} / ${(state as any).data?.total}）`,
+      state.ok && (state as any).data.covered === 90 && (state as any).data.total === 119
     )
     const probe = await ipc('mode:test')
     check('设置页的「测试连接」走真后端', probe.ok && (probe as any).data.ok === true)
@@ -530,15 +532,40 @@ async function main(): Promise<void> {
     const tpl = await ipc('products:csvTemplate')
     check('远端模式下 CSV 模板仍走本机（不白跑一趟网络）', tpl.ok && String((tpl as any).data).includes('款号'))
 
-    const unMigrated = await ipc('customers:stylePriceHistory', {})
+    // 客户页的三个数也搬完了：远端模式读的是后端那一份，不再当场报「还没搬」
+    const remoteHist = (await ipc('customers:stylePriceHistory', { customerId: remoteId })) as any
     check(
-      '没搬的通道当场报错（含去哪切回本机）',
-      !unMigrated.ok &&
-        (unMigrated as any).error.includes('还没搬到后端') &&
-        (unMigrated as any).error.includes('设置 · 数据来源')
+      '远端模式：历史价问的是后端（只认后端刚建的 REMOTE-1）',
+      remoteHist.ok && remoteHist.data.length === 1 && remoteHist.data[0].styleNo === 'REMOTE-1'
     )
-    const statsUnMigrated = await ipc('customers:stats', remoteId)
-    check('客户统计也还没搬（同一条错误路，不静默读本机）', !statsUnMigrated.ok && (statsUnMigrated as any).error.includes('还没搬到后端'))
+    const remoteStats = (await ipc('customers:stats', remoteId)) as any
+    check('远端模式：客户统计数的是后端那份（刚建 1 张单）', remoteStats.ok && remoteStats.data.orderCount === 1)
+    const remoteBriefs = (await ipc('customers:orders', remoteId)) as any
+    check(
+      '远端模式：历史订单也来自后端',
+      remoteBriefs.ok && remoteBriefs.data.length === 1 && remoteBriefs.data[0].orderNo === (ord as any).data.orderNo
+    )
+    const remoteStatsMissing = (await ipc('customers:stats', 999999)) as any
+    check(
+      '远端模式：客户不存在时后端那句原话透回界面',
+      !remoteStatsMissing.ok && String(remoteStatsMissing.error).includes('客户不存在')
+    )
+
+    // 业务通道全搬完了：只剩本机基建没登记后端路由。以后新加一条忘了登记，
+    // 这里先把它揪出来——那种通道在远端模式下会当场报错，不会悄悄读本机。
+    const stranded = registeredChannels().filter((c) => !isLocalOnlyChannel(c) && !isRemoteChannel(c))
+    check('业务通道全都有后端落点（没搬的只剩本机基建）', stranded.length === 0, stranded.join('、'))
+
+    // 安全网本身也要验一遍：真出现没登记的通道，必须当场报错并说清去哪切回
+    handle('zz:unmigrated-probe', () => 'local')
+    const unMigrated = (await ipc('zz:unmigrated-probe')) as any
+    check(
+      '没登记的通道当场报错（含去哪切回本机）',
+      !unMigrated.ok &&
+        String(unMigrated.error).includes('还没搬到后端') &&
+        String(unMigrated.error).includes('设置 · 数据来源'),
+      JSON.stringify(unMigrated)
+    )
 
     const paths = await ipc('app:paths')
     check('本机独有通道在远端模式下照常可用', paths.ok && typeof (paths as any).data.db === 'string')

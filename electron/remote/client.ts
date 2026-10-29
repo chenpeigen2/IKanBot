@@ -22,6 +22,10 @@ export const REMOTE_ROUTES: Record<string, RouteSpec> = {
   'customers:delete': { path: '/api/customers/delete', args: ['id'] },
   'customers:setActive': { path: '/api/customers/setActive', args: ['id', 'active'] },
   'customers:sameName': { path: '/api/customers/sameName', args: ['company', 'selfId'] },
+  // 客户页的三个数：以前留在了桌面薄壳里，远端模式只能读本机那份空库（R53）
+  'customers:stats': { path: '/api/customers/stats', args: ['id'] },
+  'customers:orders': { path: '/api/customers/orders', args: ['id'] },
+  'customers:stylePriceHistory': { path: '/api/customers/stylePriceHistory', args: ['filter'] },
   'products:list': { path: '/api/products/list', args: ['keyword', 'includeInactive'] },
   'products:get': { path: '/api/products/get', args: ['id'] },
   'products:save': { path: '/api/products/save', args: ['input'] },

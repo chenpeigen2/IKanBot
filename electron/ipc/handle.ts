@@ -26,6 +26,11 @@ const LOCAL_ONLY = [
  */
 const LOCAL_ONLY_CHANNELS = new Set(['products:csvTemplate'])
 
+/** 这个通道是不是「天生只在本机」——测试用它盯着「业务接口有没有漏登记后端路由」 */
+export function isLocalOnlyChannel(channel: string): boolean {
+  return LOCAL_ONLY_CHANNELS.has(channel) || LOCAL_ONLY.some((p) => channel.startsWith(p))
+}
+
 /** 注册过的通道名：设置页要报「已搬到后端几个」，不能靠手抄的数字 */
 const registered = new Set<string>()
 
@@ -69,15 +74,11 @@ export function handle<T>(channel: string, fn: (...args: any[]) => T | Promise<T
             '这会儿写进去的记录会被恢复覆盖掉——界面报了「保存成功」，重启以后却找不到，比直接失败更坑。'
         )
       }
-      if (
-        isRemoteMode() &&
-        !LOCAL_ONLY_CHANNELS.has(channel) &&
-        !LOCAL_ONLY.some((p) => channel.startsWith(p))
-      ) {
+      if (isRemoteMode() && !isLocalOnlyChannel(channel)) {
         if (!isRemoteChannel(channel)) {
           throw new Error(
             `「${channel}」这个功能还没搬到后端，现在只有本机版。\n` +
-              `${coverageWords()}；客户统计、单据存档、备份这些还在本机。\n` +
+              `${coverageWords()}；单据存档、备份这些还在本机。\n` +
               `要用它，请到「设置 · 数据来源」切回「本机」。`
           )
         }

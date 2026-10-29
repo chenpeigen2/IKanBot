@@ -1357,16 +1357,28 @@ export function moneyCore(db: Db) {
   }
 
   /**
-   * 打样单待收（基准币，N23/R25）：汇率缺失的单不计入（否则折不准），
-   * 它们在打样页上会亮「汇率未填」提醒补。
+   * 打样单待收（基准币，N23/R25）与「折不出来的张数」。
+   * 汇率缺失的单不计入合计（否则折不准），但也不能当它不存在：
+   * 客户页要照着 rateMissing 说出「还有 N 张没折进去」，否则一单 USD 样品费
+   * 在页面上就是 0，业务员不再催。
    */
-  async function sampleReceivable(customerId?: number): Promise<number> {
+  async function sampleReceivableBreakdown(
+    customerId?: number
+  ): Promise<{ total: number; rateMissing: number }> {
     let total = 0
+    let rateMissing = 0
     for (const r of await sampleOpenRows(customerId)) {
-      if (!(r.baseRate > 0)) continue
+      if (!(r.baseRate > 0)) {
+        rateMissing += 1
+        continue
+      }
       total += r.receivable * r.baseRate
     }
-    return total
+    return { total, rateMissing }
+  }
+
+  async function sampleReceivable(customerId?: number): Promise<number> {
+    return (await sampleReceivableBreakdown(customerId)).total
   }
 
   async function customerOpenRows(customerId: number): Promise<CustomerOpenRow[]> {
@@ -1580,6 +1592,7 @@ export function moneyCore(db: Db) {
     sampleOpenRows,
     sampleStatementRows,
     sampleReceivable,
+    sampleReceivableBreakdown,
     customerOpenRows,
     customerReceivable,
     customerCreditBalance,
