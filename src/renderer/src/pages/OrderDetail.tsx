@@ -16,7 +16,7 @@ import {
   type ShipStatus,
   type PaymentMethod
 } from '../../../shared/types'
-import { isBillingStatus, shownRemaining } from '../../../shared/billing'
+import { isBillingStatus, sampleOffsetFromCharges, shownRemaining } from '../../../shared/billing'
 import {
   renderPi,
   renderPl,
@@ -103,6 +103,8 @@ export default function OrderDetail() {
   const [voiding, setVoiding] = useState(false)
   // 账上还欠着就把单标成「已结清」，必须先写原因：这单以后不再出现在待收和催款里
   const [settlePrompt, setSettlePrompt] = useState(false)
+  // 改成「已失效」同样退出销售额与待收：账上还挂着东西时要把原因写下来（core 硬拦）
+  const [expirePrompt, setExpirePrompt] = useState(false)
   /** 读不出来就明说并给重试，不能永远停在「加载中…」 */
   const [loadError, setLoadError] = useState('')
 
@@ -427,13 +429,15 @@ export default function OrderDetail() {
 
   // 手工推进收款状态：还欠钱要勾「已结清」时先收原因（core 那边硬拦，
   // 不在这里先问，用户只会看到一句报错、不知道去哪儿补）
-  const applyPaymentStatus = async (next: PaymentStatus, note?: string) => {
+  const applyPaymentStatus = async (next: PaymentStatus, note?: string): Promise<boolean> => {
     try {
       await window.api.orders.setPaymentStatus(orderId, next, note)
       setEditPayment(false)
       await load()
+      return true
     } catch (err) {
       toast((err as Error).message, 'error')
+      return false
     }
   }
 
@@ -448,6 +452,17 @@ export default function OrderDetail() {
       </div>
     )
   }
+
+  // 改「已失效」前先把账上挂着的东西列出来：core 会按同一份清单要求写原因，
+  // 这里只负责让人看清连带动作，数字口径仍归服务层
+  const expireHoldings = [
+    order.payments.length > 0 ? `${order.payments.length} 笔收款流水` : '',
+    (order.settlements?.length ?? 0) > 0 ? `${order.settlements.length} 笔核销` : '',
+    order.creditApplied > 0.001 ? '客户预收抵扣' : '',
+    docVersions.some((d: any) => !d.voidedAt) ? '单据存档' : '',
+    (order.packingLists ?? []).some((p: any) => !p.voidedAt) ? '装箱单' : '',
+    sampleOffsetFromCharges(order.charges ?? []) > 0.001 ? '转单打样抵扣' : ''
+  ].filter(Boolean)
 
   return (
     <>
@@ -728,8 +743,11 @@ export default function OrderDetail() {
                     autoFocus
                     onChange={async (e) => {
                       const next = e.target.value as PaymentStatus
+                      // 失效要退出销售额与待收、预收抵扣退回余额：先让人看清连带动作再点，
+                      // 账上还挂着流水/纸的单 core 会要求写原因，这里把输入框准备好
                       if (next === 'expired' && order.paymentStatus !== 'expired') {
-                        if (!confirm('改成「已失效」后这单会被冻结：不能再收款、改明细、装箱或核销，直到改回「客户已确认」。确定吗？')) return
+                        setExpirePrompt(true)
+                        return
                       }
                       // 还欠着钱却要勾「已结清」：这单从此不进待收、月报和催款，差额没人再追。
                       // 先把原因收齐（必填），core 会把「仍欠多少」一起写进历史
@@ -744,20 +762,9 @@ export default function OrderDetail() {
                       await applyPaymentStatus(next)
                     }}
                   >
-                    {/* 作废只能走「⋯ → 作废此单」的凭据核对弹窗，下拉里不给这个旁路；
-                        有收款/核销/预收抵扣的单也不能退回草稿（后端同样拦，草稿会让这些账静默消失） */}
-                    {PAYMENT_STATUS_ORDER.filter(
-                      (s) =>
-                        s !== 'void' &&
-                        !(
-                          s === 'draft' &&
-                          (order.payments.length > 0 ||
-                            (order.settlements?.length ?? 0) > 0 ||
-                            order.creditApplied > 0.001 ||
-                            docVersions.some((d: any) => !d.voidedAt) ||
-                            (order.packingLists ?? []).some((p: any) => !p.voidedAt))
-                        )
-                    ).map((s) => (
+                    {/* 作废只能走「⋯ → 作废此单」的凭据核对弹窗，下拉里不给这个旁路。
+                        退回草稿的闸门只由服务层裁决：界面自己算一份，迟早和 core 对不上 */}
+                    {PAYMENT_STATUS_ORDER.filter((s) => s !== 'void').map((s) => (
                       <option key={s} value={s}>
                         {PAYMENT_STATUS_LABEL[s]}
                       </option>
@@ -927,6 +934,10 @@ export default function OrderDetail() {
               <p className="faint">
                 作废后：收款记录、操作历史、单据存档全部保留，只是不再计入销售额、待收款和毛利。
               </p>
+              <p className="faint">
+                抵在这张单上的客户预收会退回客户余额；转单时抵进来的打样费退回打样单的未收；
+                已经认下的坏账不会跟着单消失，仍挂在内部报表里等追回。
+              </p>
               {needsCheck ? (
                 <div className="alert warn">
                   <p>
@@ -972,6 +983,36 @@ export default function OrderDetail() {
             return false
           }}
           onClose={() => setSettlePrompt(false)}
+        />
+      ) : null}
+
+      {expirePrompt ? (
+        <PromptModal
+          title={`改为「已失效」：${order.orderNo}`}
+          label={
+            <>
+              改成「已失效」后，这张单不再计入销售额和待收，也不能再收款、改明细、装箱或核销，直到改回「客户已确认」。
+              <br />
+              <span className="muted">
+                {expireHoldings.length
+                  ? `这张单上还挂着 ${expireHoldings.join('、')}：预收抵扣会退回客户余额，收款流水仍留在账上（钱不会跟着单消失）。请写明原因（必填，会连同这些一起记进操作历史）。`
+                  : '账上没挂着收款或凭据；原因可留空，也可以写一句（PI 过期、客户暂缓），将来一看就知道这单为什么停在这里。'}
+              </span>
+            </>
+          }
+          okText="确认失效"
+          multiline
+          onOk={async (reason) => {
+            if (expireHoldings.length && !reason.trim()) {
+              toast('这张单账上还挂着东西：请写一句为什么失效，以后对账才知道是谁点的。', 'error')
+              return false
+            }
+            // 没改成（比如 core 又查出一样界面看不见的账）就留着输入框，
+            // 让人补上原因再试，不用从头再点一遍
+            if (await applyPaymentStatus('expired', reason.trim())) setExpirePrompt(false)
+            return false
+          }}
+          onClose={() => setExpirePrompt(false)}
         />
       ) : null}
 

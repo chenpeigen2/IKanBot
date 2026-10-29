@@ -988,7 +988,9 @@ function SampleModal({
             ))}
           </select>
           {form.status === 'cancelled' ? (
-            <div className="hint">改成「已取消」时，备注里要写清原因：单子从此不再跟，这句话是唯一的交代。</div>
+            <div className="hint">
+              改成「已取消」时，备注里要写清原因：单子从此不再跟，这句话是唯一的交代。已经收到的钱不会消失——留在客户预收结余里，可抵下一张单或退还。
+            </div>
           ) : null}
         </div>
       </div>

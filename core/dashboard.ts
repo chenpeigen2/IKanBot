@@ -50,7 +50,11 @@ export function dashboardCore(db: Db) {
     // 金额口径统一走 services/money.ts（唯一真源）：
     // 货值 / 费用 / 含费用合计 / 待收 / 毛利 全部用同一套计算
     // 草稿单、已失效、已作废不算正式订单：不进在途、待收、销售额、毛利、订单数
-    const all = await money.listOrderMoney()
+    //
+    // 但「坏账」是另一回事：单子作废了，没收到的钱还是没收到，不能跟着单一起从报表上消失（R49）。
+    // 所以取一遍含作废/失效的全量，金额口径按 isBillingStatus 分两路——同一份取数，两个口径。
+    const everyOrder = await money.listOrderMoney({ includeVoided: true })
+    const all = everyOrder.filter((r) => isBillingStatus(r.paymentStatus))
     const monthRows = all.filter((r) => localDateOf(r.createdAt) >= mStart)
 
     // 待收款金额 = Σ(含费用合计 − 已收) + 未收打样费，折算成基准币
@@ -76,8 +80,9 @@ export function dashboardCore(db: Db) {
     // 尾款这一桶用减法：以后再加状态，也不会出现「四个桶加起来 ≠ 待收总额」这种尴尬
     const pendingBalance = goodsReceivable - pendingUnconfirmed - pendingDeposit
 
-    // 还没追回来的坏账：老板要看见「这钱实际上收不回来了」
-    const outstandingBadDebt = all.reduce((s, r) => s + r.badDebtBase, 0)
+    // 还没追回来的坏账：老板要看见「这钱实际上收不回来了」。
+    // 含作废/失效单——作废只是不再向客户计收，我们账上没收到的那笔债并没有因此消失
+    const outstandingBadDebt = everyOrder.reduce((s, r) => s + r.badDebtBase, 0)
 
     // 本月毛利：本月的单只要有一单成本没录全，毛利就不可信 → null（界面显示「—」）
     const monthMissingCost = monthRows.some((r) => r.missingCostItems > 0)
@@ -1010,21 +1015,29 @@ export function dashboardCore(db: Db) {
     })
     const byMonth = new Map<string, MonthAcc>()
     const baseCurrency = (await settingsCore(db).get()).baseCurrency
-    for (const r of await money.listOrderMoney()) {
-      const cur = byMonth.get(r.month) ?? empty(r.month)
+    // 销售/成本/折让只认正式单；坏账认全部——作废/失效单不再算这月的生意，
+    // 但没收到的钱不会因为单子作废就收得到，抹掉它等于替老板把债忘了（R49）
+    for (const r of await money.listOrderMoney({ includeVoided: true })) {
+      const billing = isBillingStatus(r.paymentStatus)
       // 折基准币只认 baseAmountOf：本币单不乘汇率（老数据那列是 0，乘完毛利/折让就凭空蒸发），
       // 外币单没填汇率折不出 → 按 0 计，由「汇率待修」提醒去追人补
       const inBase = (amount: number): number =>
         baseAmountOf(r.currency, baseCurrency, r.exchangeRate, amount) ?? 0
-      cur.orders += 1
-      cur.sales += r.grandTotalBase
-      cur.cost += r.costBase
-      cur.profit += r.profitBase ?? 0
-      // negativeCharges 本身是负数，报表里折让按「让出去多少」写正数
-      cur.discount += -inBase(r.negativeCharges)
-      cur.shortage += inBase(r.shortageAmount)
-      cur.badDebt += inBase(r.badDebtOutstanding)
-      if (r.missingCostItems > 0) cur.missingCostOrders += 1
+      const badDebt = inBase(r.badDebtOutstanding)
+      // 作废/失效又没有坏账的单在这张报表上一无所有：别给它凭空开一行空月份
+      if (!billing && badDebt <= 0.001) continue
+      const cur = byMonth.get(r.month) ?? empty(r.month)
+      if (billing) {
+        cur.orders += 1
+        cur.sales += r.grandTotalBase
+        cur.cost += r.costBase
+        cur.profit += r.profitBase ?? 0
+        // negativeCharges 本身是负数，报表里折让按「让出去多少」写正数
+        cur.discount += -inBase(r.negativeCharges)
+        cur.shortage += inBase(r.shortageAmount)
+        if (r.missingCostItems > 0) cur.missingCostOrders += 1
+      }
+      cur.badDebt += badDebt
       byMonth.set(r.month, cur)
     }
 
@@ -1455,11 +1468,12 @@ export function dashboardCore(db: Db) {
     const docs: StatementRow[] = []
     for (const r of orders) {
       const rate = Number(r.exchangeRate) || 0
+      const billing = isBillingStatus(r.paymentStatus)
       const open = shownRemaining(r.paymentStatus, r.receivable)
       const prepaid = r.remaining < -0.001 ? -r.remaining : 0
       const creditUsed = Number(r.creditApplied ?? 0)
       const notes: string[] = []
-      if (!isBillingStatus(r.paymentStatus)) {
+      if (!billing) {
         notes.push(`此单${PAYMENT_STATUS_LABEL[r.paymentStatus as keyof typeof PAYMENT_STATUS_LABEL] ?? r.paymentStatus}，不计应收；已到的钱仍是实收`)
         if (r.paidAmount > 0.001) notes.push(`实收 ${money2(r.paidAmount)} 已计入客户预收结余`)
       }
@@ -1467,8 +1481,10 @@ export function dashboardCore(db: Db) {
       // 核销掉的两种来路必须分开说：短款是双方点头让掉的尾款（真是替客户减的），
       // 坏账是我们自己认了收不回——那张纸不能替公司许下一个没人批过的减免，
       // 否则真去追的时候，客户手里攥着一张「已为您减免」的表。
-      if (r.shortageAmount > 0.001) notes.push(`其中已为您减免 ${money2(r.shortageAmount)}，无需支付`)
-      if (r.badDebtOutstanding > 0.001)
+      // 作废/失效单更不许印这两句：这张单本身已不计应收，纸面上再写「已减免」
+      // 等于让客户拿着一张作废单来抵新单的账（R49）。核销只在内部报表里挂账。
+      if (billing && r.shortageAmount > 0.001) notes.push(`其中已为您减免 ${money2(r.shortageAmount)}，无需支付`)
+      if (billing && r.badDebtOutstanding > 0.001)
         notes.push(`其中 ${money2(r.badDebtOutstanding)} 我方账上没收到、也不再向贵司计收；若已付请把水单发来核对`)
       if (creditUsed > 0.001) notes.push(`其中预收抵扣 ${money2(creditUsed)}（非现金，从客户预收余额冲减）`)
       if (open > 0.001 && rate <= 0) notes.push('汇率未填，未折算')
@@ -1483,7 +1499,8 @@ export function dashboardCore(db: Db) {
         currency: r.currency,
         amount: money2(r.grandTotal),
         paid: money2(r.paidAmount),
-        writtenOff: money2(r.netWrittenOff),
+        // 作废/失效单的核销不进合计：这张单不欠钱，纸面上也就没有「减免」可言
+        writtenOff: billing ? money2(r.netWrittenOff) : 0,
         open: money2(open),
         rate,
         openBase: rate > 0 ? money2(open * rate) : 0,

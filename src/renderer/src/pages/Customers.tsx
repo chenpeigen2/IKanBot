@@ -203,7 +203,14 @@ export default function Customers() {
   }
 
   const remove = async (c: Customer) => {
-    if (!confirm(`确认删除客户「${c.company}」？`)) return
+    if (
+      !confirm(
+        `确认删除客户「${c.company}」？\n\n` +
+          '有订单、报价、打样或预收抵扣/退款记录的客户删不掉——那些是货和钱的凭据。\n' +
+          '建错了又不想在建单下拉里看见，请用「停用」：档案和历史单据都留着，只是不再带出来。'
+      )
+    )
+      return
     try {
       await window.api.customers.remove(c.id)
       toast('已删除')

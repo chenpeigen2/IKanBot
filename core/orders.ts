@@ -45,6 +45,9 @@ import type {
   SkuSummary
 } from '../src/shared/types'
 
+/** 新建订单能直接落库的收款状态：刚建的单还没收过钱，不可能是已收/已结清 */
+const CREATE_STATUSES: PaymentStatus[] = ['draft', 'sent', 'confirmed']
+
 export interface OrderInput {
   id?: number
   customerId: number
@@ -682,8 +685,16 @@ export function ordersCore(db: Db) {
     const validUntil = input.validUntil ?? addDays(localDate(), settings.piValidDays)
     // 汇率锁定日期：默认记今天（本地日期）
     const rateDate = input.exchangeRateDate ?? localDate()
-    // 收款状态：报价单转单时可以指定（PI 已发 = sent），默认草稿
+    // 收款状态：报价单/打样单转单时可以指定（PI 已发 = sent、客户已确认 = confirmed），默认草稿。
+    // 只放这三个：已经收过钱（partial/paid/settled）或作废/失效的单不可能在「刚建单」这一刻成立，
+    // 直接从接口塞进来就等于绕过了收款、核销、作废的全部门槛（R49）
     const status: PaymentStatus = input.paymentStatus ?? 'draft'
+    if (!CREATE_STATUSES.includes(status)) {
+      throw bizError(
+        `新建订单的收款状态只能是 ${CREATE_STATUSES.map((s) => PAYMENT_STATUS_LABEL[s]).join(' / ')}；` +
+          `「${PAYMENT_STATUS_LABEL[status] ?? status}」要在单据建好后按实际收款情况再改。`
+      )
+    }
     // 费用行（运费/保险等）存 JSON
     const chargesJson = JSON.stringify((input.charges ?? []).filter((c) => c.label.trim()))
     const parties = await partiesForOrder(input.customerId, input)
@@ -2425,6 +2436,31 @@ export function ordersCore(db: Db) {
     return (await getOrder(orderId))!
   }
 
+  /**
+   * 这张单身上挂着哪些账和纸：退回草稿要拦、转成失效要先说清它们去哪了。
+   * 两处闸门共用一份数，免得一处数了六样、另一处漏数一样。
+   */
+  async function orderHoldings(orderId: number): Promise<{ any: boolean; parts: string[] }> {
+    const n = async (sql: string): Promise<number> =>
+      Number((await db.get(sql, [orderId]) as { n?: number } | null)?.n ?? 0)
+    const payCount = await n('SELECT COUNT(*) AS n FROM payments WHERE order_id = ?')
+    const settleCount = await n('SELECT COUNT(*) AS n FROM order_settlements WHERE order_id = ?')
+    const credit = await creditsOf().hasActiveCredit('order', orderId)
+    // 纸面凭据也算账：有存档 PI/CI 或箱单的单退回草稿，系统台账里整单消失，纸却还在客户/货代手里
+    const docCount = await n('SELECT COUNT(*) AS n FROM doc_versions WHERE order_id = ? AND voided_at IS NULL')
+    const plCount = await n('SELECT COUNT(*) AS n FROM packing_lists WHERE order_id = ? AND voided_at IS NULL')
+    const sampleCount = await n('SELECT COUNT(*) AS n FROM sample_orders WHERE converted_order_id = ?')
+    const parts = [
+      payCount > 0 ? `${payCount} 笔收款流水` : '',
+      settleCount > 0 ? `${settleCount} 笔核销` : '',
+      credit ? '客户预收抵扣' : '',
+      docCount > 0 ? `${docCount} 版单据存档` : '',
+      plCount > 0 ? `${plCount} 批箱单` : '',
+      sampleCount > 0 ? `${sampleCount} 张转单打样抵扣` : ''
+    ].filter(Boolean)
+    return { any: parts.length > 0, parts }
+  }
+
   /** 人工设置收款状态（会打断自动流转） */
   async function setPaymentStatus(orderId: number, next: PaymentStatus, note = ''): Promise<OrderDetail> {
     // 与出货状态同一套守门：非法值一旦入库，这单就从待收、月报、催款里静默消失
@@ -2454,44 +2490,26 @@ export function ordersCore(db: Db) {
     // 这些账就从系统里静默消失（以前会顺手把抵扣回退掉，等于替客户把决定做了）。
     // 真不要这单请走作废：凭据核对、留痕、抵扣回退都按正门走。
     if (next === 'draft' && cur.payment_status !== 'draft') {
-      const payCount = Number(
-        (await db.get('SELECT COUNT(*) AS n FROM payments WHERE order_id = ?', [orderId]) as { n?: number } | null)?.n ?? 0
-      )
-      const settleCount = Number(
-        (await db.get('SELECT COUNT(*) AS n FROM order_settlements WHERE order_id = ?', [orderId]) as { n?: number } | null)
-          ?.n ?? 0
-      )
-      const credit = await creditsOf().hasActiveCredit('order', orderId)
-      // 纸面凭据也算账：有存档 PI/CI 或箱单的单退回草稿，系统台账里整单消失，纸却还在客户/货代手里
-      const docCount = Number(
-        (await db.get('SELECT COUNT(*) AS n FROM doc_versions WHERE order_id = ? AND voided_at IS NULL', [orderId]) as
-          | { n?: number }
-          | null)?.n ?? 0
-      )
-      const plCount = Number(
-        (await db.get('SELECT COUNT(*) AS n FROM packing_lists WHERE order_id = ? AND voided_at IS NULL', [orderId]) as
-          | { n?: number }
-          | null)?.n ?? 0
-      )
-      const sampleCount = Number(
-        (await db.get('SELECT COUNT(*) AS n FROM sample_orders WHERE converted_order_id = ?', [orderId]) as
-          | { n?: number }
-          | null)?.n ?? 0
-      )
-      if (payCount > 0 || settleCount > 0 || credit || docCount > 0 || plCount > 0 || sampleCount > 0) {
-        const what = [
-          payCount > 0 ? `${payCount} 笔收款流水` : '',
-          settleCount > 0 ? `${settleCount} 笔核销` : '',
-          credit ? '客户预收抵扣' : '',
-          docCount > 0 ? `${docCount} 版单据存档` : '',
-          plCount > 0 ? `${plCount} 批箱单` : '',
-          sampleCount > 0 ? `${sampleCount} 张转单打样抵扣` : ''
-        ]
-          .filter(Boolean)
-          .join('、')
+      const holdings = await orderHoldings(orderId)
+      if (holdings.any) {
         throw bizError(
-          `这张单已经有 ${what}，不能退回草稿：草稿不进应收和现金流，这些账会从系统里消失，纸面凭据却还在客户手里。确实不要这单，请走「⋯ → 作废此单」。`
+          `这张单已经有 ${holdings.parts.join('、')}，不能退回草稿：草稿不进应收和现金流，这些账会从系统里消失，纸面凭据却还在客户手里。确实不要这单，请走「⋯ → 作废此单」。`
         )
+      }
+    }
+    // 失效同样退出应收，但它可逆、现金仍留在流水里，所以不拦，只要求把原因写下来：
+    // 单子从销售额与待收里消失、预收抵扣退回客户余额——这些连带动作要有人签字，
+    // 将来客户拿着这张纸来问，历史里能说清是谁点的、为什么（R49）
+    let expireNote = ''
+    if (next === 'expired') {
+      const holdings = await orderHoldings(orderId)
+      if (holdings.any) {
+        if (!note.trim()) {
+          throw bizError(
+            `这张单上还挂着 ${holdings.parts.join('、')}：转成「已失效」后它不再计入销售额和待收，预收抵扣会退回客户余额，收款流水仍留在账上。请写明原因再转。`
+          )
+        }
+        expireNote = `（转失效时账上还有 ${holdings.parts.join('、')}）`
       }
     }
     // 手工勾「已结清」但按流水算还欠：这单会从应收、月报、催款里整体消失，差额没人再追。
@@ -2523,7 +2541,7 @@ export function ordersCore(db: Db) {
         await creditsOf().reverseCreditsForTarget('order', orderId, `订单转为「${PAYMENT_STATUS_LABEL[next]}」，预收抵扣回退`)
       }
       await db.run('UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?', [next, now(), orderId])
-      await logEvent(db, orderId, 'payment_status', cur.payment_status, next, note + settleGap)
+      await logEvent(db, orderId, 'payment_status', cur.payment_status, next, note + settleGap + expireNote)
       // 失效单改回计费状态：预收来源从「全部到账」收回成「只有多收的部分」，
       // 已经抵出去的钱可能就多于客户实际多付的了
       if (isBillingStatus(next)) await creditsOf().assertCreditSolvent(cur.customer_id)

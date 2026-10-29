@@ -214,27 +214,36 @@ export function customersCore(db: Db) {
   }
 
   async function remove(id: number): Promise<void> {
-    const cust = await db.get('SELECT company FROM customers WHERE id = ?', [id])
-    if (!cust) return
-    const count = async (table: string): Promise<number> => {
-      const row = await db.get(`SELECT COUNT(*) c FROM ${table} WHERE customer_id = ?`, [id])
-      return Number(row?.['c'] ?? 0)
-    }
-    const parts: string[] = []
-    const orders = await count('orders')
-    if (orders > 0) parts.push(`${orders} 个订单`)
-    const quotes = await count('quotations')
-    if (quotes > 0) parts.push(`${quotes} 个报价单`)
-    const samples = await count('sample_orders')
-    if (samples > 0) parts.push(`${samples} 个打样单`)
-    // 别把 FOREIGN KEY constraint failed 这种英文数据库报错甩给老板看
-    if (parts.length > 0) {
-      throw new BizError(
-        `${cust['company']} 已经有 ${parts.join('、')}，不能删——删了这些记录就没了凭据。\n` +
-          `建错了又不想在建单下拉里看见它，请用「停用」：档案和历史单据都留着，只是不再带出来。`
-      )
-    }
-    await db.run('DELETE FROM customers WHERE id = ?', [id])
+    // 数一遍再删要放在同一个事务里：查完到删之间正好有人登记一笔预收抵扣，
+    // 删客户就会撞上外键，弹出来的还是一句英文数据库报错（R49）
+    await db.transact(async () => {
+      const cust = await db.get('SELECT company FROM customers WHERE id = ?', [id])
+      if (!cust) return
+      const count = async (table: string): Promise<number> => {
+        const row = await db.get(`SELECT COUNT(*) c FROM ${table} WHERE customer_id = ?`, [id])
+        return Number(row?.['c'] ?? 0)
+      }
+      const parts: string[] = []
+      const orders = await count('orders')
+      if (orders > 0) parts.push(`${orders} 个订单`)
+      const quotes = await count('quotations')
+      if (quotes > 0) parts.push(`${quotes} 个报价单`)
+      const samples = await count('sample_orders')
+      if (samples > 0) parts.push(`${samples} 个打样单`)
+      // 预收抵扣和退款也是钱的凭据：撤销过的行也留着 customer_id，删客户同样会断链
+      const credits = await count('credit_applications')
+      if (credits > 0) parts.push(`${credits} 笔预收抵扣`)
+      const refunds = await count('customer_refunds')
+      if (refunds > 0) parts.push(`${refunds} 笔预收退款`)
+      // 别把 FOREIGN KEY constraint failed 这种英文数据库报错甩给老板看
+      if (parts.length > 0) {
+        throw new BizError(
+          `${cust['company']} 已经有 ${parts.join('、')}，不能删——这些是货和钱的凭据，删了就再也对不上账。\n` +
+            `建错了又不想在建单下拉里看见它，请用「停用」：档案和历史单据都留着，只是不再带出来。`
+        )
+      }
+      await db.run('DELETE FROM customers WHERE id = ?', [id])
+    })
   }
 
   /**

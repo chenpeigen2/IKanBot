@@ -8582,7 +8582,8 @@ const r35Exp = await orders.createOrder({
 await orders.addOrderItem(r35Exp.id, { styleNo: 'R35-E', quantity: 10, unitPrice: 10 })
 await orders.addPayment(r35Exp.id, { paidAt: localDate(), amount: 100, method: 'T/T', bankRef: 'R35-EXP-PAY' })
 eq('收齐自动到已结清', (await orders.getOrder(r35Exp.id))!.paymentStatus, 'settled')
-await orders.setPaymentStatus(r35Exp.id, 'expired')
+// R49 起：账上有流水的单转失效要写明原因（这条历史以后是唯一的交代）
+await orders.setPaymentStatus(r35Exp.id, 'expired', 'R35 测试：PI 过期待重开')
 eq('挂成失效后退出应收口径', (await orders.getOrder(r35Exp.id))!.paymentStatus, 'expired')
 eq('改回计费状态时按账重算：钱早就收齐了', (await orders.setPaymentStatus(r35Exp.id, 'confirmed')).paymentStatus, 'settled')
 check(
@@ -10998,6 +10999,135 @@ const r48Smp2Back = (await samples.getSample(r48Smp2.id))!
 check('撤销也在账本上留一句', r48Smp2Back.feeNote.includes('撤销客户预收抵扣'), r48Smp2Back.feeNote)
 check('撤销原因写进账本', r48Smp2Back.feeNote.includes('R48 抵错了单'), r48Smp2Back.feeNote)
 eq('撤销后待收回到 30', r48Smp2Back.owed, 30)
+
+/* ---------------- R49：作废/失效侧门、建单旁路、删客户断链 ---------------- */
+
+section('R49 新建订单的收款状态只放草稿/已发/已确认：刚建的单不可能已结清')
+const r49Cust = await customers.saveCustomer({ company: 'R49-SIDE-CO' })
+let r49Err = ''
+try {
+  await orders.createOrder({ customerId: r49Cust.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'void' })
+} catch (e) {
+  r49Err = (e as Error).message
+}
+check('接口层直接塞「已作废」被拦住，且说清允许哪几个', r49Err.includes('收款状态') && r49Err.includes('已作废'), r49Err)
+r49Err = ''
+try {
+  await orders.createOrder({ customerId: r49Cust.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'settled' })
+} catch (e) {
+  r49Err = (e as Error).message
+}
+check('「已结清」也不能在刚建单时成立', r49Err.includes('收款状态'), r49Err)
+const r49Ok = await orders.createOrder({
+  customerId: r49Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed'
+})
+eq('转单照旧能直接落「客户已确认」', r49Ok.paymentStatus, 'confirmed')
+
+section('R49 坏账不跟着作废单一起消失')
+const r49Void = await orders.createOrder({
+  customerId: r49Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(r49Void.id, {
+  styleNo: 'R49-DEBT',
+  productName: '作废前认下的坏账',
+  quantity: 10,
+  unitPrice: 100
+})
+await orders.addPayment(r49Void.id, { paidAt: localDate(), amount: 400, method: 'T/T', bankRef: 'R49-PAY' })
+await orders.addSettlement(r49Void.id, { kind: 'bad_debt', amount: 600, reason: 'R49 客户失联' })
+const r49MonthKey = localDate().slice(0, 7)
+const r49BadBefore = (await dashboard.dashboard()).outstandingBadDebt
+const r49MonthBefore = (await dashboard.monthlyReport()).find((m) => m.month === r49MonthKey)?.badDebt ?? 0
+await orders.voidOrder(r49Void.id, 'R49 手动作废')
+const r49BadAfter = (await dashboard.dashboard()).outstandingBadDebt
+const r49MonthAfter = (await dashboard.monthlyReport()).find((m) => m.month === r49MonthKey)?.badDebt ?? 0
+eq('作废后工作台「坏账未追回」不变', r49BadAfter, r49BadBefore)
+eq('作废后月报里的坏账仍留在下单月', r49MonthAfter, r49MonthBefore)
+check('这笔坏账确实算进去了（600×7）', r49BadBefore >= 4200, String(r49BadBefore))
+
+section('R49 对账单不在作废单上认减免：纸上不替公司许没批过的账')
+const r49Csv = parseCsv(await dashboard.exportCsv('statement', { customerId: r49Cust.id }))
+const r49Col = (name: string): number => r49Csv[0].indexOf(name)
+const r49VoidRow = r49Csv.slice(1).find((r) => r[r49Col('单据号')] === r49Void.orderNo)
+const r49VoidNote = r49VoidRow?.[r49Col('备注')] ?? ''
+check('作废单还在对账单上（客户认得出付过钱的那张）', !!r49VoidRow, '<缺行>')
+check('不再印「我方账上没收到、也不再向贵司计收」', !r49VoidNote.includes('不再向贵司计收'), r49VoidNote)
+check('也不印「已为您减免」', !r49VoidNote.includes('减免'), r49VoidNote)
+eq('作废单的「不必再付」列是 0', Number(r49VoidRow?.[r49Col('不必再付(原币)')] ?? 0), 0)
+check('作废仍要说明实收去哪了', r49VoidNote.includes('客户预收结余'), r49VoidNote)
+
+section('R49 失效要留原因：账上挂着流水就有人签字')
+const r49Exp = await orders.createOrder({
+  customerId: r49Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(r49Exp.id, {
+  styleNo: 'R49-EXP',
+  productName: '失效前收过钱',
+  quantity: 10,
+  unitPrice: 10
+})
+await orders.addPayment(r49Exp.id, { paidAt: localDate(), amount: 30, method: 'T/T', bankRef: 'R49-EXP-PAY' })
+let r49ExpErr = ''
+try {
+  await orders.setPaymentStatus(r49Exp.id, 'expired')
+} catch (e) {
+  r49ExpErr = (e as Error).message
+}
+check('有流水的单改失效，不写原因就拦下', r49ExpErr.includes('原因') && r49ExpErr.includes('收款流水'), r49ExpErr)
+const r49ExpOk = await orders.setPaymentStatus(r49Exp.id, 'expired', 'R49 PI 过期，客户暂缓')
+eq('写了原因就能转失效', r49ExpOk.paymentStatus, 'expired')
+const r49ExpEvent = (await orders.listEvents(r49Exp.id)).filter((e) => e.kind === 'payment_status').pop()
+check(
+  '历史里同时留下原因和账上挂着的东西',
+  (r49ExpEvent?.note ?? '').includes('R49 PI 过期') && (r49ExpEvent?.note ?? '').includes('收款流水'),
+  r49ExpEvent?.note ?? '<没有这条历史>'
+)
+const r49Clean = await orders.createOrder({
+  customerId: r49Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'sent'
+})
+eq('什么账都没挂的单，失效不必写原因', (await orders.setPaymentStatus(r49Clean.id, 'expired')).paymentStatus, 'expired')
+
+section('R49 删客户：预收抵扣也是钱的凭据，不许裸删弹英文外键')
+const r49CredOrder = await orders.createOrder({
+  customerId: r49Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(r49CredOrder.id, {
+  styleNo: 'R49-CRED',
+  productName: '用它花掉客户预收',
+  quantity: 10,
+  unitPrice: 100
+})
+await credits.applyCredit({
+  customerId: r49Cust.id,
+  currency: 'USD',
+  targetKind: 'order',
+  targetId: r49CredOrder.id,
+  amount: 50,
+  note: 'R49 抵一笔'
+})
+let r49DelErr = ''
+try {
+  await customers.deleteCustomer(r49Cust.id)
+} catch (e) {
+  r49DelErr = (e as Error).message
+}
+check('删客户被预收抵扣挡住，并指路「停用」', r49DelErr.includes('预收抵扣') && r49DelErr.includes('停用'), r49DelErr)
+check('不再漏出英文外键报错', !r49DelErr.includes('FOREIGN KEY'), r49DelErr)
 
 /* ---------------- 汇总 ---------------- */
 
