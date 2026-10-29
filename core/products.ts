@@ -224,6 +224,8 @@ export interface ImportResult {
   updated: number
   skipped: number
   errors: string[]
+  /** 导进去了、但有格子没按格式写：不拦导入，得让人回头补 */
+  warnings: string[]
 }
 
 export function productsCore(db: Db) {
@@ -454,6 +456,9 @@ export function productsCore(db: Db) {
   async function importCsv(text: string, mode: 'skip' | 'overwrite' = 'skip'): Promise<ImportResult> {
     const rows = parseCsvRows(text)
     const errors: string[] = []
+    // 箱规写歪了不该拦住整份导入（960 款不能因为一格「60*40」全军覆没），
+    // 但也不能像以前那样悄悄存成空：装箱单的毛重估算会当场塌掉，界面还说「更新 N 款」
+    const warnings: string[] = []
     if (rows.length < 2) {
       throw new BizError(
         `CSV 里除了表头没有内容（读到 ${rows.length} 行）。请用 Excel「另存为 CSV UTF-8」，第一行是表头，从第二行开始写款号。`
@@ -496,6 +501,8 @@ export function productsCore(db: Db) {
       const boxRaw = need(r, col('box'))
       const box = boxRaw.split(/[×x*X*\s]+/).filter(Boolean).map((n) => Number(n))
       const boxOk = box.length === 3 && box.every((n) => Number.isFinite(n) && n > 0)
+      // 写了字却读不成三个正数 = 格式错（空格子才是「明确要清空」）
+      const boxBad = !!boxRaw && !boxOk
       const existing = await findByStyleNo(styleNo)
       // 覆盖导入时：表头里没有这一列 = 这份 CSV 根本不打算管这个字段，保留库里原值。
       // 以前缺列一律按空串写回去——单证员只想拿 Excel 补一列成本价，整款的尺码、颜色、
@@ -510,8 +517,13 @@ export function productsCore(db: Db) {
       const tags = (key: string, keep: string[] | undefined): string[] =>
         col(key) >= 0 || !overwriting ? splitTags(need(r, col(key))) : keep ?? []
       const hasBoxCol = col('box') >= 0
+      if (hasBoxCol && boxBad) {
+        warnings.push(
+          `第 ${lineNo} 行 ${styleNo} 的箱规「${boxRaw}」读不出来（要长×宽×高三个数，例如 60×40×30），这一款的箱规没有改动`
+        )
+      }
       const boxSide = (idx: number, keep: number | null | undefined): number | null =>
-        hasBoxCol || !overwriting ? (boxOk ? box[idx] : null) : keep ?? null
+        hasBoxCol || !overwriting ? (boxOk ? box[idx] : boxBad ? keep ?? null : null) : keep ?? null
       const input: ProductInput = {
         id: existing?.id,
         styleNo,
@@ -558,7 +570,7 @@ export function productsCore(db: Db) {
       })
       if (end < rows.length) await new Promise<void>((resolve) => setImmediate(resolve))
     }
-    return { created, updated, skipped, errors }
+    return { created, updated, skipped, errors, warnings }
   }
 
   async function listImages(productId: number): Promise<ProductImage[]> {

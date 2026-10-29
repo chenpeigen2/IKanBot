@@ -1173,7 +1173,11 @@ export function dashboardCore(db: Db) {
       `预收抵扣(${base})`
     ]
     const lines = rows.map((r) => {
-      const rate = r.exchangeRate
+      // 折基准币只用 baseRate：本币单是 1，外币没填过是 0（折不出来）。
+      // 用库里那个原值乘，本币单会被历史垃圾值放大，导出的表跟屏幕上两个数。
+      const rate = r.baseRate
+      // 折不出来就空着：写 0 等于跟老板说「这笔是零」
+      const baseOf = (v: number) => (r.rateMissing ? '' : money2(v * rate))
       // 「待收」两列走屏幕上那套口径：草稿/失效/作废不催款，显示「—」。
       // 以前导出写的是裸 receivable——筛「已作废」导出的表里这些行还挂着正数，
       // 老板在 Excel 里 SUM 出来的待收，跟订单页和工作台、对账单怎么加都对不上。
@@ -1184,7 +1188,7 @@ export function dashboardCore(db: Db) {
         r.customerName,
         r.country,
         r.currency,
-        rate,
+        r.rateMissing ? '' : rate,
         r.exchangeRateDate ?? '',
         PAYMENT_STATUS_LABEL[r.paymentStatus as keyof typeof PAYMENT_STATUS_LABEL] ?? r.paymentStatus,
         SHIP_STATUS_LABEL[r.shipStatus as keyof typeof SHIP_STATUS_LABEL] ?? r.shipStatus,
@@ -1211,11 +1215,11 @@ export function dashboardCore(db: Db) {
         money2(r.shortageAmount),
         money2(r.badDebtAmount),
         money2(r.badDebtOutstanding),
-        money2(r.grandTotalBase),
-        money2(r.costBase),
-        money2(r.paidAmount * rate),
-        money2(open * rate),
-        money2(r.creditAppliedBase)
+        r.rateMissing ? '' : money2(r.grandTotalBase),
+        r.rateMissing ? '' : money2(r.costBase),
+        baseOf(r.paidAmount),
+        baseOf(open),
+        r.rateMissing ? '' : money2(r.creditAppliedBase)
       ]
     })
     return toCsv(header, lines)
@@ -1264,9 +1268,12 @@ export function dashboardCore(db: Db) {
       '该单含费用合计(原币)'
     ]
     const lines = rows.map((r) => {
-      const rate = Number(r.exchange_rate)
       const amount = Number(r.amount)
       const o = orderMoney.get(Number(r.order_id))
+      // 和订单台账同一条规矩：折基准币认 baseRate（本币单 1、外币没填过 0），
+      // 折不出来就空着——写 0 会让报关的人以为这一行不值钱
+      const rate = o?.baseRate ?? 0
+      const rateMissing = o ? o.rateMissing : !(Number(r.exchange_rate) > 0)
       const unitCost = r.unit_cost == null ? null : Number(r.unit_cost)
       return [
         r.order_no,
@@ -1283,8 +1290,8 @@ export function dashboardCore(db: Db) {
         unitCost == null ? '' : money2(unitCost),
         unitCost == null ? '' : money2(unitCost * Number(r.quantity)),
         r.currency,
-        rate,
-        money2(amount * rate),
+        rateMissing ? '' : rate,
+        rateMissing ? '' : money2(amount * rate),
         PAYMENT_STATUS_LABEL[String(r.payment_status) as keyof typeof PAYMENT_STATUS_LABEL] ?? r.payment_status,
         SHIP_STATUS_LABEL[String(r.ship_status) as keyof typeof SHIP_STATUS_LABEL] ?? r.ship_status,
         localDateOf(String(r.created_at)),
@@ -1618,7 +1625,7 @@ export function dashboardCore(db: Db) {
       status: `截至 ${today}`,
       currency: base,
       openBase: openBaseTotal,
-      note: '与客户页「未收」同一口径'
+      note: `折 ${base} 合计`
     })
 
     // 预收结余：多收的钱、作废/取消单留在账上的实收，都从 money.ts 的同一份余额派生，
@@ -1635,8 +1642,8 @@ export function dashboardCore(db: Db) {
         amount: money2(c.available),
         note:
           c.available < -0.001
-            ? `预收出现缺口 ${money2(-c.available)}：${parts}。来源单据被改动过，请先在客户页核对抵扣/退还`
-            : `可用 ${money2(c.available)}（${parts}）；可抵下张单或在客户页登记退还；不计入应收`
+            ? `预收出现缺口 ${money2(-c.available)}：${parts}。请与我们的业务员核对抵扣与退还记录`
+            : `可用 ${money2(c.available)}（${parts}）；可抵下张单，也可申请退还；不计入应收`
       }
     })
     // 已退还的钱是真实出口：单列一行负数，客户拿对账单能和我们汇出去的水单对上

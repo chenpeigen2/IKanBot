@@ -5176,8 +5176,11 @@ check(
   (await r8err(async () => await orders.deletePayment(r15VoidOps.id, r15OpsPay.payments[0].id, '删掉这笔'))).includes('已作废')
 )
 check(
-  '作废单不能撤销核销',
-  (await r8err(async () => await orders.reverseSettlement(r15VoidOps.id, r15OpsSettle.id, '撤销坏账'))).includes('已作废')
+  // R50 起撤销放行（判断错了要退得回来），新增核销仍挡在作废单门外
+  '作废单不能再新增核销',
+  (await r8err(async () =>
+    await orders.addSettlement(r15VoidOps.id, { kind: 'shortage', amount: 1, reason: 'R15 不该再核' })
+  )).includes('已作废')
 )
 check(
   '作废单不能作废箱单',
@@ -11128,6 +11131,129 @@ try {
 }
 check('删客户被预收抵扣挡住，并指路「停用」', r49DelErr.includes('预收抵扣') && r49DelErr.includes('停用'), r49DelErr)
 check('不再漏出英文外键报错', !r49DelErr.includes('FOREIGN KEY'), r49DelErr)
+
+section('R50 核销只说明少收，不许凭空造出客户预收')
+const r50Cust = await customers.saveCustomer({ company: 'R50-CREDIT-CO' })
+const r50Order = await orders.createOrder({
+  customerId: r50Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(r50Order.id, {
+  styleNo: 'R50-WO',
+  productName: '银行扣费少收',
+  quantity: 10,
+  unitPrice: 100
+})
+await orders.addPayment(r50Order.id, { paidAt: localDate(), amount: 500, method: 'T/T', bankRef: 'R50-PAY' })
+await orders.addSettlement(r50Order.id, { kind: 'shortage', amount: 200, reason: 'R50 银行扣费' })
+const r50Credit = (await money.customerCreditBalance(r50Cust.id)).find((c) => c.currency === 'USD')
+eq('核销不产生可退给客户的预收', r50Credit?.available ?? 0, 0)
+eq('待收 = 1000 − 500 − 200', (await orders.getOrder(r50Order.id))!.remaining, 300)
+
+const r50Item = (await orders.getOrder(r50Order.id))!.items[0]
+let r50ShrinkErr = ''
+try {
+  await orders.updateOrderItem(r50Order.id, r50Item.id, { quantity: 5 })
+} catch (e) {
+  r50ShrinkErr = (e as Error).message
+}
+check(
+  '把单子改到比已核销还小会被拦下，并指路撤销核销',
+  r50ShrinkErr.includes('核销') && r50ShrinkErr.includes('撤销'),
+  r50ShrinkErr
+)
+eq('拦下之后原单没被改坏', (await orders.getOrder(r50Order.id))!.remaining, 300)
+
+section('R50 作废单留着坏账，也留着一个能追回来的门')
+let r50VoidShortErr = ''
+try {
+  await orders.addSettlement(r49Void.id, { kind: 'shortage', amount: 10, reason: 'R50 作废单不该再核' })
+} catch (e) {
+  r50VoidShortErr = (e as Error).message
+}
+check('作废单不许新增短款核销', r50VoidShortErr.includes('已作废'), r50VoidShortErr)
+const r50Recovered = await orders.addSettlement(r49Void.id, {
+  kind: 'recovery',
+  amount: 100,
+  reason: 'R50 钱追回来了',
+  bankRef: 'R50-REC'
+})
+eq('作废单上能登记追回，坏账余额跟着减', r50Recovered.badDebtOutstanding, 500)
+
+const r50VoidOrder = await orders.createOrder({
+  customerId: r50Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(r50VoidOrder.id, {
+  styleNo: 'R50-VOID-WO',
+  productName: '作废前的短款',
+  quantity: 10,
+  unitPrice: 100
+})
+await orders.addSettlement(r50VoidOrder.id, { kind: 'shortage', amount: 100, reason: 'R50 认错了' })
+await orders.voidOrder(r50VoidOrder.id, 'R50 作废')
+const r50VoidRow = (await orders.listSettlements(r50VoidOrder.id)).find((s) => s.kind === 'shortage')!
+await orders.reverseSettlement(r50VoidOrder.id, r50VoidRow.id, 'R50 这笔核销认错了')
+const r50VoidNet = (await orders.listSettlements(r50VoidOrder.id)).reduce((s, r) => s + r.amount, 0)
+eq('作废单上的核销仍能撤销（判断错了必须退得回来）', r50VoidNet, 0)
+
+section('R50 本币单没有汇率这回事')
+const r50Base = getSettings().baseCurrency
+const r50Home = await orders.createOrder({
+  customerId: r50Cust.id,
+  currency: r50Base as any,
+  paymentStatus: 'confirmed'
+})
+eq('本币单的汇率归一到 1', r50Home.exchangeRate, 1)
+eq('本币单不记锁汇日期', r50Home.exchangeRateDate, null)
+await orders.addOrderItem(r50Home.id, {
+  styleNo: 'R50-HOME',
+  productName: '本位币成交',
+  quantity: 2,
+  unitPrice: 500
+})
+const r50OrdersCsv = parseCsv(await dashboard.exportCsv('orders'))
+const r50ColOf = (name: string): number => r50OrdersCsv[0].indexOf(name)
+const r50HomeRow = r50OrdersCsv.slice(1).find((r) => r[r50ColOf('订单号')] === r50Home.orderNo)
+eq(
+  '台账里本币单折基准币 = 原币金额（不再乘历史垃圾汇率）',
+  Number(r50HomeRow?.[r50ColOf(`含费用合计(${r50Base})`)] ?? ''),
+  1000
+)
+eq('台账里的汇率列写 1', Number(r50HomeRow?.[r50ColOf('汇率')] ?? ''), 1)
+
+section('R50 箱规读不出来：保留原值，还要告诉人哪一行')
+const r50BoxCols = new Array(15).fill('')
+r50BoxCols[0] = 'R50-BOX'
+r50BoxCols[1] = '箱规写歪的款'
+r50BoxCols[9] = '60*40'
+const r50BoxImport = await products.importProductsCsv(
+  [products.CSV_TEMPLATE_HEADER, r50BoxCols.join(',')].join('\n'),
+  'skip'
+)
+eq('导入没被一格箱规拦下', r50BoxImport.created, 1)
+eq('坏箱规报一行警告', r50BoxImport.warnings.length, 1)
+check('警告里写清款号与原值', r50BoxImport.warnings[0].includes('R50-BOX') && r50BoxImport.warnings[0].includes('60*40'), r50BoxImport.warnings[0])
+const r50BoxSaved = (await products.findProductByStyleNo('R50-BOX'))!
+eq('坏箱规没有硬塞一个数进去', r50BoxSaved.boxLength, null)
+
+const r50BoxKeep = await products.saveProduct({
+  styleNo: 'R50-BOX-KEEP',
+  name: '原本有箱规',
+  boxLength: 60,
+  boxWidth: 40,
+  boxHeight: 30
+})
+const r50KeepCols = new Array(15).fill('')
+r50KeepCols[0] = 'R50-BOX-KEEP'
+r50KeepCols[1] = '原本有箱规'
+r50KeepCols[9] = '六十乘四十'
+await products.importProductsCsv([products.CSV_TEMPLATE_HEADER, r50KeepCols.join(',')].join('\n'), 'overwrite')
+eq('覆盖导入遇到坏箱规，保留库里的原值', (await products.getProduct(r50BoxKeep.id))!.boxLength, 60)
 
 /* ---------------- 汇总 ---------------- */
 

@@ -2396,14 +2396,19 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
             <Button
               size="sm"
               onClick={() => openSettle('recovery')}
-              disabled={settleLocked || order.badDebtOutstanding <= 0}
+              // 追回不在 settleLocked 里：单作废了，该收的钱照样可能到账
+              disabled={order.badDebtOutstanding <= 0}
             >
               坏账追回
             </Button>
           </div>
         </div>
         {settleLocked ? (
-          <div className="hint mb">草稿、已失效、已作废的订单不能核销；先把订单状态改成正式单。</div>
+          <div className="hint mb">
+            {order.paymentStatus === 'void'
+              ? '已作废的单不再核销新欠款；此前认下的坏账如果真追回来了，仍可在这里登记追回。'
+              : '草稿、已失效的订单不能核销；先把订单状态改成正式单。'}
+          </div>
         ) : null}
 
         <div className="table-wrap" style={{ marginTop: 12 }}>
