@@ -1,6 +1,6 @@
 import { Body, Controller, HttpCode, Post } from '@nestjs/common'
 import { CustomersService } from './customers.service'
-import { boolParam, objectParam, optionalId, strParam, idParam } from '../common/params'
+import { boolParam, objectParam, optionalId, optionalObject, strParam, idParam } from '../common/params'
 
 /**
  * 路由名 = IPC 通道名（customers:list → POST /api/customers/list）。
@@ -49,5 +49,27 @@ export class CustomersController {
       strParam(body['company']),
       optionalId(body['selfId'], '客户编号')
     )
+  }
+
+  @Post('stats')
+  @HttpCode(200)
+  stats(@Body() body: Record<string, unknown>) {
+    return this.customers.stats(idParam(body['id'], '客户编号'))
+  }
+
+  @Post('orders')
+  @HttpCode(200)
+  orderBriefs(@Body() body: Record<string, unknown>) {
+    return this.customers.orderBriefs(idParam(body['id'], '客户编号'))
+  }
+
+  @Post('stylePriceHistory')
+  @HttpCode(200)
+  stylePriceHistory(@Body() body: Record<string, unknown>) {
+    const filter = optionalObject(body['filter'], '筛选条件')
+    return this.customers.stylePriceHistory({
+      customerId: optionalId(filter['customerId'], '客户编号'),
+      styleNo: strParam(filter['styleNo']) || undefined
+    })
   }
 }

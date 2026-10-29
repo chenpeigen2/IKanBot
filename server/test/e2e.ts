@@ -41,8 +41,8 @@ async function main(): Promise<void> {
     const routes: string[] = meta.body.routes ?? []
     check('GET /api 自描述已接接口', routes.includes('POST /api/customers/list') && routes.includes('GET /healthz'))
     check(
-      '路由数与控制器一致（93 个：前 30 + 订单 30 + 报价 8 + 打样 8 + 预收 4 + 装箱 9 + 工作台 2 + 月报 1 + 导出 1）',
-      routes.length === 93
+      '路由数与控制器一致（96 个：前 30 + 订单 30 + 报价 8 + 打样 8 + 预收 4 + 装箱 9 + 工作台 2 + 月报 1 + 导出 1 + 客户聚合 3）',
+      routes.length === 96
     )
 
     console.log('客户域')
@@ -89,6 +89,38 @@ async function main(): Promise<void> {
 
     const missing = await http.post('/api/customers/get').send({ id: 9999 })
     check('查不存在的客户说「客户不存在」', missing.status === 404 && missing.body.error.message === '客户不存在')
+
+    const statsEmpty = await http.post('/api/customers/stats').send({ id })
+    check(
+      '统计通道：没下过单的客户回一页 0',
+      statsEmpty.status === 200 && statsEmpty.body.orderCount === 0 && statsEmpty.body.rateMissingSamples === 0
+    )
+
+    const briefsEmpty = await http.post('/api/customers/orders').send({ id })
+    check(
+      '历史订单通道：空客户回空列表',
+      briefsEmpty.status === 200 && Array.isArray(briefsEmpty.body) && briefsEmpty.body.length === 0
+    )
+
+    const histNoFilter = await http.post('/api/customers/stylePriceHistory').send({})
+    check(
+      '历史价两个条件都不给：400 并指路',
+      histNoFilter.status === 400 && String(histNoFilter.body.error.message).includes('哪一款')
+    )
+
+    const statsMissing = await http.post('/api/customers/stats').send({ id: 9999 })
+    check(
+      '统计通道：客户不存在回 404，与桌面同一句话',
+      statsMissing.status === 404 && statsMissing.body.error.message === '客户不存在'
+    )
+
+    const histMissing = await http
+      .post('/api/customers/stylePriceHistory')
+      .send({ filter: { customerId: 9999 } })
+    check(
+      '历史价：客户不存在同样是 404',
+      histMissing.status === 404 && histMissing.body.error.message === '客户不存在'
+    )
 
     const removed = await http.post('/api/customers/delete').send({ id })
     check('没有关联单据的客户可以删', removed.status === 200)

@@ -2,7 +2,7 @@ import { Inject, Injectable } from '@nestjs/common'
 import { DB } from '../db/db.module'
 import type { Db } from '../db/types'
 import { customersCore, type CustomersCore } from '../../../core/customers'
-import type { Customer } from '../../../src/shared/types'
+import type { Customer, CustomerOrderBrief, CustomerStats, StylePriceRow } from '../../../src/shared/types'
 
 /**
  * 客户域的 HTTP 门面：SQL 与守门全在 core/customers.ts，
@@ -39,5 +39,17 @@ export class CustomersService {
 
   remove(id: number): Promise<void> {
     return this.core.remove(id)
+  }
+
+  stats(id: number): Promise<CustomerStats> {
+    return this.core.stats(id)
+  }
+
+  orderBriefs(id: number): Promise<CustomerOrderBrief[]> {
+    return this.core.orderBriefs(id)
+  }
+
+  stylePriceHistory(filter: { customerId?: number; styleNo?: string }): Promise<StylePriceRow[]> {
+    return this.core.stylePriceHistory(filter)
   }
 }

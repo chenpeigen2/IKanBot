@@ -5,12 +5,13 @@
  * 现在只有这里一处 SQL 与守门，改了一边不可能忘另一边。
  * 依赖只有异步 Db 接口 + 纯函数 mapper/守门，不碰 electron、不碰文件系统。
  */
-import type { Customer, StylePriceRow } from '../src/shared/types'
-import { mapCustomer } from '../electron/db/mappers'
+import type { Customer, CustomerOrderBrief, CustomerStats, StylePriceRow } from '../src/shared/types'
+import { mapCustomer, mapCustomerStats } from '../electron/db/mappers'
 import { likeAny } from '../electron/services/search'
 import { assertDepositRatio } from '../src/shared/guards'
-import { NON_BILLING_STATUSES } from '../src/shared/billing'
+import { NON_BILLING_STATUSES, isBillingStatus, shownRemaining } from '../src/shared/billing'
 import { BizError, notFound } from '../src/shared/errors'
+import { moneyCore } from './money'
 import type { Db } from './db'
 
 export interface CustomerInput {
@@ -73,6 +74,9 @@ function normalize(raw: Record<string, unknown>): CustomerInput {
 }
 
 export function customersCore(db: Db) {
+  // 客户页的几个数全部从 money 取（同一份订单/打样口径），这里只做聚合与措辞
+  const money = moneyCore(db)
+
   /** 同名客户（不分大小写、忽略首尾空格）；一个集团开两个采购办很常见，只提醒不硬拦 */
   async function sameName(company: string, selfId?: number): Promise<Customer[]> {
     const key = company.trim().toLowerCase()
@@ -254,6 +258,12 @@ export function customersCore(db: Db) {
   async function stylePriceHistory(
     filter: { customerId?: number; styleNo?: string } = {}
   ): Promise<StylePriceRow[]> {
+    // 两个条件都不给就是「全库历史价」：远端大库会扫穿 order_items、一次回几万行，
+    // 而页面从来只用「看这家」或「看这款」两种问法
+    if (filter.customerId == null && !filter.styleNo?.trim()) {
+      throw new BizError('查历史成交价至少要说清看哪个客户、哪一款；整库翻一遍既慢又容易看错人。')
+    }
+    if (filter.customerId != null) await mustGet(filter.customerId)
     const where = [`o.payment_status NOT IN (${NON_BILLING_STATUSES.map(() => '?').join(',')})`]
     const params: (string | number)[] = [...NON_BILLING_STATUSES]
     if (filter.customerId != null) {
@@ -266,16 +276,26 @@ export function customersCore(db: Db) {
     }
     const rows = await db.all(
       `SELECT oi.style_no, oi.color, oi.unit_price, oi.quantity, o.currency, o.created_at, o.customer_id,
-              c.company AS customer_company
+              o.id AS order_id, c.company AS customer_company
        FROM order_items oi
        JOIN orders o ON o.id = oi.order_id
        JOIN customers c ON c.id = o.customer_id
        WHERE ${where.join(' AND ')}
-       ORDER BY o.created_at DESC, o.id DESC`,
+       ORDER BY o.created_at DESC, o.id DESC, oi.id ASC`,
       params
     )
 
-    const byKey = new Map<string, StylePriceRow>()
+    // 同一款同一色在同一张单里常有多行（S/M/L 各一行）：
+    // 「成交次数」说的是几张单，不是几行；最近单价取最新那张单的加权均价，
+    // 行序靠 oi.id 钉死，SQLite 与 MySQL 才不会各报一个价。
+    interface Acc {
+      row: StylePriceRow
+      orderIds: Set<number>
+      lastOrderId: number
+      lastQty: number
+      lastAmount: number
+    }
+    const byKey = new Map<string, Acc>()
     for (const r of rows) {
       const styleNo = String(r['style_no'] ?? '').trim()
       if (!styleNo) continue
@@ -288,27 +308,131 @@ export function customersCore(db: Db) {
       const qty = Number(r['quantity'] ?? 0)
       const price = Number(r['unit_price'] ?? 0)
       const date = String(r['created_at'] ?? '')
+      const orderId = Number(r['order_id'])
       const hit = byKey.get(key)
       if (!hit) {
         byKey.set(key, {
-          styleNo,
-          color,
-          lastUnitPrice: price,
-          lastCurrency: String(r['currency'] ?? ''),
-          lastDate: date,
-          times: 1,
-          totalQuantity: qty,
-          customerCompany: String(r['customer_company'] ?? '')
+          row: {
+            styleNo,
+            color,
+            lastUnitPrice: price,
+            lastCurrency: String(r['currency'] ?? ''),
+            lastDate: date,
+            times: 1,
+            totalQuantity: qty,
+            customerCompany: String(r['customer_company'] ?? '')
+          },
+          orderIds: new Set([orderId]),
+          lastOrderId: orderId,
+          lastQty: qty,
+          lastAmount: qty * price
         })
-      } else {
-        hit.times += 1
-        hit.totalQuantity += qty
+        continue
+      }
+      hit.orderIds.add(orderId)
+      hit.row.totalQuantity += qty
+      if (orderId === hit.lastOrderId) {
+        hit.lastQty += qty
+        hit.lastAmount += qty * price
+        if (hit.lastQty > 0) hit.row.lastUnitPrice = Math.round((hit.lastAmount / hit.lastQty) * 100) / 100
       }
     }
-    return [...byKey.values()].sort((a, b) => (a.lastDate < b.lastDate ? 1 : a.lastDate > b.lastDate ? -1 : 0))
+    const out = [...byKey.values()].map((a) => ({ ...a.row, times: a.orderIds.size }))
+    // 日期相同也要有确定顺序（款号、颜色兜底），否则同一天的两笔在不同库里会换位
+    return out.sort(
+      (a, b) =>
+        (a.lastDate < b.lastDate ? 1 : a.lastDate > b.lastDate ? -1 : 0) ||
+        a.styleNo.localeCompare(b.styleNo) ||
+        a.color.localeCompare(b.color)
+    )
   }
 
-  return { list, get, mustGet, sameName, save, setActive, remove, stylePriceHistory }
+  /**
+   * 客户聚合统计：订单数、总金额、总毛利、未收金额。
+   * 口径全部走 core/money.ts（唯一真源）：
+   *  - 成交额 = Σ含费用合计（折各单锁汇率）
+   *  - 未收   = Σ(含费用合计 − 已收) + 打样未收
+   *  - 毛利   = Σ(货值 − 成本)，有成本没录全 / 缺汇率 → null（不可信）
+   */
+  async function stats(customerId: number): Promise<CustomerStats> {
+    // 客户刚被删或 id 传错时不能回一页「没下过单」的空账：那是另一种意义上的错账
+    await mustGet(customerId)
+    // 一次取全（含草稿/失效/作废）：成交额与待收只认计费单，坏账要认全部——
+    // 单子作废了，那笔没收回来的钱不会跟着消失（与工作台、月报同一个口径，R49）。
+    const all = await money.listOrderMoney({ customerId, includeVoided: true })
+    const rows = all.filter((r) => isBillingStatus(r.paymentStatus))
+    const totalAmount = rows.reduce((s, r) => s + r.grandTotalBase, 0)
+    // 未收走统一口径（money.ts）：订单待收 + 打样未收（N23：客户页不能比工作台少数一笔打样费）
+    const outstandingOrders = rows.reduce((s, r) => s + r.receivableBase, 0)
+    const samples = await money.sampleReceivableBreakdown(customerId)
+    const outstanding = outstandingOrders + samples.total
+    // 名下打样单总数：只打过样的客户也要能导出对账单
+    const sampleCount = Number(
+      (await db.get('SELECT COUNT(*) AS c FROM sample_orders WHERE customer_id = ?', [customerId]))?.['c'] ?? 0
+    )
+    // 坏账不进待收，但客户页要能看见这家客户赖过多少钱：作废/失效单上的坏账也算
+    const badDebt = all.reduce((s, r) => s + r.badDebtBase, 0)
+    const missingCostOrders = rows.filter((r) => r.missingCostItems > 0).length
+    // 外币没填汇率的单：成交额/待收/毛利都按 0 折，上面的合计是「少算了这几单」的数。
+    // 不亮出来，老板会拿着一个偏小的成交额去对账
+    const rateMissingOrders = rows.filter((r) => r.rateMissing).length
+    // 坏账也要单独数一遍缺汇率的：作废单本来就不在 rows 里，
+    // 只靠 rateMissingOrders 的话，一笔作废单上的 USD 坏账会无声无息地变成 0
+    const badDebtRateMissingOrders = all.filter((r) => r.badDebtOutstanding > 0.001 && r.rateMissing).length
+    const totalProfitRaw = rows.reduce((s, r) => s + (r.profitBase ?? 0), 0)
+    // 下面的历史列表会把草稿/失效/作废也列出来，成交额却不含它们；
+    // 不写明条数，老板会以为系统漏单（N-口径一致）
+    return mapCustomerStats({
+      order_count: rows.length,
+      excluded_order_count: all.length - rows.length,
+      total_amount: totalAmount,
+      // 有成本没录全的订单 → 毛利不可信（null），不许拿 0 成本凑一个漂亮的数；
+      // 缺汇率的单同理：那一单的毛利根本没折进合计，算出来的也不是真毛利
+      total_profit: missingCostOrders > 0 || rateMissingOrders > 0 ? null : totalProfitRaw,
+      outstanding,
+      outstanding_orders: outstandingOrders,
+      outstanding_samples: samples.total,
+      sample_count: sampleCount,
+      bad_debt: badDebt,
+      missing_cost_orders: missingCostOrders,
+      rate_missing_orders: rateMissingOrders,
+      rate_missing_samples: samples.rateMissing,
+      bad_debt_rate_missing_orders: badDebtRateMissingOrders
+    })
+  }
+
+  /** 客户历史订单简要（金额口径走 core/money.ts） */
+  async function orderBriefs(customerId: number): Promise<CustomerOrderBrief[]> {
+    await mustGet(customerId)
+    const rows = await money.listOrderMoney({ customerId, includeVoided: true })
+    return rows.map((r) => {
+      const billing = isBillingStatus(r.paymentStatus)
+      return {
+        id: r.orderId,
+        orderNo: r.orderNo,
+        piNo: r.piNo,
+        currency: r.currency,
+        paymentStatus: r.paymentStatus,
+        shipStatus: r.shipStatus,
+        total: r.goodsValue,
+        grandTotal: r.grandTotal,
+        paid: r.paidAmount,
+        // 草稿 / 已失效 / 已作废的单在历史里保留，但不再向客户催款，待收按 0 显示
+        // （口径见 src/shared/billing.ts，订单列表和客户页必须是同一个说法）
+        remaining: shownRemaining(r.paymentStatus, r.receivable),
+        // 待收里已经由客户账上余额覆盖的那一块：不露出来，「待收 500 + 已收 500」看着像
+        // 还差 500 现金，实际那 500 早已抵扣掉，再催一遍就是重复收款
+        creditApplied: billing ? r.creditApplied : 0,
+        counted: billing,
+        // 作废/失效单收到的现金全额进了客户预收（追回的欠款冲的是已核销坏账，不是多付）：
+        // 订单行里写着「已收」，预收区又有一笔，不说清就成了两笔钱
+        prepaid: billing ? 0 : Math.max(0, r.paidAmount - r.badDebtRecovered),
+        createdAt: r.createdAt
+      }
+    })
+  }
+
+  return { list, get, mustGet, sameName, save, setActive, remove, stylePriceHistory, stats, orderBriefs }
 }
 
 export type CustomersCore = ReturnType<typeof customersCore>

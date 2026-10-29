@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Modal, useToast, money, Empty, fmtDate, PaymentTag, ShipTag, Button, LoadError, PromptModal, useLoadGuard } from '../ui'
+import { Modal, useToast, money, moneyOrDash, Empty, fmtDate, PaymentTag, ShipTag, Button, LoadError, PromptModal, useLoadGuard } from '../ui'
 import { localDate } from '../../../shared/date'
 import { INCOTERMS, PAYMENT_METHOD_LABEL, type PaymentMethod } from '../../../shared/types'
 import type { Customer, CustomerCreditApplication, CustomerCreditCurrency, CustomerCreditRefund } from '../../../shared/types'
@@ -784,6 +784,8 @@ export default function Customers() {
             <div className="stat">
               <div className="stat-label">累计成交额</div>
               <div className="stat-value small">{money(detail.stats.totalAmount, detail.base)}</div>
+              {/* 各单按自己锁的汇率折，不是按今天的汇率重算：不写明，老板会拿今日汇率复算，以为漏账 */}
+              <div className="stat-hint">按每张单锁定的汇率折成 {detail.base}</div>
               {detail.stats.rateMissingOrders > 0 ? (
                 <div className="stat-hint">
                   有 {detail.stats.rateMissingOrders} 单外币没填汇率，成交额/未收/毛利都没折进去
@@ -792,11 +794,8 @@ export default function Customers() {
             </div>
             <div className="stat">
               <div className="stat-label">累计毛利</div>
-              <div className="stat-value small">
-                {detail.stats.missingCostOrders || detail.stats.rateMissingOrders
-                  ? '—'
-                  : money(detail.stats.totalProfit, detail.base)}
-              </div>
+              {/* 能不能算得出毛利由服务端判定（算不出来就是 null），界面不再各写一遍条件 */}
+              <div className="stat-value small">{moneyOrDash(detail.stats.totalProfit, detail.base)}</div>
               {detail.stats.missingCostOrders ? (
                 <div className="stat-hint">有 {detail.stats.missingCostOrders} 单成本没录全</div>
               ) : null}
@@ -814,9 +813,19 @@ export default function Customers() {
                   {money(detail.stats.outstandingSamples, detail.base)}
                 </div>
               ) : null}
+              {detail.stats.rateMissingSamples > 0 ? (
+                <div className="stat-hint">
+                  另有 {detail.stats.rateMissingSamples} 张打样单没填汇率，未折进未收
+                </div>
+              ) : null}
               {detail.stats.badDebt > 0 ? (
                 <div className="stat-hint">
                   另有坏账未追回 {money(detail.stats.badDebt, detail.base)}
+                </div>
+              ) : null}
+              {detail.stats.badDebtRateMissingOrders > 0 ? (
+                <div className="stat-hint">
+                  有 {detail.stats.badDebtRateMissingOrders} 单缺汇率，坏账折不出来，没算进上面
                 </div>
               ) : null}
             </div>
@@ -1060,7 +1069,14 @@ export default function Customers() {
                         <ShipTag status={o.shipStatus} />
                       </td>
                       <td className="num">{money(o.grandTotal, o.currency)}</td>
-                      <td className="num">{money(o.paid, o.currency)}</td>
+                      <td className="num">
+                        {money(o.paid, o.currency)}
+                        {/* 这张单不再催款，收到的现金已经进了客户预收：
+                            不说一句，上面的「可用预收」和这一行的「已收」会被当成两笔钱 */}
+                        {o.prepaid > 0.001 ? (
+                          <div className="faint">其中 {money(o.prepaid, o.currency)} 已转预收</div>
+                        ) : null}
+                      </td>
                       <td className="num">
                         {money(o.remaining, o.currency)}
                         {o.counted ? null : <span className="faint"> · 不催款</span>}

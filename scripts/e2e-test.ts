@@ -11573,6 +11573,101 @@ eq('压过的图片按原样存（method 0），不再白烧 CPU', r52Zip.readUI
 eq('包读回来条目一个不少', readZip(r52Zip).length, 2)
 fs.rmSync(r52ZipDir, { recursive: true, force: true })
 
+/* ---------------- R53 客户聚合 ---------------- */
+
+section('R53 客户聚合：历史价、统计、历史订单都从 core 出，桌面和后端同一句话')
+const r53Cust = await customers.saveCustomer({ company: 'R53-AGG-CO' })
+const r53A = await orders.createOrder({
+  customerId: r53Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed'
+})
+// 同款同色在一张单里会按尺码拆成几行（同款同码才不许重复）
+await orders.addOrderItem(r53A.id, { styleNo: 'r53-hoodie', productName: '卫衣', color: 'Gray', size: 'M', quantity: 10, unitPrice: 100 })
+await orders.addOrderItem(r53A.id, { styleNo: 'r53-hoodie', productName: '卫衣', color: 'Gray', size: 'L', quantity: 10, unitPrice: 120 })
+await orders.addOrderItem(r53A.id, { styleNo: 'r53-tee', productName: 'T恤', color: 'Black', size: 'M', quantity: 10, unitPrice: 50 })
+await orders.addOrderItem(r53A.id, { styleNo: 'r53-tee', productName: 'T恤', color: 'Black', size: 'L', quantity: 30, unitPrice: 70 })
+const r53B = await orders.createOrder({
+  customerId: r53Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(r53B.id, { styleNo: 'R53-HOODIE', productName: '卫衣', color: 'Gray', quantity: 5, unitPrice: 200 })
+const r53Hist = await customers.stylePriceHistory({ customerId: r53Cust.id })
+const r53Hoodie = r53Hist.find((r) => r.styleNo.toLowerCase() === 'r53-hoodie')!
+const r53Tee = r53Hist.find((r) => r.styleNo.toLowerCase() === 'r53-tee')!
+eq('两张单各两行也只算两次成交', r53Hoodie.times, 2)
+eq('累计数量把同一款的所有行加起来', r53Hoodie.totalQuantity, 25)
+eq('最近单价取最新那张单，款号大小写不同也认成同一款', r53Hoodie.lastUnitPrice, 200)
+eq('第一次成交的那款：同单多行按数量加权，不是随手取一行', r53Tee.lastUnitPrice, 65)
+eq('第一次成交的那款：同单多行仍只算一单', r53Tee.times, 1)
+eq('按款号查不挑大小写、不吃首尾空格', (await customers.stylePriceHistory({ styleNo: ' R53-hoodie ' })).length, 1)
+
+let r53NoFilter = ''
+try {
+  await customers.stylePriceHistory({})
+} catch (e) {
+  r53NoFilter = (e as Error).message
+}
+check(
+  '历史价不许整库翻：两个条件都不给就拦下并指路',
+  r53NoFilter.includes('哪个客户') && r53NoFilter.includes('哪一款'),
+  r53NoFilter
+)
+
+const r53Empty = await customers.saveCustomer({ company: 'R53-EMPTY-CO' })
+eq('没下过单的客户：历史订单是空列表', (await customers.customerOrderBriefs(r53Empty.id)).length, 0)
+eq('没下过单的客户：统计仍是 0 而不是崩', (await customers.customerStats(r53Empty.id)).orderCount, 0)
+
+const r53Errors: string[] = []
+for (const call of [
+  () => customers.customerStats(999999),
+  () => customers.customerOrderBriefs(999999),
+  () => customers.stylePriceHistory({ customerId: 999999 })
+]) {
+  try {
+    await call()
+    r53Errors.push('没报错')
+  } catch (e) {
+    r53Errors.push((e as Error).message)
+  }
+}
+check(
+  '客户不存在时三个通道都直说，不拿一页空账糊过去',
+  r53Errors.every((m) => m.includes('客户不存在')),
+  r53Errors.join(' | ')
+)
+
+// 升级前的 USD 单/打样单汇率列是 0：折不出来，合计里就少算了它们，页面必须点出来
+const r53NoRate = await orders.createOrder({
+  customerId: r53Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(r53NoRate.id, { styleNo: 'r53-legacy', productName: '老单', quantity: 1, unitPrice: 90 })
+await orders.addSettlement(r53NoRate.id, { kind: 'bad_debt', amount: 90, reason: 'R53 老单收不回' })
+getDb().run('UPDATE orders SET exchange_rate = 0 WHERE id = ?', [r53NoRate.id])
+const r53NoRateSmp = await samples.saveSample({
+  customerId: r53Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  status: 'pending',
+  feeStatus: 'unpaid',
+  items: [{ styleNo: 'R53-LEGACY-S', quantity: 1, unitPrice: 80 }]
+})
+getDb().run('UPDATE sample_orders SET exchange_rate = 0 WHERE id = ?', [r53NoRateSmp.id])
+const r53Stats = await customers.customerStats(r53Cust.id)
+eq('外币单缺汇率：统计说得出是哪一单', r53Stats.rateMissingOrders, 1)
+eq('外币打样缺汇率：单独数张数', r53Stats.rateMissingSamples, 1)
+eq('缺汇率的坏账也点名，不许折成 0 沉底', r53Stats.badDebtRateMissingOrders, 1)
+eq('有单折不出来，毛利宁可不给也不报一个偏小的数', r53Stats.totalProfit, null)
+
+const r53VoidBrief = (await customers.customerOrderBriefs(r52VoidCust.id)).find((b) => b.id === r52Void.id)!
+eq('作废单历史行：已收 500（含追回 200），其中转预收 300', [r53VoidBrief.paid, r53VoidBrief.prepaid], [500, 300])
+
 /* ---------------- 汇总 ---------------- */
 
 console.log(`\n${'='.repeat(46)}`)

@@ -226,6 +226,35 @@ export interface CustomerStats {
   missingCostOrders: number
   /** 外币单没填汇率的张数：这些单的成交额/待收/毛利都折不出来，上面的数是「少算过」的 */
   rateMissingOrders: number
+  /** 外币打样单没填汇率的张数：它们的待收折不出来，也不能凭 0 装作「不欠」
+   *  （与 rateMissingOrders 分开数：订单少折多少、打样少折多少，话得分别说清） */
+  rateMissingSamples: number
+  /** 有坏账、但汇率没填的单数：这些单的坏账折成 0，坏账合计少算了它们 */
+  badDebtRateMissingOrders: number
+}
+
+/** 客户历史订单简要（客户详情页「订单历史」那一列） */
+export interface CustomerOrderBrief {
+  id: number
+  orderNo: string
+  piNo: string
+  currency: string
+  paymentStatus: string
+  shipStatus: string
+  /** 货值 */
+  total: number
+  /** 含费用合计（PI 上的 TOTAL） */
+  grandTotal: number
+  paid: number
+  /** 待收（含费用合计 − 已收）；草稿/失效/作废按 0 出 */
+  remaining: number
+  /** 其中已用客户预收抵扣（非现金） */
+  creditApplied: number
+  /** 这条是否计入上面的「订单数 / 成交额」（草稿、失效、作废不计） */
+  counted: boolean
+  /** 不计费的单子收到的现金里，真正转进客户预收的那一部分（追回的欠款不算多付） */
+  prepaid: number
+  createdAt: string
 }
 
 /** 订单行 = 一个 SKU */
