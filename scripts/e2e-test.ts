@@ -6811,7 +6811,15 @@ check('预收结余注明可抵下张单或退还', r26Cell(r26Prepaid, '备注'
 
 const r26UsdTotal = r26Body.find((r) => r[r26Col('类型')] === '合计' && r[r26Col('币种')] === 'USD')
 eq('USD 小计：未收 70', r26Cell(r26UsdTotal, '未收(原币)'), '70')
-eq('USD 小计：已收 88', r26Cell(r26UsdTotal, '已收(原币)'), '88')
+eq('USD 小计：金额只算计费单（作废 20 + 免单 20 + 取消 10 不算）', r26Cell(r26UsdTotal, '金额(原币)'), '125')
+eq('USD 小计：已收也只算计费单（作废与取消单收到的钱走预收结余）', r26Cell(r26UsdTotal, '已收(原币)'), '60')
+check(
+  '合计行另记几张没算、多少钱，客户核得出差额',
+  r26Cell(r26UsdTotal, '备注').includes('另有 3 张') &&
+    r26Cell(r26UsdTotal, '备注').includes('50') &&
+    r26Cell(r26UsdTotal, '备注').includes('不计入合计'),
+  r26Cell(r26UsdTotal, '备注')
+)
 const r26BaseTotal = r26Body.find((r) => r[r26Col('类型')] === '合计' && r[r26Col('币种')] === r26Base)
 eq('基准币合计行不写原币金额（免得被看成「已收 0」）', r26Cell(r26BaseTotal, '已收(原币)'), '')
 const r26BaseOpen = Number(r26Cell(r26BaseTotal, `未收(${r26Base})`) || 0)
@@ -11254,6 +11262,153 @@ r50KeepCols[1] = '原本有箱规'
 r50KeepCols[9] = '六十乘四十'
 await products.importProductsCsv([products.CSV_TEMPLATE_HEADER, r50KeepCols.join(',')].join('\n'), 'overwrite')
 eq('覆盖导入遇到坏箱规，保留库里的原值', (await products.getProduct(r50BoxKeep.id))!.boxLength, 60)
+
+section('R51 一个汇率一张嘴：本币旧单不再被历史汇率乘一遍')
+const r51Cust = await customers.saveCustomer({ company: 'R51-RATE-CO' })
+const r51Base = getSettings().baseCurrency
+const r51Home = await orders.createOrder({
+  customerId: r51Cust.id,
+  currency: r51Base as any,
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(r51Home.id, {
+  styleNo: 'R51-HOME',
+  productName: '本币旧单',
+  quantity: 1,
+  unitPrice: 1000,
+  unitCost: 600
+})
+// 模拟升级前留下的历史汇率：当年建本币单也被逼着填了一个外币汇率
+getDb().run('UPDATE orders SET exchange_rate = 7.15 WHERE id = ?', [r51Home.id])
+const r51HomeList = await orders.listOrderRows({ keyword: r51Home.orderNo })
+const r51HomeRow = r51HomeList.rows[0]
+eq('本币单在列表里的汇率归一到 1', r51HomeRow.exchangeRate, 1)
+eq('待收折基准币不乘历史汇率', r51HomeRow.remainingBase, 1000)
+eq('列表合计也只算一次', r51HomeList.grandBaseTotal, 1000)
+
+const r51Gap = await orders.createOrder({
+  customerId: r51Cust.id,
+  currency: 'USD',
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(r51Gap.id, {
+  styleNo: 'R51-GAP',
+  productName: '汇率没填的外币单',
+  quantity: 1,
+  unitPrice: 2000,
+  unitCost: 1200
+})
+getDb().run('UPDATE orders SET exchange_rate = 0 WHERE id = ?', [r51Gap.id])
+const r51GapRow = (await orders.listOrderRows({ keyword: r51Gap.orderNo })).rows[0]
+eq('没填汇率的外币单不拿 1 冒充折算', r51GapRow.exchangeRate, 0)
+eq('它的待收折基准币是 0（不假装折得出来）', r51GapRow.remainingBase, 0)
+const r51Stats = await customers.customerStats(r51Cust.id)
+check('客户页露出「N 单汇率没填」', r51Stats.rateMissingOrders >= 1, `${r51Stats.rateMissingOrders}`)
+eq('成本都录全了，毛利仍然不许报一个偏小的数', r51Stats.missingCostOrders, 0)
+eq('有汇率没填的单，累计毛利给空值而不是少算的数', r51Stats.totalProfit, null)
+
+// 作废单只留在明细里认，不进合计（否则会出现「金额 500、已收 0、未收 0」的自相矛盾行）
+const r51Void = await orders.createOrder({
+  customerId: r51Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(r51Void.id, {
+  styleNo: 'R51-VOID',
+  productName: '作废的这单不算合计',
+  quantity: 1,
+  unitPrice: 500
+})
+await orders.voidOrder(r51Void.id, 'R51 作废')
+
+const r51Stmt = parseCsv(await dashboard.exportCsv('statement', { customerId: r51Cust.id }))
+const r51Col = (name: string): number => r51Stmt[0].indexOf(name)
+const r51GapStmtRow = r51Stmt.slice(1).find((r) => r[r51Col('单据号')] === r51Gap.orderNo)!
+eq('对账单上折不出来的单不印汇率', r51GapStmtRow[r51Col('汇率')], '')
+eq(
+  '它的未收(基准币)不写一个假的数',
+  Number(r51GapStmtRow[r51Col(`未收(${r51Base})`)]),
+  0
+)
+check(
+  '备注说明汇率未填、所以没折算',
+  String(r51GapStmtRow[r51Col('备注')]).includes('汇率未填'),
+  String(r51GapStmtRow[r51Col('备注')])
+)
+const r51HomeStmtRow = r51Stmt.slice(1).find((r) => r[r51Col('单据号')] === r51Home.orderNo)!
+eq(
+  '本币单的未收(基准币) = 原币（不乘历史汇率）',
+  Number(r51HomeStmtRow[r51Col(`未收(${r51Base})`)]),
+  1000
+)
+const r51UsdTotal = r51Stmt
+  .slice(1)
+  .find((r) => r[r51Col('类型')] === '合计' && r[r51Col('币种')] === 'USD')!
+eq('USD 合计只累加计费单（作废的 500 不算）', Number(r51UsdTotal[r51Col('金额(原币)')]), 2000)
+check(
+  '合计行另记下有几张没算，附上金额',
+  String(r51UsdTotal[r51Col('备注')]).includes('另有 1 张作废/失效/免单的单据（金额 500），不计入合计'),
+  String(r51UsdTotal[r51Col('备注')])
+)
+
+section('R51 打样单：本币不用填汇率，外币没填照样拦住')
+const r51Sample = await samples.saveSample({
+  customerId: r51Cust.id,
+  currency: r51Base,
+  status: 'pending',
+  feeStatus: 'unpaid',
+  items: [{ styleNo: 'R51-SMP', quantity: 2, unitPrice: 100 }]
+})
+eq('本币打样单不填汇率也能存（按 1 折）', r51Sample.exchangeRate, 1)
+eq('它的待收折基准币等于原币', r51Sample.receivableBase, r51Sample.owed)
+check('本币打样单不标「汇率没填」', r51Sample.rateMissing === false)
+getDb().run('UPDATE sample_orders SET exchange_rate = 7.15 WHERE id = ?', [r51Sample.id])
+const r51SampleLegacy = (await samples.getSample(r51Sample.id))!
+eq('老本币打样单不乘历史汇率', r51SampleLegacy.receivableBase, r51SampleLegacy.owed)
+check('也不标成汇率没填', r51SampleLegacy.rateMissing === false)
+const r51SampleEdited = await samples.saveSample({ id: r51Sample.id, note: 'R51 只改备注' })
+eq('本币老单改个备注不会被汇率闸门挡住，顺手把汇率归一到 1', r51SampleEdited.exchangeRate, 1)
+
+let r51SampleGapErr = ''
+try {
+  await samples.saveSample({
+    customerId: r51Cust.id,
+    currency: 'USD',
+    feeStatus: 'unpaid',
+    items: [{ styleNo: 'R51-SMP-US', quantity: 1, unitPrice: 100 }]
+  })
+} catch (e) {
+  r51SampleGapErr = (e as Error).message
+}
+check('外币打样单还有应收、没填汇率：照样拦住', r51SampleGapErr.includes('汇率'), r51SampleGapErr)
+
+section('R51 删单：闸门与删除写成同一条语句')
+const r51EmptyOrder = await orders.createOrder({
+  customerId: r51Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'draft'
+})
+await orders.deleteOrder(r51EmptyOrder.id)
+eq('空单删得掉', await orders.getOrder(r51EmptyOrder.id), null)
+let r51DelErr = ''
+try {
+  await orders.deleteOrder(r51Gap.id)
+} catch (e) {
+  r51DelErr = (e as Error).message
+}
+check('有明细的单还是删不掉，并指路「作废」', r51DelErr.includes('明细') && r51DelErr.includes('作废'), r51DelErr)
+check('拦下之后单还在', (await orders.getOrder(r51Gap.id)) !== null)
+const r51EmptySample = await samples.saveSample({
+  customerId: r51Cust.id,
+  currency: r51Base,
+  status: 'pending',
+  feeStatus: 'unpaid',
+  items: [{ styleNo: 'R51-EMPTY-SMP', quantity: 1, unitPrice: 0 }]
+})
+await samples.deleteSample(r51EmptySample.id)
+eq('没有应收、没有凭据的打样单删得掉', await samples.getSample(r51EmptySample.id), null)
 
 /* ---------------- 汇总 ---------------- */
 

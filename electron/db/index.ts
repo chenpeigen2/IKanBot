@@ -1,11 +1,12 @@
 import { Database } from 'node-sqlite3-wasm'
-import { existsSync, mkdirSync, statSync, rmdirSync, renameSync } from 'fs'
+import { existsSync, mkdirSync, statSync, renameSync, readFileSync, writeFileSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import { app } from 'electron'
 import { LATEST_DB_VERSION, MIGRATIONS } from './schema'
 import type { Db, Row } from '../../core/db'
 
 let db: Database | null = null
+let dbFile: string | null = null
 
 /** 数据根目录：开发态用项目下的 data/，打包后用 userData。可用 IKAN_DATA_DIR 覆盖。 */
 export function dataDir(): string {
@@ -118,6 +119,14 @@ export function openDb(): Database {
   const file = join(dataDir(), 'ikanbot.db')
   clearStaleLock(file)
   db = new Database(file)
+  dbFile = file
+  // 记下「谁握着这个库」：锁目录本身一直是空的（见 clearStaleLock 的注释），
+  // 只能靠这份旁注分辨「真有人在用」和「上次没退干净」
+  try {
+    writeFileSync(lockOwnerPath(file), `${process.pid}\n${new Date().toISOString()}\n`, 'utf8')
+  } catch (e) {
+    console.warn('[db] 没能登记锁的主人（不影响这次打开）', e)
+  }
   db.exec('PRAGMA foreign_keys = ON;')
   // 单实例锁挡住了第二个 IKanBot，但挡不住网盘同步/DB 工具偶尔握住文件：
   // 没有 busy_timeout 时任何写会直接抛裸英文 database is locked，用户只看到一串报错
@@ -132,28 +141,71 @@ export function openDb(): Database {
  * node-sqlite3-wasm 用「建一个 <db>.lock 目录」当排他锁：正常 close() 会删，
  * 但进程被强杀（超时 / taskkill / 崩溃）时不会删——下次启动就抛
  * `SQLite3Error: database is locked`，程序直接打不开。
- * 所以打开前先自愈。
  *
- * 只敢删空目录：锁目录里万一有内容，说明可能是别的进程（比如没退干净的另一份程序）
- * 正拿着它，递归删掉等于把它的锁抽走——两边同时写同一个库才是真灾难。
- * 所以非空时改名挪开、留个案底，让本次启动照常进行，也让人看得见发生过什么。
+ * 关键一点：**锁被握着的时候，这个目录也是空的**（驱动只 mkdir，不往里放任何东西）。
+ * 所以「空 = 没人用」是反的：照旧直接 rmdir，等于把另一个正在跑的进程的锁抽走，
+ * 两边同时写同一个库才是真灾难。现在靠同目录的 `.lock.owner`（里面是持锁进程的 pid）
+ * 分辨：
+ *   - 主人还活着 → 抛中文错，让人先把那一份关掉（桌面端会弹窗说明）；
+ *   - 主人已经不在（或老版本没留旁注）→ 这是残留锁，改名挪开、留个案底，照常启动。
  */
 function clearStaleLock(file: string): void {
   try {
     const lockPath = `${file}.lock`
-    if (!existsSync(lockPath)) return
-    if (!statSync(lockPath).isDirectory()) return
-    try {
-      rmdirSync(lockPath)
+    if (!existsSync(lockPath) || !statSync(lockPath).isDirectory()) {
+      // 锁目录都不在，上一份旁注就是废话
+      removeLockOwner(file)
       return
-    } catch {
-      /* 非空（ENOTEMPTY）或正被别人持有：往下改名挪走 */
     }
+    const ownerPid = readLockOwner(file)
+    if (ownerPid != null && pidAlive(ownerPid)) {
+      throw new Error(
+        `这份数据正被另一个 IKanBot（进程 ${ownerPid}）用着：同一个库两个程序同时写，账会写坏。` +
+          `请先关掉那一份再打开。若确认它已经不在了（比如强退过），把这个文件夹删掉再试：${lockPath}`
+      )
+    }
+    // 抽锁之前先清掉旁注：新主人的 pid 会在打开成功后重新写入
+    removeLockOwner(file)
     const moved = `${lockPath}.stale-${Date.now()}`
     renameSync(lockPath, moved)
-    console.warn(`[db] 锁目录不为空，已挪到 ${moved}（可能是上一次异常退出留下的）`)
+    console.warn(`[db] 清理残留锁：${moved}（属于已退出的进程 ${ownerPid ?? '未知，老版本没留旁注'}）`)
+  } catch (e) {
+    // 「有人在用」必须往上抛：吞掉它，接下来就是两个进程写同一个库
+    if ((e as Error).message?.includes('正被另一个')) throw e
+    // 其它情况（挪不动、没权限）交给驱动自己去报错，别在这里硬删
+    console.warn('[db] 清理残留锁失败', e)
+  }
+}
+
+function lockOwnerPath(file: string): string {
+  return `${file}.lock.owner`
+}
+
+function readLockOwner(file: string): number | null {
+  try {
+    const raw = readFileSync(lockOwnerPath(file), 'utf8').split('\n')[0].trim()
+    const pid = Number(raw)
+    return Number.isInteger(pid) && pid > 0 ? pid : null
   } catch {
-    // 删不掉就算了，下次还会再试
+    return null
+  }
+}
+
+/** pid 还活着吗：ESRCH 才是「进程没了」；EPERM 说明进程在，只是不归我们管 */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+function removeLockOwner(file: string): void {
+  try {
+    unlinkSync(lockOwnerPath(file))
+  } catch {
+    /* 没有就算了 */
   }
 }
 
@@ -185,6 +237,9 @@ export function closeDb(): void {
   if (db) {
     db.close()
     db = null
+    // close() 已经把锁目录删了；旁注也跟着走，别让下一次启动去问一个已经退出的 pid
+    if (dbFile) removeLockOwner(dbFile)
+    dbFile = null
   }
 }
 

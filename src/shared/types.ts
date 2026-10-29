@@ -224,6 +224,8 @@ export interface CustomerStats {
   badDebt: number
   /** 成本没录全的订单数：这些单的毛利是假的，不能当成真毛利看 */
   missingCostOrders: number
+  /** 外币单没填汇率的张数：这些单的成交额/待收/毛利都折不出来，上面的数是「少算过」的 */
+  rateMissingOrders: number
 }
 
 /** 订单行 = 一个 SKU */

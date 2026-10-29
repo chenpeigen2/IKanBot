@@ -16,7 +16,7 @@ import { settingsCore } from './settings'
 import { applyShipStatus, isShipStatusDerived, shipmentSummary } from './shipping'
 import { creditsCore } from './credits'
 import { samplesCore } from './samples'
-import { computeOrderMoney, costInOrderCurrency, depositDueOf, describeChargeChange, moneyCore, notInStatuses, parseCharges } from './money'
+import { baseRateOf, computeOrderMoney, costInOrderCurrency, depositDueOf, describeChargeChange, moneyCore, notInStatuses, parseCharges } from './money'
 import { mapCustomer, mapEvent, mapOrder, mapOrderItem, mapOrderPhoto, mapPackingList, mapPackingListLine, mapPayment, mapSettlement, mapSkuSummary } from '../electron/db/mappers'
 import { likeAny } from '../electron/services/search'
 import { addDays, daysBetween, isLocalDate, localDate, localDayAfterUtc, localDayStartUtc } from '../src/shared/date'
@@ -484,7 +484,14 @@ export function ordersCore(db: Db) {
     const list: OrderListRow[] = rows.map((r) => {
       const id = Number(r.id)
       const m = moneyBy.get(id)!
-      const rate = Number(r.exchange_rate ?? 1)
+      // 折算率统一走 baseRateOf：本币单恒为 1（库里存着的旧汇率不参与折算），
+      // 外币单没填汇率则为 0——折不出来就不许拿 1 装成折得出来，
+      // remainingBase / 排序 / 合计要跟着一起归零，否则「待收合计」里混进一个凭空 ×1 的数
+      const rate = baseRateOf(
+        String(r.currency ?? 'USD'),
+        String(r.base_currency ?? 'CNY'),
+        Number(r.exchange_rate ?? 0)
+      )
       const pack = packBy.get(id) ?? { qty: 0, batches: 0, containers: '' }
       const style = styleBy.get(id) ?? { styles: 0, first: '' }
       const shipStatus = String(r.ship_status ?? 'not_prepared') as ShipStatus
@@ -1195,8 +1202,7 @@ export function ordersCore(db: Db) {
    * 这些记录都是外发过或对过账的凭据，跟着订单一起删掉就再也查不回来了。
    */
   async function deleteOrder(id: number): Promise<void> {
-    const row = await db.get(
-      `SELECT o.order_no, o.payment_status,
+    const snapshotSql = `SELECT o.order_no, o.payment_status,
               (SELECT COUNT(*) FROM payments p WHERE p.order_id = o.id) AS pay_cnt,
               (SELECT COUNT(*) FROM order_settlements s WHERE s.order_id = o.id) AS settle_cnt,
               (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id) AS item_cnt,
@@ -1204,9 +1210,24 @@ export function ordersCore(db: Db) {
               (SELECT COUNT(*) FROM doc_versions d WHERE d.order_id = o.id) AS doc_cnt,
               (SELECT COUNT(*) FROM order_photos ph WHERE ph.order_id = o.id) AS photo_cnt,
               (SELECT COUNT(*) FROM sample_orders so WHERE so.converted_order_id = o.id) AS sample_cnt
-       FROM orders o WHERE o.id = ?`,
-      [id]
-    ) as Record<string, unknown> | null
+       FROM orders o WHERE o.id = ?`
+    const blockersOf = (row: Record<string, unknown>): string[] => {
+      const cnt = (k: string): number => Number(row[k] ?? 0)
+      const bits: string[] = []
+      if (cnt('item_cnt')) bits.push(`${cnt('item_cnt')} 行明细`)
+      if (cnt('pay_cnt')) bits.push(`${cnt('pay_cnt')} 笔收款`)
+      if (cnt('settle_cnt')) bits.push(`${cnt('settle_cnt')} 笔核销`)
+      if (cnt('pl_cnt')) bits.push(`${cnt('pl_cnt')} 张装箱单`)
+      if (cnt('doc_cnt')) bits.push(`${cnt('doc_cnt')} 份单据存档`)
+      if (cnt('photo_cnt')) bits.push(`${cnt('photo_cnt')} 张照片`)
+      if (cnt('sample_cnt')) bits.push(`由它转出的 ${cnt('sample_cnt')} 张打样单`)
+      return bits
+    }
+    const notEmptyError = (orderNo: string, bits: string[]): Error =>
+      bizError(
+        `订单 ${orderNo} 已经有 ${bits.join('、')}，不能直接删（删了这些凭据和操作历史会一起没有）。请用「作废」：记录全留，只是不再计入销售额和待收款。`
+      )
+    const row = (await db.get(snapshotSql, [id])) as Record<string, unknown> | null
     if (!row) throw notFound('订单不存在')
     const orderNo = String(row.order_no ?? '')
     if (String(row.payment_status ?? '') === 'void') {
@@ -1218,21 +1239,39 @@ export function ordersCore(db: Db) {
         `订单 ${orderNo} 上还有未撤销的客户预收抵扣，不能删：删了这笔余额用到哪儿就查不到了。请先在客户页撤销抵扣，再删单。`
       )
     }
-    const cnt = (k: string): number => Number(row[k] ?? 0)
-    const bits: string[] = []
-    if (cnt('item_cnt')) bits.push(`${cnt('item_cnt')} 行明细`)
-    if (cnt('pay_cnt')) bits.push(`${cnt('pay_cnt')} 笔收款`)
-    if (cnt('settle_cnt')) bits.push(`${cnt('settle_cnt')} 笔核销`)
-    if (cnt('pl_cnt')) bits.push(`${cnt('pl_cnt')} 张装箱单`)
-    if (cnt('doc_cnt')) bits.push(`${cnt('doc_cnt')} 份单据存档`)
-    if (cnt('photo_cnt')) bits.push(`${cnt('photo_cnt')} 张照片`)
-    if (cnt('sample_cnt')) bits.push(`由它转出的 ${cnt('sample_cnt')} 张打样单`)
-    if (bits.length > 0) {
-      throw bizError(
-        `订单 ${orderNo} 已经有 ${bits.join('、')}，不能直接删（删了这些凭据和操作历史会一起没有）。请用「作废」：记录全留，只是不再计入销售额和待收款。`
-      )
+    const bits = blockersOf(row)
+    if (bits.length > 0) throw notEmptyError(orderNo, bits)
+    // 上一条 SELECT 到这行 DELETE 之间，另一处可能刚落了收款/箱单/存档：
+    // 所以「还是空单」的确认要和删除在同一条语句里做完，
+    // 分两步走就会出现「查的时候是空单、删的时候不是」——新凭据跟着单一起蒸发
+    const res = await db.run(
+      `DELETE FROM orders
+        WHERE id = ?
+          AND payment_status != 'void'
+          AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.order_id = orders.id)
+          AND NOT EXISTS (SELECT 1 FROM order_settlements s WHERE s.order_id = orders.id)
+          AND NOT EXISTS (SELECT 1 FROM order_items oi WHERE oi.order_id = orders.id)
+          AND NOT EXISTS (SELECT 1 FROM packing_lists pl WHERE pl.order_id = orders.id)
+          AND NOT EXISTS (SELECT 1 FROM doc_versions d WHERE d.order_id = orders.id)
+          AND NOT EXISTS (SELECT 1 FROM order_photos ph WHERE ph.order_id = orders.id)
+          AND NOT EXISTS (SELECT 1 FROM sample_orders so WHERE so.converted_order_id = orders.id)
+          AND NOT EXISTS (SELECT 1 FROM credit_applications ca
+                          WHERE ca.target_kind = 'order' AND ca.target_id = orders.id AND ca.reversed_at IS NULL)`,
+      [id]
+    )
+    if (res.changes === 1) return
+    // 已经被人删掉了：结果一样，不报错
+    const again = (await db.get(snapshotSql, [id])) as Record<string, unknown> | null
+    if (!again) return
+    // 按最新的凭据说人话：通常是刚好落了新记录
+    if (String(again.payment_status ?? '') === 'void') {
+      throw bizError(`订单 ${orderNo} 刚刚被作废了：作废单是留档凭据，不能删除。`)
     }
-    await db.run('DELETE FROM orders WHERE id = ?', [id])
+    const fresh = blockersOf(again)
+    if (fresh.length > 0) throw notEmptyError(orderNo, fresh)
+    throw bizError(
+      `订单 ${orderNo} 上刚刚落了新的记录（可能是另一处的收款、箱单或存档），这次删除没有执行。请刷新页面看一眼，再用「作废」处理。`
+    )
   }
 
   /**

@@ -1453,6 +1453,8 @@ export function dashboardCore(db: Db) {
       note: string
       /** 这张单里用客户预收抵掉的原币金额（非现金） */
       credit: number
+      /** 是否计入「合计」行：作废/失效/免单的单据只留明细，不参与四列相加 */
+      counted: boolean
     }
     const blank = {
       docNo: '',
@@ -1469,12 +1471,16 @@ export function dashboardCore(db: Db) {
       method: '',
       bankRef: '',
       note: '',
-      credit: 0
+      credit: 0,
+      counted: true
     }
 
     const docs: StatementRow[] = []
     for (const r of orders) {
-      const rate = Number(r.exchangeRate) || 0
+      // 折算乘的是 money.ts 那份 baseRate（本币 1、外币没填过 0），
+      // 不是库里那一列：本币单的历史值是当年被逼着填的汇率，乘上去整张表差一个倍数，
+      // 而表尾合计还得等于客户页未收（customerReceivable 用的正是 baseRate）。
+      const rate = r.baseRate
       const billing = isBillingStatus(r.paymentStatus)
       const open = shownRemaining(r.paymentStatus, r.receivable)
       const prepaid = r.remaining < -0.001 ? -r.remaining : 0
@@ -1512,11 +1518,14 @@ export function dashboardCore(db: Db) {
         rate,
         openBase: rate > 0 ? money2(open * rate) : 0,
         note: notes.join('；'),
-        credit: money2(creditUsed)
+        credit: money2(creditUsed),
+        // 作废/失效单在明细里留着（客户要认得出自己付过钱的那张），
+        // 但「金额 − 已收 − 不必再付 − 未收」在它身上本来就不成立，不能进合计
+        counted: billing
       })
     }
     for (const s of samples) {
-      const rate = s.exchangeRate > 0 ? s.exchangeRate : 0
+      const rate = s.baseRate
       const statusText = SAMPLE_STATUS_LABEL[s.status as keyof typeof SAMPLE_STATUS_LABEL] ?? s.status
       // 收款标记「未收」说的是现金还没进这张单；预收抵清的单子未收已经是 0.00。
       // 对账单是发给客户的纸，状态列印「未收」、未收列印 0.00 是自己跟自己对不上。
@@ -1565,7 +1574,9 @@ export function dashboardCore(db: Db) {
         rate,
         openBase: rate > 0 ? money2(s.open * rate) : 0,
         note: notes.join('；'),
-        credit: money2(s.creditApplied)
+        credit: money2(s.creditApplied),
+        // 取消/免单的打样单同理：钱已经进了预收结余，不再计入「金额/已收/未收」合计
+        counted: s.status !== 'cancelled' && s.feeStatus !== 'waived'
       })
     }
     docs.sort((a, b) => a.date.localeCompare(b.date) || a.kind.localeCompare(b.kind) || a.docNo.localeCompare(b.docNo))
@@ -1595,12 +1606,18 @@ export function dashboardCore(db: Db) {
     const currencies = [...new Set(docs.map((d) => d.currency))].sort()
     for (const cur of currencies) {
       const rs = docs.filter((d) => d.currency === cur)
-      const creditTotal = money2(rs.reduce((s, d) => s + d.credit, 0))
+      // 合计只加「还计应收」的单：作废/失效/免单的单据金额留着给人认，但加进合计就会出现
+      // 「金额 1000、已收 0、未收 0」这种自己跟自己对不上的行，客户拿计算器一减就来问
+      const counted = rs.filter((d) => d.counted)
+      const skipped = rs.length - counted.length
+      const skippedAmount = money2(rs.filter((d) => !d.counted).reduce((s, d) => s + d.amount, 0))
+      const creditTotal = money2(counted.reduce((s, d) => s + d.credit, 0))
       // 合计行把「没有单独水单」的那部分也点出来：客户整表核完差额只剩这一处解释得通
       const legacyTotal = money2(
         samples.filter((s) => s.currency === cur && s.legacyPaidNoFlow).reduce((s, d) => s + d.recovered, 0)
       )
       const tail: string[] = []
+      if (skipped > 0) tail.push(`另有 ${skipped} 张作废/失效/免单的单据（金额 ${skippedAmount}），不计入合计`)
       if (creditTotal > 0.001) tail.push(`其中预收抵扣 ${creditTotal}（非现金）；多收/退款见预收结余`)
       if (legacyTotal > 0.001) tail.push(`其中 ${legacyTotal} 为早前已确认的打样费，未单独列水单`)
       totals.push({
@@ -1609,10 +1626,10 @@ export function dashboardCore(db: Db) {
         date: today,
         status: `${cur} 共 ${rs.length} 张单据`,
         currency: cur,
-        amount: money2(rs.reduce((s, d) => s + d.amount, 0)),
-        paid: money2(rs.reduce((s, d) => s + d.paid, 0)),
-        writtenOff: money2(rs.reduce((s, d) => s + d.writtenOff, 0)),
-        open: money2(rs.reduce((s, d) => s + d.open, 0)),
+        amount: money2(counted.reduce((s, d) => s + d.amount, 0)),
+        paid: money2(counted.reduce((s, d) => s + d.paid, 0)),
+        writtenOff: money2(counted.reduce((s, d) => s + d.writtenOff, 0)),
+        open: money2(counted.reduce((s, d) => s + d.open, 0)),
         credit: creditTotal,
         note: tail.join('；')
       })
@@ -1693,7 +1710,9 @@ export function dashboardCore(db: Db) {
         isBaseTotal ? '' : r.paid,
         isBaseTotal ? '' : r.writtenOff,
         isBaseTotal ? '' : r.open,
-        isBaseTotal ? '' : r.rate,
+        // 折不出基准币的单（外币没填汇率）不报汇率：印个 0 会让人拿它去乘一遍。
+        // 本币单报 1——它确实按 1:1 折，和台账那一列同一个说法
+        isBaseTotal || !(r.rate > 0) ? '' : r.rate,
         r.openBase,
         r.method ? PAYMENT_METHOD_LABEL[r.method as keyof typeof PAYMENT_METHOD_LABEL] ?? r.method : '',
         r.bankRef,

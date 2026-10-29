@@ -363,6 +363,18 @@ export function baseAmountOf(
   return amount * rate
 }
 
+/**
+ * 折算基准币真正要乘的那个汇率：订单台账、订单列表、对账单、打样台账共用这一份。
+ *
+ * 本币单固定 1——库里那一列可能是升级前的历史值（当年建单也逼人填汇率，
+ * 有人顺手填了 7.15），拿它乘会把一张 CNY 单折成 7.15 倍；
+ * 外币单没填过就返回 0，由 rateMissing 标出来让「汇率待修」追人。
+ */
+export function baseRateOf(currency: string, baseCurrency: string, storedRate: number): number {
+  if (currency === baseCurrency) return 1
+  return storedRate > 0 ? storedRate : 0
+}
+
 /** 汇总时的筛选条件 */
 export interface MoneyListFilter {
   /** 只要这些订单（已排除的默认不算） */
@@ -466,6 +478,8 @@ export interface SampleOpenRow {
   status: string
   currency: string
   exchangeRate: number
+  /** 折基准币真正乘的汇率：本币 1、外币没填过 0（rateMissing） */
+  baseRate: number
   /** 原币待收 */
   receivable: number
 }
@@ -479,6 +493,10 @@ export interface SampleMoneyRow {
   feeStatus: string
   currency: string
   exchangeRate: number
+  /** 折基准币真正乘的汇率：本币 1、外币没填过 0 */
+  baseRate: number
+  /** 外币单汇率没填过：待收和台面金额都折不出来，要人去补 */
+  rateMissing: boolean
   sampleDate: string
   /** 样品费（明细行合计） */
   sampleFee: number
@@ -519,6 +537,8 @@ export interface SampleBillRow {
   feeStatus: string
   currency: string
   exchangeRate: number
+  /** 折基准币真正乘的汇率：本币 1、外币没填过 0 */
+  baseRate: number
   sampleDate: string
   totalFee: number
   /** 已收回（实收 + 抵扣；旧记录按全额） */
@@ -726,7 +746,7 @@ export function moneyCore(db: Db) {
       const rateMissing = !isHomeCurrency && !(rateRaw > 0)
       // 折算用的汇率：本币单永远是 1（那一列存的是历史垃圾也别拿它乘），
       // 外币单没填过就按 0 折（折不出来，交给「汇率待修」追人），照旧吐出存值
-      const rate = isHomeCurrency ? 1 : rateMissing ? 0 : rateRaw
+      const rate = baseRateOf(currency, base, rateRaw)
       const createdAt = String(r.created_at ?? '')
       return {
         ...m,
@@ -1135,8 +1155,8 @@ export function moneyCore(db: Db) {
     const sampleBaseByCustomer = new Map<number, number>()
     for (const r of await sampleOpenRows()) {
       // 汇率没填时折不出来，不上榜；打样页会提醒补汇率
-      if (r.exchangeRate <= 0) continue
-      const base = r.receivable * r.exchangeRate
+      if (!(r.baseRate > 0)) continue
+      const base = r.receivable * r.baseRate
       if (base <= 0.001) continue
       sampleBaseByCustomer.set(r.customerId, (sampleBaseByCustomer.get(r.customerId) ?? 0) + base)
     }
@@ -1193,6 +1213,8 @@ export function moneyCore(db: Db) {
      ${where}`,
       params
     )) as Record<string, unknown>[]
+    // 打样单也认本位币：CNY 打样单不该被逼着填 7.15，更不该按 7.15 折进待收
+    const baseCurrency = (await settingsCore(db).get()).baseCurrency
     return rows.map((r) => {
       const sampleFee = Number(r.sample_fee ?? 0)
       const expressFee = Number(r.express_fee ?? 0)
@@ -1229,14 +1251,18 @@ export function moneyCore(db: Db) {
         String(r.status ?? '') === 'cancelled' || feeStatus === 'waived'
           ? collected
           : Math.max(0, collected + offsetSettled - totalFee)
+      const storedRate = Number(r.exchange_rate ?? 0)
+      const currency = String(r.currency ?? 'USD')
       return {
         sampleId: Number(r.id),
         sampleNo: String(r.sample_no ?? ''),
         customerId: Number(r.customer_id),
         status: String(r.status ?? ''),
         feeStatus,
-        currency: String(r.currency ?? 'USD'),
-        exchangeRate: Number(r.exchange_rate ?? 0),
+        currency,
+        exchangeRate: storedRate,
+        baseRate: baseRateOf(currency, baseCurrency, storedRate),
+        rateMissing: currency !== baseCurrency && !(storedRate > 0),
         sampleDate: String(r.sample_date ?? ''),
         sampleFee,
         totalFee,
@@ -1272,6 +1298,7 @@ export function moneyCore(db: Db) {
         status: r.status,
         currency: r.currency,
         exchangeRate: r.exchangeRate,
+        baseRate: r.baseRate,
         receivable: left
       })
     }
@@ -1302,6 +1329,7 @@ export function moneyCore(db: Db) {
         feeStatus: r.feeStatus,
         currency: r.currency,
         exchangeRate: r.exchangeRate,
+        baseRate: r.baseRate,
         sampleDate: r.sampleDate,
         totalFee: r.totalFee,
         recovered: r.recovered,
@@ -1323,8 +1351,8 @@ export function moneyCore(db: Db) {
   async function sampleReceivable(customerId?: number): Promise<number> {
     let total = 0
     for (const r of await sampleOpenRows(customerId)) {
-      if (r.exchangeRate <= 0) continue
-      total += r.receivable * r.exchangeRate
+      if (!(r.baseRate > 0)) continue
+      total += r.receivable * r.baseRate
     }
     return total
   }
