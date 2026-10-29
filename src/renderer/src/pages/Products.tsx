@@ -686,9 +686,13 @@ function ImportModal({ onClose, onDone }: { onClose: () => void; onDone: () => P
   const [text, setText] = useState('')
   const [mode, setMode] = useState<'skip' | 'overwrite'>('skip')
   const [busy, setBusy] = useState(false)
-  const [result, setResult] = useState<{ created: number; updated: number; skipped: number; errors: string[] } | null>(
-    null
-  )
+  const [result, setResult] = useState<{
+    created: number
+    updated: number
+    skipped: number
+    errors: string[]
+    warnings?: string[]
+  } | null>(null)
 
   const downloadTemplate = async () => {
     const header = await window.api.products.csvTemplate()
@@ -816,6 +820,7 @@ function ImportModal({ onClose, onDone }: { onClose: () => void; onDone: () => P
             <div>
               新增 <b>{result.created}</b> · 更新 <b>{result.updated}</b> · 跳过 <b>{result.skipped}</b>
               {result.errors.length ? ` · 有问题 ${result.errors.length} 行` : ''}
+              {result.warnings?.length ? ` · 有 ${result.warnings.length} 格的箱规没看懂` : ''}
             </div>
             {result.errors.length ? (
               <ul className="hint" style={{ marginTop: 6, paddingLeft: 18 }}>
@@ -823,6 +828,14 @@ function ImportModal({ onClose, onDone }: { onClose: () => void; onDone: () => P
                   <li key={i}>{er}</li>
                 ))}
                 {result.errors.length > 20 ? <li>……其余 {result.errors.length - 20} 行略</li> : null}
+              </ul>
+            ) : null}
+            {result.warnings?.length ? (
+              <ul className="hint" style={{ marginTop: 6, paddingLeft: 18 }}>
+                {result.warnings.slice(0, 20).map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+                {result.warnings.length > 20 ? <li>……其余 {result.warnings.length - 20} 行略</li> : null}
               </ul>
             ) : null}
             <div style={{ marginTop: 8 }}>

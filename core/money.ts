@@ -293,7 +293,14 @@ export interface OrderMoneyRow extends OrderMoney {
   customerName: string
   country: string
   currency: string
+  /** 库里存的汇率原值（本币单可能是历史垃圾，只用于展示「当时填的什么」） */
   exchangeRate: number
+  /**
+   * 折算基准币真正用的汇率：本币单固定 1、外币没填过为 0（折不出来）。
+   * 任何「拿汇率去乘」的地方都只能用这个数——用 exchangeRate 乘，
+   * 本币单会被历史垃圾值放大，和 grandTotalBase/costBase 说的不是一个数。
+   */
+  baseRate: number
   createdAt: string
   /** YYYY-MM */
   month: string
@@ -731,6 +738,7 @@ export function moneyCore(db: Db) {
         country: String(r.country ?? ''),
         currency,
         exchangeRate: rateRaw,
+        baseRate: rate,
         rateMissing,
         createdAt,
         month: localMonthOf(createdAt),
@@ -1362,7 +1370,7 @@ export function moneyCore(db: Db) {
    * 客户预收余额：**不另存一份钱**，全部从 payments 的现状派生。
    *
    * 口径（与对账单「预收结余」行同一份）：
-   *   正常单   —— 实收 + 净核销 超过含费用合计的部分（客户多付）
+   *   正常单   —— 实收超过含费用合计的部分（客户多付；核销不是钱，不参与这条减法）
    *   作废/失效 —— 已经收到的全部现金（这单不再欠钱，钱必须有去处）
    *   打样单   —— 取消/免单时收到的全部现金；其余按「实收 + 抵扣 − 应收」算多付
    *   减：未撤销的抵扣台账
@@ -1392,9 +1400,13 @@ export function moneyCore(db: Db) {
       if (r.paymentStatus === 'draft') continue
       // 合计 ≤ 0 的单（样品费抵扣大于货值等）没有「多付」可退：只有真的收进来的现金算余额。
       // 旧口径直接把 −grandTotal 当多付，会凭空生成一笔客户预收，甚至能退真钱出去。
+      //
+      // 核销（短款/坏账）不参与这里的减法：那是「我们知道这笔收不回来」，
+      // 不是客户多付的钱。以前写成 实收 + 核销 − 合计，一旦单据金额被改小，
+      // 多出来的核销额就变成一笔从没收到的预收——能抵别的单、还能退真钱出去（R50）。
       const amount = isBillingStatus(r.paymentStatus)
         ? r.grandTotal > 0
-          ? Math.max(0, r.paidAmount + r.netWrittenOff - r.grandTotal)
+          ? Math.max(0, r.paidAmount - r.grandTotal)
           : Math.max(0, r.paidAmount)
         : r.paidAmount
       if (amount <= 0.001) continue

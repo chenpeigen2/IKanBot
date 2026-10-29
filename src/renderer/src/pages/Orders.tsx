@@ -472,6 +472,9 @@ function CreateOrderModal({
     note: ''
   })
   const [lastRate, setLastRate] = useState<{ rate: number; date: string } | null>(null)
+  // 本币单没有汇率可填：折算口径固定 1:1，硬要一个数字只会被随手填成 1，
+  // 然后这个「1」跟着订单走进报表，看上去像是有人真的盘过汇率
+  const isHomeCurrency = form.currency === (settings?.baseCurrency ?? 'CNY')
 
   useEffect(() => {
     void (async () => {
@@ -562,7 +565,7 @@ function CreateOrderModal({
       toast('请先选择客户', 'error')
       return
     }
-    if (form.exchangeRate === '' || Number(form.exchangeRate) <= 0) {
+    if (!isHomeCurrency && (form.exchangeRate === '' || Number(form.exchangeRate) <= 0)) {
       toast('请先按今天钉盘的汇率填写汇率', 'error')
       return
     }
@@ -571,8 +574,8 @@ function CreateOrderModal({
       const order = await window.api.orders.create({
         customerId: form.customerId,
         currency: form.currency,
-        exchangeRate: Number(form.exchangeRate),
-        exchangeRateDate: form.exchangeRateDate || null,
+        exchangeRate: isHomeCurrency ? 1 : Number(form.exchangeRate),
+        exchangeRateDate: isHomeCurrency ? null : form.exchangeRateDate || null,
         baseCurrency: settings?.baseCurrency ?? 'CNY',
         incoterm: form.incoterm,
         portOfLoading: form.portOfLoading,
@@ -646,44 +649,55 @@ function CreateOrderModal({
           </select>
         </div>
         <div className="field">
-          <label>汇率（1 {form.currency} = ? {settings?.baseCurrency ?? 'CNY'}）*</label>
-          <input
-            type="number"
-            step="0.0001"
-            value={form.exchangeRate}
-            onChange={(e) =>
-              setForm({ ...form, exchangeRate: e.target.value === '' ? '' : Number(e.target.value) })
-            }
-            placeholder="请按今天钉盘的汇率填"
-          />
-          <div className="hint">
-            请按今天钉盘的汇率填写，填了才能建单。（这里不会自动填数字）
-          </div>
-          {lastRate ? (
-            <div className="row" style={{ marginTop: 4, gap: 5 }}>
-              <Button size="sm"
-                
-                onClick={() =>
-                  setForm({
-                    ...form,
-                    exchangeRate: lastRate.rate,
-                    exchangeRateDate: lastRate.date || today()
-                  })
+          {isHomeCurrency ? (
+            <>
+              <label>汇率</label>
+              <div className="hint">
+                {form.currency} 就是记账本位币，折算按 1:1，不需要填汇率。
+              </div>
+            </>
+          ) : (
+            <>
+              <label>汇率（1 {form.currency} = ? {settings?.baseCurrency ?? 'CNY'}）*</label>
+              <input
+                type="number"
+                step="0.0001"
+                value={form.exchangeRate}
+                onChange={(e) =>
+                  setForm({ ...form, exchangeRate: e.target.value === '' ? '' : Number(e.target.value) })
                 }
-              >
-                填入上次用的 {lastRate.rate}
-                {lastRate.date ? `（${lastRate.date}）` : ''}
-              </Button>
-            </div>
-          ) : null}
-          <div style={{ marginTop: 6 }}>
-            <label>汇率日期（这个汇率是哪天的）*</label>
-            <input
-              type="date"
-              value={form.exchangeRateDate}
-              onChange={(e) => setForm({ ...form, exchangeRateDate: e.target.value })}
-            />
-          </div>
+                placeholder="请按今天钉盘的汇率填"
+              />
+              <div className="hint">
+                请按今天钉盘的汇率填写，填了才能建单。（这里不会自动填数字）
+              </div>
+              {lastRate ? (
+                <div className="row" style={{ marginTop: 4, gap: 5 }}>
+                  <Button size="sm"
+
+                    onClick={() =>
+                      setForm({
+                        ...form,
+                        exchangeRate: lastRate.rate,
+                        exchangeRateDate: lastRate.date || today()
+                      })
+                    }
+                  >
+                    填入上次用的 {lastRate.rate}
+                    {lastRate.date ? `（${lastRate.date}）` : ''}
+                  </Button>
+                </div>
+              ) : null}
+              <div style={{ marginTop: 6 }}>
+                <label>汇率日期（这个汇率是哪天的）*</label>
+                <input
+                  type="date"
+                  value={form.exchangeRateDate}
+                  onChange={(e) => setForm({ ...form, exchangeRateDate: e.target.value })}
+                />
+              </div>
+            </>
+          )}
         </div>
         <div className="field">
           <label>贸易术语</label>

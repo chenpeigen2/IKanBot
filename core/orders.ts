@@ -670,9 +670,16 @@ export function ordersCore(db: Db) {
   async function createOrder(input: OrderInput): Promise<OrderDetail> {
     const settings = (await settingsCore(db).get())
     const ts = now()
+    const currency = input.currency ?? 'USD'
+    const baseCurrency = input.baseCurrency ?? settings.baseCurrency
+    // 本币单没有折算这回事：汇率固定按 1 记（读取口径 listOrderMoney 也是这么算的）。
+    // 以前界面对本币单也逼着填 7.15，存进去的数会在导出台账、成本折算里各乘一遍，
+    // 同一张单的金额出现两套说法。汇率日期也不记：纸面本来就不印汇率。
+    const isHomeCurrency = currency === baseCurrency
+    const exchangeRate = isHomeCurrency ? 1 : (input.exchangeRate ?? 1)
     // 建单与改单同一套汇率闸门：显式传了 0/负数/NaN 一律拦下——这种单会从待收、销售、毛利里静默消失。
     // 没传不拦：草稿单默认 1，正是「汇率待修」提醒认的哨兵值
-    if (input.exchangeRate !== undefined && !(Number(input.exchangeRate) > 0)) {
+    if (!isHomeCurrency && input.exchangeRate !== undefined && !(Number(input.exchangeRate) > 0)) {
       throw bizError('汇率必须填大于 0 的数。0 或空值会让这张单从待收和毛利里消失，请按今天钉盘的汇率填。')
     }
     // 费用行同一套闸门：Infinity/NaN 过 JSON.stringify 会变 null，落库后费用按 0 算
@@ -683,8 +690,8 @@ export function ordersCore(db: Db) {
     // 全靠后面的明细把合计顶回正数——那边各有自己的口径守着；
     // 货值和费用行真正同框的 updateOrder / updateOrderCharges 才拦得住、也拦得准
     const validUntil = input.validUntil ?? addDays(localDate(), settings.piValidDays)
-    // 汇率锁定日期：默认记今天（本地日期）
-    const rateDate = input.exchangeRateDate ?? localDate()
+    // 汇率锁定日期：默认记今天（本地日期）；本币单不记（根本没有折算这件事）
+    const rateDate = isHomeCurrency ? null : (input.exchangeRateDate ?? localDate())
     // 收款状态：报价单/打样单转单时可以指定（PI 已发 = sent、客户已确认 = confirmed），默认草稿。
     // 只放这三个：已经收过钱（partial/paid/settled）或作废/失效的单不可能在「刚建单」这一刻成立，
     // 直接从接口塞进来就等于绕过了收款、核销、作废的全部门槛（R49）
@@ -722,9 +729,9 @@ export function ordersCore(db: Db) {
           input.customerId,
           piNo,
           status,
-          input.currency ?? 'USD',
-          input.exchangeRate ?? 1,
-          input.baseCurrency ?? settings.baseCurrency,
+          currency,
+          exchangeRate,
+          baseCurrency,
           input.incoterm ?? 'FOB',
           input.portOfLoading ?? '',
           input.portOfDestination ?? '',
@@ -775,11 +782,17 @@ export function ordersCore(db: Db) {
 
     // 汇率是锁定的凭据：清空或填 0 不许悄悄落成 1——
     // 1 会让整单金额按错汇率折算，四张单据、报表、待收全跟着错
-    const newRate = Number(input.exchangeRate ?? before.exchange_rate)
-    if (!(newRate > 0)) throw bizError('汇率必须大于 0，清空汇率不能保存')
-    const oldRate = Number(before.exchange_rate)
+    const settings = (await settingsCore(db).get())
     const newCurrency = (input.currency ?? String(before.currency ?? 'USD')) as Currency
     const oldCurrency = String(before.currency ?? 'USD') as Currency
+    // 基准币跟着这张单走（没传就沿用单子上记的，再没有才用全局设置）
+    const baseForOrder = String(input.baseCurrency ?? before.base_currency ?? '') || settings.baseCurrency
+    // 本币单没有折算这回事：库里那一列（可能是历史垃圾 7.15）一律归一到 1，
+    // 和读取口径 listOrderMoney 说同一个数。外币单照旧守「必须大于 0」。
+    const isHomeCurrency = newCurrency === baseForOrder
+    const newRate = isHomeCurrency ? 1 : Number(input.exchangeRate ?? before.exchange_rate)
+    if (!isHomeCurrency && !(newRate > 0)) throw bizError('汇率必须大于 0，清空汇率不能保存')
+    const oldRate = Number(before.exchange_rate)
     const payCount = Number(
       (await db.get('SELECT COUNT(*) AS n FROM payments WHERE order_id = ?', [id]) as { n?: number } | null)?.n ?? 0
     )
@@ -808,7 +821,8 @@ export function ordersCore(db: Db) {
     // 汇率印在纸面上（PI/CI 都有 Exchange Rate 一行），也参与核销的账：
     // 这两样一旦落定，改汇率就会和已发出的纸面、已核定的账对不上。
     // 只登记了收款、还没出单据时不锁——录错汇率要能修正，操作历史里有旧值 → 新值。
-    if (newRate !== oldRate && (docCount > 0 || settleCount > 0)) {
+    // 本币单不锁：那个数根本不参与折算，归一到 1 不会改动任何一张纸、任何一笔账。
+    if (!isHomeCurrency && newRate !== oldRate && (docCount > 0 || settleCount > 0)) {
       const why =
         docCount > 0
           ? `${docCount} 份单据存档（纸面上印着 1 ${oldCurrency} = ${oldRate}）`
@@ -834,17 +848,19 @@ export function ordersCore(db: Db) {
           `这张单已经登记了 ${what}，不能改币种——历史金额都是按 ${oldCurrency} 记的，改了会和银行流水、核销记录对不上。确实要换币种，请作废这张单后按正确币种重开。`
         )
       }
-      // 没改汇率就换币种，等于把 USD 的 7.1 套在 EUR 上，报表和毛利全错
-      if (newRate === oldRate) {
+      // 没改汇率就换币种，等于把 USD 的 7.1 套在 EUR 上，报表和毛利全错。
+      // 换成基准币不用问汇率（折算口径固定是 1），只有换成外币才要人重新填。
+      if (!isHomeCurrency && newRate === oldRate) {
         throw bizError(
           `币种从 ${oldCurrency} 换成 ${newCurrency}，汇率不能沿用原来的 ${oldRate}；请按 ${newCurrency} 重新填写汇率再保存。`
         )
       }
     }
-    // 汇率变了就重新记锁定日期（未手动指定时）
-    let rateDate = (before.exchange_rate_date as string | null) ?? null
-    if (input.exchangeRateDate !== undefined) rateDate = input.exchangeRateDate
-    else if (newRate !== oldRate) rateDate = localDate()
+    // 汇率变了就重新记锁定日期（未手动指定时）；本币单不留任何「哪天的汇率」——
+    // 那一天不存在，留着只会让税务复核以为这里真折过一次
+    let rateDate = isHomeCurrency ? null : ((before.exchange_rate_date as string | null) ?? null)
+    if (input.exchangeRateDate !== undefined) rateDate = isHomeCurrency ? null : input.exchangeRateDate
+    else if (!isHomeCurrency && newRate !== oldRate) rateDate = localDate()
     // 费用行（运费/保险）：传了就按传的改，没传就保持原样（不能一个字段没传就把费用清空）
     const beforeCharges = parseCharges(before.charges)
     const cleanCharges = input.charges === undefined ? null : input.charges.filter((c) => c.label.trim())
@@ -923,7 +939,6 @@ export function ordersCore(db: Db) {
       const v = keep(key, col)
       return v == null ? '' : String(v)
     }
-    const settings = (await settingsCore(db).get())
     const cells: Array<[string, unknown]> = [
       ['customer_id', nextCustomerId],
       ['currency', newCurrency],
@@ -974,6 +989,8 @@ export function ordersCore(db: Db) {
       }
       // 收款金额变了，状态可能需要重算
       await recomputePaymentStatus(id)
+      // 核销过的单被改小：核销额不能超过实际欠款（多出来的会变成能退真钱的假预收）
+      await assertWriteOffFitsOrder(id)
       // 有预收抵扣的单：换客户/币种或金额改小不能让那笔抵扣悬空
       await creditsOf().assertCreditFitsOrder(id)
       // 换客户/换币种：原客户账上的「多收」跟着这单走了，已经抵出去的钱可能穿仓
@@ -1267,6 +1284,39 @@ export function ordersCore(db: Db) {
     }
   }
 
+  /**
+   * 核销过的单不能再改小到「核销比欠款还多」。
+   *
+   * 短款/坏账是「这笔我们认了收不回来」，不是客户多付的钱。金额一缩到实收 + 抵扣 + 核销以下，
+   * 多出来的核销额就会在客户账上变成一笔从没收到的预收：能抵别的单，还能退真钱出去。
+   * 改费用行、改明细、删行、整批换货都得过这一道（加行/加收款只会让缺口变松，不必查）。
+   */
+  async function assertWriteOffFitsOrder(orderId: number): Promise<void> {
+    const row = (await db.get('SELECT charges, deposit_ratio, currency FROM orders WHERE id = ?', [orderId])) as
+      | Record<string, unknown>
+      | null
+    if (!row) return
+    const money = (
+      await moneyOf().moneyForOrders([
+        { id: orderId, charges: row.charges, depositRatio: Number(row.deposit_ratio ?? 0) }
+      ])
+    ).get(orderId)
+    if (!money) return
+    const writtenOff = money.netWrittenOff
+    if (writtenOff <= 0.001) return
+    const debt = money.grandTotal - money.paidAmount - money.creditApplied
+    const excess = writtenOff - Math.max(0, debt)
+    if (excess <= 0.001) return
+    const used = money.creditApplied > 0.001 ? `、预收抵扣 ${money.creditApplied.toFixed(2)}` : ''
+    throw bizError(
+      `这张单已经核销过 ${writtenOff.toFixed(2)} ${String(row.currency ?? '')}（短款 + 坏账）。` +
+        `改完后，客户付过的 ${money.paidAmount.toFixed(2)}${used} 加上这笔核销，` +
+        `比单据总额 ${money.grandTotal.toFixed(2)} 还多出 ${excess.toFixed(2)}——` +
+        `核销是「我们认了收不回来」，不是客户多付的钱，多出来的部分不能变成客户的预收。` +
+        `请先到这张单的「核销与坏账」里撤销那笔核销，再改金额。`
+    )
+  }
+
   /** 打样单「还该收多少」的三个原始数：总额（样品费+快递费）、已按水单收、已用预收抵 */
   async function sampleFeePieces(sampleId: number): Promise<{ totalFee: number; collected: number; creditApplied: number }> {
     const row = (await db.get(
@@ -1413,6 +1463,8 @@ export function ordersCore(db: Db) {
       const detail = parts.length ? `修改费用：${parts.join('；')}` : '修改费用行'
       await logEvent(db, orderId, 'update', null, null, reasonText ? `${detail}；原因：${reasonText}` : detail)
       await recomputePaymentStatus(orderId)
+      // 改小费用行同样可能让核销额超过实际欠款（多出来的会变成假预收）
+      await assertWriteOffFitsOrder(orderId)
       await creditsOf().assertCreditFitsOrder(orderId)
       // 让利/加费都会改变这单的「多收」残差：客户账上已抵/已退的钱不能被架空
       await creditsOf().assertCreditSolvent(Number(before.customer_id))
@@ -1437,13 +1489,18 @@ export function ordersCore(db: Db) {
    * 行成本一律按订单币种存。
    * 前端传 costBase（工厂报的人民币价）时，这里按本单汇率折算——
    * 以前把 ¥30 直接当 $30 写进 unit_cost，毛利差一整个汇率。
+   * 本币单没有折算可言：汇率按 1 用，库里那一列存着历史垃圾也不能拿它去除
+   * （7.15 的垃圾值会把 ¥30 的成本写成 ¥4.2，毛利凭空翻七倍）。
    */
   async function resolveItemCost(orderId: number, item: { unitCost?: number | null; costBase?: number | null }): Promise<number | null> {
     if (item.costBase !== undefined && item.costBase !== null) {
-      const row = await db.get('SELECT exchange_rate FROM orders WHERE id = ?', [orderId]) as
-        | { exchange_rate?: number }
+      const row = await db.get('SELECT currency, exchange_rate FROM orders WHERE id = ?', [orderId]) as
+        | { currency?: string; exchange_rate?: number }
         | null
-      return costInOrderCurrency(item.costBase, Number(row?.exchange_rate ?? 1))
+      const base = (await settingsCore(db).get()).baseCurrency
+      const currency = String(row?.currency ?? '')
+      const rate = currency && currency === base ? 1 : Number(row?.exchange_rate ?? 1)
+      return costInOrderCurrency(item.costBase, rate)
     }
     return item.unitCost ?? null
   }
@@ -1686,6 +1743,8 @@ export function ordersCore(db: Db) {
       await applyShipStatus(db, orderId)
       // 金额变了，收款状态要重算（加单加到收不够要从「已收款」退回「部分收款」）
       await recomputePaymentStatus(orderId)
+      // 改小数量/单价：核销额不能超过实际欠款（多出来的会变成假预收）
+      await assertWriteOffFitsOrder(orderId)
       await creditsOf().assertCreditFitsOrder(orderId)
       // 调大数量/单价会吃掉这家客户的「多收」残差，已抵/已退的钱不能被架空
       if (customerId) await creditsOf().assertCreditSolvent(customerId)
@@ -1750,6 +1809,8 @@ export function ordersCore(db: Db) {
       await applyShipStatus(db, orderId)
       // 金额变了，收款状态要重算
       await recomputePaymentStatus(orderId)
+      // 删行抽走货值：核销额不能超过实际欠款（多出来的会变成假预收）
+      await assertWriteOffFitsOrder(orderId)
       await creditsOf().assertCreditFitsOrder(orderId)
     })
     return (await getOrder(orderId))!
@@ -1820,6 +1881,8 @@ export function ordersCore(db: Db) {
       await logEvent(db, orderId, 'item_replace', null, null, `批量生成 ${items.length} 个 SKU 行`)
       // 金额变了，收款状态要重算
       await recomputePaymentStatus(orderId)
+      // 换成一批更小的货：核销额不能超过实际欠款（多出来的会变成假预收）
+      await assertWriteOffFitsOrder(orderId)
       await creditsOf().assertCreditFitsOrder(orderId)
       // 替换后的总额变大 = 原来客户多付的那截变小，已抵/已退的钱不能被架空
       if (customerId) await creditsOf().assertCreditSolvent(customerId)
@@ -2172,13 +2235,17 @@ export function ordersCore(db: Db) {
   async function addSettlement(orderId: number, input: SettlementInput): Promise<OrderDetail> {
     const order = await getOrder(orderId)
     if (!order) throw notFound('订单不存在')
-    // 核销准入就是「要不要向客户收钱」这条口径：以后加免催状态只改 billing.ts 一处
-    if (!isBillingStatus(order.paymentStatus)) {
-      throw bizError('草稿、已失效、已作废的订单不能做核销或坏账。先把订单状态改成正式单，再处理欠款。')
-    }
     const kind = input.kind
     if (kind !== 'shortage' && kind !== 'bad_debt' && kind !== 'recovery') {
       throw bizError('核销类型不对，只能是短款核销、坏账或坏账追回。')
+    }
+    // 核销准入就是「要不要向客户收钱」这条口径：以后加免催状态只改 billing.ts 一处。
+    // 但坏账追回是例外：单作废了，欠的钱照样可能到账，不给这个门，这笔钱只能记成
+    // 一张没有单据的来历不明的收款（或者根本记不进来）。短款/坏账仍按原口径挡住。
+    if (!isBillingStatus(order.paymentStatus)) {
+      if (kind !== 'recovery') {
+        throw bizError('草稿、已失效、已作废的订单不能做核销或坏账。先把订单状态改成正式单，再处理欠款。')
+      }
     }
     const reason = String(input.reason ?? '').trim()
     if (!reason) throw bizError('核销 / 坏账要写原因（例如“银行扣费”“客户破产”），操作历史要留痕。')
@@ -2302,8 +2369,13 @@ export function ordersCore(db: Db) {
       orderId
     ]) as Record<string, unknown> | null
     if (!row) throw bizError('这条核销记录已经不存在了，刷新页面后再试。')
-    // 作废/失效单是留档凭据：撤销核销会改它的待收与坏账，不能再动
-    await assertOrderWritable(orderId, '撤销核销')
+    // 作废/失效单不再拦撤销：核销是「我们把这笔钱认成收不回来」的判断，
+    // 判断错了必须能退回，否则一条错误坏账跟着档案永久挂在账上。
+    // 撤销只追加一条负数记录，原记录与作废档案都不动。
+    const owner = await db.get('SELECT order_no FROM orders WHERE id = ?', [orderId]) as
+      | { order_no?: string }
+      | null
+    if (!owner) throw notFound('订单不存在')
     const kind = String(row.kind) as SettlementKind
     const amount = Number(row.amount ?? 0)
     if (amount <= 0) throw bizError('这条是撤销记录，不能再撤销一次。')

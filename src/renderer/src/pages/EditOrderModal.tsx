@@ -82,6 +82,9 @@ export default function EditOrderModal({
     sealNo: order.sealNo ?? ''
   })
   const chargesTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
+  const baseCurrency = settings?.baseCurrency ?? 'CNY'
+  // 本币单没有汇率可填：折算口径就是 1:1，问人要数字只会被随手填成 1
+  const isHomeCurrency = form.currency === baseCurrency
   const [chargeReason, setChargeReason] = useState('')
   // 让利要不要写原因只由服务层那一道门判（它看的是库里的原值 + 过滤掉空行之后的新值）。
   // 界面自己再算一遍会得出第三种基准：同样的改动这儿放行、服务端拦下，
@@ -102,7 +105,7 @@ export default function EditOrderModal({
 
   const save = async () => {
     if (busy) return
-    const rate = Number(form.exchangeRate)
+    const rate = isHomeCurrency ? 1 : Number(form.exchangeRate)
     const paidCount = (order.payments ?? []).length
     // 收款是按原币登记的：已经收过钱的单不许换币种，否则客户对账和银行流水都会错位
     if (form.currency !== order.currency && paidCount > 0) {
@@ -112,17 +115,17 @@ export default function EditOrderModal({
       )
       return
     }
-    if (!(rate > 0)) {
+    if (!isHomeCurrency && !(rate > 0)) {
       toast('汇率必须填大于 0 的数。清空不能保存——整单金额会按错汇率折算', 'error')
       return
     }
-    // 换了币种却沿用旧币种的汇率，等于把 USD 的 7.1 套在 EUR 上
-    if (form.currency !== order.currency && rate === Number(order.exchangeRate)) {
+    // 换了币种却沿用旧币种的汇率，等于把 USD 的 7.1 套在 EUR 上（换成基准币不用问：口径就是 1）
+    if (!isHomeCurrency && form.currency !== order.currency && rate === Number(order.exchangeRate)) {
       toast('换币种后汇率不能沿用原来的数值，请按新币种重新填写汇率。', 'error')
       return
     }
     // 已经收过钱的单，换汇率等于把已收的钱重新折算，对账单会对不上 → 先问一声
-    if (rate !== Number(order.exchangeRate) && paidCount > 0) {
+    if (!isHomeCurrency && rate !== Number(order.exchangeRate) && paidCount > 0) {
       const ok = confirm(
         `这张单已经记过 ${paidCount} 笔收款。换汇率，已收的钱折成本位币也会跟着变，跟银行流水对账时对不上。\n\n确认按新汇率保存吗？`
       )
@@ -147,7 +150,7 @@ export default function EditOrderModal({
         piNo: form.piNo.trim(),
         currency: form.currency,
         exchangeRate: rate,
-        exchangeRateDate: form.exchangeRateDate || null,
+        exchangeRateDate: isHomeCurrency ? null : form.exchangeRateDate || null,
         baseCurrency: settings?.baseCurrency ?? 'CNY',
         incoterm: form.incoterm,
         portOfLoading: form.portOfLoading,
@@ -250,26 +253,39 @@ export default function EditOrderModal({
           <div className="hint">
             {(order.payments ?? []).length > 0
               ? '已登记收款，币种不能改——收款按原币记，改了和银行流水对不上。'
-              : '换币种后要按新币种重新填汇率'}
+              : isHomeCurrency
+                ? `${baseCurrency} 是记账本位币，不需要填汇率。`
+                : '换币种后要按新币种重新填汇率'}
           </div>
         </div>
         <div className="field">
-          <label>汇率（1 {form.currency} = ? {settings?.baseCurrency ?? 'CNY'}）</label>
-          <input
-            type="number"
-            step="0.0001"
-            value={form.exchangeRate}
-            onChange={(e) => setForm({ ...form, exchangeRate: Number(e.target.value) })}
-          />
-          <div className="hint">
-            汇率锁定日期：{form.exchangeRateDate || '未记录'}
-            <input
-              type="date"
-              style={{ width: 140, marginLeft: 8 }}
-              value={form.exchangeRateDate}
-              onChange={(e) => setForm({ ...form, exchangeRateDate: e.target.value })}
-            />
-          </div>
+          {isHomeCurrency ? (
+            <>
+              <label>汇率</label>
+              <div className="hint">
+                {form.currency} 就是记账本位币，折算按 1:1，不需要填汇率。
+              </div>
+            </>
+          ) : (
+            <>
+              <label>汇率（1 {form.currency} = ? {baseCurrency}）</label>
+              <input
+                type="number"
+                step="0.0001"
+                value={form.exchangeRate}
+                onChange={(e) => setForm({ ...form, exchangeRate: Number(e.target.value) })}
+              />
+              <div className="hint">
+                汇率锁定日期：{form.exchangeRateDate || '未记录'}
+                <input
+                  type="date"
+                  style={{ width: 140, marginLeft: 8 }}
+                  value={form.exchangeRateDate}
+                  onChange={(e) => setForm({ ...form, exchangeRateDate: e.target.value })}
+                />
+              </div>
+            </>
+          )}
         </div>
         <div className="field">
           <label>贸易术语</label>
