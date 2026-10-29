@@ -11410,6 +11410,169 @@ const r51EmptySample = await samples.saveSample({
 await samples.deleteSample(r51EmptySample.id)
 eq('没有应收、没有凭据的打样单删得掉', await samples.getSample(r51EmptySample.id), null)
 
+section('R52 本币报价没有汇率：存 1、显示 1、转单成本不再折一遍')
+const r52Base = getSettings().baseCurrency
+const r52Cust = await customers.saveCustomer({ company: 'R52-RATE-CO' })
+await products.saveProduct({ styleNo: 'R52-HOME-P', name: '本币成本款', costPrice: 30 })
+const r52Q = await quotations.saveQuotation({
+  customerId: r52Cust.id,
+  currency: r52Base as any,
+  items: [{ styleNo: 'R52-HOME-P', quantity: 10, unitPrice: 50 }]
+})
+check('本币报价不填汇率也能存', r52Q.id > 0)
+eq('本币报价的汇率归一到 1', r52Q.exchangeRate, 1)
+eq('本币报价不记锁汇日期', r52Q.exchangeRateDate, null)
+eq('本币报价合计只有货值', r52Q.grandTotal, 500)
+const r52SnapRow = getDb().get('SELECT snapshot_json FROM quotation_versions WHERE quotation_id = ?', [r52Q.id]) as {
+  snapshot_json?: string
+}
+const r52Snap = JSON.parse(String(r52SnapRow?.snapshot_json ?? '{}'))
+eq('存档里本币汇率也是 1', r52Snap.exchangeRate, 1)
+eq('存档里不记一个不存在的汇率日期', r52Snap.exchangeRateDate, null)
+
+// 升级前留下的本币老单：库里存着 7.15，显示与转单都得按 1
+getDb().run('UPDATE quotations SET exchange_rate = 7.15 WHERE id = ?', [r52Q.id])
+const r52LegacyView = (await quotations.getQuotation(r52Q.id))!
+eq('老本币报价显示汇率 1', r52LegacyView.exchangeRate, 1)
+eq('老本币报价也不显示锁汇日', r52LegacyView.exchangeRateDate, null)
+getDb().run('UPDATE quotation_versions SET snapshot_json = ? WHERE quotation_id = ?', [
+  JSON.stringify({ ...r52Snap, exchangeRate: 7.15, exchangeRateDate: '2026-09-01' }),
+  r52Q.id
+])
+const r52Order = await quotations.convertToOrder(r52Q.id)
+eq('转出的订单汇率是 1', r52Order.exchangeRate, 1)
+eq('转出的订单不记锁汇日期', r52Order.exchangeRateDate, null)
+eq('成本不拿历史汇率再折一遍', r52Order.items[0].unitCost, 30)
+check(
+  '转单历史写清「本币单，不涉汇率」',
+  (await orders.listEvents(r52Order.id)).some((e) => e.note.includes('本币单，不涉汇率'))
+)
+
+section('R52 负合计不许存成报价，也不许转成订单')
+let r52NegErr = ''
+try {
+  await quotations.saveQuotation({
+    customerId: r52Cust.id,
+    currency: 'USD',
+    exchangeRate: 7,
+    charges: [{ label: '让利 Discount', amount: -150 }],
+    items: [{ styleNo: 'R52-NEG', quantity: 1, unitPrice: 100 }]
+  })
+} catch (e) {
+  r52NegErr = (e as Error).message
+}
+check('新建负合计报价被拦，并说清转单后会变成客户多付', r52NegErr.includes('报价单') && r52NegErr.includes('负'), r52NegErr)
+
+const r52NegQ = await quotations.saveQuotation({
+  customerId: r52Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  items: [{ styleNo: 'R52-NEG-2', quantity: 1, unitPrice: 100 }]
+})
+let r52NegEditErr = ''
+try {
+  await quotations.saveQuotation({
+    id: r52NegQ.id,
+    items: [{ styleNo: 'R52-NEG-2', quantity: 1, unitPrice: 100 }],
+    charges: [{ label: '让利', amount: -999 }]
+  })
+} catch (e) {
+  r52NegEditErr = (e as Error).message
+}
+check('编辑时把费用改成超过货值也被拦', r52NegEditErr.includes('负'), r52NegEditErr)
+eq('拦下后报价合计没被改坏', (await quotations.getQuotation(r52NegQ.id))!.grandTotal, 100)
+const r52NegSnapRow = getDb().get('SELECT snapshot_json FROM quotation_versions WHERE quotation_id = ?', [r52NegQ.id]) as {
+  snapshot_json?: string
+}
+const r52NegSnap = JSON.parse(String(r52NegSnapRow?.snapshot_json ?? '{}'))
+getDb().run('UPDATE quotation_versions SET snapshot_json = ?, grand_total = ? WHERE quotation_id = ?', [
+  JSON.stringify({ ...r52NegSnap, charges: [{ label: '让利', amount: -150 }] }),
+  -50,
+  r52NegQ.id
+])
+let r52NegConvertErr = ''
+try {
+  await quotations.convertToOrder(r52NegQ.id)
+} catch (e) {
+  r52NegConvertErr = (e as Error).message
+}
+check('升级前冻结的负合计存档同样不许转单', r52NegConvertErr.includes('负'), r52NegConvertErr)
+eq('拦下后没有偷偷生成订单', (await quotations.getQuotation(r52NegQ.id))!.convertedOrderId ?? null, null)
+
+section('R52 打样换币种不许沿用旧汇率')
+const r52Smp = await samples.saveSample({
+  customerId: r52Cust.id,
+  currency: 'USD',
+  exchangeRate: 7.15,
+  exchangeRateDate: '2026-09-01',
+  status: 'pending',
+  feeStatus: 'unpaid',
+  items: [{ styleNo: 'R52-SMP', quantity: 1, unitPrice: 100 }]
+})
+let r52SmpErr = ''
+try {
+  await samples.saveSample({ id: r52Smp.id, currency: 'EUR' })
+} catch (e) {
+  r52SmpErr = (e as Error).message
+}
+check('USD→EUR 沿用 7.15 被拦下并指路重填', r52SmpErr.includes('EUR') && r52SmpErr.includes('汇率'), r52SmpErr)
+const r52SmpEur = await samples.saveSample({ id: r52Smp.id, currency: 'EUR', exchangeRate: 7.8 })
+eq('按 EUR 重新填了汇率就能存', r52SmpEur.exchangeRate, 7.8)
+const r52SmpHome = await samples.saveSample({ id: r52Smp.id, currency: r52Base as any })
+eq('换回本币按 1 记，不用重填汇率', r52SmpHome.exchangeRate, 1)
+
+section('R52 作废单追回的钱是还欠款，不是客户多付')
+const r52VoidCust = await customers.saveCustomer({ company: 'R52-RECOVER-CO' })
+const r52Void = await orders.createOrder({
+  customerId: r52VoidCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed'
+})
+await orders.addOrderItem(r52Void.id, { styleNo: 'R52-REC', productName: '作废前已收一半', quantity: 10, unitPrice: 100 })
+await orders.addPayment(r52Void.id, { paidAt: localDate(), amount: 300, method: 'T/T', bankRef: 'R52-PAY' })
+await orders.addSettlement(r52Void.id, { kind: 'bad_debt', amount: 700, reason: 'R52 收不回来' })
+await orders.voidOrder(r52Void.id, 'R52 作废重开')
+await orders.addSettlement(r52Void.id, {
+  kind: 'recovery',
+  amount: 200,
+  reason: 'R52 追回',
+  bankRef: 'R52-REC'
+})
+const r52VoidMoney = (await orders.getOrder(r52Void.id))!
+eq('坏账追回只冲坏账余额', r52VoidMoney.badDebtOutstanding, 500)
+const r52VoidCredit = (await money.customerCreditBalance(r52VoidCust.id)).find((c) => c.currency === 'USD')
+eq('作废单上的预收只算真正多收的 300（追回的 200 不算预收）', r52VoidCredit?.available ?? 0, 300)
+const r52VoidStats = await customers.customerStats(r52VoidCust.id)
+eq('客户页坏账也认作废单（500×7）', r52VoidStats.badDebt, 500 * 7)
+const r52Stmt = parseCsv(await dashboard.exportCsv('statement', { customerId: r52VoidCust.id }))
+const r52Col = (name: string): number => r52Stmt[0].indexOf(name)
+const r52VoidStmtRow = r52Stmt.slice(1).find((r) => r[r52Col('单据号')] === r52Void.orderNo)!
+const r52VoidNote = String(r52VoidStmtRow[r52Col('备注')])
+check('对账单写明实收 300 计入客户预收', r52VoidNote.includes('实收 300'), r52VoidNote)
+check('对账单说明 200 是追回欠款、不计预收', r52VoidNote.includes('追回的欠款'), r52VoidNote)
+check('作废单不再印第二个「比单据多」的预收数', !r52VoidNote.includes('比单据多'), r52VoidNote)
+
+section('R52 备份打包：先量体积再读，压过的文件不再重复压')
+const r52ZipDir = join(dataDir(), 'r52-zip-probe')
+fs.mkdirSync(r52ZipDir, { recursive: true })
+fs.writeFileSync(join(r52ZipDir, 'a.jpg'), Buffer.alloc(2048, 1))
+let r52ZipErr = ''
+try {
+  collectDir(r52ZipDir, 'probe', [], { used: 0, limit: 1024 })
+} catch (e) {
+  r52ZipErr = (e as Error).message
+}
+check('打包前就按盘上体积拦下超限，并说是哪一份', r52ZipErr.includes('4GB') && r52ZipErr.includes('a.jpg'), r52ZipErr)
+eq('不设预算时照常收集', collectDir(r52ZipDir, 'probe').length, 1)
+const r52Zip = createZip([
+  { name: 'images/a.jpg', data: Buffer.alloc(4096, 7) },
+  { name: 'note.txt', data: Buffer.from('hello '.repeat(200)) }
+])
+eq('压过的图片按原样存（method 0），不再白烧 CPU', r52Zip.readUInt16LE(8), 0)
+eq('包读回来条目一个不少', readZip(r52Zip).length, 2)
+fs.rmSync(r52ZipDir, { recursive: true, force: true })
+
 /* ---------------- 汇总 ---------------- */
 
 console.log(`\n${'='.repeat(46)}`)

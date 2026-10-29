@@ -1306,18 +1306,20 @@ export function ordersCore(db: Db) {
 
   /**
    * 合计（货值 + 费用行）不许为负：负合计会被误当成客户多付，凭空生成一笔能抵别的单、能退真钱的预收。
-   * cause 说清这回钱是从哪里让出去的（让利行 / 样品费抵扣 / 调小明细），报错才指得对地方。
+   * cause 说清这回钱是从哪里让出去的（让利行 / 样品费抵扣 / 调小明细），报错才指得对地方；
+   * docLabel 说明这是哪张纸——报价单转单时会把负合计原样带成订单的负合计，所以它也得在源头拦住。
    */
   function assertOrderTotalNonNegative(
     goodsTotal: number,
     charges: QuotationCharge[],
-    cause = '让利（负费用行）'
+    cause = '让利（负费用行）',
+    docLabel = '订单'
   ): void {
     const total = goodsTotal + charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
     if (total < -0.001) {
       throw bizError(
         `货值 ${goodsTotal.toFixed(2)} 加上费用行后合计是 ${total.toFixed(2)}。` +
-          `合计为负的订单会被系统当成客户多付，凭空生成一笔能抵别的单、甚至退真钱的预收。` +
+          `合计为负的${docLabel}会被系统当成客户多付，凭空生成一笔能抵别的单、甚至退真钱的预收。` +
           `请把${cause}控制在货值以内，或先补足明细货值再保存。`
       )
     }

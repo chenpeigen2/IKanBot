@@ -137,6 +137,38 @@ async function main(): Promise<void> {
       (await db.all(`SELECT id FROM customers WHERE company = 'OuterD'`)).length === 0
     )
 
+    // 同一条连接上并发的另一条调用链（没有事务在手）：它不能看见别人事务的回滚点，
+    // 更不能把自己的写入并进去。旧实现只数本地层数，这条链也能看到计数 > 0。
+    let outerStartedResolve: () => void = () => {}
+    const outerStarted = new Promise<void>((res) => (outerStartedResolve = res))
+    let releaseOuterResolve: () => void = () => {}
+    const outerGate = new Promise<void>((res) => (releaseOuterResolve = res))
+    const outerTx = db.transact(async () => {
+      await db.run(`INSERT INTO customers(company, created_at, updated_at) VALUES('OutsideA', '', '')`)
+      outerStartedResolve()
+      await outerGate
+    })
+    await outerStarted
+    let queueErr = ''
+    try {
+      await db.transact(async () => {
+        await db.run(`INSERT INTO customers(company, created_at, updated_at) VALUES('QueueB', '', '')`)
+      })
+    } catch (e) {
+      queueErr = (e as Error).message
+    }
+    check('别人事务开着时，并发的另一段写入不许插队', queueErr.includes('事务插队'))
+    releaseOuterResolve()
+    await outerTx
+    check(
+      '插队被拦，外层照常提交',
+      (await db.all(`SELECT id FROM customers WHERE company = 'OutsideA'`)).length === 1
+    )
+    check(
+      '插队的写入没有落库',
+      (await db.all(`SELECT id FROM customers WHERE company = 'QueueB'`)).length === 0
+    )
+
     console.log('客户域 SQL')
     const core = customersCore(db)
     await db.run(`UPDATE customers SET active = 0 WHERE company = 'OuterC'`)

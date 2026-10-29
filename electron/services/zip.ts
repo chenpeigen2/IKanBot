@@ -7,6 +7,28 @@ export interface ZipEntry {
   data: Buffer
 }
 
+/** ZIP32 的体积/偏移都是 32 位无符号字段，越过 4GB 就会截断出一个自己都读不回来的包 */
+export const ZIP_MAX_BYTES = 0xffffffff
+
+/** 打包中的体积预算：先按盘上的体积合计，越线就不读——读进内存才发现超限，进程已经 OOM 了 */
+export interface ZipBudget {
+  used: number
+  limit: number
+}
+
+function zipTooLargeError(name: string): Error {
+  return new Error(
+    `备份内容超过单个备份包 4GB 的上限（数到「${name}」时越线），备份没有生成。` +
+      `图片和单据存档都是重要凭据，请不要删除；请清理重复/废弃的附件，或联系技术支持做分卷备份。`
+  )
+}
+
+/**
+ * 已经是压缩格式的扩展名：再 deflate 一遍只烧 CPU，包也小不了多少。
+ * 备份里最占体积的就是这些图片和 PDF 附件。
+ */
+const ALREADY_COMPRESSED = /\.(jpe?g|png|gif|webp|heic|avif|zip|7z|rar|gz|mp4|mov)$/i
+
 /**
  * 最小 ZIP 写入器（store + deflate），仅实现导出备份所需的功能。
  * 避免引入 archiver 依赖，同时保持纯 JS。
@@ -52,18 +74,18 @@ export function createZip(entries: ZipEntry[]): Buffer {
   for (const entry of entries) {
     const nameBuf = Buffer.from(entry.name, 'utf8')
     const crc = crc32(entry.data)
-    const compressed = deflateRawSync(entry.data, { level: 9 })
+    // 图片/视频/压缩包本来就是压过的，再 deflate 一遍只是白烧 CPU
+    const compressed = ALREADY_COMPRESSED.test(entry.name)
+      ? entry.data
+      : deflateRawSync(entry.data, { level: 9 })
     const useDeflate = compressed.length < entry.data.length
     const body = useDeflate ? compressed : entry.data
     const method = useDeflate ? 8 : 0
 
     // ZIP32 的体积/偏移都是 32 位无符号字段：越过 4GB 后 writeUInt32LE 会静默截断，
     // 生成一个自己都读不回来的包。宁可在写到这里时停下来把话说清
-    if (offset + 30 + nameBuf.length + body.length > 0xffffffff || entry.data.length > 0xffffffff) {
-      throw new Error(
-        `备份内容超过单个备份包 4GB 的上限（写到「${entry.name}」时越线），备份没有生成。` +
-          `图片和单据存档都是重要凭据，请不要删除；请清理重复/废弃的附件，或联系技术支持做分卷备份。`
-      )
+    if (offset + 30 + nameBuf.length + body.length > ZIP_MAX_BYTES || entry.data.length > ZIP_MAX_BYTES) {
+      throw zipTooLargeError(entry.name)
     }
 
     const local = Buffer.alloc(30)
@@ -142,7 +164,12 @@ export function zhFsError(e: unknown): string {
  * 由备份服务决定怎么留痕。但「跳过」绝不能等同于「成功」——少了几张图、几个 PDF 的包
  * 也要如实告诉人，否则出事那天翻备份，以为备份里什么都有。
  */
-export function collectDir(dir: string, prefix: string, skipped: string[] = []): ZipEntry[] {
+export function collectDir(
+  dir: string,
+  prefix: string,
+  skipped: string[] = [],
+  budget?: ZipBudget
+): ZipEntry[] {
   if (!existsSync(dir)) return []
   const out: ZipEntry[] = []
   let names: string[]
@@ -154,13 +181,28 @@ export function collectDir(dir: string, prefix: string, skipped: string[] = []):
   }
   for (const f of names) {
     const p = join(dir, f)
+    let isDir = false
+    let size = 0
     try {
-      if (statSync(p).isDirectory()) {
-        // 单据按单号分子目录：备份必须把子目录里的 PDF 一起带上
-        out.push(...collectDir(p, `${prefix}/${f}`, skipped))
-      } else {
-        out.push({ name: `${prefix}/${f}`, data: readFileSync(p) })
-      }
+      const st = statSync(p)
+      isDir = st.isDirectory()
+      size = st.size
+    } catch (e) {
+      skipped.push(`${prefix}/${f} —— ${zhFsError(e)}`)
+      continue
+    }
+    if (isDir) {
+      // 单据按单号分子目录：备份必须把子目录里的 PDF 一起带上
+      out.push(...collectDir(p, `${prefix}/${f}`, skipped, budget))
+      continue
+    }
+    // 先按盘上的体积合计再读：读进内存才发现越线，进程已经被 OOM 带走了
+    if (budget) {
+      budget.used += size
+      if (budget.used > budget.limit) throw zipTooLargeError(`${prefix}/${f}`)
+    }
+    try {
+      out.push({ name: `${prefix}/${f}`, data: readFileSync(p) })
     } catch (e) {
       skipped.push(`${prefix}/${f} —— ${zhFsError(e)}`)
     }

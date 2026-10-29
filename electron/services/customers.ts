@@ -1,7 +1,7 @@
 import { coreDb, getDb } from '../db'
 import { mapCustomerStats } from '../db/mappers'
 import { isBillingStatus, shownRemaining } from '../../src/shared/billing'
-import { EXCLUDED_STATUSES, listOrderMoney, sampleReceivable } from './money'
+import { listOrderMoney, sampleReceivable } from './money'
 import { customersCore, type CustomerInput } from '../../core/customers'
 import type { CustomerStats } from '../../src/shared/types'
 
@@ -38,7 +38,12 @@ export const stylePriceHistory = (filter: { customerId?: number; styleNo?: strin
  *  - 毛利   = Σ(货值 − 成本)，有成本没录全 → null（不可信）
  */
 export async function customerStats(customerId: number): Promise<CustomerStats> {
-  const rows = await listOrderMoney({ customerId })
+  // 一次取全（含草稿/失效/作废）：成交额与待收只认计费单，坏账要认全部——
+  // 单子作废了，那笔没收回来的钱不会跟着消失（与工作台、月报同一个口径，R49）。
+  // 以前这里按默认口径取，一家客户只有一张作废单挂着坏账时，客户页显示「没赖过钱」，
+  // 工作台和月报却还在报这笔损失。
+  const all = await listOrderMoney({ customerId, includeVoided: true })
+  const rows = all.filter((r) => isBillingStatus(r.paymentStatus))
   const totalAmount = rows.reduce((s, r) => s + r.grandTotalBase, 0)
   // 未收走统一口径（money.ts）：订单待收 + 打样未收（N23：客户页不能比工作台少数一笔打样费）
   const outstandingOrders = rows.reduce((s, r) => s + r.receivableBase, 0)
@@ -50,8 +55,8 @@ export async function customerStats(customerId: number): Promise<CustomerStats> 
       | { c?: number }
       | null)?.c ?? 0
   )
-  // 坏账不进待收，但客户页要能看见这家客户赖过多少钱
-  const badDebt = rows.reduce((s, r) => s + r.badDebtBase, 0)
+  // 坏账不进待收，但客户页要能看见这家客户赖过多少钱：作废/失效单上的坏账也算
+  const badDebt = all.reduce((s, r) => s + r.badDebtBase, 0)
   const missingCostOrders = rows.filter((r) => r.missingCostItems > 0).length
   // 外币没填汇率的单：成交额/待收/毛利都按 0 折，上面的合计是「少算了这几单」的数。
   // 不亮出来，老板会拿着一个偏小的成交额去对账
@@ -59,15 +64,9 @@ export async function customerStats(customerId: number): Promise<CustomerStats> 
   const totalProfitRaw = rows.reduce((s, r) => s + (r.profitBase ?? 0), 0)
   // 下面的历史列表会把草稿/失效/作废也列出来，成交额却不含它们；
   // 不写明条数，老板会以为系统漏单（N-口径一致）
-  const excluded = getDb().all(
-    `SELECT payment_status FROM orders WHERE customer_id = ? AND payment_status IN (${EXCLUDED_STATUSES.map(
-      () => '?'
-    ).join(',')})`,
-    [customerId, ...EXCLUDED_STATUSES]
-  ) as { payment_status?: string }[]
   return mapCustomerStats({
     order_count: rows.length,
-    excluded_order_count: excluded.length,
+    excluded_order_count: all.length - rows.length,
     total_amount: totalAmount,
     // 有成本没录全的订单 → 毛利不可信（null），不许拿 0 成本凑一个漂亮的数；
     // 缺汇率的单同理：那一单的毛利根本没折进合计，算出来的也不是真毛利

@@ -849,8 +849,8 @@ export function dashboardCore(db: Db) {
           sampleId: m.sampleId,
           message:
             `打样费 ${owed.toFixed(2)} ${m.currency} 未收` +
-            (m.exchangeRate > 0
-              ? `（折合 ${(owed * m.exchangeRate).toFixed(2)}），${shippedAt ? `样品寄出 ${days} 天` : `挂单 ${days} 天还没寄出`}`
+            (m.baseRate > 0
+              ? `（折合 ${(owed * m.baseRate).toFixed(2)}），${shippedAt ? `样品寄出 ${days} 天` : `挂单 ${days} 天还没寄出`}`
               : '，且汇率未填（工作台待收里少算了这单，请补汇率）') +
             (offsetSuspended ? '；转出订单已退回草稿/失效，抵扣暂不生效，请先把订单恢复成正式单（会自动再抵）' : ''),
           days
@@ -1487,8 +1487,14 @@ export function dashboardCore(db: Db) {
       const creditUsed = Number(r.creditApplied ?? 0)
       const notes: string[] = []
       if (!billing) {
+        // 这张单不欠钱了，收到的现金只剩一个去处：客户预收结余。
+        // 坏账追回那一截例外——它补的是我方账上已经核销掉的欠款，不是客户多付，
+        // 算进预收就能再抵别的单、甚至退真钱出去（customerCreditBalance 同一口径）
+        const credited = Math.max(0, r.paidAmount - r.badDebtRecovered)
         notes.push(`此单${PAYMENT_STATUS_LABEL[r.paymentStatus as keyof typeof PAYMENT_STATUS_LABEL] ?? r.paymentStatus}，不计应收；已到的钱仍是实收`)
-        if (r.paidAmount > 0.001) notes.push(`实收 ${money2(r.paidAmount)} 已计入客户预收结余`)
+        if (credited > 0.001) notes.push(`实收 ${money2(credited)} 已计入客户预收结余`)
+        if (r.badDebtRecovered > 0.001)
+          notes.push(`其中 ${money2(r.badDebtRecovered)} 为追回的欠款，冲的是我方账上已核销的坏账，不计入预收`)
       }
       if (r.negativeCharges < -0.001) notes.push(`含折让/抵扣 ${money2(r.negativeCharges)}（已计入单据金额）`)
       // 核销掉的两种来路必须分开说：短款是双方点头让掉的尾款（真是替客户减的），
@@ -1501,7 +1507,9 @@ export function dashboardCore(db: Db) {
         notes.push(`其中 ${money2(r.badDebtOutstanding)} 我方账上没收到、也不再向贵司计收；若已付请把水单发来核对`)
       if (creditUsed > 0.001) notes.push(`其中预收抵扣 ${money2(creditUsed)}（非现金，从客户预收余额冲减）`)
       if (open > 0.001 && rate <= 0) notes.push('汇率未填，未折算')
-      if (prepaid > 0.001) notes.push(`实收比单据多 ${money2(prepaid)}（预收结余）`)
+      // 「实收比单据多」只对计应收的单说：作废/失效单整笔实收都已经进预收，
+      // 再补一句「比单据多 X」，同一行就有两个预收数，客户拿计算器一减就问过来
+      if (billing && prepaid > 0.001) notes.push(`实收比单据多 ${money2(prepaid)}（预收结余）`)
       docs.push({
         ...blank,
         kind: '订单',

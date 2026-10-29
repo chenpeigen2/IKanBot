@@ -371,6 +371,19 @@ export function samplesCore(db: Db) {
     // 本币单没有汇率可折：统一落 1。库里可能还存着切基准币之前的外币汇率（比如 7.15），
     // 读路径已经按 baseRateOf 折成 1，写回旧值只会让台账的「汇率」列和金额自相矛盾
     const exchangeRate = currency === baseCurrency ? 1 : keepNum('exchangeRate', 'exchange_rate')
+    // 换币种不能沿用旧汇率：7.15 是 USD→CNY 的价，套在一张 EUR 单上，
+    // 待收、净垫、月报就全按错汇率折了。换成基准币不用问（折算固定是 1），
+    // 只有换成外币才要人重新填
+    if (
+      before &&
+      currency !== String(before.currency ?? '') &&
+      currency !== baseCurrency &&
+      Math.abs(exchangeRate - Number(before.exchange_rate ?? 0)) < 0.001
+    ) {
+      throw bizError(
+        `币种从 ${String(before.currency ?? '')} 换成 ${currency}，汇率不能沿用原来的 ${exchangeRate}；请按 ${currency} 重新填写汇率再保存。`
+      )
+    }
     const beforeRate = before
       ? baseRateOf(String(before.currency ?? ''), baseCurrency, Number(before.exchange_rate ?? 0))
       : 0
@@ -756,14 +769,16 @@ export function samplesCore(db: Db) {
     }
     const settings = (await settingsCore(db).get())
     const currency = (s.currency || 'USD') as 'USD'
-    const rate = Number(s.exchangeRate || 0)
-    if (rate <= 0) {
+    // 本币单没有折算这回事：老单里存着的 7.15 不许拿去除成本，也不该拦「没填汇率」
+    const isHomeSample = currency === settings.baseCurrency
+    const rate = isHomeSample ? 1 : Number(s.exchangeRate || 0)
+    if (!isHomeSample && rate <= 0) {
       throw bizError('这张打样单没有汇率，请先编辑打样单填上汇率再转订单')
     }
     // 锁汇日期必须是真记下来的那一天：打样日期不是订单的锁汇日，拿它或今天顶替
-    // 都会在账上留下一个查不出处的汇率
-    const rateDate = s.exchangeRateDate
-    if (!rateDate) {
+    // 都会在账上留下一个查不出处的汇率。本币单不涉汇率，也没有那一天
+    const rateDate = isHomeSample ? null : s.exchangeRateDate
+    if (!isHomeSample && !rateDate) {
       throw bizError('这张打样单没记汇率锁定日期。请先编辑打样单，把汇率锁定日期补上再转订单')
     }
 
