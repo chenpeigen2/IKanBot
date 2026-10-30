@@ -69,6 +69,8 @@ export default function Quotations() {
   /** 历史版本拉取失败：转单按钮要停下来，不能拿「只有一版」的假象转出去 */
   const [convertVersionsError, setConvertVersionsError] = useState('')
   const [convertRevision, setConvertRevision] = useState<number | null>(null)
+  /** 转单在途：连点两下「PI 现在就发」会各建一张单，第二张把第一张从报价单上顶掉 */
+  const [converting, setConverting] = useState(false)
   const [overrideBy, setOverrideBy] = useState('')
   const [overrideReason, setOverrideReason] = useState('')
   // 敲太快时两个 list 请求在途，先发的旧结果不许盖住新关键词
@@ -135,11 +137,13 @@ export default function Quotations() {
 
   /** 转订单：问一句 PI 发不发，状态别默认落在草稿（草稿单系统不提醒） */
   const convert = async (q: any, paymentStatus: 'draft' | 'sent') => {
+    if (converting) return
     const expired = isConvertExpired
     if (expired && (!overrideBy.trim() || !overrideReason.trim())) {
       toast('这张报价已经过期，要沿用旧价必须填批准人和原因', 'error')
       return
     }
+    setConverting(true)
     try {
       const order = await window.api.quotations.convert(q.id, {
         paymentStatus,
@@ -155,6 +159,8 @@ export default function Quotations() {
       navigate(`/orders/${order.id}`)
     } catch (e) {
       toast((e as Error).message, 'error')
+    } finally {
+      setConverting(false)
     }
   }
 
@@ -338,12 +344,15 @@ export default function Quotations() {
               <Button  onClick={() => setConvertTarget(null)}>
                 取消
               </Button>
-              <Button disabled={!!convertVersionsError} onClick={() => void convert(convertTarget, 'draft')}>
+              <Button
+                disabled={!!convertVersionsError || converting}
+                onClick={() => void convert(convertTarget, 'draft')}
+              >
                 先存草稿
               </Button>
               <Button
                 variant="primary"
-                disabled={!!convertVersionsError}
+                disabled={!!convertVersionsError || converting}
                 onClick={() => void convert(convertTarget, 'sent')}
               >
                 PI 现在就发（待确认）

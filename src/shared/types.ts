@@ -8,7 +8,7 @@ export type PaymentStatus =
   | 'sent' // 已发送，待客户确认
   | 'confirmed' // 客户已确认
   | 'partial' // 部分收款
-  | 'paid' // 已收款（定金收齐）
+  | 'paid' // 定金已收（定金收齐、尾款未到）
   | 'settled' // 已结清（全额收齐）
   | 'expired' // 已失效
   | 'void' // 已作废（客户取消 / 建错单）：记录全留，但不进货值/待收/毛利
@@ -31,7 +31,7 @@ export const PAYMENT_STATUS_LABEL: Record<PaymentStatus, string> = {
   sent: '待确认',
   confirmed: '客户已确认',
   partial: '部分收款',
-  paid: '已收款',
+  paid: '定金已收',
   settled: '已结清',
   expired: '已失效',
   void: '已作废'

@@ -868,6 +868,12 @@ export function quotationsCore(db: Db) {
       '报价单存档，转成订单后'
     )
 
+    // 两个人同时点「转订单」：各自先读到「还没转过」，各建一张单，最后一条 UPDATE 把前一张
+    // 静默覆盖掉——前一张单从此在报价单上无主，客户手里却可能已经收到它的 PI。
+    // 落库这一步带上开头的旧值做条件更新：条件不成立就整笔回滚（含刚烧掉的单号与明细），
+    // 让后到的人看到「已经转过了」，而不是多出一张没人认领的单。
+    const allowFrom = q.convertedOrderId ?? -1
+
     return db.transact(async () => {
       const order = await ordersOf().createOrder({
         customerId: snap.customerId,
@@ -971,13 +977,16 @@ export function quotationsCore(db: Db) {
         `按第 ${targetRevision} 版转成订单 ${saved.orderNo}${overrideNote ? `；${overrideNote}` : ''}`
       )
 
-      await db.run('UPDATE quotations SET status=?, result=?, converted_order_id=?, updated_at=? WHERE id=?', [
-        'converted',
-        'won',
-        order.id,
-        now(),
-        id
-      ])
+      const done = await db.run(
+        `UPDATE quotations SET status=?, result=?, converted_order_id=?, updated_at=?
+         WHERE id = ? AND (converted_order_id IS NULL OR converted_order_id = ?)`,
+        ['converted', 'won', order.id, now(), id, allowFrom]
+      )
+      if (done.changes !== 1) {
+        throw bizError(
+          `报价单 ${q.qNo} 刚刚已经转成订单了：请先回订单列表核对新单，不要重复建单。`
+        )
+      }
       return saved
     })
   }

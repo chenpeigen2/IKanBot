@@ -34,6 +34,38 @@ export const SETTINGS_DEFAULTS: AppSettings = {
 
 const KEY = 'app_settings'
 
+/**
+ * 备份的两个戳单独存一行。
+ *
+ * 以前它们混在整份设置 JSON 里：每日备份收尾要「读出来 → 盖个戳 → 写回去」，
+ * 而这份读-改-写只要在并发里被设置页的保存插一杠，就会把用户刚填的抬头、账户、
+ * 阈值整份盖回旧值（备份服务写的是它读到的那个快照）。反过来设置页保存也带着
+ * 它读到的旧戳写回去，谁后写谁说了算。
+ * 现在两边各写各的行：设置页只写正文（write 里剥掉这两个字段），
+ * 备份只在 backup_state 这一行上做读-改-写。
+ */
+export const BACKUP_STATE_KEY = 'backup_state'
+
+/**
+ * 把 backup_state 那一行里的戳盖到设置对象上。
+ * 没落过这一行（升级前的库）就沿用正文里那份——老数据里戳还在老位置，不能丢。
+ */
+export function mergeBackupStamps(s: AppSettings, text: string | null | undefined): AppSettings {
+  if (!text) return s
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return s
+  }
+  const p = (parsed && typeof parsed === 'object' ? parsed : {}) as Record<string, unknown>
+  return {
+    ...s,
+    lastBackupAt: typeof p['lastBackupAt'] === 'string' ? p['lastBackupAt'] : null,
+    lastBackupError: typeof p['lastBackupError'] === 'string' ? p['lastBackupError'] : null
+  }
+}
+
 /** 天数类设置：下限 / 上限（0 表示「当天就提醒」，是合法值） */
 const DAY_FIELDS = [
   ['piValidDays', 'PI 有效期', 1, 365],
@@ -151,30 +183,11 @@ function factorOf(v: unknown, fallback: number): number {
 export function settingsCore(db: Db) {
   async function get(): Promise<AppSettings> {
     const row = await db.get('SELECT value FROM settings WHERE key = ?', [KEY])
-    return parseSettings(typeof row?.['value'] === 'string' ? (row['value'] as string) : null)
-  }
-
-  /**
-   * 写回之前的严格读：整块 JSON 解析不出来就停手。
-   *
-   * get() 对坏数据按字段退回默认值，那是给界面看的；而「读回来 → 盖一个戳 → 写回去」
-   * 这条路（每日备份收尾必走）要是也照默认值走，一次备份就把公司抬头、收款账户、
-   * 各种提醒阈值全换成了出厂设置，而且界面只会报「备份成功」。
-   * 字段个别坏了照样按默认值退回，这里只拦「整块读不出来」。
-   */
-  async function getStrict(): Promise<AppSettings> {
-    const row = await db.get('SELECT value FROM settings WHERE key = ?', [KEY])
-    const text = typeof row?.['value'] === 'string' ? (row['value'] as string) : null
-    if (!text) return structuredClone(SETTINGS_DEFAULTS)
-    try {
-      return normalizeSettings(JSON.parse(text))
-    } catch {
-      throw new BizError(
-        '设置里那一块 JSON 解析不出来，已停手不回写。' +
-          '这时候写一次就会把公司抬头、收款账户和提醒阈值全换成默认值。' +
-          '请到设置页重新填一遍存好，或者从备份恢复后再试。'
-      )
-    }
+    const backup = await db.get('SELECT value FROM settings WHERE key = ?', [BACKUP_STATE_KEY])
+    return mergeBackupStamps(
+      parseSettings(typeof row?.['value'] === 'string' ? (row['value'] as string) : null),
+      typeof backup?.['value'] === 'string' ? (backup['value'] as string) : null
+    )
   }
 
   /** 库里已经落地的单据数——基准币一旦有账就只能锁死，改动前先问它 */
@@ -303,9 +316,13 @@ export function settingsCore(db: Db) {
   }
 
   async function write(s: AppSettings): Promise<void> {
+    // 正文里不落戳：戳归 backup_state，设置页保存不该顺手把备份凭据写成旧值
+    const main = { ...s } as Partial<AppSettings>
+    delete main.lastBackupAt
+    delete main.lastBackupError
     await db.run(
       'INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
-      [KEY, JSON.stringify(s)]
+      [KEY, JSON.stringify(main)]
     )
   }
 
@@ -320,13 +337,22 @@ export function settingsCore(db: Db) {
     return (await bookedDocCount()) > 0
   }
 
-  /** 备份服务专用：只盖自己那一两个戳，不碰用户在设置页填的东西 */
+  /**
+   * 备份服务专用：只盖自己那一两个戳。
+   *
+   * 只动 backup_state 这一行，正文一个字都不碰——所以哪怕设置页正在保存、
+   * 哪怕正文那块 JSON 已经读不出来，一次备份收尾也不会把用户填的东西换成别的。
+   */
   async function patchBackup(patch: Partial<Pick<AppSettings, 'lastBackupAt' | 'lastBackupError'>>): Promise<void> {
-    const s = await getStrict()
-    await write({ ...s, ...patch })
+    const cur = await get()
+    const next = { lastBackupAt: cur.lastBackupAt, lastBackupError: cur.lastBackupError, ...patch }
+    await db.run(
+      'INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+      [BACKUP_STATE_KEY, JSON.stringify(next)]
+    )
   }
 
-  return { get, getStrict, save, baseCurrencyLocked, patchBackup }
+  return { get, save, baseCurrencyLocked, patchBackup }
 }
 
 export type SettingsCore = ReturnType<typeof settingsCore>

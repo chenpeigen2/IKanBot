@@ -7,7 +7,7 @@
  *
  *   neutral  草稿 / 未备货 / 已作废
  *   info     客户已确认 / 已备货 / 已转订单
- *   success  已收款 / 已结清 / 已签收
+ *   success  定金已收 / 已结清 / 已签收
  *   warning  待确认 / 部分收款 / 备货中 / 汇率未填
  *   danger   已失效 / 已作废（需强调）
  */
@@ -16,6 +16,12 @@ import type {
   QuotationStatus,
   SampleStatus,
   ShipStatus
+} from '../../../shared/types'
+import {
+  PAYMENT_STATUS_LABEL,
+  QUOTATION_STATUS_LABEL,
+  SAMPLE_STATUS_LABEL,
+  SHIP_STATUS_LABEL
 } from '../../../shared/types'
 
 export type StatusTone = 'neutral' | 'info' | 'success' | 'warning' | 'danger'
@@ -44,62 +50,62 @@ export function StatusTag({
   )
 }
 
-/* ---------------- 各业务状态的中文与语义色 ---------------- */
+/* ---------------- 各业务状态的语义色 ----------------
+ * 文案一律取 shared/types 里那份（同一个状态在标签、下拉、导出里必须是同一个词），
+ * 这里只保留颜色，不另抄一份中文。 */
 
-const PAYMENT: Record<PaymentStatus, { label: string; tone: StatusTone }> = {
-  draft: { label: '草稿', tone: 'neutral' },
-  sent: { label: '待确认', tone: 'warning' },
-  confirmed: { label: '客户已确认', tone: 'info' },
-  partial: { label: '部分收款', tone: 'warning' },
-  paid: { label: '已收款', tone: 'success' },
-  settled: { label: '已结清', tone: 'success' },
-  expired: { label: '已失效', tone: 'danger' },
-  void: { label: '已作废', tone: 'neutral' }
+const PAYMENT_TONE: Record<PaymentStatus, StatusTone> = {
+  draft: 'neutral',
+  sent: 'warning',
+  confirmed: 'info',
+  partial: 'warning',
+  paid: 'success',
+  settled: 'success',
+  expired: 'danger',
+  void: 'neutral'
 }
 
-const SHIP: Record<ShipStatus, { label: string; tone: StatusTone }> = {
-  not_prepared: { label: '未备货', tone: 'neutral' },
-  preparing: { label: '备货中', tone: 'warning' },
-  packed: { label: '已包装', tone: 'info' },
-  shipped: { label: '已出运', tone: 'info' },
-  partial_shipped: { label: '部分出运', tone: 'info' },
-  cleared: { label: '已清关', tone: 'success' },
-  delivered: { label: '已签收', tone: 'success' }
+const SHIP_TONE: Record<ShipStatus, StatusTone> = {
+  not_prepared: 'neutral',
+  preparing: 'warning',
+  packed: 'info',
+  shipped: 'info',
+  partial_shipped: 'info',
+  cleared: 'success',
+  delivered: 'success'
 }
 
-const QUOTATION: Record<QuotationStatus, { label: string; tone: StatusTone }> = {
-  draft: { label: '草稿', tone: 'neutral' },
-  sent: { label: '已发送', tone: 'warning' },
-  confirmed: { label: '客户已确认', tone: 'info' },
-  converted: { label: '已转订单', tone: 'success' },
-  expired: { label: '已失效', tone: 'danger' }
+const QUOTATION_TONE: Record<QuotationStatus, StatusTone> = {
+  draft: 'neutral',
+  sent: 'warning',
+  confirmed: 'info',
+  converted: 'success',
+  expired: 'danger'
 }
 
-const SAMPLE: Record<SampleStatus, { label: string; tone: StatusTone }> = {
-  pending: { label: '待寄出', tone: 'neutral' },
-  sent: { label: '已寄出', tone: 'warning' },
-  received: { label: '已签收', tone: 'success' },
-  cancelled: { label: '已取消', tone: 'neutral' }
+const SAMPLE_TONE: Record<SampleStatus, StatusTone> = {
+  pending: 'neutral',
+  sent: 'warning',
+  received: 'success',
+  cancelled: 'neutral'
 }
 
 export function PaymentTag({ status }: { status: PaymentStatus }) {
-  const s = PAYMENT[status] ?? { label: status, tone: 'neutral' as StatusTone }
-  return <StatusTag tone={s.tone}>{s.label}</StatusTag>
+  return <StatusTag tone={PAYMENT_TONE[status] ?? 'neutral'}>{PAYMENT_STATUS_LABEL[status] ?? status}</StatusTag>
 }
 
 export function ShipTag({ status }: { status: ShipStatus }) {
-  const s = SHIP[status] ?? { label: status, tone: 'neutral' as StatusTone }
-  return <StatusTag tone={s.tone}>{s.label}</StatusTag>
+  return <StatusTag tone={SHIP_TONE[status] ?? 'neutral'}>{SHIP_STATUS_LABEL[status] ?? status}</StatusTag>
 }
 
 export function QuotationStatusTag({ status }: { status: QuotationStatus }) {
-  const s = QUOTATION[status] ?? { label: status, tone: 'neutral' as StatusTone }
-  return <StatusTag tone={s.tone}>{s.label}</StatusTag>
+  return (
+    <StatusTag tone={QUOTATION_TONE[status] ?? 'neutral'}>{QUOTATION_STATUS_LABEL[status] ?? status}</StatusTag>
+  )
 }
 
 export function SampleStatusTag({ status }: { status: SampleStatus }) {
-  const s = SAMPLE[status] ?? { label: status, tone: 'neutral' as StatusTone }
-  return <StatusTag tone={s.tone}>{s.label}</StatusTag>
+  return <StatusTag tone={SAMPLE_TONE[status] ?? 'neutral'}>{SAMPLE_STATUS_LABEL[status] ?? status}</StatusTag>
 }
 
 /** 打样费收款状态 */

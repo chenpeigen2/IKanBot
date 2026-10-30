@@ -3,6 +3,9 @@
  * 运行：npm run test:e2e
  */
 import { openDb, closeDb, getDb, coreDb, dataDir, imagesDir, docsDir, backupsDir } from '../electron/db'
+import type { Db } from '../core/db'
+import { quotationsCore } from '../core/quotations'
+import { settingsCore, BACKUP_STATE_KEY } from '../core/settings'
 import { filesCore } from '../core/files'
 import { LATEST_DB_VERSION } from '../electron/db/schema'
 import * as fs from 'fs'
@@ -4048,10 +4051,10 @@ eq(
 
 section('R9 工作台会盯住备份（数据只躺在这台电脑上）')
 const r9setStamp = (at: string | null, err: string | null): void => {
-  const cur = getSettings()
+  // R54 起戳单独一行（backup_state）：这里模拟备份服务写凭据，别再往设置正文里塞
   getDb().run('INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', [
-    'app_settings',
-    JSON.stringify({ ...cur, lastBackupAt: at, lastBackupError: err })
+    BACKUP_STATE_KEY,
+    JSON.stringify({ lastBackupAt: at, lastBackupError: err })
   ])
 }
 const r9backupTips = async () => (await dashboard.reminders()).filter((r) => r.orderNo === '数据备份')
@@ -10481,39 +10484,85 @@ check(
 )
 await saveSettings(r45RemSettings)
 
-/* ---------------- R46：一个数只许一张嘴 ---------------- */
-section('R46 手工勾「已结清」但按流水还欠：原因必填，差额钉进留痕')
-const r46Cust = await customers.saveCustomer({ company: 'R46-SETTLE-CO' })
-const r46Owed = await orders.createOrder({
-  customerId: r46Cust.id,
+/* ---------------- R54：结清就是钱真的收齐了 ---------------- */
+section('R54 手工勾「已结清」但按流水还欠：拒绝，并指到两条正门')
+const r54Cust = await customers.saveCustomer({ company: 'R54-SETTLE-CO' })
+// 下面 R46 的费用行与少收两组断言沿用这张客户：把结清守门换成正门之后它们仍然同源
+const r46Cust = r54Cust
+const r54Owed = await orders.createOrder({
+  customerId: r54Cust.id,
   currency: 'USD',
   exchangeRate: 7,
   paymentStatus: 'confirmed',
-  piNo: 'PI-R46-OWED'
+  piNo: 'PI-R54-OWED'
 })
-await orders.addOrderItem(r46Owed.id, { styleNo: 'R46-S1', quantity: 1, unitPrice: 100 })
-await orders.addPayment(r46Owed.id, { paidAt: localDate(), amount: 60, method: 'T/T', bankRef: 'ZZ-R46-OWED' })
-const r46Before = (await orders.getOrder(r46Owed.id))!.paymentStatus
-const r46NoReason = await r8err(async () => await orders.setPaymentStatus(r46Owed.id, 'settled'))
-check('还欠 40 时直接勾「已结清」被拦', r46NoReason.includes('还欠'), r46NoReason)
-check('拦下的话术说清该干什么（先做平，或写明为什么不收了）', r46NoReason.includes('请写明原因'), r46NoReason)
-eq('拦下后状态一个字没动', (await orders.getOrder(r46Owed.id))!.paymentStatus, r46Before)
-await orders.setPaymentStatus(r46Owed.id, 'settled', '客户现场付现金，水单不入账')
-const r46SetEv = (await orders.listEvents(r46Owed.id)).find(
-  (e) => e.kind === 'payment_status' && e.toStatus === 'settled'
+await orders.addOrderItem(r54Owed.id, { styleNo: 'R54-S1', quantity: 1, unitPrice: 100 })
+// 40 天前收的定金：尾款提醒的主钟是「自最后收款」，今天刚收完就催是不讲理的
+await orders.addPayment(r54Owed.id, {
+  paidAt: addDays(localDate(), -40),
+  amount: 60,
+  method: 'T/T',
+  bankRef: 'ZZ-R54-OWED'
+})
+const r54Before = (await orders.getOrder(r54Owed.id))!.paymentStatus
+const r54Reject = await r8err(async () => await orders.setPaymentStatus(r54Owed.id, 'settled'))
+check('还欠 40 时勾「已结清」被拦', r54Reject.includes('还欠'), r54Reject)
+check('拦下的话术说清「已结清」是什么意思', r54Reject.includes('钱真的收齐了'), r54Reject)
+check(
+  '指到第一扇门：登记这笔收款（现金、水单没录也能登）',
+  r54Reject.includes('收款记录') && r54Reject.includes('流水号可以留空'),
+  r54Reject
 )
-check('结清留痕把差额钉进历史：将来对不上账知道差多少', (r46SetEv?.note ?? '').includes('按流水仍欠 40.00'), r46SetEv?.note ?? '')
-const r46Clean = await orders.createOrder({
-  customerId: r46Cust.id,
+check(
+  '指到第二扇门：核销短款 / 坏账',
+  r54Reject.includes('核销与坏账') && r54Reject.includes('短款或坏账'),
+  r54Reject
+)
+eq('拦下后状态一个字没动', (await orders.getOrder(r54Owed.id))!.paymentStatus, r54Before)
+// R46 曾允许「写一句原因就过关」：状态说着已结清，待收/催款/对账单照着同一个数继续喊。
+const r54Note = await r8err(async () =>
+  await orders.setPaymentStatus(r54Owed.id, 'settled', '客户现场付现金，水单不入账')
+)
+check('写一句原因也不再放行（留痕不是通行证）', r54Note.includes('还欠'), r54Note)
+const r54OwedRow = (await money.listOrderMoney()).find((r) => r.orderId === r54Owed.id)!
+check('待收里确实还挂着这 40（拦下不是把差额悄悄抹了）', Math.abs(r54OwedRow.remaining - 40) < 0.005, `${r54OwedRow.remaining}`)
+const r54Reminder = (await dashboard.reminders()).find((r) => r.orderId === r54Owed.id && r.kind === 'balance')
+check('工作台继续催这 40：勾不过去，账也就不会假装不用催', Boolean(r54Reminder), r54Reminder?.message)
+
+// 正门一：现金已经收了、水单没录 → 直接登记这一笔（流水号留空）
+await orders.addPayment(r54Owed.id, { paidAt: localDate(), amount: 40, method: 'T/T', bankRef: '' })
+eq('登记这笔现金后按流水自然结清（不用再手工勾）', (await orders.getOrder(r54Owed.id))!.paymentStatus, 'settled')
+check(
+  '结清后待收归零',
+  Math.abs((await money.listOrderMoney()).find((r) => r.orderId === r54Owed.id)!.remaining) < 0.005
+)
+
+// 正门二：差额确实不再收 → 记一笔核销（短款/坏账），不留白条
+const r54Short = await orders.createOrder({
+  customerId: r54Cust.id,
   currency: 'USD',
   exchangeRate: 7,
   paymentStatus: 'confirmed',
-  piNo: 'PI-R46-CLEAN'
+  piNo: 'PI-R54-SHORT'
 })
-await orders.addOrderItem(r46Clean.id, { styleNo: 'R46-S2', quantity: 1, unitPrice: 80 })
-await orders.addPayment(r46Clean.id, { paidAt: localDate(), amount: 80, method: 'T/T', bankRef: 'ZZ-R46-CLEAN' })
-eq('收齐了勾结清不折腾人（原因不必填）', (await orders.setPaymentStatus(r46Clean.id, 'settled')).paymentStatus, 'settled')
-check('不欠钱的单，结清留痕里不多出「仍欠」', !(await orders.listEvents(r46Clean.id)).some((e) => e.note.includes('仍欠')))
+await orders.addOrderItem(r54Short.id, { styleNo: 'R54-S2', quantity: 1, unitPrice: 100 })
+await orders.addPayment(r54Short.id, { paidAt: localDate(), amount: 60, method: 'T/T', bankRef: 'ZZ-R54-SHORT' })
+await orders.addSettlement(r54Short.id, { kind: 'shortage', amount: 40, reason: 'R54 客户抹零' })
+eq('核销短款把差额做平后同样自动结清', (await orders.getOrder(r54Short.id))!.paymentStatus, 'settled')
+
+const r54Clean = await orders.createOrder({
+  customerId: r54Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R54-CLEAN'
+})
+await orders.addOrderItem(r54Clean.id, { styleNo: 'R54-S3', quantity: 1, unitPrice: 80 })
+await orders.addPayment(r54Clean.id, { paidAt: localDate(), amount: 80, method: 'T/T', bankRef: 'ZZ-R54-CLEAN' })
+eq('收齐了勾结清不折腾人（原因不必填）', (await orders.setPaymentStatus(r54Clean.id, 'settled')).paymentStatus, 'settled')
+check('不欠钱的单，结清留痕里不多出「仍欠」', !(await orders.listEvents(r54Clean.id)).some((e) => e.note.includes('仍欠')))
+// 下面 R46 的费用行/少收两组断言仍拿这张干净的已结清单当靶子
+const r46Clean = r54Clean
 
 section('R46 定金阶梯：状态和工作台定金桶吃同一份算术')
 const r46DepCust = await customers.saveCustomer({ company: 'R46-DEP-CO' })
@@ -11667,6 +11716,67 @@ eq('有单折不出来，毛利宁可不给也不报一个偏小的数', r53Stat
 
 const r53VoidBrief = (await customers.customerOrderBriefs(r52VoidCust.id)).find((b) => b.id === r52Void.id)!
 eq('作废单历史行：已收 500（含追回 200），其中转预收 300', [r53VoidBrief.paid, r53VoidBrief.prepaid], [500, 300])
+
+/* ---------------- R54：两个人同时点，只许一张单 ---------------- */
+section('R54 报价转单：后到的那次被条件更新挡下，不留第二张无主的单')
+const r54qCust = await customers.saveCustomer({ company: 'R54-CONVERT-CO' })
+const r54q = await quotations.saveQuotation({
+  customerId: r54qCust.id,
+  currency: 'CNY',
+  incoterm: 'FOB',
+  items: [{ styleNo: 'R54-Q1', quantity: 10, unitPrice: 5 }]
+})
+const r54FirstOrder = await quotations.convertToOrder(r54q.id, { paymentStatus: 'sent' })
+// 模拟并发里后到的那一次：它在另一个人提交之前就读到了「还没转过」的那一行
+const r54StaleDb: Db = {
+  ...coreDb,
+  async get(sql, params) {
+    const row = await coreDb.get(sql, params)
+    if (row && /FROM\s+quotations\b/i.test(sql)) return { ...row, converted_order_id: null, status: 'draft' }
+    return row
+  }
+}
+const r54StaleConvert = quotationsCore(r54StaleDb).convertToOrder
+const r54RaceErr = await r8err(async () => await r54StaleConvert(r54q.id, { paymentStatus: 'sent' }))
+check('后到的那次当面说清「已经转过了」', r54RaceErr.includes('已经转成订单'), r54RaceErr)
+check('并指路回订单列表核对，不是让人再点一遍', r54RaceErr.includes('不要重复建单'), r54RaceErr)
+eq('报价单仍指向第一次转出的那张单', (await quotations.getQuotation(r54q.id))!.convertedOrderId, r54FirstOrder.id)
+const r54qOrders = getDb().all('SELECT id FROM orders WHERE customer_id = ?', [r54qCust.id]) as Array<{ id: number }>
+eq('事务整体回滚：没多出第二张单', r54qOrders.length, 1)
+eq('也没多烧一个单号（回滚把号还回去了）', r54qOrders[0].id, r54FirstOrder.id)
+
+/* ---------------- R54：备份戳单独一行 ---------------- */
+section('R54 备份戳不跟设置正文挤一行：设置页盖不掉它，正文坏了也丢不了')
+// 演示用的戳先记下原来那份，跑完还原，别把开发库的备份凭据改成测试时间
+const r54StampsBefore = { at: getSettings().lastBackupAt, err: getSettings().lastBackupError }
+await markBackupOk('2026-10-02T09:00:00.000Z')
+await markBackupFail('磁盘满了，R54 备份写到一半停了')
+const r54MainRow = getDb().get(`SELECT value FROM settings WHERE key = 'app_settings'`) as { value: string } | null
+const r54StampRow = getDb().get(`SELECT value FROM settings WHERE key = 'backup_state'`) as { value: string } | null
+check('正文里不再夹带备份戳', !String(r54MainRow?.value ?? '').includes('lastBackupAt'), String(r54MainRow?.value).slice(0, 80))
+check(
+  '戳落在自己那一行（成功时刻 + 失败原因）',
+  String(r54StampRow?.value ?? '').includes('2026-10-02T09:00:00.000Z') && String(r54StampRow?.value ?? '').includes('磁盘满了'),
+  String(r54StampRow?.value)
+)
+eq('读设置时把两行合起来给人看', [getSettings().lastBackupAt, getSettings().lastBackupError], [
+  '2026-10-02T09:00:00.000Z',
+  '磁盘满了，R54 备份写到一半停了'
+])
+// 设置页保存的是正文：它连戳都不该碰，更不该把备份服务的读-改-写连根换掉
+await saveSettings(r9set({ lastBackupAt: '瞎填的', lastBackupError: null }))
+eq('设置页传瞎填的戳：库里仍是备份服务写的那个', getSettings().lastBackupAt, '2026-10-02T09:00:00.000Z')
+// 正文那块 JSON 被改坏：以前戳就跟着一起没了（它长在同一块 JSON 里）
+getDb().run('INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', [
+  'app_settings',
+  '{这不是 JSON'
+])
+eq('正文坏了，最近一次成功备份的时刻还在', getSettings().lastBackupAt, '2026-10-02T09:00:00.000Z')
+eq('失败原因也还在', getSettings().lastBackupError, '磁盘满了，R54 备份写到一半停了')
+await saveSettings(r9base)
+eq('正文修回来后设置照常可读', r9UserFields(getSettings()), r9UserFields(r9base))
+await settingsCore(coreDb).patchBackup({ lastBackupAt: r54StampsBefore.at, lastBackupError: r54StampsBefore.err })
+eq('还原备份凭据', [getSettings().lastBackupAt, getSettings().lastBackupError], [r54StampsBefore.at, r54StampsBefore.err])
 
 /* ---------------- 汇总 ---------------- */
 

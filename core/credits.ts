@@ -69,7 +69,7 @@ export function creditsCore(db: Db) {
     const currency = String(row.currency ?? '').trim()
     const status = String(row.payment_status ?? '')
     if (status === 'draft') {
-      throw bizError(`订单 ${String(row.order_no ?? '')} 还是草稿：草稿不进应收，不能拿客户预收去抵。先把状态改成「已发出」或「已确认」。`)
+      throw bizError(`订单 ${String(row.order_no ?? '')} 还是草稿：草稿不进应收，不能拿客户预收去抵。先把状态改成「待确认」或「客户已确认」。`)
     }
     if (!isBillingStatus(status)) {
       throw bizError(`订单 ${String(row.order_no ?? '')} 已失效/作废：它已经没有待收，预收抵扣无处可落。`)

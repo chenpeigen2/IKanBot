@@ -1,6 +1,6 @@
 import { coreDb, dataDir, getDb } from '../db'
 import type { AppSettings, BankAccount, Currency } from '../../src/shared/types'
-import { parseSettings, settingsCore } from '../../core/settings'
+import { BACKUP_STATE_KEY, mergeBackupStamps, parseSettings, settingsCore } from '../../core/settings'
 
 const core = settingsCore(coreDb)
 
@@ -8,12 +8,14 @@ const KEY = 'app_settings'
 
 /**
  * 同步读取：订单、报表、打印这些服务还在同步函数里调它，一时换不成 await。
- * 业务口径（默认值、脏数据兜底）仍在 core/settings.ts，这里只是把那一行 SELECT
- * 走同步驱动取出来——不是第二份实现。
+ * 业务口径（默认值、脏数据兜底、备份戳合并）仍在 core/settings.ts，这里只是把
+ * 那两行 SELECT 走同步驱动取出来——不是第二份实现。
  */
 export function getSettings(): AppSettings {
-  const row = getDb().get('SELECT value FROM settings WHERE key = ?', [KEY]) as { value: string } | null
-  return parseSettings(row?.value)
+  const db = getDb()
+  const row = db.get('SELECT value FROM settings WHERE key = ?', [KEY]) as { value: string } | null
+  const backup = db.get('SELECT value FROM settings WHERE key = ?', [BACKUP_STATE_KEY]) as { value: string } | null
+  return mergeBackupStamps(parseSettings(row?.value), backup?.value)
 }
 
 export function saveSettings(s: AppSettings): Promise<AppSettings> {

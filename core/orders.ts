@@ -1782,7 +1782,7 @@ export function ordersCore(db: Db) {
       if (changes) await logEvent(db, orderId, 'item_update', null, null, `修改明细 ${patch.styleNo ?? cur.style_no}：${changes}`)
       // 件数变了，订单的「装够没有 / 走了没有」跟着变
       await applyShipStatus(db, orderId)
-      // 金额变了，收款状态要重算（加单加到收不够要从「已收款」退回「部分收款」）
+      // 金额变了，收款状态要重算（加单加到收不够要从「定金已收」退回「部分收款」）
       await recomputePaymentStatus(orderId)
       // 改小数量/单价：核销额不能超过实际欠款（多出来的会变成假预收）
       await assertWriteOffFitsOrder(orderId)
@@ -2030,10 +2030,10 @@ export function ordersCore(db: Db) {
       await assertOrderWritable(orderId, '登记收款')
     }
     // 草稿不进现金流（month_received / 月报 / 月度汇总都排除草稿），
-    // 在草稿上登记收款，这笔钱会从所有到账报表里消失——先把状态推到「已发出」再收钱
+    // 在草稿上登记收款，这笔钱会从所有到账报表里消失——先把状态推到「待确认」再收钱
     if (curStatus === 'draft') {
       throw bizError(
-        `订单 ${String(cur.order_no ?? '')} 还是草稿：草稿不进现金流，登记了也不会出现在「本月到账」和月报里。请先把收款状态改成「已发出」或「已确认」，再登记收款。`
+        `订单 ${String(cur.order_no ?? '')} 还是草稿：草稿不进现金流，登记了也不会出现在「本月到账」和月报里。请先把收款状态改成「待确认」或「客户已确认」，再登记收款。`
       )
     }
     const { paidAt, amount } = assertPaymentInput(p)
@@ -2459,7 +2459,7 @@ export function ordersCore(db: Db) {
   /**
    * 收款状态自动流转（双向）：
    *  - 收款 >= 总额 → 已结清
-   *  - 收款 >= 定金（且 > 0）→ 已收款
+   *  - 收款 >= 定金（且 > 0）→ 定金已收
    *  - 收款 > 0 → 部分收款
    *  - 一分没收 → 客户已确认
    *
@@ -2467,7 +2467,7 @@ export function ordersCore(db: Db) {
    * 两套公式迟早会因为费用/核销改动而打架，首页待收和状态标签就会各说各话。
    *
    * 关键：加单 / 减单 / 改数量 / 改单价 / 删行都会重算，
-   * 所以「已收款」可以退回「部分收款」，「部分收款」也能升到「已结清」。
+   * 所以「定金已收」可以退回「部分收款」，「部分收款」也能升到「已结清」。
    * 人工设定的 draft / expired / void 保持不变；sent 只在真收到钱后往上走，
    * 否则客户已付定金，工作台还会天天催「客户还没确认」。
    */
@@ -2492,7 +2492,7 @@ export function ordersCore(db: Db) {
     // 注意：这里算出来的是「下一个状态」，跟当前状态无关，所以能往上走也能往下退
     let next: PaymentStatus = status
     // 有货值却被费用行抵成 0 的单（转单时抵扣恰等于货值）本来就不欠钱：以前要求 total>0
-    // 才认结清，这种单会一直停在「已发出」，在途榜和催款天天追一张没有任何金额的账。
+    // 才认结清，这种单会一直停在「待确认」，在途榜和催款天天追一张没有任何金额的账。
     // 空的 0 单不算——那张 PI 还没填货，客户点头才是它的事，不能被当成「钱收齐了」。
     // 负数也不算：那是费用/折扣把货值抵穿了，方向是「该退客户钱」，
     // 标成结清正好把老板最不能吃的那口假象做出来（待收界面本来就把它收在 0）。
@@ -2625,11 +2625,13 @@ export function ordersCore(db: Db) {
         expireNote = `（转失效时账上还有 ${holdings.parts.join('、')}）`
       }
     }
-    // 手工勾「已结清」但按流水算还欠：这单会从应收、月报、催款里整体消失，差额没人再追。
-    // 所以原因必填，并把「还差多少」钉进留痕——将来对不上账，这条历史要说清点的是谁、差多少。
-    // 用的就是 recomputePaymentStatus 那一份待收（grandTotal − 已收 − 净核销 − 预收抵扣），
-    // 不许在这里再写一条公式：两套算术迟早一个说欠一个说不欠。
-    let settleGap = ''
+    // 手工勾「已结清」是按流水真的收齐了才成立：还欠着就不许点。
+    // 以前允许写一句备注就过关，结果是状态写着「已结清」，待收、尾款催款、对账单
+    // 照着同一个 remaining 继续喊——两张嘴说两个数，老板按状态汇报「这单结了」，
+    // 系统却还在催，月报里也看不见这笔损失。所以只剩两扇正门：
+    // 钱到了就登记收款（现金、水单没录都能登，流水号可以留空），
+    // 钱不再收就去「核销与坏账」记短款或坏账。两条路都会让 remaining 自然归零。
+    // 用的仍是 recomputePaymentStatus 那一份待收，不在这里另写公式。
     if (next === 'settled') {
       const settleRow = await db.get('SELECT charges, deposit_ratio, currency FROM orders WHERE id = ?', [orderId]) as
         | { charges: string | null; deposit_ratio: number | null; currency: string }
@@ -2640,12 +2642,12 @@ export function ordersCore(db: Db) {
         ])
       ).get(orderId)!
       if (money.remaining > 0.001) {
-        if (!note.trim()) {
-          throw bizError(
-            `这张单按流水还欠 ${money.remaining.toFixed(2)} ${settleRow?.currency ?? ''}，不能直接勾「已结清」：请先在收款/核销里把这笔做平；确实不用再收（线下收款未入账、协商免尾款…）请写明原因。`
-          )
-        }
-        settleGap = `（按流水仍欠 ${money.remaining.toFixed(2)} ${settleRow?.currency ?? ''}）`
+        throw bizError(
+          `这张单按流水还欠 ${money.remaining.toFixed(2)} ${settleRow?.currency ?? ''}，不能标「已结清」——「已结清」的意思是钱真的收齐了。\n` +
+            `客户给的是现金、或者水单还没录：请到下面「收款记录」里登记这一笔（流水号可以留空）。\n` +
+            `这笔钱确实不再收（抹零、协商免收、收不回来）：请到「核销与坏账」里记一笔短款或坏账。\n` +
+            `两条路走完，待收归零，再回来点「已结清」。`
+        )
       }
     }
     await db.transact(async () => {
@@ -2654,7 +2656,7 @@ export function ordersCore(db: Db) {
         await creditsOf().reverseCreditsForTarget('order', orderId, `订单转为「${PAYMENT_STATUS_LABEL[next]}」，预收抵扣回退`)
       }
       await db.run('UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?', [next, now(), orderId])
-      await logEvent(db, orderId, 'payment_status', cur.payment_status, next, note + settleGap + expireNote)
+      await logEvent(db, orderId, 'payment_status', cur.payment_status, next, note + expireNote)
       // 失效单改回计费状态：预收来源从「全部到账」收回成「只有多收的部分」，
       // 已经抵出去的钱可能就多于客户实际多付的了
       if (isBillingStatus(next)) await creditsOf().assertCreditSolvent(cur.customer_id)

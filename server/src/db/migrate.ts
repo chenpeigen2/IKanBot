@@ -7,7 +7,14 @@ import type { Db } from './types'
  * 库比程序新就拒绝打开——老程序改新结构会把数据改坏。
  */
 export async function migrate(db: Db): Promise<void> {
-  if (db.kind !== 'sqlite') return
+  // MySQL 的建库脚本还没写（M2 才做）：以前这里直接 return，服务照常启动，
+  // 第一句 SELECT 才炸在「表不存在」上，看起来像程序坏了。宁可在这句停下来说清楚。
+  if (db.kind !== 'sqlite') {
+    throw new Error(
+      '这个版本只能连 SQLite 库：MySQL 的建表脚本还没随服务发布（排在 M2）。' +
+        '请先用 SQLite 文件跑（IKAN_DB 留空或指向 .db 文件），把 mysql 连接配置去掉。'
+    )
+  }
   const row = await db.get('PRAGMA user_version')
   const current = Number(row?.['user_version'] ?? 0)
   if (current > LATEST_DB_VERSION) {

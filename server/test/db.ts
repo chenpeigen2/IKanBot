@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SqliteDb } from '../src/db/sqlite'
 import { migrate } from '../src/db/migrate'
+import type { Db } from '../src/db/types'
 import { customersCore } from '../../core/customers'
 import { productsCore } from '../../core/products'
 import { settingsCore } from '../../core/settings'
@@ -100,6 +101,22 @@ async function main(): Promise<void> {
       }
     })()
     check('端口不合法当场拒（中文说清是哪个变量）', badPort.includes('IKAN_PORT'))
+
+    // MySQL 的建表脚本还没随服务发布：以前 migrate 见到非 SQLite 直接 return，
+    // 服务照常起来，第一句 SELECT 才炸在「表不存在」上。现在在启动这一步就说清楚。
+    const mysqlMigrateErr = await (async () => {
+      try {
+        await migrate({ kind: 'mysql' } as unknown as Db)
+        return ''
+      } catch (e) {
+        return (e as Error).message
+      }
+    })()
+    check(
+      '连 MySQL 时启动就停：说清只能用 SQLite、MySQL 排在 M2',
+      mysqlMigrateErr.includes('SQLite') && mysqlMigrateErr.includes('MySQL') && mysqlMigrateErr.includes('M2'),
+      mysqlMigrateErr
+    )
 
     console.log('建库与事务')
     await migrate(db)

@@ -101,8 +101,6 @@ export default function OrderDetail() {
   const [voidModal, setVoidModal] = useState(false)
   const [voidChecked, setVoidChecked] = useState(false)
   const [voiding, setVoiding] = useState(false)
-  // 账上还欠着就把单标成「已结清」，必须先写原因：这单以后不再出现在待收和催款里
-  const [settlePrompt, setSettlePrompt] = useState(false)
   // 改成「已失效」同样退出销售额与待收：账上还挂着东西时要把原因写下来（core 硬拦）
   const [expirePrompt, setExpirePrompt] = useState(false)
   /** 读不出来就明说并给重试，不能永远停在「加载中…」 */
@@ -427,8 +425,8 @@ export default function OrderDetail() {
     }
   }
 
-  // 手工推进收款状态：还欠钱要勾「已结清」时先收原因（core 那边硬拦，
-  // 不在这里先问，用户只会看到一句报错、不知道去哪儿补）
+  // 手工推进收款状态：界面不自己判「能不能结清」，一律交给 core——
+  // 还欠着钱点「已结清」时 core 会把两条正门（登记收款 / 核销差额）说清楚
   const applyPaymentStatus = async (next: PaymentStatus, note?: string): Promise<boolean> => {
     try {
       await window.api.orders.setPaymentStatus(orderId, next, note)
@@ -749,14 +747,19 @@ export default function OrderDetail() {
                         setExpirePrompt(true)
                         return
                       }
-                      // 还欠着钱却要勾「已结清」：这单从此不进待收、月报和催款，差额没人再追。
-                      // 先把原因收齐（必填），core 会把「仍欠多少」一起写进历史
+                      // 还欠着钱却要勾「已结清」：界面不拦、也不收原因，交给 core 当面拒绝，
+                      // 报错里会把「登记收款」和「核销与坏账」两条正门说清楚
                       if (
                         next === 'settled' &&
                         order.paymentStatus !== 'settled' &&
                         Number(order.remaining ?? 0) > 0.001
                       ) {
-                        setSettlePrompt(true)
+                        toast(
+                          `这张单按流水还欠 ${money(Number(order.remaining), order.currency)}，不能标「已结清」——「已结清」的意思是钱真的收齐了。\n` +
+                            '客户给的是现金、或者水单还没录：先到下面「收款记录」里登记这一笔（流水号可以留空）。\n' +
+                            '确实不再收（抹零、协商免收、收不回来）：到「核销与坏账」里记一笔短款或坏账。',
+                          'error'
+                        )
                         return
                       }
                       await applyPaymentStatus(next)
@@ -959,31 +962,6 @@ export default function OrderDetail() {
             </Modal>
           )
         })()
-      ) : null}
-
-      {settlePrompt ? (
-        <PromptModal
-          title={`标记为「已结清」：${order.orderNo}`}
-          label={
-            <>
-              按流水算，这张单还欠 {money(order.remaining, order.currency)}。勾了已结清，它就从待收、月报和催款里消失，差额不会再有人追。
-              <br />
-              <span className="muted">请写明为什么这钱不用再收（必填，会连同差额一起记进操作历史）。</span>
-            </>
-          }
-          okText="确认已结清"
-          multiline
-          onOk={async (reason) => {
-            if (!reason.trim()) {
-              toast('原因必须写一句：以后对不上账，全靠这句话知道是谁点的、为什么点。', 'error')
-              return false
-            }
-            await applyPaymentStatus('settled', reason.trim())
-            setSettlePrompt(false)
-            return false
-          }}
-          onClose={() => setSettlePrompt(false)}
-        />
       ) : null}
 
       {expirePrompt ? (
@@ -2265,7 +2243,7 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
 
         {order.paymentStatus === 'draft' ? (
           <div className="alert warn">
-            这张单还是草稿：草稿不进现金流，登记了也不会出现在「本月到账」和月报里。请先把收款状态改成「已发出」或「已确认」。
+            这张单还是草稿：草稿不进现金流，登记了也不会出现在「本月到账」和月报里。请先把收款状态改成「待确认」或「客户已确认」。
           </div>
         ) : null}
         {order.paymentStatus === 'void' ? (
