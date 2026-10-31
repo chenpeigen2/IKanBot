@@ -117,7 +117,9 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
         </div>
         {/* 「待修」没有期限概念，别给它挂个假的「0 天」 */}
         {r.kind === 'data' ? null : (
-          <span className="faint nowrap">{r.days < 0 ? `逾期 ${-r.days} 天` : `${r.days} 天`}</span>
+          <span className="faint nowrap">
+            {r.days < 0 ? `逾期 ${-r.days} 天` : r.days === 0 ? '今天' : `${r.days} 天`}
+          </span>
         )}
       </div>
     )

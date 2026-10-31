@@ -220,8 +220,9 @@ export function dashboardCore(db: Db) {
     }
     /** 距到期还有几天（负数 = 已逾期）；脏数据返回 null */
     const daysTo = (v: unknown): number | null => dayDiff(today, String(v ?? '').trim())
-    /** 「还有 N 天 / 已逾期 N 天」的统一说法 */
-    const dueWords = (diff: number): string => (diff < 0 ? `已逾期 ${-diff} 天` : `还有 ${diff} 天`)
+    /** 「还有 N 天 / 今天 / 已逾期 N 天」的统一说法；0 天说「还有 0 天」，读起来像还没到 */
+    const dueWords = (diff: number): string =>
+      diff < 0 ? `已逾期 ${-diff} 天` : diff === 0 ? '就是今天' : `还有 ${diff} 天`
 
     // 钱只看一个真源：待收 / 定金 / 已收都取自 listOrderMoney，出运后催款也必须用它
     const moneyRows = await money.listOrderMoney()
@@ -1060,6 +1061,10 @@ export function dashboardCore(db: Db) {
         }
       ])
     )
+
+    // 只退过款、当月没开单也没收款的月份也要开一行：不补行，这笔退款在报表上凭空消失，
+    // 银行流水和「本月收款」差出来的那截就没人解释得了（R55）
+    for (const m of refundByMonth.keys()) if (!byMonth.has(m)) byMonth.set(m, empty(m))
 
     return [...byMonth.values()]
       .sort((a, b) => (a.month < b.month ? 1 : -1))

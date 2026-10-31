@@ -352,11 +352,15 @@ export function creditsCore(db: Db) {
     const why = String(reason ?? '').trim()
     if (!why) throw bizError('撤销退款要写原因（例如“水单录错，钱没退出去”），操作历史要留痕。')
     const customerId = Number(row.customer_id)
+    // 撤销的人也留痕：以前只记原因，台账上一条撤销摆着，事后没人说得清是谁撤的（R55）。
+    // 操作员没填就原样只存原因，不为留痕逼人先去做设置。
+    const actor = (await settingsCore(db).get()).operator
+    const trace = actor ? `${why}（操作人：${actor}）` : why
     // CAS 写：读出来时还没撤销，写回去这中间可能已经被撤过一次（后端多人同时点）。
     // 裸 UPDATE 会把对方的原因盖掉，台账上多一条撤销、余额只回来一次
     const done = await db.run(
       'UPDATE customer_refunds SET reversed_at = ?, reversed_reason = ? WHERE id = ? AND reversed_at IS NULL',
-      [new Date().toISOString(), why, refundId]
+      [new Date().toISOString(), trace, refundId]
     )
     if (done.changes !== 1) {
       throw bizError('这笔退款刚刚已经被撤销过了（多半是两个人同时点了撤销），本次操作没有改动任何数据。')

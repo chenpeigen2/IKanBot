@@ -76,6 +76,8 @@ export default function Quotations() {
   // 敲太快时两个 list 请求在途，先发的旧结果不许盖住新关键词
   const kw = useDebounced(keyword, 250)
   const begin = useLoadGuard()
+  /** 转单弹窗的历史版本请求：换一张报价就作废上一张的在途响应（见 openConvert） */
+  const beginConvertLoad = useLoadGuard()
 
   const load = async () => {
     const { isCurrent } = begin()
@@ -114,7 +116,11 @@ export default function Quotations() {
 
   /** 打开转单弹窗：先把历史版本拉出来，默认选当前版 */
   const openConvert = async (q: any) => {
+    // 连点两张报价时，A 的版本响应可能后到、配到 B 的弹窗上：
+    // 差价、过期判定都会按 A 的价格算，转出去就是一张错价的单
+    beginConvertLoad()
     setConvertTarget(q)
+    setConvertVersions([])
     setConvertRevision(Number(q.revision ?? 1))
     setOverrideBy('')
     setOverrideReason('')
@@ -126,10 +132,15 @@ export default function Quotations() {
    * 看着像只有一版，实际可能客户确认的是更早那一版的价格。
    */
   const loadConvertVersions = async (q: any) => {
+    const { isCurrent } = beginConvertLoad()
     setConvertVersionsError('')
     try {
-      setConvertVersions(await window.api.quotations.versions(q.id))
+      const versions = await window.api.quotations.versions(q.id)
+      if (!isCurrent()) return
+      setConvertVersions(versions)
     } catch (e) {
+      // 已经换成别的报价了：这次失败属于上一张，不许把错误挂到眼下这张单上
+      if (!isCurrent()) return
       setConvertVersions([])
       setConvertVersionsError((e as Error).message || '历史版本没拉出来')
     }

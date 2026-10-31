@@ -2016,52 +2016,54 @@ export function ordersCore(db: Db) {
     // 现金流口径（只排除草稿）本来就把作废单的到账算进月报——闸门拦死只会让银行流水与系统账脱节。
     // 这里开正门：必须写明来路；这笔钱只进收款流水与月报，不复活订单、不动待收（recompute 对终态直接返回）。
     // 失效单不走这条门：它还有「改回客户已确认」的活路，走正常收款流程。
-    const cur = await db.get('SELECT order_no, payment_status, currency FROM orders WHERE id = ?', [orderId]) as
-      | { order_no?: string; payment_status?: string; currency?: string }
-      | null
-    if (!cur) throw notFound('订单不存在')
-    const curStatus = String(cur.payment_status ?? '')
-    const isVoided = curStatus === 'void'
-    if (curStatus === 'void') {
-      if (!String(p.note ?? '').trim()) {
-        throw bizError(`订单 ${String(cur.order_no ?? '')} 已作废：作废单的回款必须写明来路（备注里写清楚，例如“取消单客户退回的定金”），操作历史要能对上银行流水。`)
-      }
-    } else {
-      await assertOrderWritable(orderId, '登记收款')
-    }
-    // 草稿不进现金流（month_received / 月报 / 月度汇总都排除草稿），
-    // 在草稿上登记收款，这笔钱会从所有到账报表里消失——先把状态推到「待确认」再收钱
-    if (curStatus === 'draft') {
-      throw bizError(
-        `订单 ${String(cur.order_no ?? '')} 还是草稿：草稿不进现金流，登记了也不会出现在「本月到账」和月报里。请先把收款状态改成「待确认」或「客户已确认」，再登记收款。`
-      )
-    }
-    const { paidAt, amount } = assertPaymentInput(p)
-    // 有预收抵扣的单：现金只能收「预收之外还欠的那部分」，
-    // 否则同一块钱会被收两遍（预收抵一次、现金又收满全额）
-    if (!isVoided) {
-      const detail = (await getOrder(orderId))!
-      // 坏账已经从待收里拿掉过一次：再按普通收款记，同一笔钱会同时被算成
-      // 「坏账损失」和「客户多付」，凭空铸出可退的预收。钱到账请走「坏账追回」。
-      if (detail.badDebtOutstanding > 0.001) {
-        throw bizError(
-          `这张单还有 ${detail.badDebtOutstanding.toFixed(2)} ${String(cur.currency ?? '')} 坏账没追回：` +
-            `钱到账请走「坏账追回」登记，不能按普通收款记——否则同一笔欠款会同时算坏账损失和客户多付。`
-        )
-      }
-      if (detail.creditApplied > 0.001 && amount > detail.remaining + 0.001) {
-        throw bizError(
-          `这张单已经有 ${detail.creditApplied.toFixed(2)} ${String(cur.currency ?? '')} 是客户预收抵掉的，现金待收只剩 ${detail.remaining.toFixed(2)}：再收 ${amount.toFixed(2)} 就重复收了。多出来的钱请登记到别的单上。`
-        )
-      }
-    }
-    // 汇率快照：这笔到账按「落款那天订单上的汇率」折算进月报，
-    // 以后订单汇率再改（出单据前的窗口期是允许的），历史到账不许跟着漂
-    const rate = Number(
-      (await db.get('SELECT exchange_rate FROM orders WHERE id = ?', [orderId]) as { exchange_rate?: number } | null)
-        ?.exchange_rate ?? 1
-    )
+    //
+    // 读订单、算待收、读汇率全都放进同一个事务（R55）：以前在事务外读、事务内写，
+    // 双击或两个人同时点，两次都按同一份旧待收过闸——同一笔钱记两遍，
+    // 或者订单汇率刚被人改过、这笔到账却钉了改之前的快照。
     await db.transact(async () => {
+      const cur = await db.get(
+        'SELECT order_no, payment_status, currency, exchange_rate FROM orders WHERE id = ?',
+        [orderId]
+      ) as { order_no?: string; payment_status?: string; currency?: string; exchange_rate?: number } | null
+      if (!cur) throw notFound('订单不存在')
+      const curStatus = String(cur.payment_status ?? '')
+      const isVoided = curStatus === 'void'
+      if (curStatus === 'void') {
+        if (!String(p.note ?? '').trim()) {
+          throw bizError(`订单 ${String(cur.order_no ?? '')} 已作废：作废单的回款必须写明来路（备注里写清楚，例如“取消单客户退回的定金”），操作历史要能对上银行流水。`)
+        }
+      } else {
+        await assertOrderWritable(orderId, '登记收款')
+      }
+      // 草稿不进现金流（month_received / 月报 / 月度汇总都排除草稿），
+      // 在草稿上登记收款，这笔钱会从所有到账报表里消失——先把状态推到「待确认」再收钱
+      if (curStatus === 'draft') {
+        throw bizError(
+          `订单 ${String(cur.order_no ?? '')} 还是草稿：草稿不进现金流，登记了也不会出现在「本月到账」和月报里。请先把收款状态改成「待确认」或「客户已确认」，再登记收款。`
+        )
+      }
+      const { paidAt, amount } = assertPaymentInput(p)
+      // 有预收抵扣的单：现金只能收「预收之外还欠的那部分」，
+      // 否则同一块钱会被收两遍（预收抵一次、现金又收满全额）
+      if (!isVoided) {
+        const detail = (await getOrder(orderId))!
+        // 坏账已经从待收里拿掉过一次：再按普通收款记，同一笔钱会同时被算成
+        // 「坏账损失」和「客户多付」，凭空铸出可退的预收。钱到账请走「坏账追回」。
+        if (detail.badDebtOutstanding > 0.001) {
+          throw bizError(
+            `这张单还有 ${detail.badDebtOutstanding.toFixed(2)} ${String(cur.currency ?? '')} 坏账没追回：` +
+              `钱到账请走「坏账追回」登记，不能按普通收款记——否则同一笔欠款会同时算坏账损失和客户多付。`
+          )
+        }
+        if (detail.creditApplied > 0.001 && amount > detail.remaining + 0.001) {
+          throw bizError(
+            `这张单已经有 ${detail.creditApplied.toFixed(2)} ${String(cur.currency ?? '')} 是客户预收抵掉的，现金待收只剩 ${detail.remaining.toFixed(2)}：再收 ${amount.toFixed(2)} 就重复收了。多出来的钱请登记到别的单上。`
+          )
+        }
+      }
+      // 汇率快照：这笔到账按「落款那天订单上的汇率」折算进月报，
+      // 以后订单汇率再改（出单据前的窗口期是允许的），历史到账不许跟着漂
+      const rate = Number(cur.exchange_rate ?? 1)
       // 查重放在事务里：拆分收款整批落账时，同一张单被填两次会在这里当场拦下
       await assertBankRefUnused({ orderId }, p.bankRef)
       await db.run(
@@ -2069,7 +2071,7 @@ export function ordersCore(db: Db) {
          VALUES(?,?,?,?,?,?,?,?)`,
         [orderId, paidAt, amount, p.method ?? 'T/T', p.bankRef ?? '', p.note ?? '', rate, now()]
       )
-      await logEvent(db, 
+      await logEvent(db,
         orderId,
         'payment',
         null,

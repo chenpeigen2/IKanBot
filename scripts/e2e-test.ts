@@ -11778,6 +11778,118 @@ eq('正文修回来后设置照常可读', r9UserFields(getSettings()), r9UserFi
 await settingsCore(coreDb).patchBackup({ lastBackupAt: r54StampsBefore.at, lastBackupError: r54StampsBefore.err })
 eq('还原备份凭据', [getSettings().lastBackupAt, getSettings().lastBackupError], [r54StampsBefore.at, r54StampsBefore.err])
 
+/* ---------------- R55：写入口复核与报表话术 ---------------- */
+section('R55 收款判定与流水同一事务：被拦下时账上一笔不动')
+const r55Cust = await customers.saveCustomer({ company: 'R55-TX-CO' })
+const r55Src = await orders.createOrder({
+  customerId: r55Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R55-SRC'
+})
+await orders.addOrderItem(r55Src.id, { styleNo: 'R55-S1', quantity: 1, unitPrice: 100 })
+// 多付 40 变成客户预收，再抵到另一张单上
+await orders.addPayment(r55Src.id, { paidAt: localDate(), amount: 140, method: 'T/T', bankRef: 'ZZ-R55-SRC' })
+const r55Target = await orders.createOrder({
+  customerId: r55Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R55-CREDIT'
+})
+await orders.addOrderItem(r55Target.id, { styleNo: 'R55-S2', quantity: 1, unitPrice: 100 })
+await credits.applyCredit({ customerId: r55Cust.id, currency: 'USD', targetKind: 'order', targetId: r55Target.id, amount: 40 })
+eq('预收抵掉后现金待收只剩 60', (await orders.getOrder(r55Target.id))!.remaining, 60)
+const r55OverErr = await r8err(async () =>
+  await orders.addPayment(r55Target.id, { paidAt: localDate(), amount: 100, method: 'T/T', bankRef: 'ZZ-R55-OVER' })
+)
+check('抵过预收的单按全额再收现金被拦', r55OverErr.includes('重复收'), r55OverErr)
+eq('被拦下时一笔收款都没落（判定与写入同事务）', (await orders.getOrder(r55Target.id))!.payments.length, 0)
+eq('待收仍停在 60', (await orders.getOrder(r55Target.id))!.remaining, 60)
+check(
+  '被拦下也不留一条「收款」历史',
+  !(await orders.listEvents(r55Target.id)).some((e) => e.kind === 'payment'),
+  JSON.stringify((await orders.listEvents(r55Target.id)).map((e) => e.kind))
+)
+
+const r55Bad = await orders.createOrder({
+  customerId: r55Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R55-BAD'
+})
+await orders.addOrderItem(r55Bad.id, { styleNo: 'R55-S3', quantity: 1, unitPrice: 100 })
+await orders.addPayment(r55Bad.id, { paidAt: localDate(), amount: 40, method: 'T/T', bankRef: 'ZZ-R55-BAD' })
+await orders.addSettlement(r55Bad.id, { kind: 'bad_debt', amount: 60, reason: 'R55 客户失联' })
+const r55BadErr = await r8err(async () =>
+  await orders.addPayment(r55Bad.id, { paidAt: localDate(), amount: 60, method: 'T/T', bankRef: 'ZZ-R55-BAD-2' })
+)
+check('有坏账的单按普通收款记被拦，指路「坏账追回」', r55BadErr.includes('坏账追回'), r55BadErr)
+eq('同样一笔不动：流水仍是原来那一笔', (await orders.getOrder(r55Bad.id))!.payments.length, 1)
+
+section('R55 只退过款的月份在月报上也有一行')
+const r55RefCust = await customers.saveCustomer({ company: 'R55-REF-CO' })
+const r55RefOrder = await orders.createOrder({
+  customerId: r55RefCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R55-REF'
+})
+await orders.addOrderItem(r55RefOrder.id, { styleNo: 'R55-R1', quantity: 1, unitPrice: 100 })
+await orders.addPayment(r55RefOrder.id, { paidAt: localDate(), amount: 110, method: 'T/T', bankRef: 'ZZ-R55-REF-IN' })
+await credits.refundCredit({
+  customerId: r55RefCust.id,
+  currency: 'USD',
+  amount: 10,
+  refundAt: '2001-03-05',
+  bankRef: 'ZZ-R55-OUT',
+  note: 'R55 历史月份的退款'
+})
+const r55RefMonth = (await dashboard.monthlyReport()).find((r) => r.month === '2001-03')
+check('当月没开单没收款、只退了一笔：这一行仍然在', Boolean(r55RefMonth), JSON.stringify((await dashboard.monthlyReport()).map((r) => r.month)))
+eq('这一行没有销售、没有到账', r55RefMonth ? [r55RefMonth.sales, r55RefMonth.received] : null, [0, 0])
+eq('退款笔数与金额写着（银行流水差的那截有解释）', r55RefMonth ? [r55RefMonth.refundCount, r55RefMonth.refundText] : null, [1, '10 USD'])
+
+section('R55 撤销退款记下是谁撤的')
+const r55RefRow = getDb().get(`SELECT id FROM customer_refunds WHERE bank_ref = 'ZZ-R55-OUT'`) as { id: number } | null
+const r55OpBefore = getSettings().operator
+await saveSettings(r9set({ operator: '周文娟' }))
+await credits.reverseRefund(Number(r55RefRow?.id), 'R55 水单录错，钱没退出去')
+const r55Reversed = getDb().get('SELECT reversed_reason FROM customer_refunds WHERE id = ?', [
+  Number(r55RefRow?.id)
+]) as { reversed_reason: string | null } | null
+check(
+  '撤销原因后面跟上了操作员',
+  String(r55Reversed?.reversed_reason ?? '').includes('R55 水单录错，钱没退出去') &&
+    String(r55Reversed?.reversed_reason ?? '').includes('（操作人：周文娟）'),
+  String(r55Reversed?.reversed_reason)
+)
+await saveSettings(r9set({ operator: r55OpBefore }))
+
+section('R55 今天到期的交期说「就是今天」，不再说「还有 0 天」')
+const r55ShipCust = await customers.saveCustomer({ company: 'R55-SHIP-CO' })
+const r55Ship = await orders.createOrder({
+  customerId: r55ShipCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R55-SHIP'
+})
+await orders.addOrderItem(r55Ship.id, { styleNo: 'R55-E1', quantity: 10, unitPrice: 5 })
+const r55Pl = await packing.createPackingList({
+  orderId: r55Ship.id,
+  containerNo: 'C55',
+  lines: [{ boxNo: 'NO.1', styleNo: 'R55-E1', quantity: 10 }]
+})
+await packing.updatePackingListInfo(r55Ship.id, r55Pl[0].id, { etdDate: localDate() })
+const r55Rem = (await dashboard.reminders()).find((r) => r.orderId === r55Ship.id && r.kind === 'ship')
+check('今天到期说「就是今天」', (r55Rem?.message ?? '').includes('就是今天'), r55Rem?.message)
+check('不再说「还有 0 天」', !(r55Rem?.message ?? '').includes('还有 0 天'), r55Rem?.message)
+eq('天数仍是 0（逾期计数与排序不受话术影响）', r55Rem?.days, 0)
+
 /* ---------------- 汇总 ---------------- */
 
 console.log(`\n${'='.repeat(46)}`)

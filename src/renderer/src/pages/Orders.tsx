@@ -53,6 +53,8 @@ export default function Orders() {
   const [showCreate, setShowCreate] = useState(params.get('new') === '1')
   /** 查询失败要说出来：空列表 + 一句「还没有订单」会把“读取失败”说成“今天没单” */
   const [loadError, setLoadError] = useState('')
+  /** 作废/删除在途的那一行：双击只会发一次请求，第二次点当场让开 */
+  const [busyId, setBusyId] = useState<number | null>(null)
   /** 敲太快不重复打后端；后到的旧结果不许盖住新关键词 */
   const kw = useDebounced(keyword, 250)
   const begin = useLoadGuard()
@@ -331,8 +333,10 @@ export default function Orders() {
                         <td className="cell-actions">
                           <button
                             className="link"
+                            disabled={busyId !== null}
                             onClick={async (e) => {
                               e.stopPropagation()
+                              if (busyId !== null) return
                               if (
                                 !confirm(
                                   `确认作废订单 ${o.orderNo}？\n\n` +
@@ -346,6 +350,7 @@ export default function Orders() {
                                 )
                               )
                                 return
+                              setBusyId(o.id)
                               try {
                                 await window.api.orders.void(o.id, '手动作废')
                                 toast('订单已作废，记录全部保留')
@@ -353,6 +358,8 @@ export default function Orders() {
                                 const msg = (err as Error).message || ''
                                 // 凭据闸门拦下的，引导去详情页核对；别的错原样说
                                 toast(/凭据|存档/.test(msg) ? '这张单有单据存档或箱单，请打开详情页核对凭据后再作废' : msg, 'error')
+                              } finally {
+                                setBusyId(null)
                               }
                               await load()
                             }}
@@ -361,8 +368,10 @@ export default function Orders() {
                           </button>
                           <button
                             className="link danger"
+                            disabled={busyId !== null}
                             onClick={async (e) => {
                               e.stopPropagation()
+                              if (busyId !== null) return
                               if (
                                 !confirm(
                                   `确认删除订单 ${o.orderNo}？\n\n` +
@@ -373,11 +382,14 @@ export default function Orders() {
                                 )
                               )
                                 return
+                              setBusyId(o.id)
                               try {
                                 await window.api.orders.remove(o.id)
                                 toast('订单已删除')
                               } catch (err) {
                                 toast((err as Error).message, 'error')
+                              } finally {
+                                setBusyId(null)
                               }
                               await load()
                             }}
