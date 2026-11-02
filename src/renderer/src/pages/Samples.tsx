@@ -658,7 +658,7 @@ function SamplePayModal({
       ) : null}
       {detail.offsetSuspended ? (
         <div className="alert warn">
-          转出的订单已退回草稿/失效/作废，抵扣暂不生效：样品费重新计入待收，订单恢复成正式单后会自动再抵，不需要重录。这期间不能重复登记打样收款。
+          转出的订单已退回草稿/失效/作废，抵扣暂不生效：样品费重新计入待收，等那张订单改回「待确认」或「客户已确认」，抵扣会自动再抵，不需要重录。这期间不能重复登记打样收款。
         </div>
       ) : null}
       {detail.feeStatus === 'waived' ? <div className="alert info">这张单的样品费已免收。</div> : null}

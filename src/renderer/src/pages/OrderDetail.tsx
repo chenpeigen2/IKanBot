@@ -105,18 +105,19 @@ export default function OrderDetail() {
   const [expirePrompt, setExpirePrompt] = useState(false)
   /** 读不出来就明说并给重试，不能永远停在「加载中…」 */
   const [loadError, setLoadError] = useState('')
+  /** 单据存档是本机专属通道：它读不出来（后端模式当场拒、或本机目录出问题）不许把整页拖死 */
+  const [docsError, setDocsError] = useState('')
 
-  // 4 个 IPC 并发在途时快速切单，先发的旧单响应可能后到——
+  // 并发在途时快速切单，先发的旧单响应可能后到——
   // 不设栅栏会把 5 号单的金额/收款整套写进 7 号页面（金额串单，比列表串结果疼得多）
   const beginLoad = useLoadGuard()
   const load = async () => {
     const { isCurrent } = beginLoad()
     try {
-      const [o, s, e, dv] = await Promise.all([
+      const [o, s, e] = await Promise.all([
         window.api.orders.get(orderId),
         window.api.settings.get(),
-        window.api.orders.events(orderId),
-        window.api.docs.list(orderId)
+        window.api.orders.events(orderId)
       ])
       if (!isCurrent()) return
       if (!o) {
@@ -127,11 +128,23 @@ export default function OrderDetail() {
       setOrder(o)
       setSettings(s)
       setEvents(e)
-      setDocVersions(dv)
       setLoadError('')
     } catch (e) {
       if (!isCurrent()) return
       setLoadError((e as Error).message || '这张订单没读出来')
+    }
+    // 存档单独一条腿：`docs:list` 是本机专属通道，后端模式下当场拒。
+    // 捆进上面那个 Promise.all 会让「切了后端的老板点开任何一张单」整页报没读出来，
+    // 而单子、收款、明细在服务端那份账上都是好的——附属数据不许拖死主数据（R57）
+    try {
+      const dv = await window.api.docs.list(orderId)
+      if (!isCurrent()) return
+      setDocVersions(dv)
+      setDocsError('')
+    } catch (e) {
+      if (!isCurrent()) return
+      setDocVersions([])
+      setDocsError((e as Error).message || '单据存档没读出来')
     }
   }
 
@@ -140,6 +153,9 @@ export default function OrderDetail() {
     // 短暂显示 5 号单的金额和状态，多单并行时容易瞄错
     setOrder(null)
     setLoadError('')
+    // 存档现在是单独一条腿，窗口更长：不清掉会把上一张单的 PI/CI 列表挂在这一张下面
+    setDocVersions([])
+    setDocsError('')
     void load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orderId])
@@ -867,7 +883,9 @@ export default function OrderDetail() {
             {tab === 'packing' ? (
               <PackingTab order={order} onChange={load} onPreview={openPl} grossFactor={Number(settings?.grossWeightFactor ?? 1.1)} />
             ) : null}
-            {tab === 'timeline' ? <TimelineTab events={events} docVersions={docVersions} onChanged={load} /> : null}
+            {tab === 'timeline' ? (
+              <TimelineTab events={events} docVersions={docVersions} docsError={docsError} onChanged={load} />
+            ) : null}
             {tab === 'photos' ? <PhotosTab order={order} onChange={load} /> : null}
           </div>
         </div>
@@ -2251,6 +2269,7 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
             这张单已作废：作废后客户又汇来的钱（例如取消单补付的尾款）可以在这里登记，
             会进「本月到账」和月报，但不会复活这张单、也不改变它的待收。<strong>备注必须写明来路</strong>，以后对银行流水要靠它。
             如果是<strong>我们要退钱给客户</strong>，请到客户页「退还预收」登记，别在这里记成正收款。
+            如果这笔钱是<strong>早前认下的坏账追回来的</strong>，请到下面「核销与坏账」里登记追回——作废的单照样能登，按普通收款记会被拦下。
           </div>
         ) : null}
         <div className="field-row-3">
@@ -2385,7 +2404,7 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
           <div className="hint mb">
             {order.paymentStatus === 'void'
               ? '已作废的单不再核销新欠款；此前认下的坏账如果真追回来了，仍可在这里登记追回。'
-              : '草稿、已失效的订单不能核销；先把订单状态改成正式单。'}
+              : '草稿、已失效的订单不能核销；先把订单状态改成「待确认」或「客户已确认」。'}
           </div>
         ) : null}
 
@@ -3775,10 +3794,12 @@ function statusText(kind: string, v: string | null): string {
 function TimelineTab({
   events,
   docVersions,
+  docsError,
   onChanged
 }: {
   events: any[]
   docVersions: any[]
+  docsError: string
   onChanged: () => Promise<void>
 }) {
   const toast = useToast()
@@ -3875,6 +3896,17 @@ function TimelineTab({
             </table>
           </div>
         </>
+      ) : null}
+      {docsError && docVersions.length === 0 ? (
+        <LoadError
+          what="单据存档（已发出的 PI/CI 每一版）"
+          message={
+            `${docsError}\n` +
+            '金额、收款、明细走的是另一条通道，不受影响。单据存档存在本机出单时写下的文件夹里，' +
+            '要核对已经发出去的那张纸，请到「设置 → 数据来源」切回本机再看。'
+          }
+          onRetry={() => void onChanged()}
+        />
       ) : null}
       {events.length === 0 ? (
         <Empty text="还没有操作记录。这张单从创建到现在的每一步都会记在这里。" />

@@ -287,7 +287,6 @@ export function productsCore(db: Db) {
     assertProductInput(input)
     const styleNo = normalizeStyleNo(input.styleNo)
     input.styleNo = styleNo
-    await assertStyleNoFree(styleNo, input.id)
     const ts = new Date().toISOString()
     const uniq = (xs: string[]): string =>
       JSON.stringify(xs.map((x) => String(x).trim()).filter((x, i, arr) => x && arr.indexOf(x) === i))
@@ -301,14 +300,50 @@ export function productsCore(db: Db) {
     const boxWidth = input.boxWidth === null || input.boxWidth === undefined ? null : Number(input.boxWidth)
     const boxHeight = input.boxHeight === null || input.boxHeight === undefined ? null : Number(input.boxHeight)
 
-    if (input.id != null) {
-      // active 不传就保留原值：不能因为编辑一下就把「停用」的款重新启用
-      const cur = await db.get('SELECT active FROM products WHERE id = ?', [input.id])
-      if (!cur) throw new BizError('商品不存在，改不了')
-      await db.run(
-        `UPDATE products SET style_no=?, name=?, composition=?, category=?, brand=?, season=?,
+    // 「这个款号没人用」这一眼必须和落库同一口气（R57）：款号列没有 UNIQUE 约束
+    // （大小写、空格归一后只能靠代码比对），事务外查完再写，两个人同时新建「A100」
+    // 会各自查不到对方，库里存下两条同号的款——重印单据按款号找主图和成本，
+    // 就不知道取哪一条，两张纸还能长得不一样。
+    return db.transact(async () => {
+      await assertStyleNoFree(styleNo, input.id)
+      if (input.id != null) {
+        // active 不传就保留原值：不能因为编辑一下就把「停用」的款重新启用
+        const cur = await db.get('SELECT active FROM products WHERE id = ?', [input.id])
+        if (!cur) throw new BizError('商品不存在，改不了')
+        await db.run(
+          `UPDATE products SET style_no=?, name=?, composition=?, category=?, brand=?, season=?,
          cost_price=?, sizes=?, colors=?, unit_net_weight=?, box_pieces=?, box_length=?, box_width=?, box_height=?,
          factory=?, factory_no=?, note=?, active=?, updated_at=? WHERE id=?`,
+          [
+            styleNo,
+            input.name ?? '',
+            input.composition ?? '',
+            input.category ?? '',
+            input.brand ?? '',
+            input.season ?? '',
+            cost,
+            sizes,
+            colors,
+            unitNetWeight,
+            boxPieces,
+            boxLength,
+            boxWidth,
+            boxHeight,
+            (input.factory ?? '').trim(),
+            (input.factoryNo ?? '').trim(),
+            input.note ?? '',
+            input.active ?? Number(cur['active'] ?? 1),
+            ts,
+            input.id
+          ]
+        )
+        return mustGet(input.id)
+      }
+
+      const res = await db.run(
+        `INSERT INTO products(style_no, name, composition, category, brand, season, cost_price, sizes, colors,
+        unit_net_weight, box_pieces, box_length, box_width, box_height, factory, factory_no, note, active, created_at, updated_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           styleNo,
           input.name ?? '',
@@ -327,42 +362,13 @@ export function productsCore(db: Db) {
           (input.factory ?? '').trim(),
           (input.factoryNo ?? '').trim(),
           input.note ?? '',
-          input.active ?? Number(cur['active'] ?? 1),
+          input.active ?? 1,
           ts,
-          input.id
+          ts
         ]
       )
-      return mustGet(input.id)
-    }
-
-    const res = await db.run(
-      `INSERT INTO products(style_no, name, composition, category, brand, season, cost_price, sizes, colors,
-        unit_net_weight, box_pieces, box_length, box_width, box_height, factory, factory_no, note, active, created_at, updated_at)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [
-        styleNo,
-        input.name ?? '',
-        input.composition ?? '',
-        input.category ?? '',
-        input.brand ?? '',
-        input.season ?? '',
-        cost,
-        sizes,
-        colors,
-        unitNetWeight,
-        boxPieces,
-        boxLength,
-        boxWidth,
-        boxHeight,
-        (input.factory ?? '').trim(),
-        (input.factoryNo ?? '').trim(),
-        input.note ?? '',
-        input.active ?? 1,
-        ts,
-        ts
-      ]
-    )
-    return mustGet(res.lastInsertRowid)
+      return mustGet(res.lastInsertRowid)
+    })
   }
 
   async function setActive(id: number, active: 0 | 1): Promise<Product> {
@@ -395,34 +401,38 @@ export function productsCore(db: Db) {
   async function remove(id: number): Promise<DeleteProductResult & { files: string[] }> {
     const p = await get(id)
     if (!p) return { deactivated: false, message: '', files: [] }
-    const ref = await referenceCount(id)
-    const used = ref.orders + ref.quotations + ref.samples
-    if (used > 0) {
-      await setActive(id, 0)
-      const parts: string[] = []
-      if (ref.orders) parts.push(`${ref.orders} 个订单行`)
-      if (ref.quotations) parts.push(`${ref.quotations} 个报价行`)
-      if (ref.samples) parts.push(`${ref.samples} 个打样行`)
-      return {
-        deactivated: true,
-        message:
-          `${p.styleNo} 还挂在${parts.join('、')}上，只做了「停用」没有真删——` +
-          `真删了历史单据重印就找不到主图和成本，跟已经发出去的存档对不上。` +
-          `停用后建单时不会再带出来，历史单据照常能重印。`,
-        files: []
+    // 「有没有单据还指着这个款」这一眼要和删除同一口气（R57）：
+    // 明细行的 product_id 是 ON DELETE SET NULL，抢在中间加进来的那一行不会撞外键报错，
+    // 只会静静变成没有款的空行——重印时按 product_id 找不到主图和成本，
+    // 而单据上的款号还在，谁都不知道图是被这次删除拿走的。
+    return db.transact(async () => {
+      const ref = await referenceCount(id)
+      const used = ref.orders + ref.quotations + ref.samples
+      if (used > 0) {
+        await setActive(id, 0)
+        const parts: string[] = []
+        if (ref.orders) parts.push(`${ref.orders} 个订单行`)
+        if (ref.quotations) parts.push(`${ref.quotations} 个报价行`)
+        if (ref.samples) parts.push(`${ref.samples} 个打样行`)
+        return {
+          deactivated: true,
+          message:
+            `${p.styleNo} 还挂在${parts.join('、')}上，只做了「停用」没有真删——` +
+            `真删了历史单据重印就找不到主图和成本，跟已经发出去的存档对不上。` +
+            `停用后建单时不会再带出来，历史单据照常能重印。`,
+          files: []
+        }
       }
-    }
-    // 没引用 = 真的录错了，连图片文件一起清掉，别让备份越滚越大
-    const images = await listImages(id)
-    await db.transact(async () => {
+      // 没引用 = 真的录错了，连图片文件一起清掉，别让备份越滚越大
+      const images = await listImages(id)
       for (const im of images) await db.run('DELETE FROM product_images WHERE id = ?', [im.id])
       await db.run('DELETE FROM products WHERE id = ?', [id])
+      return {
+        deactivated: false,
+        message: `${p.styleNo} 没有历史引用，已连同图片一并删除。`,
+        files: images.map((im) => im.fileName)
+      }
     })
-    return {
-      deactivated: false,
-      message: `${p.styleNo} 没有历史引用，已连同图片一并删除。`,
-      files: images.map((im) => im.fileName)
-    }
   }
 
   /** 复制款号建新款 */

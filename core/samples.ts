@@ -1024,6 +1024,21 @@ export function samplesCore(db: Db) {
     }
     await db.transact(async () => {
       await ordersOf().assertBankRefUnused({ sampleOrderId: sampleId }, p.bankRef)
+      // 同一句「还欠多少」再看一遍，这一眼要和落库同一口气（R57）：
+      // 事务外那份是点按钮那一刻的快照，双击或两个人同登时两次都按旧余额过闸，
+      // 100 的样品费能收出 200。打样单多出来的钱没有归属对象（不像订单还能挂客户预收），
+      // 落进来就是永远对不上水单的一笔死数。
+      const fresh = (await getSample(sampleId))!
+      const freshRemaining = Math.max(0, fresh.totalFee - fresh.collected - Number(fresh.creditApplied ?? 0))
+      if (amount > freshRemaining + 0.001) {
+        const creditPart =
+          Number(fresh.creditApplied ?? 0) > 0.001 ? ` − 预收抵扣 ${Number(fresh.creditApplied).toFixed(2)}` : ''
+        throw bizError(
+          `这笔 ${amount.toFixed(2)} 超过了还没收的 ${freshRemaining.toFixed(2)} ${fresh.currency}` +
+            `（应收 ${fresh.totalFee.toFixed(2)} − 已收 ${fresh.collected.toFixed(2)}${creditPart}）。` +
+            `余额是在登记这一瞬间被别的操作改小的（另收了一笔、或明细/快递费调小），刷新后按当前待收再收。`
+        )
+      }
       await db.run(
         `INSERT INTO payments(sample_order_id, paid_at, amount, method, bank_ref, note, exchange_rate, created_at)
          VALUES(?,?,?,?,?,?,?,?)`,

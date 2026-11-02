@@ -6,6 +6,8 @@ import { openDb, closeDb, getDb, coreDb, dataDir, imagesDir, docsDir, backupsDir
 import type { Db } from '../core/db'
 import { quotationsCore } from '../core/quotations'
 import { ordersCore } from '../core/orders'
+import { samplesCore } from '../core/samples'
+import { productsCore } from '../core/products'
 import { settingsCore, BACKUP_STATE_KEY } from '../core/settings'
 import { filesCore } from '../core/files'
 import { LATEST_DB_VERSION } from '../electron/db/schema'
@@ -12175,6 +12177,284 @@ check('缺口话术点名「已经退给客户的」', r56GapErr.includes('已�
 check('说清退款不能拿来补缺口', r56GapErr.includes('不能靠撤销退款'), r56GapErr)
 check('抵在别处的那条出路也仍然写着', r56GapErr.includes('撤销那一笔抵扣'), r56GapErr)
 eq('拦下后那笔 140 的流水还在', (await orders.getOrder(r56GapOrder.id))!.payments.length, 1)
+
+/* ---------------- R57：判定与落笔同一口气（续）· 附属数据不拖死主数据 ---------------- */
+
+section('R57 单据存档读不出来，不许把这张单的账一起拖没（本机专属通道 ≠ 主数据）')
+const r57DetailSrc = fs.readFileSync(join(process.cwd(), 'src/renderer/src/pages/OrderDetail.tsx'), 'utf8')
+const r57PaAt = r57DetailSrc.indexOf('const [o, s, e] = await Promise.all([')
+const r57Pa = r57PaAt < 0 ? '' : r57DetailSrc.slice(r57PaAt, r57DetailSrc.indexOf('])', r57PaAt))
+check('主数据那一腿只读订单/设置/历史，没捆本机专属的 docs.list', r57Pa !== '' && !/docs\.list/.test(r57Pa), r57Pa.replace(/\s+/g, ' '))
+check('存档单独报错，读得到列表时不盖住它', /setDocsError\(/.test(r57DetailSrc) && /docsError && docVersions\.length === 0/.test(r57DetailSrc))
+check('切单时把上一张单的存档和它的报错一起清掉', /setDocVersions\(\[\]\)[\s\S]{0,160}setDocsError\(''\)/.test(r57DetailSrc))
+const r57SamplesSrc = fs.readFileSync(join(process.cwd(), 'src/renderer/src/pages/Samples.tsx'), 'utf8')
+check(
+  '这两个页面都不再写下拉里根本没有的「正式单」',
+  !/[「'"]正式单/.test(r57DetailSrc) && !/[「'"]正式单/.test(r57SamplesSrc)
+)
+
+section('R57 坏账没追回就不许按普通收款记 —— 作废单也一样，正门是「坏账追回」')
+const r57BadCust = await customers.saveCustomer({ company: 'R57-BADCO' })
+const r57Bad = await orders.createOrder({
+  customerId: r57BadCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R57-BAD'
+})
+await orders.addOrderItem(r57Bad.id, { styleNo: 'R57-BD1', quantity: 1, unitPrice: 200 })
+await orders.addSettlement(r57Bad.id, { kind: 'bad_debt', amount: 200, at: localDate(), reason: 'R57 客户失联，全额挂坏账' })
+await orders.voidOrder(r57Bad.id, 'R57 测试：单作废了，坏账还挂在账上')
+eq('作废单仍然带着 200 未追回坏账', (await orders.getOrder(r57Bad.id))!.badDebtOutstanding, 200)
+const r57BadPayErr = await r8err(async () =>
+  await orders.addPayment(r57Bad.id, {
+    paidAt: localDate(),
+    amount: 50,
+    bankRef: 'ZZ-R57-BAD-CASH',
+    note: 'R57 客户退回一笔定金'
+  })
+)
+check('在作废单上按普通收款记这笔欠款：拦下', r57BadPayErr.includes('坏账没追回'), r57BadPayErr)
+check('拦下时指到「坏账追回」那道正门', r57BadPayErr.includes('请走「坏账追回」登记'), r57BadPayErr)
+check('说清后果：同一笔欠款会变成坏账损失 + 客户多付', r57BadPayErr.includes('客户多付'), r57BadPayErr)
+eq('拦下后作废单没有多出流水', (await orders.getOrder(r57Bad.id))!.payments.length, 0)
+
+section('R57 「还剩多少坏账」这一眼读在落库这一刻：追满了再追第二笔进不了账')
+let r57SumsInsideTx = false
+let r57SumsDepth = 0
+const r57SumsDb: Db = {
+  ...coreDb,
+  async all(sql, params) {
+    if (/FROM order_settlements WHERE order_id = \?\s+GROUP BY kind/.test(sql) && r57SumsDepth > 0) r57SumsInsideTx = true
+    return coreDb.all(sql, params)
+  },
+  async transact<T>(fn: () => Promise<T>): Promise<T> {
+    r57SumsDepth += 1
+    try {
+      return await coreDb.transact(fn)
+    } finally {
+      r57SumsDepth -= 1
+    }
+  }
+}
+const r57RecDone = await ordersCore(r57SumsDb).addSettlement(r57Bad.id, {
+  kind: 'recovery',
+  amount: 200,
+  at: localDate(),
+  paidAt: localDate(),
+  bankRef: 'ZZ-R57-REC-FULL',
+  reason: 'R57 客户分期补付，全额追回'
+})
+eq('坏账全额追回后余额归零', r57RecDone.badDebtOutstanding, 0)
+const r57RecErr = await r8err(async () =>
+  await ordersCore(r57SumsDb).addSettlement(r57Bad.id, {
+    kind: 'recovery',
+    amount: 50,
+    bankRef: 'ZZ-R57-REC-OVER',
+    reason: 'R57 已经追满了还追第二笔'
+  })
+)
+check('第二笔被拦：这张单没有尚未追回的坏账', r57RecErr.includes('没有尚未追回的坏账'), r57RecErr)
+check('被拦时把钱该走哪道门也说清', r57RecErr.includes('钱到账请走「记录收款」'), r57RecErr)
+check('余额这一眼读在事务里（和落库同一口气，双击追不出两笔）', r57SumsInsideTx)
+eq('被拦的那一笔没留下流水', (getDb().all(`SELECT id FROM payments WHERE bank_ref = 'ZZ-R57-REC-OVER'`) as unknown[]).length, 0)
+const r57AfterRecPay = await orders.addPayment(r57Bad.id, {
+  paidAt: localDate(),
+  amount: 30,
+  bankRef: 'ZZ-R57-BAD-AFTER',
+  note: 'R57 坏账追齐后又汇来一笔'
+})
+eq('坏账追齐后普通收款放行', r57AfterRecPay.payments.filter((p) => p.bankRef === 'ZZ-R57-BAD-AFTER').length, 1)
+eq('作废单收了钱仍然是作废单（留档终态不因流水翻身）', r57AfterRecPay.paymentStatus, 'void')
+
+section('R57 打样「还欠多少」也在落库这一刻再看一眼：双击收不出两笔样品费')
+const r57SmpCust = await customers.saveCustomer({ company: 'R57-SMPCO' })
+const r57Smp = await samples.saveSample({
+  customerId: r57SmpCust.id,
+  currency: 'USD',
+  exchangeRate: 7.15,
+  items: [{ styleNo: 'R57-SP1', quantity: 1, unitPrice: 100 }]
+})
+await samples.addSamplePayment(r57Smp.id, { paidAt: localDate(), amount: 60, bankRef: 'ZZ-R57-SMP-1' })
+// 后到的那一下：点按钮那一刻读到的还是「一分没收」，中间同事已经收了 60
+let r57SmpPeek = 0
+const r57SmpDb: Db = {
+  ...coreDb,
+  async get(sql, params) {
+    if (/FROM payments WHERE sample_order_id = \?/.test(sql) && r57SmpPeek++ === 0) return undefined
+    return coreDb.get(sql, params)
+  }
+}
+const r57SmpErr = await r8err(async () =>
+  await samplesCore(r57SmpDb).addSamplePayment(r57Smp.id, { paidAt: localDate(), amount: 100, bankRef: 'ZZ-R57-SMP-2' })
+)
+check('事务里的第二眼把超收那一下挡在门外', r57SmpErr.includes('这一瞬间被别的操作改小'), r57SmpErr)
+check('被拦时也报得出此刻真实的已收', r57SmpErr.includes('已收 60.00'), r57SmpErr)
+eq('拦下后打样流水仍只有一笔', Number((getDb().get(`SELECT COUNT(*) n FROM payments WHERE sample_order_id = ${r57Smp.id}`) as { n: number }).n), 1)
+eq('样品费仍只收到 60（没有落一半）', Number((await samples.getSample(r57Smp.id))!.collected), 60)
+
+section('R57 状态这一眼和 UPDATE 同一口气：前提被人改了，作废与改状态都整笔顶回')
+const r57VoidCust = await customers.saveCustomer({ company: 'R57-VOIDCO' })
+const r57Void = await orders.createOrder({
+  customerId: r57VoidCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R57-VOID'
+})
+await orders.addOrderItem(r57Void.id, { styleNo: 'R57-V1', quantity: 1, unitPrice: 100 })
+await orders.voidOrder(r57Void.id, 'R57 同事先一步作废了这张单')
+// 后到的那一下：进事务前读到的还是「客户已确认」，中间那张单已经被作废
+const r57StaleVoidDb: Db = {
+  ...coreDb,
+  async get(sql, params) {
+    const row = await coreDb.get(sql, params)
+    if (row && /SELECT order_no, payment_status FROM orders WHERE id = \?/.test(sql)) {
+      return { ...row, payment_status: 'confirmed' }
+    }
+    return row
+  }
+}
+const r57VoidErr = await r8err(async () => await ordersCore(r57StaleVoidDb).voidOrder(r57Void.id, 'R57 第二个人也点了作废'))
+check('作废写不进去时点名现在的真实状态', r57VoidErr.includes('刚刚被人改成了「已作废」'), r57VoidErr)
+check('说清这次作废没执行、抵扣都还没动', r57VoidErr.includes('这次作废没有执行'), r57VoidErr)
+check('也提醒人先刷新核对（旧状态做的凭据核对不算数）', r57VoidErr.includes('请刷新页面看一眼现在的账'), r57VoidErr)
+eq('状态仍是被作废，没有被第二下盖成新话', (await orders.getOrder(r57Void.id))!.paymentStatus, 'void')
+eq('历史里只有一条作废（第二下整笔顶回）', (await orders.listEvents(r57Void.id)).filter((e) => e.kind === 'void').length, 1)
+
+const r57StatusCust = await customers.saveCustomer({ company: 'R57-STATUSCO' })
+const r57Status = await orders.createOrder({
+  customerId: r57StatusCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R57-STATUS'
+})
+await orders.addOrderItem(r57Status.id, { styleNo: 'R57-ST1', quantity: 1, unitPrice: 100 })
+getDb().run(`UPDATE orders SET payment_status = 'paid' WHERE id = ?`, [r57Status.id])
+const r57StaleStatusDb: Db = {
+  ...coreDb,
+  async get(sql, params) {
+    const row = await coreDb.get(sql, params)
+    if (row && /SELECT payment_status, customer_id FROM orders WHERE id = \?/.test(sql)) {
+      return { ...row, payment_status: 'confirmed' }
+    }
+    return row
+  }
+}
+const r57StatusErr = await r8err(async () => await ordersCore(r57StaleStatusDb).setPaymentStatus(r57Status.id, 'sent', 'R57 以为还停在已确认'))
+check('改状态写不进去时点名现在的真实状态', r57StatusErr.includes('刚刚被人改成了「定金已收」'), r57StatusErr)
+check('点名的是哪一次改动没做成', r57StatusErr.includes('这次「改成待确认」没有执行'), r57StatusErr)
+eq('状态停在另一笔钱推出来的「定金已收」', (await orders.getOrder(r57Status.id))!.paymentStatus, 'paid')
+
+section('R57 PI 号在写入这一刻再查一遍：单号是凭据，两张单不能共用一个号')
+const r57PiCust = await customers.saveCustomer({ company: 'R57-PICO' })
+const r57PiA = await orders.createOrder({
+  customerId: r57PiCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R57-A'
+})
+await orders.addOrderItem(r57PiA.id, { styleNo: 'R57-PA', quantity: 1, unitPrice: 10 })
+let r57PiPeek = 0
+const r57PiDb: Db = {
+  ...coreDb,
+  async get(sql, params) {
+    const row = await coreDb.get(sql, params)
+    // 事务外那一次查重没查到；就在这之后、UPDATE 之前，另一张单把这个号占了
+    if (/SELECT id FROM orders WHERE pi_no = \? AND id != \?/.test(sql) && ++r57PiPeek === 1) {
+      getDb().run(
+        `INSERT INTO orders(order_no, customer_id, pi_no, created_at, updated_at) VALUES(?,?,?, datetime('now'), datetime('now'))`,
+        ['ZZ-R57-HIJACK', r57PiCust.id, 'PI-R57-B']
+      )
+    }
+    return row
+  }
+}
+const r57PiErr = await r8err(async () => await ordersCore(r57PiDb).updateOrder(r57PiA.id, { customerId: r57PiCust.id, piNo: 'PI-R57-B' }))
+check('保存时第二眼发现号刚被人占了', r57PiErr.includes('在这一瞬间已经被另一张单用了'), r57PiErr)
+check('拦下后说清这次没改号', r57PiErr.includes('这次保存没有改号'), r57PiErr)
+eq('这张单仍印着自己原来的 PI 号', (await orders.getOrder(r57PiA.id))!.piNo, 'PI-R57-A')
+eq('库里也没有因为这次失败多出改号历史', (await orders.listEvents(r57PiA.id)).filter((e) => String(e.note).includes('PI-R57-B')).length, 0)
+getDb().run(`DELETE FROM orders WHERE order_no = 'ZZ-R57-HIJACK'`)
+
+section('R57 款号查重、删除引用都读在写入这一刻：不做 repository，靠事务里的第二眼')
+const r57ProdLog = { styleCheckInsideTx: false, refCountInsideTx: false }
+let r57ProdDepth = 0
+const r57ProdDb: Db = {
+  ...coreDb,
+  async all(sql, params) {
+    if (/SELECT id, style_no FROM products/.test(sql) && r57ProdDepth > 0) r57ProdLog.styleCheckInsideTx = true
+    return coreDb.all(sql, params)
+  },
+  async get(sql, params) {
+    if (/SELECT COUNT\(\*\) c FROM order_items WHERE product_id = \?/.test(sql) && r57ProdDepth > 0) r57ProdLog.refCountInsideTx = true
+    return coreDb.get(sql, params)
+  },
+  async transact<T>(fn: () => Promise<T>): Promise<T> {
+    r57ProdDepth += 1
+    try {
+      return await coreDb.transact(fn)
+    } finally {
+      r57ProdDepth -= 1
+    }
+  }
+}
+const r57ProdDupErr = await r8err(async () =>
+  await productsCore(r57ProdDb).save({ styleNo: 'A001', name: 'R57 撞号的款', sizes: [], colors: [] })
+)
+check('款号查重发生在落库这一刻（事务里）', r57ProdLog.styleCheckInsideTx, JSON.stringify(r57ProdLog))
+check('撞号仍然拦得下', r57ProdDupErr.includes('已经存在'), r57ProdDupErr)
+const r57FreshProd = await productsCore(r57ProdDb).save({ styleNo: 'R57-FRESH', name: 'R57 没人引用的款', sizes: [], colors: [] })
+const r57ProdDel = await productsCore(r57ProdDb).remove(r57FreshProd.id)
+check('「有没有单据指着这个款」也读在事务里', r57ProdLog.refCountInsideTx, JSON.stringify(r57ProdLog))
+eq('没引用的款仍然真删（不是退化成停用）', r57ProdDel.deactivated, false)
+eq('库里确实没有这一行了', (getDb().all(`SELECT id FROM products WHERE style_no = 'R57-FRESH'`) as unknown[]).length, 0)
+const r57UsedDel = await productsCore(r57ProdDb).remove(p1.id)
+eq('有引用的款仍然只停用', r57UsedDel.deactivated, true)
+
+section('R57 汇率还是建单默认那个 1：这笔先不落快照，补上真实汇率历史自己折对')
+const r57RateCust = await customers.saveCustomer({ company: 'R57-RATECO' })
+const r57Rate = await orders.createOrder({ customerId: r57RateCust.id, currency: 'USD', paymentStatus: 'confirmed', piNo: 'PI-R57-RATE' })
+await orders.addOrderItem(r57Rate.id, { styleNo: 'R57-RT1', quantity: 1, unitPrice: 100 })
+eq('建单默认汇率就是那个「还没填」的哨兵 1', (await orders.getOrder(r57Rate.id))!.exchangeRate, 1)
+const r57Month = localMonthOf(localDate())
+const r57Rbm = async (): Promise<number> => (await money.receivedByMonth()).find((m) => m.month === r57Month)?.amount ?? 0
+const r57CashBefore = await r57Rbm()
+await orders.addPayment(r57Rate.id, { paidAt: localDate(), amount: 50, bankRef: 'ZZ-R57-RATE-1' })
+eq(
+  '哨兵汇率不钉成假快照：流水上这一列留空',
+  (getDb().get(`SELECT exchange_rate FROM payments WHERE bank_ref = 'ZZ-R57-RATE-1'`) as { exchange_rate: number | null }).exchange_rate,
+  null
+)
+check('到账当下就按订单汇率折（此时是 1，算 50）', Math.abs((await r57Rbm()) - r57CashBefore - 50) < 0.01, `${(await r57Rbm()) - r57CashBefore}`)
+const r57RateEvent = (await orders.listEvents(r57Rate.id)).find((e) => e.kind === 'payment' && String(e.note).includes('汇率看着还没填过'))
+check('历史里写明这笔没钉快照、补完汇率月报跟着折对', !!r57RateEvent, JSON.stringify((await orders.listEvents(r57Rate.id)).map((e) => e.note)))
+await orders.updateOrder(r57Rate.id, { customerId: r57RateCust.id, exchangeRate: 7 })
+check(
+  '补上真实汇率后，这笔历史到账自己跟着折对（50 → 350）',
+  Math.abs((await r57Rbm()) - r57CashBefore - 350) < 0.01,
+  `${(await r57Rbm()) - r57CashBefore}`
+)
+const r57Pin = await orders.createOrder({
+  customerId: r57RateCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R57-PIN'
+})
+await orders.addOrderItem(r57Pin.id, { styleNo: 'R57-PN1', quantity: 1, unitPrice: 100 })
+const r57PinBefore = await r57Rbm()
+await orders.addPayment(r57Pin.id, { paidAt: localDate(), amount: 100, bankRef: 'ZZ-R57-PIN-1' })
+eq('真汇率那笔照常钉快照：100 USD 按 7 折进 700', (await r57Rbm()) - r57PinBefore, 700)
+eq(
+  '流水上钉的是登记那一刻的真实汇率',
+  (getDb().get(`SELECT exchange_rate FROM payments WHERE bank_ref = 'ZZ-R57-PIN-1'`) as { exchange_rate: number }).exchange_rate,
+  7
+)
+await orders.updateOrder(r57Pin.id, { customerId: r57RateCust.id, exchangeRate: 7.5 })
+eq('订单汇率之后再改，钉过快照的历史不跟着漂', (await r57Rbm()) - r57PinBefore, 700)
 
 /* ---------------- 汇总 ---------------- */
 

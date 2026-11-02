@@ -983,6 +983,15 @@ export function ordersCore(db: Db) {
       const lockedNow = await readLocks()
       assertPaperLocked(lockedNow)
       await assertCustomerSwapAllowed(lockedNow)
+      // PI 号查重也要在写入这一刻再看一眼：单号列没有 UNIQUE 约束，靠的就是这一眼。
+      // 事务外那次查完之后另一张单正好把这个号占了（另一个人也在改单/恢复备份），
+      // 两边各自都合法，库里就留下两张共用一个凭据的单——报关、对账按号找单时各拿各的那张。
+      if (newPiNo && newPiNo !== oldPiNo && (await piNoTaken(newPiNo, id))) {
+        throw bizError(
+          `PI 号 ${newPiNo} 在这一瞬间已经被另一张单用了，这次保存没有改号。` +
+            `单号是凭据，两张单不能共用一个号——请换一个号再保存。`
+        )
+      }
       await db.run(
         `UPDATE orders SET ${cells.map(([col]) => `${col}=?`).join(', ')}, updated_at=? WHERE id=?`,
         [...cells.map(([, v]) => v as string | number | null), ts, id]
@@ -1157,10 +1166,31 @@ export function ordersCore(db: Db) {
       )
     }
     await db.transact(async () => {
+      // 「还是这张活单」的确认要和写入同一口气（R57）：上面读到的状态、凭据数、
+      // 预收抵扣都是过闸那一刻的快照，中间同事可能已经作废了它、或刚把状态改成「已结清」。
+      // 无条件 UPDATE 会把对方的改动盖成 void，接着还把预收抵扣回退、打样抵扣退成未收——
+      // 一串连带动作全按错前提做了，历史里还留着「从 X 作废」这条假话。
+      // 条件写：状态不是读过的那个就一行不动，写不进去当场把整个事务顶回。
+      const wrote = await db.run(
+        'UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ? AND payment_status = ?',
+        ['void', now(), id, cur.payment_status]
+      )
+      if (wrote.changes !== 1) {
+        const nowStatus = String(
+          (await db.get('SELECT payment_status FROM orders WHERE id = ?', [id]) as {
+            payment_status?: string
+          } | null)?.payment_status ?? ''
+        )
+        throw bizError(
+          `这张单的状态刚刚被人改成了「${
+            PAYMENT_STATUS_LABEL[nowStatus as PaymentStatus] ?? nowStatus
+          }」，这次作废没有执行（预收抵扣、打样抵扣都还没动）。` +
+            `作废前的凭据核对是按旧状态做的，请刷新页面看一眼现在的账，再决定要不要作废。`
+        )
+      }
       // 单子作废就退出应收口径：已经抵在它身上的客户预收要退回客户余额，
       // 否则这笔钱既不在待收里、也不在余额里，从账上凭空消失
       await creditsOf().reverseCreditsForTarget('order', id, `订单 ${cur.order_no} 作废，预收抵扣回退`)
-      await db.run('UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?', ['void', now(), id])
       // 下单抵扣的样品费不能跟着凭空消失：订单作废退出应收口径，
       // 打样单还挂着「已抵扣」的话，客户实际欠的样品费会从欠款榜、工作台同时蒸发。
       // 回退成未收（抵扣历史留在备注里），打样费回到该在的地方
@@ -1962,6 +1992,20 @@ export function ordersCore(db: Db) {
 
   /* ---------------- 收款 ---------------- */
 
+  /**
+   * 一笔到账该在流水上钉什么汇率（普通收款、坏账追回自动生成的那笔共用这一份）。
+   *
+   * 外币单那一列上的 1 是建单默认的「汇率还没填过」（工作台的「汇率待修」就是追它），
+   * 0/空 是坏值——两个都不是真汇率。把它们钉死在流水上，事后补上真实汇率，
+   * 这笔钱却永远按 1:1 折进月报（少折七倍）或干脆算「未折算」，
+   * 而补汇率恰恰就是冲着这笔算错的钱来的。
+   * 这种流水不落快照（写 NULL），读取侧 COALESCE(流水, 订单) 回落到订单当前汇率，
+   * 补完汇率历史月报自己就折对了；本币单不参与折算，照旧存库里的值。
+   */
+  function paymentRateSnapshot(currency: string, base: string, stored: number): number | null {
+    if (currency === base) return stored
+    return stored > 0 && stored !== 1 ? stored : null
+  }
 
 
   /**
@@ -2026,9 +2070,15 @@ export function ordersCore(db: Db) {
     // 或者订单汇率刚被人改过、这笔到账却钉了改之前的快照。
     await db.transact(async () => {
       const cur = await db.get(
-        'SELECT order_no, payment_status, currency, exchange_rate FROM orders WHERE id = ?',
+        'SELECT order_no, payment_status, currency, base_currency, exchange_rate FROM orders WHERE id = ?',
         [orderId]
-      ) as { order_no?: string; payment_status?: string; currency?: string; exchange_rate?: number } | null
+      ) as {
+        order_no?: string
+        payment_status?: string
+        currency?: string
+        base_currency?: string
+        exchange_rate?: number
+      } | null
       if (!cur) throw notFound('订单不存在')
       const curStatus = String(cur.payment_status ?? '')
       const isVoided = curStatus === 'void'
@@ -2049,25 +2099,26 @@ export function ordersCore(db: Db) {
       const { paidAt, amount } = assertPaymentInput(p)
       // 有预收抵扣的单：现金只能收「预收之外还欠的那部分」，
       // 否则同一块钱会被收两遍（预收抵一次、现金又收满全额）
-      if (!isVoided) {
-        const detail = (await getOrder(orderId))!
-        // 坏账已经从待收里拿掉过一次：再按普通收款记，同一笔钱会同时被算成
-        // 「坏账损失」和「客户多付」，凭空铸出可退的预收。钱到账请走「坏账追回」。
-        if (detail.badDebtOutstanding > 0.001) {
-          throw bizError(
-            `这张单还有 ${detail.badDebtOutstanding.toFixed(2)} ${String(cur.currency ?? '')} 坏账没追回：` +
-              `钱到账请走「坏账追回」登记，不能按普通收款记——否则同一笔欠款会同时算坏账损失和客户多付。`
-          )
-        }
-        if (detail.creditApplied > 0.001 && amount > detail.remaining + 0.001) {
-          throw bizError(
-            `这张单已经有 ${detail.creditApplied.toFixed(2)} ${String(cur.currency ?? '')} 是客户预收抵掉的，现金待收只剩 ${detail.remaining.toFixed(2)}：再收 ${amount.toFixed(2)} 就重复收了。多出来的钱请登记到别的单上。`
-          )
-        }
+      const detail = (await getOrder(orderId))!
+      // 坏账闸门不分作废与否（R57）：坏账早就从待收里拿掉了，再按普通收款记一次，
+      // 同一笔钱会同时算成「坏账损失」（工作台按核销总额追）和「客户多付」（预收余额按到账算），
+      // 凭空铸出一笔能退给客户的预收。作废单也开着「坏账追回」这道正门，没有理由放普通收款进来。
+      if (detail.badDebtOutstanding > 0.001) {
+        throw bizError(
+          `这张单还有 ${detail.badDebtOutstanding.toFixed(2)} ${String(cur.currency ?? '')} 坏账没追回：` +
+            `钱到账请走「坏账追回」登记，不能按普通收款记——否则同一笔欠款会同时算坏账损失和客户多付。`
+        )
+      }
+      // 作废单没有「重复收」这一说（它本来就不在待收里），这笔钱只是落进流水
+      if (!isVoided && detail.creditApplied > 0.001 && amount > detail.remaining + 0.001) {
+        throw bizError(
+          `这张单已经有 ${detail.creditApplied.toFixed(2)} ${String(cur.currency ?? '')} 是客户预收抵掉的，现金待收只剩 ${detail.remaining.toFixed(2)}：再收 ${amount.toFixed(2)} 就重复收了。多出来的钱请登记到别的单上。`
+        )
       }
       // 汇率快照：这笔到账按「落款那天订单上的汇率」折算进月报，
       // 以后订单汇率再改（出单据前的窗口期是允许的），历史到账不许跟着漂
-      const rate = Number(cur.exchange_rate ?? 1)
+      const storedRate = Number(cur.exchange_rate ?? 1)
+      const rate = paymentRateSnapshot(String(cur.currency ?? ''), String(cur.base_currency ?? ''), storedRate)
       // 查重放在事务里：拆分收款整批落账时，同一张单被填两次会在这里当场拦下
       await assertBankRefUnused({ orderId }, p.bankRef)
       await db.run(
@@ -2082,7 +2133,9 @@ export function ordersCore(db: Db) {
         null,
         `${isVoided ? '作废单回款' : '收款'} ${amount.toFixed(2)}（${paidAt}${p.bankRef ? `，流水号 ${p.bankRef}` : `，${p.method ?? 'T/T'}`}）` +
           // 补录过去日期的到账也是按「录入时刻」的订单汇率钉快照：口径写进历史，月报对不上时查得到原因
-          `；汇率按 ${rate} 钉快照`
+          (rate === null
+            ? `；这张单的${String(cur.currency ?? '')}汇率看着还没填过（存的是 ${storedRate}），这笔先按订单当前汇率折，补上真实汇率后月报会跟着折对`
+            : `；汇率按 ${rate} 钉快照`)
       )
       await recomputePaymentStatus(orderId)
     })
@@ -2317,21 +2370,11 @@ export function ordersCore(db: Db) {
     }
     const evidence = String(input.evidence ?? '').trim()
 
-    const sums = await settlementSums(orderId)
-    const badDebtOutstanding = Math.max(0, sums.badDebt - sums.recovered)
     const currency = order.currency
 
     if (kind === 'recovery') {
-      if (badDebtOutstanding <= 0.001) {
-        throw bizError('这张单没有尚未追回的坏账，不能登记追回款；钱到账请走「记录收款」。')
-      }
       const amount = Number(input.amount)
       if (!Number.isFinite(amount) || amount <= 0) throw bizError('追回金额必须是大于 0 的数。')
-      if (amount > badDebtOutstanding + 0.001) {
-        throw bizError(
-          `追回金额 ${amount.toFixed(2)} 超过了尚未追回的坏账 ${badDebtOutstanding.toFixed(2)}；超出的部分请按普通收款登记。`
-        )
-      }
       const paidAt = String(input.paidAt ?? '').trim() || at
       if (!isLocalDate(paidAt)) throw bizError('追回款的到账日期要填完整（例如 2026-10-24）。')
       if (paidAt > localDate()) {
@@ -2339,8 +2382,23 @@ export function ordersCore(db: Db) {
           `追回款的到账日期 ${paidAt} 还没到。请填银行水单上的实际到账日，最晚是今天（${localDate()}）。`
         )
       }
-      const rate = Number(order.exchangeRate ?? 1)
+      // 追回款自动生成的那笔流水，汇率快照跟普通收款同一个口径
+      const rate = paymentRateSnapshot(String(order.currency ?? ''), String(order.baseCurrency ?? ''), Number(order.exchangeRate ?? 1))
       await db.transact(async () => {
+        // 「还剩多少坏账」这一眼必须和落库同一口气（R57）：事务外数完再插，
+        // 双击或两个人同登会两次都按同一份旧余额过闸——100 的坏账追出 200，
+        // 多出的 100 让待收变负、转身成了能退给客户的预收。
+        // 空流水号救不了这道门：assertBankRefUnused 对没号的收款直接放行。
+        const freshSums = await settlementSums(orderId)
+        const outstandingNow = Math.max(0, freshSums.badDebt - freshSums.recovered)
+        if (outstandingNow <= 0.001) {
+          throw bizError('这张单没有尚未追回的坏账，不能登记追回款；钱到账请走「记录收款」。')
+        }
+        if (amount > outstandingNow + 0.001) {
+          throw bizError(
+            `追回金额 ${amount.toFixed(2)} 超过了尚未追回的坏账 ${outstandingNow.toFixed(2)}；超出的部分请按普通收款登记。`
+          )
+        }
         // 追回来的钱和普通收款住在同一张表里，查重就得走同一道门。
         // 少查这一次，同一张水单可以既当「追回」又当「收款」记两遍：已收翻倍、坏账冲两遍、
         // 多出来的部分还变成能退给客户的预收——R38 在前门拦掉的，别从后门放进来。
@@ -2683,7 +2741,28 @@ export function ordersCore(db: Db) {
       if (!isBillingStatus(next)) {
         await creditsOf().reverseCreditsForTarget('order', orderId, `订单转为「${PAYMENT_STATUS_LABEL[next]}」，预收抵扣回退`)
       }
-      await db.run('UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?', [next, now(), orderId])
+      // 状态这一眼要和写入同一口气（R57）：上面那些闸门用的是函数开头读到的旧状态，
+      // 「过闸 → 写入」之间别人可能已经改过它（同事又点了一次结清、一笔收款把标签推成部分收款）。
+      // 无条件 UPDATE 会把那一次改动盖掉，历史里还留一条「从 X 改成 Y」的假话，
+      // 而退回草稿/失效已经顺手把预收抵扣回退掉了——按错前提做的连带动作收不回来。
+      // 所以用条件写：状态不是我们读过的那个就一行也不动，写不进去就说明前提变了。
+      const wrote = await db.run(
+        'UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ? AND payment_status = ?',
+        [next, now(), orderId, cur.payment_status]
+      )
+      if (wrote.changes !== 1) {
+        const nowStatus = String(
+          (await db.get('SELECT payment_status FROM orders WHERE id = ?', [orderId]) as {
+            payment_status?: string
+          } | null)?.payment_status ?? ''
+        )
+        throw bizError(
+          `这张单的状态刚刚被人改成了「${
+            PAYMENT_STATUS_LABEL[nowStatus as PaymentStatus] ?? nowStatus
+          }」，这次「改成${PAYMENT_STATUS_LABEL[next]}」没有执行。` +
+            `刚才那几步守门是按旧状态算的，请刷新页面看一眼现在的账，再决定怎么改。`
+        )
+      }
       await logEvent(db, orderId, 'payment_status', cur.payment_status, next, note + expireNote)
       // 失效单改回计费状态：预收来源从「全部到账」收回成「只有多收的部分」，
       // 已经抵出去的钱可能就多于客户实际多付的了

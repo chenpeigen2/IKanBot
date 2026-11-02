@@ -729,6 +729,51 @@ async function main(): Promise<void> {
     const exBad = await http.post('/api/export/csv').send({ kind: 'nope' })
     check('未知导出类型说清只接哪几种', exBad.status === 400 && String(exBad.body.error.message).includes('只接'))
 
+    console.log('R57 后端同一份守门：坏账没追回不许按普通收款记，追回要看得见余额')
+    const r57Create = await http
+      .post('/api/orders/create')
+      .send({ input: { customerId: ocid, currency: 'USD', exchangeRate: 7.2, exchangeRateDate: localDate() } })
+    const r57Oid = Number(r57Create.body.id)
+    await http.post('/api/orders/addItems').send({ orderId: r57Oid, items: [{ styleNo: 'R57-1', quantity: 10, unitPrice: 5 }] })
+    await http.post('/api/orders/setPaymentStatus').send({ orderId: r57Oid, status: 'confirmed', note: '后端对拍：PI 已确认' })
+    const r57Bd = await http
+      .post('/api/orders/addSettlement')
+      .send({ orderId: r57Oid, input: { kind: 'bad_debt', amount: 20, at: localDate(), reason: '后端对拍：客户失联挂坏账' } })
+    check('坏账核销在后端也落得下', r57Bd.status === 200 && Number(r57Bd.body.badDebtOutstanding) === 20)
+    const r57BadPay = await http
+      .post('/api/orders/addPayment')
+      .send({ orderId: r57Oid, p: { paidAt: localDate(), amount: 10, bankRef: 'ZZ-SRV-R57' } })
+    check(
+      '没追回的坏账挡住普通收款（拦人的话后端与桌面同一份）',
+      r57BadPay.status === 400 && String(r57BadPay.body.error.message).includes('坏账没追回')
+    )
+    const r57Rows = await http.post('/api/orders/listSettlements').send({ orderId: r57Oid })
+    const r57BdId = Number(
+      (r57Rows.body as Array<{ kind: string; id: number }>).find((s) => s.kind === 'bad_debt')!.id
+    )
+    const r57Rec = await http
+      .post('/api/orders/addSettlement')
+      .send({ orderId: r57Oid, input: { kind: 'recovery', amount: 30, at: localDate(), paidAt: localDate(), reason: '后端对拍：追过头' } })
+    check(
+      '追回超过尚未追回的坏账：后端当场说清还剩多少',
+      r57Rec.status === 400 && String(r57Rec.body.error.message).includes('超过了尚未追回的坏账')
+    )
+    const r57Rev = await http
+      .post('/api/orders/reverseSettlement')
+      .send({ orderId: r57Oid, settlementId: r57BdId, reason: '后端对拍：这笔认错了' })
+    check('撤销坏账后闸门重新开得动', r57Rev.status === 200 && Number(r57Rev.body.badDebtOutstanding) === 0)
+    const r57Pay = await http
+      .post('/api/orders/addPayment')
+      .send({ orderId: r57Oid, p: { paidAt: localDate(), amount: 10, bankRef: 'ZZ-SRV-R57' } })
+    check('撤掉的坏账不再拦这一笔收款', r57Pay.status === 200 && Number(r57Pay.body.paidAmount) === 10)
+    const r57RecAgain = await http
+      .post('/api/orders/addSettlement')
+      .send({ orderId: r57Oid, input: { kind: 'recovery', amount: 5, reason: '后端对拍：没坏账也追一笔' } })
+    check(
+      '没有尚未追回的坏账时追回被拦（余额读在落库这一刻）',
+      r57RecAgain.status === 400 && String(r57RecAgain.body.error.message).includes('没有尚未追回的坏账')
+    )
+
     console.log('错误体')
     const unknown = await http.post('/api/no-such-route').send({})
     check('未知路由回中文错误体', unknown.status === 404 && unknown.body.error.message === '没有这个接口')
