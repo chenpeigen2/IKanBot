@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IKanApi } from '../../src/shared/api'
+import type { CustomerStats, DashboardStats, Reminder } from '../../src/shared/types'
 import type {
   AppSettings,
   CustomerCreditCurrency,
@@ -45,7 +46,7 @@ const api: IKanApi = {
     remove: (id: number) => call<void>('customers:delete', id),
     setActive: (id: number, active: 0 | 1) => call<any>('customers:setActive', id, active),
     sameName: (company: string, selfId?: number) => call<any[]>('customers:sameName', company, selfId),
-    stats: (id: number) => call<any>('customers:stats', id),
+    stats: (id: number) => call<CustomerStats>('customers:stats', id),
     orders: (id: number) => call<any[]>('customers:orders', id),
     stylePriceHistory: (filter?: { customerId?: number; styleNo?: string }) =>
       call<any[]>('customers:stylePriceHistory', filter)
@@ -168,8 +169,8 @@ const api: IKanApi = {
     amounts: (orderId: number) => call<PackingAmount[]>('pl:amounts', orderId)
   },
   dashboard: {
-    stats: () => call<any>('dashboard:stats'),
-    reminders: () => call<any[]>('dashboard:reminders')
+    stats: () => call<DashboardStats>('dashboard:stats'),
+    reminders: () => call<Reminder[]>('dashboard:reminders')
   },
   report: {
     monthly: () => call<MonthlyReportRow[]>('report:monthly'),

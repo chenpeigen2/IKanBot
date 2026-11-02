@@ -33,9 +33,20 @@ export function isLocalOnlyChannel(channel: string): boolean {
 
 /** 注册过的通道名：设置页要报「已搬到后端几个」，不能靠手抄的数字 */
 const registered = new Set<string>()
+/**
+ * 每条通道 handler 声明的形参个数。远端模式下参数是按位置映射成 body 字段的，
+ * 路由表登记的参数名比形参少，多出来的那几个就被丢掉——本机拦住的话术
+ * 到了后端就成了「没填」，同一句话术两张嘴（R56）。
+ */
+const handlerArityOf = new Map<string, number>()
 
 export function registeredChannels(): string[] {
   return [...registered]
+}
+
+/** handler 声明了几个形参（没注册过给 0） */
+export function handlerArity(channel: string): number {
+  return handlerArityOf.get(channel) ?? 0
 }
 
 /**
@@ -66,6 +77,7 @@ function isRestoreAllowed(channel: string): boolean {
  */
 export function handle<T>(channel: string, fn: (...args: any[]) => T | Promise<T>): void {
   registered.add(channel)
+  handlerArityOf.set(channel, fn.length)
   ipcMain.handle(channel, async (_e, ...args) => {
     try {
       if (isRestoring() && !isRestoreAllowed(channel)) {

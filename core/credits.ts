@@ -113,7 +113,7 @@ export function creditsCore(db: Db) {
       const orderNo = String(row.converted_order_no ?? '').trim()
       throw bizError(
         `打样单 ${String(row.sample_no ?? '')} 的样品费已经抵进转出的订单${orderNo ? ` ${orderNo}` : ''}，不能再用客户预收抵一次。` +
-          `如果转出的订单退回了草稿/失效，请先把订单恢复成正式单，抵扣会自动生效。`
+          `如果转出的订单退回了草稿/失效，请把订单状态改成「待确认」或「客户已确认」，抵扣会自动生效。`
       )
     }
     const hit = (await moneyOf().sampleOpenRows(customerId)).find((r) => r.sampleId === id)
@@ -459,7 +459,10 @@ export function creditsCore(db: Db) {
     if (!gaps.length) return
     const detail = gaps.map((c) => `${c.currency} ${c.available.toFixed(2)}`).join('、')
     throw bizError(
-      `这笔改动会让客户预收出现缺口（${detail}）：这些钱已经抵到了别的单上或退还给了客户。请先在客户页撤销对应的预收抵扣/退款，再改这笔钱。`
+      `这笔改动会让客户预收出现缺口（${detail}）：这些钱已经抵到别的单上，或者已经退给客户了。\n` +
+        `抵在别处的：请到客户页的「客户预收」里撤销那一笔抵扣，再改这笔钱。\n` +
+        `已经退给客户的：那是真金白银出了门，不能靠撤销退款把这个缺口补上——除非当初那笔退款根本没发生（水单录错）。\n` +
+        `对不上就只能把这笔改动改小，或者按实际到账的金额重新登记。`
     )
   }
 

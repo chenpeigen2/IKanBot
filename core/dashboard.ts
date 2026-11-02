@@ -436,6 +436,21 @@ export function dashboardCore(db: Db) {
             },
             'order-etd'
           )
+        } else if (diff <= s.remindShipDays && !orderGone && anyBatchGone && undated.length > 0) {
+          // 上面那条一遇到「已走一批」就静音，是因为它的话术（还没有批次标出运）会成为假话；
+          // 但剩下没填船期的批次同样没有批次卡替它喊，整张单从此在提醒里失声——
+          // 出过一批的单反而再没人催船期，后半截货全靠人记得（R56）。
+          add(
+            {
+              orderId,
+              orderNo: String(r.order_no),
+              customerName: String(r.customer_name),
+              kind: 'ship',
+              message: `开船日 ${etdRaw} ${dueWords(diff)}，已有批次出运，另有 ${undated.length} 个批次没填 ETD，这批货没人盯船期`,
+              days: diff
+            },
+            'order-etd-undated'
+          )
         }
       }
 
@@ -533,7 +548,9 @@ export function dashboardCore(db: Db) {
       const shipRaw = String(r.expected_ship_date ?? '').trim()
       if (shipRaw && open.length === 0) {
         const diff = daysTo(shipRaw)
-        const gone = ['packed', 'shipped', 'cleared', 'delivered', 'partial_shipped'].includes(String(r.ship_status))
+        // 「已备货」只是货码进了仓库，船还没订：预计出货日过了照样要催。
+        // 只有真的走了一批（部分出运）或整单出运/清关/签收，这张卡才该闭嘴（R56）。
+        const gone = ['shipped', 'cleared', 'delivered', 'partial_shipped'].includes(String(r.ship_status))
         if (diff === null) {
           add(
             {
@@ -724,7 +741,10 @@ export function dashboardCore(db: Db) {
         )
         continue
       }
-      if (diff > s.remindShipDays) continue
+      // 只有上限没有下限，等于让一张死纸永久霸着逾期队列：有效期过了两年的草稿单，
+      // 每天第一条提醒都是它，真正要催的船期被挤到第二屏。过了 N 天就不再喊，
+      // 该作废还是失效由人决定，不靠提醒替他们永远挂着（R56，N 复用「没回音」那档天数）。
+      if (diff > s.remindShipDays || diff < -s.remindConfirmDays) continue
       add(
         {
           orderId: Number(r.id),
@@ -780,14 +800,16 @@ export function dashboardCore(db: Db) {
         )
       }
       const diff = daysTo(q.valid_until)
-      if (diff !== null && diff <= s.remindShipDays) {
+      // 同 PI 有效期那条：过期两年的报价不必每天霸第一条，且语序要能倒着读通
+      // （以前负数拼出来是「已逾期 500 天到期」，半句人话没有）（R56）。
+      if (diff !== null && diff <= s.remindShipDays && diff >= -s.remindConfirmDays) {
         add(
           {
             orderId: 0,
             orderNo: qNo,
             customerName: who,
             kind: 'quote',
-            message: `报价 ${qNo} ${dueWords(diff)}到期（${String(q.valid_until)}），到期要重新盘汇率`,
+            message: `报价 ${qNo} 有效期 ${String(q.valid_until)} ${dueWords(diff)}，还没转订单——过了这天价格要重新盘汇率`,
             days: diff
           },
           'quote-valid'
@@ -832,7 +854,7 @@ export function dashboardCore(db: Db) {
       }
       if (m.feeStatus === 'paid' || m.feeStatus === 'waived') continue
       // 已生效的抵扣不再催（钱进了订单）；挂起中的抵扣钱还是该收，但不能按打样费登记
-      // （服务层会拦），提醒里直接说清下一步是把转出订单恢复成正式单
+      // （服务层会拦），提醒里直接说清下一步是把那张单改回计费状态
       if (m.offsetSettled > 0.001) continue
       const offsetSuspended = m.feeStatus === 'offset' && !!m.convertedStatus && !m.offsetLive
       // 催的是还欠的那部分：已收一半只催一半，预收抵掉的部分也不算欠（与 sampleOpenRows 同一算式）
@@ -853,7 +875,7 @@ export function dashboardCore(db: Db) {
             (m.baseRate > 0
               ? `（折合 ${(owed * m.baseRate).toFixed(2)}），${shippedAt ? `样品寄出 ${days} 天` : `挂单 ${days} 天还没寄出`}`
               : '，且汇率未填（工作台待收里少算了这单，请补汇率）') +
-            (offsetSuspended ? '；转出订单已退回草稿/失效，抵扣暂不生效，请先把订单恢复成正式单（会自动再抵）' : ''),
+            (offsetSuspended ? '；转出订单已退回草稿/失效，抵扣暂不生效，请把订单状态改成「待确认」或「客户已确认」（会自动再抵）' : ''),
           days
         },
         'fee'
@@ -958,8 +980,10 @@ export function dashboardCore(db: Db) {
       const main = mainDebtOf.get(key)
       if (!main) continue
       main.message += `；${eta.clause}`
-      // 到港都过了的，这张卡该待在逾期区，不能被「出运 30 天」这种正数天数挤到后面去
-      main.days = Math.min(main.days, eta.days)
+      // 到港都过了的，这张卡该待在逾期区，不能被「出运 30 天」这种正数天数挤到后面去。
+      // 只挪排序、不动 days：右边那个数和这句欠款话术是同一笔账，改成 ETA 的负数后
+      // 就成了「尾款还有 12 天」旁边写「逾期 45 天」，连顶部的逾期计数跟着一起错（R56）。
+      main.rankDays = Math.min(main.rankDays ?? main.days, eta.days)
     }
     for (let i = out.length - 1; i >= 0; i--) {
       const r = out[i]
@@ -970,7 +994,10 @@ export function dashboardCore(db: Db) {
 
     // 逾期最前（越久越靠前）→ 按还剩几天升序 → 「待修」垫底：
     // 待修不会到期，错过船期是真金白银；界面右上角另给「待修 N」计数，不会被埋掉
-    const rank = (r: Reminder): number => (r.days < 0 ? r.days : r.kind === 'data' ? 100000 : 1000 + r.days)
+    const rank = (r: Reminder): number => {
+      const d = r.rankDays ?? r.days
+      return d < 0 ? d : r.kind === 'data' ? 100000 : 1000 + d
+    }
     out.sort((a, b) => rank(a) - rank(b) || a.kind.localeCompare(b.kind) || a.orderNo.localeCompare(b.orderNo))
     return out
   }

@@ -6,11 +6,14 @@ import type {
   AppSettings,
   CustomerCreditCurrency,
   CustomerReceivable,
+  CustomerStats,
+  DashboardStats,
   ExportKind,
   MonthlyReportRow,
   OrderExportFilter,
   OrderListPage,
-  PackingAmount
+  PackingAmount,
+  Reminder
 } from './types'
 
 export interface IKanApi {
@@ -38,7 +41,7 @@ export interface IKanApi {
     setActive(id: number, active: 0 | 1): Promise<any>
     /** 同名客户（重名提醒，不是硬拦） */
     sameName(company: string, selfId?: number): Promise<any[]>
-    stats(id: number): Promise<any>
+    stats(id: number): Promise<CustomerStats>
     orders(id: number): Promise<any[]>
     /** 款号×颜色的历史成交价：报价前先看客户上次付了多少 */
     stylePriceHistory(filter?: { customerId?: number; styleNo?: string }): Promise<any[]>
@@ -177,8 +180,8 @@ export interface IKanApi {
     amounts(orderId: number): Promise<PackingAmount[]>
   }
   dashboard: {
-    stats(): Promise<any>
-    reminders(): Promise<any[]>
+    stats(): Promise<DashboardStats>
+    reminders(): Promise<Reminder[]>
   }
   report: {
     monthly(): Promise<MonthlyReportRow[]>

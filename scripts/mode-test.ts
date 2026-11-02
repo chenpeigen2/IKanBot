@@ -34,7 +34,7 @@ import {
   isRemoteChannel,
   REMOTE_ROUTES
 } from '../electron/remote/client'
-import { handle, isLocalOnlyChannel, registeredChannels } from '../electron/ipc/handle'
+import { handle, handlerArity, isLocalOnlyChannel, registeredChannels } from '../electron/ipc/handle'
 
 const root = mkdtempSync(join(tmpdir(), 'ikan-mode-'))
 process.env['IKAN_DATA_DIR'] = join(root, 'data')
@@ -189,6 +189,13 @@ async function main(): Promise<void> {
 
     await remoteCall('customers:list', [])
     check('没传的参数不进请求体', JSON.stringify(captured) === '{}')
+
+    // 本机比路由表多传一个参数：以前多出来的那个被静默丢掉，
+    // 界面少报一个原因/备注，后端收到的就是「没填」——本机拦得住的，远端放行（R56）
+    const tooMany = await errorOf(remoteCall('customers:get', [7, '本机多出来的那一个']))
+    check('多传的参数当场报错，不再当哑巴丢掉', tooMany.includes('后端路由只登记了 1 个'), tooMany)
+    check('报错说清去哪改（补登记或切回本机）', tooMany.includes('路由表补登记') && tooMany.includes('切回「本机」'), tooMany)
+    check('拦下时一个请求都没发出去', JSON.stringify(captured) === '{}')
 
     variant = 'err'
     check('后端的错误体还原成中文原句', (await errorOf(remoteCall('customers:get', [7]))) === '客户不存在')
@@ -555,6 +562,14 @@ async function main(): Promise<void> {
     // 这里先把它揪出来——那种通道在远端模式下会当场报错，不会悄悄读本机。
     const stranded = registeredChannels().filter((c) => !isLocalOnlyChannel(c) && !isRemoteChannel(c))
     check('业务通道全都有后端落点（没搬的只剩本机基建）', stranded.length === 0, stranded.join('、'))
+
+    // 光「有没有登记」还不够：路由表记的参数名比本机 handler 的形参少，
+    // 远端模式下多出来的那几个会被静默丢掉——本机拦得住的话术，到了后端就成了「没填」。
+    // （fn.length 含 ipcMain 的 event 形参，所以要减 1；带默认值的形参不计入 length，那方向只会漏报不会误报）
+    const thinRoutes = Object.entries(REMOTE_ROUTES)
+      .filter(([ch, spec]) => handlerArity(ch) > 0 && handlerArity(ch) - 1 > spec.args.length)
+      .map(([ch, spec]) => `${ch}：handler ${handlerArity(ch) - 1} 个参数，路由只登记 ${spec.args.length} 个（${spec.args.join('、')}）`)
+    check('每条后端路由登记的参数不少于本机 handler', thinRoutes.length === 0, thinRoutes.join('；'))
 
     // 安全网本身也要验一遍：真出现没登记的通道，必须当场报错并说清去哪切回
     handle('zz:unmigrated-probe', () => 'local')

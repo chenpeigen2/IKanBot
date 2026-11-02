@@ -5,6 +5,7 @@
 import { openDb, closeDb, getDb, coreDb, dataDir, imagesDir, docsDir, backupsDir } from '../electron/db'
 import type { Db } from '../core/db'
 import { quotationsCore } from '../core/quotations'
+import { ordersCore } from '../core/orders'
 import { settingsCore, BACKUP_STATE_KEY } from '../core/settings'
 import { filesCore } from '../core/files'
 import { LATEST_DB_VERSION } from '../electron/db/schema'
@@ -3186,8 +3187,14 @@ check(
   new Set(remShipped.map((r) => r.key)).size === remShipped.length,
   `${remShipped.length} 条 / ${new Set(remShipped.map((r) => r.key)).size} 个 key`
 )
-const overdueN = remShipped.filter((r) => r.days < 0).length
-check('逾期的排在最前面，越久越靠前', remShipped.slice(0, overdueN).every((r) => r.days < 0), JSON.stringify(remShipped.slice(0, 3).map((r) => r.days)))
+// 排序看 rankDays（被船期那句压进逾期区的欠款卡），卡面天数与顶部逾期计数仍看 days
+const rankOf = (r: typeof remShipped[number]): number => r.rankDays ?? r.days
+const overdueN = remShipped.filter((r) => rankOf(r) < 0).length
+check(
+  '逾期的排在最前面，越久越靠前',
+  remShipped.slice(0, overdueN).every((r) => rankOf(r) < 0),
+  JSON.stringify(remShipped.slice(0, 3).map((r) => [r.days, r.rankDays]))
+)
 const remOrdered = await dashboard.reminders()
 const firstData = remOrdered.findIndex((r) => r.kind === 'data')
 const lastUpcoming = remOrdered.reduce((acc, r, idx) => (r.kind !== 'data' && r.days > 0 ? idx : acc), -1)
@@ -3242,8 +3249,16 @@ check(
 )
 check(
   '报价有效期已过还没转单 → 催重新盘汇率',
-  remQuote.some((r) => r.kind === 'quote' && r.orderNo === qR6.qNo && r.message.includes('到期')),
-  ''
+  remQuote.some((r) => r.kind === 'quote' && r.orderNo === qR6.qNo && r.message.includes('重新盘汇率')),
+  JSON.stringify(remQuote.filter((r) => r.kind === 'quote').map((r) => r.message))
+)
+// R56：日期在前、天数在后，倒着读也是一句人话（以前负数拼成「已逾期 500 天到期」）
+check(
+  '到期那句的语序：有效期 + 日期 + 已逾期 N 天',
+  remQuote.some(
+    (r) => r.kind === 'quote' && r.orderNo === qR6.qNo && r.message.includes(`有效期 ${dAgo(2)} 已逾期 2 天`) && !r.message.includes('到期（')
+  ),
+  JSON.stringify(remQuote.filter((r) => r.kind === 'quote' && r.orderNo === qR6.qNo).map((r) => r.message))
 )
 // 编辑报价只动 updated_at，等待天数必须还按 sent_at 算
 await quotations.saveQuotation({ ...qR6, note: '改了一下备注' })
@@ -7847,7 +7862,7 @@ check(
       (r) =>
         r.kind === 'sample' &&
         r.sampleId === r30SuspSample.id &&
-        r.message.includes('请先把订单恢复成正式单')
+        r.message.includes('请把订单状态改成「待确认」或「客户已确认」')
     ),
   JSON.stringify((await dashboard.reminders()).filter((r) => r.sampleId === r30SuspSample.id).map((r) => r.message))
 )
@@ -8134,17 +8149,16 @@ check('天数取最久那批（催款先后排得出来）', r33BalRem[0]?.days,
 
 section('R33 核销准入 = 计费口径：一个集合，不各自手写三个状态')
 
+// 拦人的话要说得出下一步：作废是留档终态，不能劝人去改状态（R56）
+const r33GateWords = { draft: '不能做核销', expired: '不能做核销', void: '按新单重开' } as const
 for (const st of ['draft', 'expired', 'void'] as const) {
   const c = await customers.saveCustomer({ company: `R33-SETTLE-${st}` })
   const o = await orders.createOrder({ customerId: c.id, currency: 'USD', exchangeRate: 7.2, paymentStatus: 'confirmed' })
   await orders.addOrderItem(o.id, { styleNo: 'R33-S', quantity: 1, unitPrice: 100 })
   // 作废/失效的正门另有凭据核对，这里只验「非计费状态进不了核销」这道门，直接落库模拟历史脏数据
   getDb().run('UPDATE orders SET payment_status = ? WHERE id = ?', [st, o.id])
-  check(
-    `${st} 单不能核销或坏账`,
-    (await r8err(async () => await orders.addSettlement(o.id, { kind: 'shortage', amount: 10, reason: 'R33' }))).includes('不能做核销'),
-    (await r8err(async () => await orders.addSettlement(o.id, { kind: 'shortage', amount: 10, reason: 'R33' })))
-  )
+  const r33GateErr = await r8err(async () => await orders.addSettlement(o.id, { kind: 'shortage', amount: 10, reason: 'R33' }))
+  check(`${st} 单不能核销或坏账`, r33GateErr.includes(r33GateWords[st]), r33GateErr)
 }
 
 section('R33 上单条款只认计费状态：草稿/失效/作废不能作为报价默认')
@@ -10939,7 +10953,14 @@ const r47Debt = r47DebtCards[0]?.message ?? ''
 check('留下的是说得最全的那条：货已出运、一分未收', r47Debt.includes('一分未收') && r47Debt.includes('赊销'), r47Debt)
 check('整单欠款还是那句话里的数', r47Debt.includes('100.00'), r47Debt)
 check('船期那句折进话尾，批次号没丢', r47Debt.includes('预计到港已过期') && r47Debt.includes(r47RemPl[0].plNo), r47Debt)
-check('到港已过期，这张卡排在逾期区', (r47DebtCards[0]?.days ?? 0) < 0, String(r47DebtCards[0]?.days))
+check('到港已过期，这张卡仍排在逾期区', (r47DebtCards[0]?.rankDays ?? 0) < 0, String(r47DebtCards[0]?.rankDays))
+// R56：排序沉底只动 rankDays，days 仍是这张欠款卡自己的口径
+// 以前把 days 一起改成 ETA 的负数，卡面写成「逾期 10 天」而话里说的是另一笔账，顶部逾期计数跟着错
+check(
+  '天数仍按欠款自己算（货已出运那天数），不被船期改写',
+  (r47DebtCards[0]?.days ?? -1) >= 0 && r47Debt.includes('货已出运'),
+  `days=${r47DebtCards[0]?.days}｜${r47Debt}`
+)
 const r47RemOther = (await dashboard.reminders()).find((x) => x.kind === 'payment' && x.orderId !== r47RemOrder.id)
 check('别的单该催定金照催，没被一起压掉', !!r47RemOther, '全场一条催定金都没有')
 await saveSettings(r47Set0)
@@ -11889,6 +11910,271 @@ const r55Rem = (await dashboard.reminders()).find((r) => r.orderId === r55Ship.i
 check('今天到期说「就是今天」', (r55Rem?.message ?? '').includes('就是今天'), r55Rem?.message)
 check('不再说「还有 0 天」', !(r55Rem?.message ?? '').includes('还有 0 天'), r55Rem?.message)
 eq('天数仍是 0（逾期计数与排序不受话术影响）', r55Rem?.days, 0)
+
+/* ---------------- R56：判定与落笔之间不许有人插队 ---------------- */
+section('R56 撤销核销双击：事务里再问一遍「撤过没有」，负数只落一条')
+const r56Cust = await customers.saveCustomer({ company: 'R56-REV-CO' })
+const r56Order = await orders.createOrder({
+  customerId: r56Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R56-REV'
+})
+await orders.addOrderItem(r56Order.id, { styleNo: 'R56-R1', quantity: 1, unitPrice: 100 })
+await orders.addPayment(r56Order.id, { paidAt: localDate(), amount: 40, method: 'T/T', bankRef: 'ZZ-R56-REV-IN' })
+await orders.addSettlement(r56Order.id, { kind: 'bad_debt', amount: 60, reason: 'R56 客户失联' })
+const r56BdId = Number(
+  (getDb().get(`SELECT id FROM order_settlements WHERE order_id = ? AND kind = 'bad_debt'`, [
+    r56Order.id
+  ]) as { id: number }).id
+)
+await orders.reverseSettlement(r56Order.id, r56BdId, 'R56 第一下：这笔坏账认错了')
+// 后落地的那一下：进事务前那一眼读到的还是「没撤过」的旧快照——
+// 那一眼和写入之间隔着好几个 await，双击时两下都看见同一份旧账
+let r56Peek = 0
+const r56StalePeek: Db = {
+  ...coreDb,
+  async get(sql, params) {
+    if (/reverses_id/.test(sql) && r56Peek++ === 0) return undefined
+    return coreDb.get(sql, params)
+  }
+}
+const r56DoubleErr = await r8err(async () =>
+  await ordersCore(r56StalePeek).reverseSettlement(r56Order.id, r56BdId, 'R56 第二下：同一笔再撤一次')
+)
+check('写入这一刻的复查把第二下挡在门外', r56DoubleErr.includes('已经撤销过了'), r56DoubleErr)
+const r56SettleRows = getDb().all('SELECT amount FROM order_settlements WHERE order_id = ?', [
+  r56Order.id
+]) as Array<{ amount: number }>
+eq('账上仍只有「一笔坏账 + 一笔撤销」', r56SettleRows.length, 2)
+eq('负数撤销只有一条（坏账抵扣没翻倍）', r56SettleRows.filter((r) => Number(r.amount) < 0).length, 1)
+eq('拦下后待收停在撤销后的 60', (await orders.getOrder(r56Order.id))!.remaining, 60)
+
+section('R56 作废单的删除闸门认「钱到账那天」：补录的旧账不借登账时间翻身')
+const r56VoidCust = await customers.saveCustomer({ company: 'R56-VOID-CO' })
+const r56Void = await orders.createOrder({
+  customerId: r56VoidCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R56-VOID'
+})
+await orders.addOrderItem(r56Void.id, { styleNo: 'R56-V1', quantity: 1, unitPrice: 100 })
+await orders.voidOrder(r56Void.id, 'R56 客户取消整单')
+// 把作废留痕拨回五天前：今天才补登的账，created_at 落在作废之后、paid_at 落在作废之前
+getDb().run(`UPDATE order_events SET at = ? WHERE order_id = ? AND kind = 'void'`, [dAgoIso(5), r56Void.id])
+await orders.addPayment(r56Void.id, {
+  paidAt: dAgo(10),
+  amount: 30,
+  method: 'T/T',
+  bankRef: 'ZZ-R56-LATE',
+  note: 'R56 作废前到账、今天才补登'
+})
+const r56LateId = Number((getDb().get(`SELECT id FROM payments WHERE bank_ref = 'ZZ-R56-LATE'`) as { id: number }).id)
+const r56LateErr = await r8err(async () => await orders.deletePayment(r56Void.id, r56LateId, 'R56 想删这笔补录'))
+check('到账日在作废之前：客户手里的凭据不许删', r56LateErr.includes('作废之前到账的收款是留档凭据'), r56LateErr)
+eq('拦下后流水还在', (await orders.getOrder(r56Void.id))!.payments.length, 1)
+await orders.addPayment(r56Void.id, {
+  paidAt: localDate(),
+  amount: 20,
+  method: 'T/T',
+  bankRef: 'ZZ-R56-AFTER',
+  note: 'R56 作废之后到账的回款'
+})
+const r56AfterId = Number(
+  (getDb().get(`SELECT id FROM payments WHERE bank_ref = 'ZZ-R56-AFTER'`) as { id: number }).id
+)
+await orders.deletePayment(r56Void.id, r56AfterId, 'R56 金额录错，作废后的回款要更正')
+eq('作废之后到账的回款仍允许更正', (await orders.getOrder(r56Void.id))!.payments.length, 1)
+
+section('R56 已走一批、还剩没填船期的批次：整单开船日不再跟着一起静音')
+const r56HalfCust = await customers.saveCustomer({ company: 'R56-HALF-CO' })
+const r56Half = await orders.createOrder({
+  customerId: r56HalfCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R56-HALF',
+  etdDate: localDate()
+})
+await orders.addOrderItem(r56Half.id, { styleNo: 'R56-H1', quantity: 20, unitPrice: 5 })
+const r56HalfPls = await packing.createPackingList({
+  orderId: r56Half.id,
+  lines: [{ styleNo: 'R56-H1', quantity: 10 }]
+})
+await packing.createPackingList({ orderId: r56Half.id, lines: [{ styleNo: 'R56-H1', quantity: 10 }] })
+await packing.updatePackingListInfo(r56Half.id, r56HalfPls[0].id, { shipStatus: 'shipped', atdDate: localDate() })
+const r56HalfShip = (await orders.getOrder(r56Half.id))!.shipStatus
+eq('一批出运、一批没动：整单是部分出运', r56HalfShip, 'partial_shipped')
+const r56HalfRems = (await dashboard.reminders()).filter((x) => x.orderId === r56Half.id && x.kind === 'ship')
+check(
+  '后半截没填船期的货有人喊',
+  r56HalfRems.some((x) => x.message.includes('1 个批次没填 ETD')),
+  JSON.stringify(r56HalfRems.map((x) => x.message))
+)
+check(
+  '不再说「还没有批次标出运」这句假话',
+  !r56HalfRems.some((x) => x.message.includes('还没有批次标出运')),
+  JSON.stringify(r56HalfRems.map((x) => x.message))
+)
+
+section('R56 「已备货」不是「已上船」：预计出货日过了照样催')
+const r56PackCust = await customers.saveCustomer({ company: 'R56-PACK-CO' })
+const r56Pack = await orders.createOrder({
+  customerId: r56PackCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R56-PACK',
+  expectedShipDate: localDate()
+})
+await orders.addOrderItem(r56Pack.id, { styleNo: 'R56-P1', quantity: 10, unitPrice: 6 })
+await orders.setShipStatus(r56Pack.id, 'packed', 'R56 货已码进仓库')
+const r56PackRem = (await dashboard.reminders()).find((x) => x.orderId === r56Pack.id && x.message.includes('预计出货日'))
+check('备好货的单，预计出货日到期仍然喊', !!r56PackRem, JSON.stringify(r56PackRem))
+check('说的是「就是今天」', (r56PackRem?.message ?? '').includes('就是今天'), String(r56PackRem?.message))
+
+section('R56 「已结清」那一眼与 UPDATE 同一口气（判定必须发生在事务里）')
+const r56TxLog: { insideTx: boolean } = { insideTx: false }
+let r56TxDepth = 0
+const r56TxDb: Db = {
+  ...coreDb,
+  async get(sql, params) {
+    if (/SELECT charges, deposit_ratio, currency FROM orders/.test(sql) && r56TxDepth > 0) r56TxLog.insideTx = true
+    return coreDb.get(sql, params)
+  },
+  async transact<T>(fn: () => Promise<T>): Promise<T> {
+    r56TxDepth += 1
+    try {
+      return await coreDb.transact(fn)
+    } finally {
+      r56TxDepth -= 1
+    }
+  }
+}
+const r56SettleCust = await customers.saveCustomer({ company: 'R56-SETTLE-CO' })
+const r56Settle = await orders.createOrder({
+  customerId: r56SettleCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R56-SETTLE'
+})
+await orders.addOrderItem(r56Settle.id, { styleNo: 'R56-ST1', quantity: 1, unitPrice: 100 })
+const r56SettleErr = await r8err(async () =>
+  await ordersCore(r56TxDb).setPaymentStatus(r56Settle.id, 'settled', 'R56 想直接勾结清')
+)
+check('结清的账面复核发生在写入这一刻（不是事务外先看一眼）', r56TxLog.insideTx, JSON.stringify(r56TxLog))
+check('拦下的话说清还欠多少', r56SettleErr.includes('还欠 100.00'), r56SettleErr)
+eq('还欠 100 的单没被勾成已结清', (await orders.getOrder(r56Settle.id))!.paymentStatus, 'confirmed')
+
+section('R56 纸面与钱的门在写入这一刻再过一遍：核销落进来就不再改汇率')
+const r56LockCust = await customers.saveCustomer({ company: 'R56-LOCK-CO' })
+const r56Lock = await orders.createOrder({
+  customerId: r56LockCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R56-LOCK'
+})
+await orders.addOrderItem(r56Lock.id, { styleNo: 'R56-L1', quantity: 1, unitPrice: 100 })
+await orders.addPayment(r56Lock.id, { paidAt: localDate(), amount: 90, method: 'T/T', bankRef: 'ZZ-R56-LOCK' })
+await orders.addSettlement(r56Lock.id, { kind: 'shortage', amount: 10, reason: 'R56 银行扣费' })
+// 这一次编辑在事务外读到「还没有核销」的旧快照（另一笔核销正好在这中间落库）
+let r56LockPeek = 0
+const r56StaleLocks: Db = {
+  ...coreDb,
+  async get(sql, params) {
+    if (/COUNT\(\*\) AS n FROM order_settlements/.test(sql) && r56LockPeek++ === 0) return { n: 0 }
+    return coreDb.get(sql, params)
+  }
+}
+const r56RateErr = await r8err(async () =>
+  await ordersCore(r56StaleLocks).updateOrder(r56Lock.id, { customerId: r56LockCust.id, exchangeRate: 7.5 })
+)
+check('事务里的第二眼拦下改汇率', r56RateErr.includes('汇率不能再改'), r56RateErr)
+eq(
+  '汇率原封不动',
+  (getDb().get('SELECT exchange_rate FROM orders WHERE id = ?', [r56Lock.id]) as { exchange_rate: number }).exchange_rate,
+  7
+)
+
+section('R56 过期两年的死纸不再霸着逾期队列：PI 与报价都补了下限')
+const r56DeadCust = await customers.saveCustomer({ company: 'R56-DEAD-CO' })
+const r56DeadPi = await orders.createOrder({
+  customerId: r56DeadCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'sent',
+  piNo: 'PI-R56-DEAD',
+  validUntil: dAgo(2)
+})
+const r56DeadQ = await quotations.saveQuotation({
+  customerId: r56DeadCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  status: 'sent',
+  validUntil: dAgo(2),
+  items: [{ styleNo: 'R56-D1', quantity: 1, unitPrice: 10 }]
+})
+check(
+  '刚过期两天：PI 与报价都还在队列里',
+  (await dashboard.reminders()).some((x) => x.orderId === r56DeadPi.id && x.kind === 'expiry') &&
+    (await dashboard.reminders()).some((x) => x.kind === 'quote' && x.orderNo === r56DeadQ.qNo && x.message.includes('有效期')),
+  JSON.stringify((await dashboard.reminders()).filter((x) => x.orderId === r56DeadPi.id || x.orderNo === r56DeadQ.qNo).map((x) => x.message))
+)
+getDb().run('UPDATE orders SET valid_until = ? WHERE id = ?', [dAgo(200), r56DeadPi.id])
+getDb().run('UPDATE quotations SET valid_until = ? WHERE id = ?', [dAgo(200), r56DeadQ.id])
+// 报价死纸退出队列，不代表这单生意不用追了：把发出日推回 20 天前，让「没回音」那条接手
+getDb().run('UPDATE quotations SET sent_at = ? WHERE id = ?', [dAgoIso(20), r56DeadQ.id])
+check(
+  '过期 200 天的草稿 PI 退出到期队列（该作废还是失效由人决定）',
+  !(await dashboard.reminders()).some((x) => x.orderId === r56DeadPi.id && x.kind === 'expiry'),
+  JSON.stringify((await dashboard.reminders()).filter((x) => x.orderId === r56DeadPi.id).map((x) => x.kind))
+)
+const r56DeadQRems = (await dashboard.reminders()).filter((x) => x.kind === 'quote' && x.orderNo === r56DeadQ.qNo)
+check('过期 200 天的报价不再喊有效期', !r56DeadQRems.some((x) => x.message.includes('有效期')), JSON.stringify(r56DeadQRems.map((x) => x.message)))
+check('但该追的生意还在追：没回音那条仍然挂着', r56DeadQRems.some((x) => x.message.includes('没回音')), JSON.stringify(r56DeadQRems.map((x) => x.message)))
+
+section('R56 拦人的话要说得出下拉里真有的选项（不再有「正式单」这个标签）')
+const r56WordCust = await customers.saveCustomer({ company: 'R56-WORD-CO' })
+const r56Draft = await orders.createOrder({ customerId: r56WordCust.id, currency: 'USD', exchangeRate: 7, piNo: 'PI-R56-DRAFT' })
+await orders.addOrderItem(r56Draft.id, { styleNo: 'R56-W1', quantity: 1, unitPrice: 100 })
+const r56DraftErr = await r8err(async () => await orders.addSettlement(r56Draft.id, { kind: 'shortage', amount: 10, reason: 'R56 抹零' }))
+check('草稿单做核销：指路到「待确认 / 客户已确认」', r56DraftErr.includes('「待确认」或「客户已确认」'), r56DraftErr)
+check('不再说界面上根本没有的「正式单」', !r56DraftErr.includes('正式单'), r56DraftErr)
+const r56VoidSettleErr = await r8err(async () => await orders.addSettlement(r56Void.id, { kind: 'bad_debt', amount: 10, reason: 'R56 作废单又想核销' }))
+check('作废单做核销：说清是留档终态、请按新单重开', r56VoidSettleErr.includes('按新单重开'), r56VoidSettleErr)
+check('作废那条不再劝人改状态', !r56VoidSettleErr.includes('「待确认」'), r56VoidSettleErr)
+
+section('R56 预收缺口要分两种：抵在别处的能撤，退出去的钱撤不回')
+const r56GapCust = await customers.saveCustomer({ company: 'R56-GAP-CO' })
+const r56GapOrder = await orders.createOrder({
+  customerId: r56GapCust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  piNo: 'PI-R56-GAP'
+})
+await orders.addOrderItem(r56GapOrder.id, { styleNo: 'R56-G1', quantity: 1, unitPrice: 100 })
+await orders.addPayment(r56GapOrder.id, { paidAt: localDate(), amount: 140, method: 'T/T', bankRef: 'ZZ-R56-GAP-IN' })
+await credits.refundCredit({
+  customerId: r56GapCust.id,
+  currency: 'USD',
+  amount: 40,
+  refundAt: localDate(),
+  bankRef: 'ZZ-R56-GAP-OUT',
+  note: 'R56 多付的 40 已退给客户'
+})
+const r56GapPayId = Number(
+  (getDb().get(`SELECT id FROM payments WHERE bank_ref = 'ZZ-R56-GAP-IN'`) as { id: number }).id
+)
+const r56GapErr = await r8err(async () => await orders.deletePayment(r56GapOrder.id, r56GapPayId, 'R56 水单录错，要删掉重登'))
+check('缺口话术点名「已经退给客户的」', r56GapErr.includes('已经退给客户的'), r56GapErr)
+check('说清退款不能拿来补缺口', r56GapErr.includes('不能靠撤销退款'), r56GapErr)
+check('抵在别处的那条出路也仍然写着', r56GapErr.includes('撤销那一笔抵扣'), r56GapErr)
+eq('拦下后那笔 140 的流水还在', (await orders.getOrder(r56GapOrder.id))!.payments.length, 1)
 
 /* ---------------- 汇总 ---------------- */
 

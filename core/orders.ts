@@ -19,7 +19,7 @@ import { samplesCore } from './samples'
 import { baseRateOf, computeOrderMoney, costInOrderCurrency, depositDueOf, describeChargeChange, moneyCore, notInStatuses, parseCharges } from './money'
 import { mapCustomer, mapEvent, mapOrder, mapOrderItem, mapOrderPhoto, mapPackingList, mapPackingListLine, mapPayment, mapSettlement, mapSkuSummary } from '../electron/db/mappers'
 import { likeAny } from '../electron/services/search'
-import { addDays, daysBetween, isLocalDate, localDate, localDayAfterUtc, localDayStartUtc } from '../src/shared/date'
+import { addDays, daysBetween, isLocalDate, localDate, localDateOf, localDayAfterUtc, localDayStartUtc } from '../src/shared/date'
 import { billPartyOf, emptyParty, parseParty, patchParty, shipPartyOf, stringifyParty } from '../src/shared/party'
 import { isBillingStatus, NON_BILLING_STATUSES, sampleOffsetFromCharges, sampleOpenFeeOf, shownRemaining } from '../src/shared/billing'
 import { assertDepositRatio, assertDocNo, assertQuantity, assertUnitPrice } from '../src/shared/guards'
@@ -800,67 +800,61 @@ export function ordersCore(db: Db) {
     const newRate = isHomeCurrency ? 1 : Number(input.exchangeRate ?? before.exchange_rate)
     if (!isHomeCurrency && !(newRate > 0)) throw bizError('汇率必须大于 0，清空汇率不能保存')
     const oldRate = Number(before.exchange_rate)
-    const payCount = Number(
-      (await db.get('SELECT COUNT(*) AS n FROM payments WHERE order_id = ?', [id]) as { n?: number } | null)?.n ?? 0
-    )
-    const settleCount = Number(
-      (
-        await db.get('SELECT COUNT(*) AS n FROM order_settlements WHERE order_id = ?', [id]) as
-          | { n?: number }
-          | null
-      )?.n ?? 0
-    )
-    const itemCount = Number(
-      (await db.get('SELECT COUNT(*) AS n FROM order_items WHERE order_id = ?', [id]) as { n?: number } | null)?.n ?? 0
-    )
-    const docCount = Number(
-      (await db.get('SELECT COUNT(*) AS n FROM doc_versions WHERE order_id = ?', [id]) as { n?: number } | null)?.n ?? 0
-    )
-    // PI 号印在已经发出去的单据上，CI 号又是由 PI 号派生的：改了号，重印的纸和客户手里那张对不上
-    if (newPiNo !== oldPiNo && docCount > 0) {
-      throw bizError(
-        `这张单已经有 ${docCount} 份单据存档，PI 号 ${oldPiNo} 印在纸面上、CI 号也由它派生，不能再改。确实要换号，请作废这张单后按新单重开。`
-      )
-    }
-    const plCount = Number(
-      (await db.get('SELECT COUNT(*) AS n FROM packing_lists WHERE order_id = ?', [id]) as { n?: number } | null)?.n ?? 0
-    )
-    // 汇率印在纸面上（PI/CI 都有 Exchange Rate 一行），也参与核销的账：
-    // 这两样一旦落定，改汇率就会和已发出的纸面、已核定的账对不上。
-    // 只登记了收款、还没出单据时不锁——录错汇率要能修正，操作历史里有旧值 → 新值。
-    // 本币单不锁：那个数根本不参与折算，归一到 1 不会改动任何一张纸、任何一笔账。
-    if (!isHomeCurrency && newRate !== oldRate && (docCount > 0 || settleCount > 0)) {
-      const why =
-        docCount > 0
-          ? `${docCount} 份单据存档（纸面上印着 1 ${oldCurrency} = ${oldRate}）`
-          : `${settleCount} 笔核销`
-      throw bizError(
-        `这张单已经有 ${why}，汇率不能再改：改了会和已经发出去的纸面、已经核定的账对不上。确实要按新汇率重算，请作废这张单后按新单重开。`
-      )
-    }
-    if (newCurrency !== oldCurrency) {
-      // 明细单价没有独立币种：已经对外发过（或已出单据/箱单）的单换币种，
-      // 等于把 100 USD 的单价当成 100 EUR 用。草稿还没发出去，允许改错字。
-      const released =
-        String(before.payment_status ?? '') !== 'draft' || docCount > 0 || plCount > 0
-      if (itemCount > 0 && released) {
+    // 纸面与钱的锁：下面几道门问的都是同一件事——这张单对外发过没有、钱进来没有。
+    // 表名写死在联合类型里，避免拼进 SQL。
+    type Locks = { payCount: number; settleCount: number; itemCount: number; docCount: number; plCount: number }
+    const countRows = async (table: 'payments' | 'order_settlements' | 'order_items' | 'doc_versions' | 'packing_lists'): Promise<number> =>
+      Number((await db.get(`SELECT COUNT(*) AS n FROM ${table} WHERE order_id = ?`, [id]) as { n?: number } | null)?.n ?? 0)
+    const readLocks = async (): Promise<Locks> => ({
+      payCount: await countRows('payments'),
+      settleCount: await countRows('order_settlements'),
+      itemCount: await countRows('order_items'),
+      docCount: await countRows('doc_versions'),
+      plCount: await countRows('packing_lists')
+    })
+    const assertPaperLocked = (c: Locks): void => {
+      // PI 号印在已经发出去的单据上，CI 号又是由 PI 号派生的：改了号，重印的纸和客户手里那张对不上
+      if (newPiNo !== oldPiNo && c.docCount > 0) {
         throw bizError(
-          `这张单已经有 ${itemCount} 行明细，而且已经对外发过（不是草稿），不能改币种——单价都是按 ${oldCurrency} 记的，100 ${oldCurrency} 会被当成 100 ${newCurrency}。确实要换币种，请作废这张单后按新单重开。`
+          `这张单已经有 ${c.docCount} 份单据存档，PI 号 ${oldPiNo} 印在纸面上、CI 号也由它派生，不能再改。确实要换号，请作废这张单后按新单重开。`
         )
       }
-      // 收款是按原币登记的凭据：改币种会让历史收款、银行流水和客户对账全部错位
-      if (payCount > 0 || settleCount > 0) {
-        const what = payCount > 0 ? `${payCount} 笔收款` : `${settleCount} 笔核销`
+      // 汇率印在纸面上（PI/CI 都有 Exchange Rate 一行），也参与核销的账：
+      // 这两样一旦落定，改汇率就会和已发出的纸面、已核定的账对不上。
+      // 只登记了收款、还没出单据时不锁——录错汇率要能修正，操作历史里有旧值 → 新值。
+      // 本币单不锁：那个数根本不参与折算，归一到 1 不会改动任何一张纸、任何一笔账。
+      if (!isHomeCurrency && newRate !== oldRate && (c.docCount > 0 || c.settleCount > 0)) {
+        const why =
+          c.docCount > 0
+            ? `${c.docCount} 份单据存档（纸面上印着 1 ${oldCurrency} = ${oldRate}）`
+            : `${c.settleCount} 笔核销`
         throw bizError(
-          `这张单已经登记了 ${what}，不能改币种——历史金额都是按 ${oldCurrency} 记的，改了会和银行流水、核销记录对不上。确实要换币种，请作废这张单后按正确币种重开。`
+          `这张单已经有 ${why}，汇率不能再改：改了会和已经发出去的纸面、已经核定的账对不上。确实要按新汇率重算，请作废这张单后按新单重开。`
         )
       }
-      // 没改汇率就换币种，等于把 USD 的 7.1 套在 EUR 上，报表和毛利全错。
-      // 换成基准币不用问汇率（折算口径固定是 1），只有换成外币才要人重新填。
-      if (!isHomeCurrency && newRate === oldRate) {
-        throw bizError(
-          `币种从 ${oldCurrency} 换成 ${newCurrency}，汇率不能沿用原来的 ${oldRate}；请按 ${newCurrency} 重新填写汇率再保存。`
-        )
+      if (newCurrency !== oldCurrency) {
+        // 明细单价没有独立币种：已经对外发过（或已出单据/箱单）的单换币种，
+        // 等于把 100 USD 的单价当成 100 EUR 用。草稿还没发出去，允许改错字。
+        const released = String(before.payment_status ?? '') !== 'draft' || c.docCount > 0 || c.plCount > 0
+        if (c.itemCount > 0 && released) {
+          throw bizError(
+            `这张单已经有 ${c.itemCount} 行明细，而且已经对外发过（不是草稿），不能改币种——单价都是按 ${oldCurrency} 记的，100 ${oldCurrency} 会被当成 100 ${newCurrency}。确实要换币种，请作废这张单后按新单重开。`
+          )
+        }
+        // 收款是按原币登记的凭据：改币种会让历史收款、银行流水和客户对账全部错位
+        if (c.payCount > 0 || c.settleCount > 0) {
+          const what = c.payCount > 0 ? `${c.payCount} 笔收款` : `${c.settleCount} 笔核销`
+          throw bizError(
+            `这张单已经登记了 ${what}，不能改币种——历史金额都是按 ${oldCurrency} 记的，改了会和银行流水、核销记录对不上。确实要换币种，请作废这张单后按正确币种重开。`
+          )
+        }
+        // 没改汇率就换币种，等于把 USD 的 7.1 套在 EUR 上，报表和毛利全错。
+        // 换成基准币不用问汇率（折算口径固定是 1），只有换成外币才要人重新填。
+        if (!isHomeCurrency && newRate === oldRate) {
+          throw bizError(
+            `币种从 ${oldCurrency} 换成 ${newCurrency}，汇率不能沿用原来的 ${oldRate}；请按 ${newCurrency} 重新填写汇率再保存。`
+          )
+        }
       }
     }
     // 汇率变了就重新记锁定日期（未手动指定时）；本币单不留任何「哪天的汇率」——
@@ -905,21 +899,22 @@ export function ordersCore(db: Db) {
     // 换客户不是改个抬头：收款流水、核销、预收抵扣、转单打样和存档单据都挂在当前客户名下，
     // 换过去会让两边的对账单、银行流水和客户预收整体错位，而客户手里的纸面抬头不会跟着变。
     // 只有「一张干净的空单」才允许换主（R21 的留痕场景）。
-    if (customerChanged) {
+    const assertCustomerSwapAllowed = async (c: Locks): Promise<void> => {
+      if (!customerChanged) return
       const sampleCount = Number(
         (await db.get('SELECT COUNT(*) AS n FROM sample_orders WHERE converted_order_id = ?', [id]) as
           | { n?: number }
           | null)?.n ?? 0
       )
       const credit = await creditsOf().hasActiveCredit('order', id)
-      if (payCount > 0 || settleCount > 0 || credit || sampleCount > 0 || docCount > 0 || plCount > 0) {
+      if (c.payCount > 0 || c.settleCount > 0 || credit || sampleCount > 0 || c.docCount > 0 || c.plCount > 0) {
         const what = [
-          payCount > 0 ? `${payCount} 笔收款流水` : '',
-          settleCount > 0 ? `${settleCount} 笔核销` : '',
+          c.payCount > 0 ? `${c.payCount} 笔收款流水` : '',
+          c.settleCount > 0 ? `${c.settleCount} 笔核销` : '',
           credit ? '客户预收抵扣' : '',
           sampleCount > 0 ? `${sampleCount} 张转单打样抵扣` : '',
-          docCount > 0 ? `${docCount} 版单据存档` : '',
-          plCount > 0 ? `${plCount} 批箱单` : ''
+          c.docCount > 0 ? `${c.docCount} 版单据存档` : '',
+          c.plCount > 0 ? `${c.plCount} 批箱单` : ''
         ]
           .filter(Boolean)
           .join('、')
@@ -929,6 +924,9 @@ export function ordersCore(db: Db) {
         )
       }
     }
+    const locks = await readLocks()
+    assertPaperLocked(locks)
+    await assertCustomerSwapAllowed(locks)
 
     /**
      * 只写「这次真的传了」的列：input 里没有的键保留数据库原值。
@@ -979,6 +977,12 @@ export function ordersCore(db: Db) {
       ['ship_to_json', shipJson]
     ]
     await db.transact(async () => {
+      // 纸面与钱的门在写入这一刻再过一遍。上面那一眼只为把话术说在前面；计数读在事务外，
+      // UPDATE 却写在事务里，中间进来一笔收款或一份 CI 存档，两边各自看自己那一改都合法，
+      // 结果就是币种当着真钱被改掉、客户当着已经入账的流水换了主人（R56）。
+      const lockedNow = await readLocks()
+      assertPaperLocked(lockedNow)
+      await assertCustomerSwapAllowed(lockedNow)
       await db.run(
         `UPDATE orders SET ${cells.map(([col]) => `${col}=?`).join(', ')}, updated_at=? WHERE id=?`,
         [...cells.map(([, v]) => v as string | number | null), ts, id]
@@ -2189,10 +2193,17 @@ export function ordersCore(db: Db) {
           [orderId]
         ) as { at?: string } | null)?.at ?? ''
       )
-      const created = String(row.created_at ?? '')
-      if (!voidedAt || !created || created <= voidedAt) {
+      // 闸门认「钱到账的那一天」，不是这条记录什么时候插进库的。补录是常态：钱 12 号到、
+      // 单据 20 号才登账，created_at 在作废之后而 paid_at 在作废之前——按 created_at 比，
+      // 客户手里那张 PI/CI 对着的留档凭据就站进了「允许删除」那一侧（R56）。
+      // 同一天分不出钱是几点到的，退回这条记录的登记时刻比：作废之前登的仍是凭据，
+      // 作废之后补登的回款录错了要能更正，不然就成了一笔删不掉的死账。
+      const paidDay = localDateOf(String(row.paid_at ?? '')) || localDateOf(String(row.created_at ?? ''))
+      const voidDay = localDateOf(voidedAt)
+      const bookedAfterVoid = String(row.created_at ?? '') > voidedAt
+      if (!voidDay || !paidDay || paidDay < voidDay || !bookedAfterVoid) {
         throw bizError(
-          '订单已作废：作废前的收款是留档凭据（和客户手里的 PI/CI 对着账），不能再改写。只有作废后登记的回款才允许更正。'
+          '订单已作废：作废之前到账的收款是留档凭据（和客户手里的 PI/CI 对着账），不能再改写。只有作废之后到账的回款才允许更正。'
         )
       }
     } else {
@@ -2287,7 +2298,13 @@ export function ordersCore(db: Db) {
     // 一张没有单据的来历不明的收款（或者根本记不进来）。短款/坏账仍按原口径挡住。
     if (!isBillingStatus(order.paymentStatus)) {
       if (kind !== 'recovery') {
-        throw bizError('草稿、已失效、已作废的订单不能做核销或坏账。先把订单状态改成正式单，再处理欠款。')
+        // 「正式单」这个标签界面上不存在，指路人得说得出下拉里真有的那两项；
+        // 作废是留档终态（R54），这里更不能劝人去改状态（R56）。
+        throw bizError(
+          order.paymentStatus === 'void'
+            ? '这张单已作废，不再认新的欠款：作废是留档终态。确实要往下做生意，请按新单重开，再在新单上核销。'
+            : '草稿、已失效的订单不计应收，也不能做核销或坏账。先把订单状态改成「待确认」或「客户已确认」，再处理欠款。'
+        )
       }
     }
     const reason = String(input.reason ?? '').trim()
@@ -2436,6 +2453,11 @@ export function ordersCore(db: Db) {
     // 记错客户/金额时这是唯一能退回原状的出口，两条必须同一个事务一起动。
     const payId = Number(row.payment_id ?? 0)
     await db.transact(async () => {
+      // 「撤过没有」必须在事务里再问一次：事务外那一眼和写入之间隔着好几个 await，
+      // 双击时两次点都看见「没撤过」，就插出两条负数核销——追回分支还会把已经删掉的
+      // 自动收款再算一遍，坏账抵扣翻倍、银行流水当场对不上（R56）。
+      const already = await db.get('SELECT id FROM order_settlements WHERE reverses_id = ?', [settlementId])
+      if (already) throw bizError('这笔核销已经撤销过了，刷新页面就能看到。')
       if (kind === 'recovery' && payId) {
         await db.run('DELETE FROM payments WHERE id = ? AND order_id = ?', [payId, orderId])
       }
@@ -2634,7 +2656,10 @@ export function ordersCore(db: Db) {
     // 钱到了就登记收款（现金、水单没录都能登，流水号可以留空），
     // 钱不再收就去「核销与坏账」记短款或坏账。两条路都会让 remaining 自然归零。
     // 用的仍是 recomputePaymentStatus 那一份待收，不在这里另写公式。
-    if (next === 'settled') {
+    // 这一眼还得和 UPDATE 站在同一个事务里：事务外算出的 remaining 可能在「过闸 → 写入」
+    // 之间被另一笔撤销收款改成正数，闸门放着真话过关、标签写着结清，
+    // 而 recompute 只在钱进来时才跑——这张单会一路顶着错的标签导出、汇报（R56）。
+    const assertSettledByBooks = async (): Promise<void> => {
       const settleRow = await db.get('SELECT charges, deposit_ratio, currency FROM orders WHERE id = ?', [orderId]) as
         | { charges: string | null; deposit_ratio: number | null; currency: string }
         | null
@@ -2653,6 +2678,7 @@ export function ordersCore(db: Db) {
       }
     }
     await db.transact(async () => {
+      if (next === 'settled') await assertSettledByBooks()
       // 改成草稿/失效就退出应收口径：抵在这张单上的客户预收无处可落，先退回余额
       if (!isBillingStatus(next)) {
         await creditsOf().reverseCreditsForTarget('order', orderId, `订单转为「${PAYMENT_STATUS_LABEL[next]}」，预收抵扣回退`)

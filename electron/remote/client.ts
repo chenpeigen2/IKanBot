@@ -169,6 +169,14 @@ async function readJson(res: Response): Promise<unknown> {
 export async function remoteCall(channel: string, args: unknown[]): Promise<unknown> {
   const spec = REMOTE_ROUTES[channel]
   if (!spec) throw new Error(`「${channel}」没有登记后端路由`)
+  // 本机传得比路由登记的参数多时，多出来的那几个以前是静默丢掉：界面少报一个原因、
+  // 少报一个备注，后端收到的就是「没填」，同一句话术在本机拦住、在远端放行（R56）。
+  if (args.length > spec.args.length) {
+    throw new Error(
+      `「${channel}」要传 ${args.length} 个参数，后端路由只登记了 ${spec.args.length} 个` +
+        `（${spec.args.join('、') || '没有参数'}）。多出来的会被丢掉，请先在路由表补登记，或切回「本机」。`
+    )
+  }
   const body: Record<string, unknown> = {}
   spec.args.forEach((name, i) => {
     if (i < args.length) body[name] = args[i]
