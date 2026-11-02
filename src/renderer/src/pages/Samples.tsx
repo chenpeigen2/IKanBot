@@ -817,6 +817,7 @@ function SampleModal({
     factoryCost: draft.factoryCost ?? 0,
     feeStatus: (draft.feeStatus ?? 'unpaid') as SampleFeeStatus,
     feeNote: draft.feeNote ?? '',
+    feeWaiveReason: '',
     currency: draft.currency ?? 'USD',
     exchangeRate: draft.exchangeRate ?? 0,
     exchangeRateDate: draft.exchangeRateDate ?? ''
@@ -835,6 +836,10 @@ function SampleModal({
       goodsUnitPrice: it.goodsUnitPrice ?? null
     }))
   )
+
+  // 改成「免收」等于把这笔样品费从待收和欠款榜里摘掉，而打样单没有操作历史表：
+  // 界面先要一句为什么免，落库时这句话会被写进收款说明，成为唯一的账本
+  const isWaivingNow = !!draft.id && form.feeStatus === 'waived' && draft.feeStatus !== 'waived'
 
   useEffect(() => {
     // 编辑老打样单时，即使客户后来停用了也要能选回原来那个
@@ -889,6 +894,10 @@ function SampleModal({
       return
     }
     const cleanItems = filled.map(({ uid: _uid, ...rest }) => rest)
+    if (isWaivingNow && !form.feeWaiveReason.trim()) {
+      toast('改成「客户免单」要写原因：这笔样品费不再向客户收，得有人说明为什么免（例如「客户自己承担」「订单已含样品费」）。', 'error')
+      return
+    }
     setBusy(true)
     try {
       await window.api.samples.save({
@@ -906,6 +915,7 @@ function SampleModal({
         factoryCost: Number(form.factoryCost) || 0,
         feeStatus: form.feeStatus,
         feeNote: form.feeNote,
+        feeWaiveReason: isWaivingNow ? form.feeWaiveReason.trim() : undefined,
         currency: form.currency,
         exchangeRate: Number(form.exchangeRate) || 0,
         exchangeRateDate: form.exchangeRateDate,
@@ -941,7 +951,7 @@ function SampleModal({
       }
     >
       <div className="field">
-        <label>样品单号（凭据号；留空 = 保存时自动编号）</label>
+        <label>样品单号（对外就用这个号对账；留空 = 保存时自动编号）</label>
         <input
           value={form.sampleNo}
           onChange={(e) => setForm({ ...form, sampleNo: e.target.value })}
@@ -1116,6 +1126,16 @@ function SampleModal({
             placeholder="如「已下单抵扣 PO-xxx」"
           />
         </div>
+        {isWaivingNow && (
+          <div className="field">
+            <label>客户免单原因（必填，会写进收款说明）</label>
+            <input
+              value={form.feeWaiveReason}
+              onChange={(e) => setForm({ ...form, feeWaiveReason: e.target.value })}
+              placeholder="如「客户自己承担」「订单已含样品费」"
+            />
+          </div>
+        )}
       </div>
 
       <div className="row sec-head">

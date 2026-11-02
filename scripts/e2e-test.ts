@@ -5184,10 +5184,11 @@ const r15OpsPlB = (await packing.createPackingList({
   lines: [{ boxNo: 'R15-VOID-B', styleNo: 'R15-VOIDOPS', quantity: 5 }]
 })).slice(-1)[0]
 await packing.voidPackingList(r15VoidOps.id, r15OpsPlB.id, '这一批没走成')
-// R19 起作废带凭据的单要先核对：直接作废被拦，勾了「凭据已核对」才放行
+// R19 起作废带凭据的单要先核对：直接作废被拦，勾了确认才放行
+// R58 起确认框里那句勾换成了人话（「已发出单据我已确认处理」），拦人的话跟着指同一格
 check(
-  '还挂着箱单的订单直接作废会被拦下核对凭据',
-  (await r8err(async () => await orders.voidOrder(r15VoidOps.id, 'R15 作废'))).includes('凭据')
+  '还挂着箱单的订单直接作废会被拦下核对已发出单据',
+  (await r8err(async () => await orders.voidOrder(r15VoidOps.id, 'R15 作废'))).includes('已发出单据')
 )
 await orders.voidOrder(r15VoidOps.id, 'R15 作废', { confirmDocs: true })
 const r15OpsSettle = (await orders.listSettlements(r15VoidOps.id))[0]
@@ -5764,13 +5765,13 @@ await orders.addOrderItem(r19Gate.id, { styleNo: 'R19-GATE', quantity: 10, unitP
 await packing.createPackingList({ orderId: r19Gate.id, lines: [{ boxNo: 'R19-G1', styleNo: 'R19-GATE', quantity: 10 }] })
 check(
   '有箱单的订单直接作废被拦',
-  (await r8err(async () => await orders.voidOrder(r19Gate.id, '客户取消'))).includes('凭据')
+  (await r8err(async () => await orders.voidOrder(r19Gate.id, '客户取消'))).includes('已发出单据')
 )
 await orders.voidOrder(r19Gate.id, '客户取消', { confirmDocs: true })
-check('勾了凭据已核对就能作废', (await orders.getOrder(r19Gate.id))!.paymentStatus, 'void')
+check('勾了「已发出单据我已确认处理」就能作废', (await orders.getOrder(r19Gate.id))!.paymentStatus, 'void')
 check(
-  '作废历史里写明核对过哪些凭据',
-  (await orders.listEvents(r19Gate.id)).slice(-1)[0].note.includes('凭据已核对')
+  '作废历史里写明核对过哪些已发出单据',
+  (await orders.listEvents(r19Gate.id)).slice(-1)[0].note.includes('已发出单据我已确认处理')
 )
 
 section('R19 作废通道只认 CI：PI/箱单/报价存档作不了废，作废单的存档也不能动')
@@ -8405,7 +8406,7 @@ const r34OffOpen = (await money.sampleOpenRows(r34OffCust.id)).find((r) => r.sam
 check('挂起中的样品费确实回到待收', !!r34OffOpen && r34OffOpen.receivable > 0.001, JSON.stringify(r34OffOpen))
 const r34OffErr = (await r8err(async () => await samples.addSamplePayment(r34OffSample.id, { paidAt: localDate(), amount: 60, bankRef: 'R34-OF-IN' })))
 check('仍不许在打样侧收这笔钱（订单恢复就会双算）', r34OffErr.includes('重复计'), r34OffErr)
-check('报错给出正门：先把那张订单恢复成计费状态', r34OffErr.includes('恢复成计费状态'), r34OffErr)
+check('报错给出正门：先把那张订单改成「客户已确认」', r34OffErr.includes('客户已确认'), r34OffErr)
 check('不是一句「登记在订单上」把人赶进死胡同', r34OffErr.includes('草稿'), r34OffErr)
 
 section('R34 一笔水单拆到订单与打样：两种单据各归各的账')
@@ -9161,7 +9162,25 @@ check(
   )).includes('原始报价凭据')
 )
 await orders.voidOrder(r37QOrder.id, 'R37 客户改款')
-eq('订单作废后状态看得见', (await quotations.getQuotation(r37Q.id))!.convertedOrderStatus, 'void')
+// R58 起作废把转出报价退回待跟进：那张单死了，报价不能再顶着「已成交」——
+// 以前它既不进待办也不进催款（过滤条件要 status IN (sent,confirmed) 且没有转出单），
+// 报表还算它一笔成交，业务员只能靠自己想起来。链接放开、下场写进报价时间线。
+const r37QAfterVoid = (await quotations.getQuotation(r37Q.id))!
+eq('订单作废后报价退回「客户已确认」', r37QAfterVoid.status, 'confirmed')
+eq('成交结果回到「待回」', r37QAfterVoid.result, 'pending')
+check(
+  '转出的链接放开（可以重新转单，不再被死单占着）',
+  !r37QAfterVoid.convertedOrderId,
+  JSON.stringify(r37QAfterVoid.convertedOrderId)
+)
+check(
+  '报价时间线写明是哪张单作废把它退回待跟进',
+  (await quotations.listQuotationEvents(r37Q.id)).some((e) => String(e.note).includes('已作废') && String(e.note).includes('退回'))
+)
+check(
+  '订单侧也留一条退回痕',
+  (await orders.listEvents(r37QOrder.id)).some((e) => e.kind === 'quotation_back')
+)
 const r37QEdit = await quotations.saveQuotation({
   id: r37Q.id,
   customerId: r37QCust.id,
@@ -12455,6 +12474,174 @@ eq(
 )
 await orders.updateOrder(r57Pin.id, { customerId: r57RateCust.id, exchangeRate: 7.5 })
 eq('订单汇率之后再改，钉过快照的历史不跟着漂', (await r57Rbm()) - r57PinBefore, 700)
+
+/* ---------------- R58：标签是账的结论，不是手写的备注 ---------------- */
+
+section('R58 钱档（部分收款 / 定金已收 / 已结清）由流水推出来 —— 手工勾错当场拒')
+const r58Cust = await customers.saveCustomer({ company: 'R58-BOOKS-CO' })
+// 这张单不设定金比例（设置里的默认 30% 会跟着带进来）：这一段只看「收了钱 → 部分收款」那一档，
+// 定金那一档单独用下面 r58Dep 验，别把两件事混成一句断言
+const r58Bare = await orders.createOrder({
+  customerId: r58Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  depositRatio: 0,
+  piNo: 'PI-R58-BARE'
+})
+await orders.addOrderItem(r58Bare.id, { styleNo: 'R58-B1', quantity: 1, unitPrice: 100 })
+const r58PartialErr = await r8err(async () => await orders.setPaymentStatus(r58Bare.id, 'partial'))
+check('一分没收时勾「部分收款」被拦下', r58PartialErr.includes('按账算'), r58PartialErr)
+check('点名账上真正的那一档（不是让人猜系统怎么想的）', r58PartialErr.includes('客户已确认'), r58PartialErr)
+check(
+  '三条正门都指到位：登记收款 / 撤销那笔 / 核销与坏账',
+  r58PartialErr.includes('收款记录') && r58PartialErr.includes('核销与坏账') && r58PartialErr.includes('撤销那笔收款'),
+  r58PartialErr
+)
+check('说清手工这一格只管客户走到哪一步', r58PartialErr.includes('手工要定的只是客户走到哪一步'), r58PartialErr)
+check('作废仍然只认「⋯ → 作废此单」那道门', r58PartialErr.includes('作废此单'), r58PartialErr)
+eq('拦下之后状态一个字没动', (await orders.getOrder(r58Bare.id))!.paymentStatus, 'confirmed')
+check(
+  '勾「定金已收」吃同一道闸门（以前只有已结清有人看门）',
+  (await r8err(async () => await orders.setPaymentStatus(r58Bare.id, 'paid'))).includes('按账算')
+)
+check(
+  '勾「已结清」还是 R54 那句按流水还欠多少（老话术没被新闸门换掉）',
+  (await r8err(async () => await orders.setPaymentStatus(r58Bare.id, 'settled'))).includes('还欠 100.00')
+)
+
+section('R58 账推出来哪一档，手工就能勾哪一档 —— 落笔之后一律按账重算')
+await orders.addPayment(r58Bare.id, { paidAt: localDate(), amount: 40, method: 'T/T', bankRef: 'ZZ-R58-P40' })
+eq('收了 40 标签自己跟上（部分收款）', (await orders.getOrder(r58Bare.id))!.paymentStatus, 'partial')
+getDb().run("UPDATE orders SET payment_status = 'confirmed' WHERE id = ?", [r58Bare.id])
+eq('账上真有这笔钱时勾「部分收款」放行（等的就是账推出来的那一档）', (await orders.setPaymentStatus(r58Bare.id, 'partial')).paymentStatus, 'partial')
+getDb().run("UPDATE orders SET payment_status = 'confirmed' WHERE id = ?", [r58Bare.id])
+eq('勾「待确认」不会把收到的 40 抹掉：写完照样按账重算', (await orders.setPaymentStatus(r58Bare.id, 'sent')).paymentStatus, 'partial')
+const r58Dep = await orders.createOrder({
+  customerId: r58Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  paymentStatus: 'confirmed',
+  depositRatio: 0.5,
+  piNo: 'PI-R58-DEP'
+})
+await orders.addOrderItem(r58Dep.id, { styleNo: 'R58-D1', quantity: 1, unitPrice: 100 })
+await orders.addPayment(r58Dep.id, { paidAt: localDate(), amount: 50, method: 'T/T', bankRef: 'ZZ-R58-DEP50' })
+eq('定金收齐自动到「定金已收」（阶梯只有一份，自动流转和手工复查同算式）', (await orders.getOrder(r58Dep.id))!.paymentStatus, 'paid')
+getDb().run("UPDATE orders SET payment_status = 'confirmed' WHERE id = ?", [r58Dep.id])
+eq('手工勾「定金已收」与账一致就放行', (await orders.setPaymentStatus(r58Dep.id, 'paid')).paymentStatus, 'paid')
+const r58DepErr = await r8err(async () => await orders.setPaymentStatus(r58Dep.id, 'settled'))
+check('尾款还欠 50 时勾「已结清」被账拦下', r58DepErr.includes('还欠 50.00'), r58DepErr)
+
+section('R58 报价的状态与结果只认枚举 —— 裸码落不了库，报错用中文点名可选项')
+const r58Q = await quotations.saveQuotation({
+  customerId: r58Cust.id,
+  exchangeRate: 7,
+  items: [{ styleNo: 'R58Q', quantity: 1, unitPrice: 10 }]
+})
+const r58QStatusErr = await r8err(async () => await quotations.updateQuotationMeta(r58Q.id, { status: 'Converted' as never }))
+check('只差一个大小写的裸码也当场拒（落库就人间蒸发）', r58QStatusErr.includes('不是报价单状态'), r58QStatusErr)
+check('报错列的是中文标签，不是一串要人对代码的枚举', r58QStatusErr.includes('已转订单') && !r58QStatusErr.includes('converted'), r58QStatusErr)
+const r58QResultErr = await r8err(async () => await quotations.updateQuotationMeta(r58Q.id, { result: 'one' as never }))
+check('报价结果同样拦在门外', r58QResultErr.includes('不是报价结果'), r58QResultErr)
+check('结果的可选项也写成中文', r58QResultErr.includes('待回') && r58QResultErr.includes('没成交'), r58QResultErr)
+eq('合法的枚举照旧改得动', (await quotations.updateQuotationMeta(r58Q.id, { status: 'expired', result: 'lost' })).status, 'expired')
+
+section('R58 打样状态同一条白名单；改成「客户免单」必须写一句原因，落进唯一的账本')
+const r58S = await samples.saveSample({
+  customerId: r58Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  sampleDate: localDate(),
+  status: 'sent',
+  items: [{ styleNo: 'R58-SMP', quantity: 2, unitPrice: 100 }]
+})
+check(
+  '打样状态脏值拦得住（不然这张单从样品台账里静默消失）',
+  (await r8err(async () => await samples.saveSample({ id: r58S.id, status: 'shipped' as never, items: [] }))).includes('打样状态')
+)
+eq('拦下后打样单状态没被写花', (await samples.getSample(r58S.id))!.status, 'sent')
+const r58WaiveErr = await r8err(async () => await samples.saveSample({ id: r58S.id, feeStatus: 'waived' }))
+check('改成「客户免单」不写原因被拦', r58WaiveErr.includes('改成「客户免单」要写原因'), r58WaiveErr)
+check('话里说清为什么要这一句（打样单没有操作历史）', r58WaiveErr.includes('打样单没有操作历史'), r58WaiveErr)
+eq('拦下后收款标记还是未收', (await samples.getSample(r58S.id))!.feeStatus, 'unpaid')
+const r58Waived = await samples.saveSample({ id: r58S.id, feeStatus: 'waived', feeWaiveReason: '客户自己承担' })
+eq('补了一句原因就免掉', r58Waived.feeStatus, 'waived')
+check('这句话落进收款说明（以后客户来问，账上有交代）', String(r58Waived.feeNote ?? '').includes('样品费免收：客户自己承担'), String(r58Waived.feeNote))
+const r58NewWaive = await samples.saveSample({
+  customerId: r58Cust.id,
+  currency: 'USD',
+  exchangeRate: 7,
+  sampleDate: localDate(),
+  status: 'pending',
+  feeStatus: 'waived',
+  items: [{ styleNo: 'R58-FREE', quantity: 1, unitPrice: 50 }]
+})
+eq('新建时就谈好免收的不折腾人（那笔钱从没进过待收）', r58NewWaive.feeStatus, 'waived')
+
+section('R58 本币打样单不许从客户页拆分表里静默消失 —— 页头那个数和这张表同源')
+const r58HomeCust = await customers.saveCustomer({ company: 'R58-HOMECO' })
+const r58Home = await samples.saveSample({
+  customerId: r58HomeCust.id,
+  currency: 'CNY',
+  sampleDate: localDate(),
+  status: 'sent',
+  items: [{ styleNo: 'R58-CNY', quantity: 2, unitPrice: 100 }]
+})
+// 升级前的老数据：本币单的汇率列留着 0。按原始列筛会把这张单从拆分表里漏掉，
+// 而页头「未收金额」明明含它——分出来的钱永远对不上表头那个数
+getDb().run('UPDATE sample_orders SET exchange_rate = 0 WHERE id = ?', [r58Home.id])
+const r58HomeRows = await money.customerOpenRows(r58HomeCust.id)
+check(
+  '汇率列还是 0 的本币打样单照样能拆（认折算口径，不认那一列）',
+  r58HomeRows.some((r) => r.kind === 'sample' && r.docId === r58Home.id),
+  JSON.stringify(r58HomeRows)
+)
+check('页头未收数与这张表说的是同一个数', Math.abs((await money.customerReceivable(r58HomeCust.id)) - 200) < 0.01)
+
+section('R58 界面上不再自己算一遍结清 —— 存档读不出来也不许拖死预览和写字')
+const r58DetailSrc = fs.readFileSync(join(process.cwd(), 'src/renderer/src/pages/OrderDetail.tsx'), 'utf8')
+const r58QuotesSrc = fs.readFileSync(join(process.cwd(), 'src/renderer/src/pages/Quotations.tsx'), 'utf8')
+const r58EditSrc = fs.readFileSync(join(process.cwd(), 'src/renderer/src/pages/EditOrderModal.tsx'), 'utf8')
+const r58CustSrc = fs.readFileSync(join(process.cwd(), 'src/renderer/src/pages/Customers.tsx'), 'utf8')
+check('下拉里的钱档标着「按账算」，一眼知道这一格不是随手勾的', r58DetailSrc.includes('（按账算）'))
+check(
+  '渲染层不再自算「按流水还欠」那一句（同一道门只留服务层一张嘴）',
+  !/按流水还欠|还欠 \$\{|remaining > 0/.test(r58DetailSrc)
+)
+check(
+  'PI / PL / CI 三处存档版本读不出来时预览照样能出（兜底 0，不再整页崩）',
+  (r58DetailSrc.match(/docs\.nextVersion\([^)]*\)\.catch\(\(\) => 0\)/g) ?? []).length === 3,
+  `${(r58DetailSrc.match(/docs\.nextVersion\([^)]*\)/g) ?? []).length}`
+)
+check('报价预览同样不被存档读数拖死', /docs\.nextVersion\([^)]*\)\.catch\(\(\) => 0\)/.test(r58QuotesSrc))
+check('批次保存时存档读不到也照样把船期写下去，只是当场说明没核对过纸面', /archiveBlind/.test(r58DetailSrc))
+check(
+  '作废确认框那句勾改成了人话（不再叫「凭据已核对」）',
+  r58DetailSrc.includes('已发出单据我已确认处理') && !r58DetailSrc.includes('凭据已核对')
+)
+check(
+  '改单弹窗的费用合计、含费用合计、提交数组吃同一批行',
+  /chargesTotal = cleanCharges\.reduce/.test(r58EditSrc) && /charges: cleanCharges\.map/.test(r58EditSrc)
+)
+check(
+  '没填名字却带着金额的费用行当场挡住保存（钱不会在 PI 上凭空消失）',
+  /disabled=\{busy \|\| unnamedWithAmount\.length > 0\}/.test(r58EditSrc) && r58EditSrc.includes('行费用没填名字却带着金额')
+)
+check(
+  '订单页费用弹窗同一个口径',
+  /const clean = charges\.filter\(\(c\) => c\.label\.trim\(\)\)/.test(r58DetailSrc) &&
+    /total = clean\.reduce/.test(r58DetailSrc) &&
+    r58DetailSrc.includes('行费用没填名字却带着金额')
+)
+check(
+  '水单总额核对吃的是真分了钱的那几行（和保存时硬校验同一个集合）',
+  /const filled = rows\.filter\(\(r\) => Number\(amounts\[rowKey\(r\)\] \?\? 0\) > 0\)/.test(r58CustSrc)
+)
+check(
+  '连点两次搜索不会让旧关键词的结果盖住新列表',
+  /const beginList = useLoadGuard\(\)/.test(r58CustSrc) && /const \{ isCurrent \} = beginList\(\)/.test(r58CustSrc)
+)
 
 /* ---------------- 汇总 ---------------- */
 

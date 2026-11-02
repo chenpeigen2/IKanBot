@@ -553,7 +553,7 @@ function QuotationDetailModal({
       const fresh = (await window.api.quotations.get(quotation.id)) ?? quotation
       const images = await buildImages(fresh)
       // 先问存档：这一版存进去会是第几版；没存之前纸上印「待存为第 N 版」（N39，不占还不存在的版本号）
-      const rev = await window.api.docs.nextVersion(fresh.qNo, 'quotation')
+      const rev = await window.api.docs.nextVersion(fresh.qNo, 'quotation').catch(() => 0)
       const render = (pending: boolean) => renderQuotation({ quotation: fresh, settings, images, rev, pending })
       setPreview({
         html: render(true),

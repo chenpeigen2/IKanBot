@@ -17,11 +17,12 @@ import { applyShipStatus, isShipStatusDerived, shipmentSummary } from './shippin
 import { creditsCore } from './credits'
 import { samplesCore } from './samples'
 import { baseRateOf, computeOrderMoney, costInOrderCurrency, depositDueOf, describeChargeChange, moneyCore, notInStatuses, parseCharges } from './money'
+import type { OrderMoney } from './money'
 import { mapCustomer, mapEvent, mapOrder, mapOrderItem, mapOrderPhoto, mapPackingList, mapPackingListLine, mapPayment, mapSettlement, mapSkuSummary } from '../electron/db/mappers'
 import { likeAny } from '../electron/services/search'
 import { addDays, daysBetween, isLocalDate, localDate, localDateOf, localDayAfterUtc, localDayStartUtc } from '../src/shared/date'
 import { billPartyOf, emptyParty, parseParty, patchParty, shipPartyOf, stringifyParty } from '../src/shared/party'
-import { isBillingStatus, NON_BILLING_STATUSES, sampleOffsetFromCharges, sampleOpenFeeOf, shownRemaining } from '../src/shared/billing'
+import { isBillingStatus, isMoneyStatus, NON_BILLING_STATUSES, sampleOffsetFromCharges, sampleOpenFeeOf, shownRemaining } from '../src/shared/billing'
 import { assertDepositRatio, assertDocNo, assertQuantity, assertUnitPrice } from '../src/shared/guards'
 import { PAYMENT_STATUS_LABEL, SETTLEMENT_KIND_LABEL, SHIP_STATUS_LABEL, SHIP_STATUS_ORDER } from '../src/shared/types'
 import type {
@@ -47,6 +48,32 @@ import type {
 
 /** 新建订单能直接落库的收款状态：刚建的单还没收过钱，不可能是已收/已结清 */
 const CREATE_STATUSES: PaymentStatus[] = ['draft', 'sent', 'confirmed']
+
+/**
+ * 按账推出来的收款状态——阶梯只写这一份。
+ *
+ * 自动流转（recomputePaymentStatus）和手工闸门的复查都吃它：手工想标的那一档跟账推出来的
+ * 不是同一档，两个入口说的是同一个数，不会出现「一处放行、一处拦下」这种两头话。
+ * 草稿 / 失效 / 作废由调用方挡在门外，这里只管计费状态该长什么样。
+ */
+function booksStatusOf(status: PaymentStatus, money: OrderMoney): PaymentStatus {
+  const total = money.grandTotal
+  const paid = money.paidAmount
+  // 核销过的钱不用再收：短款 + 坏账算「结清」，撤销记负数自然退回
+  const writtenOff = money.netWrittenOff
+  // 客户预收抵扣也是已经收到的钱（只是先收在别的单上）：它同样把这张单收齐
+  const creditApplied = money.creditApplied
+  const deposit = money.depositAmount
+  // 有货值却被费用行抵成 0 的单（转单时抵扣恰等于货值）本来就不欠钱；空的 0 单不算，
+  // 负数也不算——那是费用把货值抵穿了，方向是「该退客户钱」，标成结清正好做出老板最不能吃的那口假象
+  const offsetToZero = Math.abs(total) <= 0.001 && money.goodsValue > 0.001
+  // 定金还差多少只认 depositDueOf 那一份算术（工作台待收四桶、催定金、压制尾款共用它）
+  const depositLeft = depositDueOf(money)
+  if (offsetToZero || (total > 0.001 && paid + writtenOff + creditApplied >= total - 0.001)) return 'settled'
+  if (deposit > 0 && depositLeft <= 0.001) return 'paid'
+  if (paid + writtenOff + creditApplied > 0) return 'partial'
+  return status === 'sent' ? 'sent' : 'confirmed'
+}
 
 export interface OrderInput {
   id?: number
@@ -1161,8 +1188,9 @@ export function ordersCore(db: Db) {
       if (docCount > 0) parts.push(`${docCount} 版单据存档（PI/CI 可能已发到客户手里）`)
       if (plCount > 0) parts.push(`${plCount} 批箱单`)
       throw bizError(
-        `这张订单还有 ${parts.join(' 和 ')}。作废后系统不再认账，但这些纸面凭据不会消失，` +
-          `报关/收汇在途的钱会和系统脱节。请先核对这些凭据的处理，在作废确认框里勾选「凭据已核对」再作废。`
+        `这张订单还有 ${parts.join(' 和 ')}。作废后系统不再认账，但这些纸不会跟着消失，` +
+          `报关/收汇在途的钱会和系统脱节。请先确认这些已发出的单据（PI/CI/箱单）各自怎么收尾，` +
+          `在作废确认框里勾「已发出单据我已确认处理」再作废。`
       )
     }
     await db.transact(async () => {
@@ -1185,7 +1213,7 @@ export function ordersCore(db: Db) {
           `这张单的状态刚刚被人改成了「${
             PAYMENT_STATUS_LABEL[nowStatus as PaymentStatus] ?? nowStatus
           }」，这次作废没有执行（预收抵扣、打样抵扣都还没动）。` +
-            `作废前的凭据核对是按旧状态做的，请刷新页面看一眼现在的账，再决定要不要作废。`
+            `作废前对已发出单据的核对是按旧状态做的，请刷新页面看一眼现在的账，再决定要不要作废。`
         )
       }
       // 单子作废就退出应收口径：已经抵在它身上的客户预收要退回客户余额，
@@ -1217,13 +1245,49 @@ export function ordersCore(db: Db) {
           `打样单 ${String(s.sample_no ?? '')} 的样品费抵扣随订单作废回退为未收`
         )
       }
+      // 从报价转出来的订单作废，报价单不能继续顶着「已成交」：
+      // 那张纸的两个字段（status='converted'、result='won'）说的都是「这单生意做成了」，
+      // 而生意已经死了。以前作废只回退预收抵扣和打样抵扣，对报价单一个字不动——
+      // 工作台的报价跟进条件是 status IN (sent, confirmed) 且没有转出的订单，
+      // 这张两个条件都不满足，于是它从待办、催款里彻底消失，报表还算它一笔成交；
+      // 业务员要重转只能靠自己想起来。退回客户点头那一档，结果回到「待回」，提醒重新认它。
+      const backToFollowUp = await db.all(
+        `SELECT id, q_no, confirmed_at, sent_at FROM quotations
+         WHERE converted_order_id = ? AND status = 'converted'`,
+        [id]
+      ) as Record<string, unknown>[]
+      for (const q of backToFollowUp) {
+        const qId = Number(q.id)
+        // 确认时间优先用原来钉下的那个，没有再退回发送时间；两个都没有才用这一刻，
+        // 工作台按它起算的等待天数才不会凭空归零
+        await db.run(
+          `UPDATE quotations
+             SET status = 'confirmed', result = 'pending', converted_order_id = NULL,
+                 confirmed_at = COALESCE(confirmed_at, sent_at, ?), updated_at = ?
+           WHERE id = ? AND status = 'converted' AND converted_order_id = ?`,
+          [now(), now(), qId, id]
+        )
+        await db.run('INSERT INTO quotation_events(quotation_id, at, kind, note) VALUES(?,?,?,?)', [
+          qId,
+          now(),
+          'convert',
+          `转出的订单 ${cur.order_no} 已作废，报价退回「客户已确认」、结果回到「待回」——这笔生意要重新跟进（重转或重报价）`
+        ])
+        await logEvent(db, 
+          id,
+          'quotation_back',
+          null,
+          null,
+          `报价单 ${String(q.q_no ?? '')} 随订单作废退回待跟进（不再是「已成交」）`
+        )
+      }
       await logEvent(db, 
         id,
         'void',
         cur.payment_status,
         'void',
         `作废订单 ${cur.order_no}${reason ? '：' + reason : ''}${
-          docCount > 0 || plCount > 0 ? `（凭据已核对：${docCount} 版单据存档、${plCount} 批箱单）` : ''
+          docCount > 0 || plCount > 0 ? `（已发出单据我已确认处理：${docCount} 版单据存档、${plCount} 批箱单）` : ''
         }`
       )
     })
@@ -2563,30 +2627,9 @@ export function ordersCore(db: Db) {
     const money = (
       await moneyOf().moneyForOrders([{ id: orderId, charges: order.charges, depositRatio: Number(order.deposit_ratio ?? 0) }])
     ).get(orderId)!
-    const total = money.grandTotal
-    const paid = money.paidAmount
-    // 核销过的钱不用再收：短款 + 坏账算「结清」，撤销记负数自然退回
-    const writtenOff = money.netWrittenOff
-    // 客户预收抵扣也是已经收到的钱（只是先收在别的单上）：它同样把这张单收齐
-    const creditApplied = money.creditApplied
-    const deposit = money.depositAmount
 
-    // 注意：这里算出来的是「下一个状态」，跟当前状态无关，所以能往上走也能往下退
-    let next: PaymentStatus = status
-    // 有货值却被费用行抵成 0 的单（转单时抵扣恰等于货值）本来就不欠钱：以前要求 total>0
-    // 才认结清，这种单会一直停在「待确认」，在途榜和催款天天追一张没有任何金额的账。
-    // 空的 0 单不算——那张 PI 还没填货，客户点头才是它的事，不能被当成「钱收齐了」。
-    // 负数也不算：那是费用/折扣把货值抵穿了，方向是「该退客户钱」，
-    // 标成结清正好把老板最不能吃的那口假象做出来（待收界面本来就把它收在 0）。
-    const offsetToZero = Math.abs(total) <= 0.001 && money.goodsValue > 0.001
-    // 定金还差多少只认 depositDueOf 那一份算术（工作台待收四桶、催定金、压制尾款共用它）：
-    // 以前这里只算 paid+抵扣、不算核销，短款核销把定金抵平的单会永远停在「已确认」，
-    // 而同一个客户在同一屏上看到的定金桶已经是 0——一个数两张嘴。
-    const depositLeft = depositDueOf(money)
-    if (offsetToZero || (total > 0.001 && paid + writtenOff + creditApplied >= total - 0.001)) next = 'settled'
-    else if (deposit > 0 && depositLeft <= 0.001) next = 'paid'
-    else if (paid + writtenOff + creditApplied > 0) next = 'partial'
-    else next = status === 'sent' ? 'sent' : 'confirmed'
+    // 阶梯抽到 booksStatusOf：手工改状态时要用同一份算术复查，写在两处迟早对不上
+    const next = booksStatusOf(status, money)
 
     if (next !== status) {
       await db.run('UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?', [next, now(), orderId])
@@ -2671,11 +2714,11 @@ export function ordersCore(db: Db) {
     if (cur.payment_status === 'void' && next !== 'void') {
       throw bizError('这张单已作废，不能改回收款状态：作废是留档终态，要接着做生意请按新单重开。')
     }
-    // 手工下拉不许直接改成「已作废」：那会绕过作废弹窗的凭据核对、作废留痕和打样抵扣回退。
-    // 作废只能走「⋯ → 作废此单」，在凭据清单前勾了「凭据已核对」再作废。
+    // 手工下拉不许直接改成「已作废」：那会绕过作废弹窗的单据核对、作废留痕和打样抵扣回退。
+    // 作废只能走「⋯ → 作废此单」，在单据清单前勾了「已发出单据我已确认处理」再作废。
     if (next === 'void') {
       throw bizError(
-        '收款状态下拉不能直接改成「已作废」：作废要先核对客户手里的 PI/CI 凭据。请到「⋯」菜单里走「作废此单」。'
+        '收款状态下拉不能直接改成「已作废」：作废要先看一眼客户手里的 PI/CI/箱单各自怎么收尾。请到「⋯」菜单里走「作废此单」。'
       )
     }
     // 同值就是没发生任何事：不早返回会重写 updated_at（把状态时钟挪后，尾款/催款提醒跟着变）、
@@ -2707,17 +2750,15 @@ export function ordersCore(db: Db) {
         expireNote = `（转失效时账上还有 ${holdings.parts.join('、')}）`
       }
     }
-    // 手工勾「已结清」是按流水真的收齐了才成立：还欠着就不许点。
-    // 以前允许写一句备注就过关，结果是状态写着「已结清」，待收、尾款催款、对账单
-    // 照着同一个 remaining 继续喊——两张嘴说两个数，老板按状态汇报「这单结了」，
-    // 系统却还在催，月报里也看不见这笔损失。所以只剩两扇正门：
-    // 钱到了就登记收款（现金、水单没录都能登，流水号可以留空），
-    // 钱不再收就去「核销与坏账」记短款或坏账。两条路都会让 remaining 自然归零。
-    // 用的仍是 recomputePaymentStatus 那一份待收，不在这里另写公式。
-    // 这一眼还得和 UPDATE 站在同一个事务里：事务外算出的 remaining 可能在「过闸 → 写入」
-    // 之间被另一笔撤销收款改成正数，闸门放着真话过关、标签写着结清，
-    // 而 recompute 只在钱进来时才跑——这张单会一路顶着错的标签导出、汇报（R56）。
-    const assertSettledByBooks = async (): Promise<void> => {
+    // 钱档状态（部分收款 / 已收款 / 已结清）是账的结论，不是手写的备注：
+    // 手工想标的那一档必须就是流水、核销、预收抵扣推出来的那一档（booksStatusOf 一份阶梯）。
+    // 以前只拦「已结清」，其余两档随便勾——结果状态写着「部分收款」，账上一笔钱都没有，
+    // 待收、催款、对账单照着 remaining 说另一个数；老板按状态汇报进度，系统里那笔钱不存在。
+    // 要改标签只走三条正门：登记收款 / 撤销那笔收款 / 核销与坏账，走完标签自己跟上。
+    // 这一眼必须和 UPDATE 站在同一个事务里（R56）：事务外算出的账可能在「过闸 → 写入」
+    // 之间被另一笔收款改动，闸门放着真话过关，标签却写错。
+    const assertMoneyStatusByBooks = async (): Promise<void> => {
+      if (!isMoneyStatus(next)) return
       const settleRow = await db.get('SELECT charges, deposit_ratio, currency FROM orders WHERE id = ?', [orderId]) as
         | { charges: string | null; deposit_ratio: number | null; currency: string }
         | null
@@ -2726,17 +2767,34 @@ export function ordersCore(db: Db) {
           { id: orderId, charges: settleRow?.charges, depositRatio: Number(settleRow?.deposit_ratio ?? 0) }
         ])
       ).get(orderId)!
-      if (money.remaining > 0.001) {
+      const currency = settleRow?.currency ?? ''
+      // 账推出来的那一档就是手工想标的那一档：放行
+      const books = booksStatusOf(cur.payment_status as PaymentStatus, money)
+      if (books === next) return
+      // 还欠着却要勾「已结清」：沿用 R54 那句把两条正门说清楚的话（待收归零才能真正结清）
+      if (next === 'settled' && money.remaining > 0.001) {
         throw bizError(
-          `这张单按流水还欠 ${money.remaining.toFixed(2)} ${settleRow?.currency ?? ''}，不能标「已结清」——「已结清」的意思是钱真的收齐了。\n` +
+          `这张单按流水还欠 ${money.remaining.toFixed(2)} ${currency}，不能标「已结清」——「已结清」的意思是钱真的收齐了。\n` +
             `客户给的是现金、或者水单还没录：请到下面「收款记录」里登记这一笔（流水号可以留空）。\n` +
             `这笔钱确实不再收（抹零、协商免收、收不回来）：请到「核销与坏账」里记一笔短款或坏账。\n` +
             `两条路走完，待收归零，再回来点「已结清」。`
         )
       }
+      const booksLabel = PAYMENT_STATUS_LABEL[books as keyof typeof PAYMENT_STATUS_LABEL] ?? books
+      const nextLabel = PAYMENT_STATUS_LABEL[next]
+      throw bizError(
+        `这张单标不成「${nextLabel}」：按账算，它现在是「${booksLabel}」${
+          next === 'settled' ? `，还欠 ${money.remaining.toFixed(2)} ${currency}` : ''
+        }。\n` +
+          `「部分收款 / 定金已收 / 已结清」是账收钱收出来的结果，不是给业务员手写的备注——勾错了，` +
+          `状态说「收到了一部分」，待收和催款却说「一分没收」，报表按状态汇报时这笔钱根本不存在。\n` +
+          `钱到了：到下面「收款记录」里登记（现金、水单还没录也能登，流水号可以留空）；\n` +
+          `登错了：撤销那笔收款；确实不再收：到「核销与坏账」里记短款或坏账。走完标签自己会跟上。\n` +
+          `手工要定的只是客户走到哪一步（草稿 / 待确认 / 客户已确认 / 已失效），作废请走「⋯ → 作废此单」。`
+      )
     }
     await db.transact(async () => {
-      if (next === 'settled') await assertSettledByBooks()
+      await assertMoneyStatusByBooks()
       // 改成草稿/失效就退出应收口径：抵在这张单上的客户预收无处可落，先退回余额
       if (!isBillingStatus(next)) {
         await creditsOf().reverseCreditsForTarget('order', orderId, `订单转为「${PAYMENT_STATUS_LABEL[next]}」，预收抵扣回退`)
@@ -2767,10 +2825,11 @@ export function ordersCore(db: Db) {
       // 失效单改回计费状态：预收来源从「全部到账」收回成「只有多收的部分」，
       // 已经抵出去的钱可能就多于客户实际多付的了
       if (isBillingStatus(next)) await creditsOf().assertCreditSolvent(cur.customer_id)
-      // 退出应收口径期间（失效/草稿）recompute 直接返回，钱到了状态也不动：
-      // 回到计费状态必须按账重算一次，否则一张早已收齐的单恢复后还顶着「已确认」，
-      // 工作台继续催款、报表把它算进待收，要等下一笔流水进来才自己纠正
-      if (isBillingStatus(next) && !isBillingStatus(cur.payment_status)) await recomputePaymentStatus(orderId)
+      // 只要落在计费状态就按账重算一次（以前只补「失效/草稿 → 计费」这一步）：
+      // 一张早已收齐的单恢复成「已确认」，或手工把进度标小了一档，都要当场推回账上那一档，
+      // 否则工作台继续催款、报表把它算进待收，要等下一笔流水进来才自己纠正。
+      // 钱档状态已经过上面那道等值闸门，重算对它是个空操作。
+      if (isBillingStatus(next)) await recomputePaymentStatus(orderId)
     })
     return (await getOrder(orderId))!
   }

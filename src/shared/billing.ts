@@ -19,6 +19,23 @@ export function isBillingStatus(status: string | null | undefined): boolean {
 }
 
 /**
+ * 「钱收到哪一步」的三种状态：部分收款 / 定金已收 / 已结清。
+ *
+ * 它们是账的结论，不是手写的标签——只能由 Σ流水 + 核销 + 预收抵扣推出来。
+ * 手工能定的只有客户姿态（草稿 / 待确认 / 客户已确认 / 已失效）和作废正门。
+ * R49 拦了「从接口直接建一张已收款的单」、R54 拦了「还欠着钱勾已结清」、R25 让样品费只认流水，
+ * 缺的是把这条规矩说全：一笔没收钱的分文，界面下拉里选「定金已收」就能选上，
+ * 工作台把整笔剩余当成尾款催、报表按「已收款状态」算本月完成，钱却没进过账。
+ * 要改这个集合只改这一处。
+ */
+export const MONEY_STATUSES: PaymentStatus[] = ['partial', 'paid', 'settled']
+
+/** 这个收款状态是不是「只能由账推出来」的钱档 */
+export function isMoneyStatus(status: string | null | undefined): boolean {
+  return MONEY_STATUSES.includes(status as PaymentStatus)
+}
+
+/**
  * 界面上「待收」该显示多少。
  * 不催款的单一律 0（该显示「—」的地方由 isBillingStatus 判断），
  * 多收的部分不算待收，所以这里把负数收在 0。

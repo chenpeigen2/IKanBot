@@ -87,8 +87,11 @@ const rowKey = (r: { kind: string; docId: number }) => `${r.kind}:${r.docId}`
 function splitMismatch(rows: any[], amounts: Record<string, string>, bankTotal: string): string {
   const total = Number(bankTotal)
   if (!(total > 0)) return ''
-  if (new Set(rows.map((r) => r.currency)).size > 1) return ''
-  const allocated = rows.reduce((s, r) => s + Number(amounts[rowKey(r)] ?? 0), 0)
+  // 只核对「真的分了钱的那几行」：保存时的硬校验认的就是这批行。
+  // 用全部候选行核对，跨币种静音放行的是另一批行，钱分在单一币种上却整句提示不出现
+  const filled = rows.filter((r) => Number(amounts[rowKey(r)] ?? 0) > 0)
+  if (new Set(filled.map((r) => r.currency)).size > 1) return ''
+  const allocated = filled.reduce((s, r) => s + Number(amounts[rowKey(r)] ?? 0), 0)
   const diff = total - allocated
   if (Math.abs(diff) <= 0.005) return ''
   // 预收是「某一单上实收超过了它的待收」才产生的，不是水单剩下的自动进账——话术别把人误导
@@ -159,12 +162,18 @@ export default function Customers() {
   >(null)
   /** 读取失败不能装成「没有客户」 */
   const [loadError, setLoadError] = useState('')
+  /** 连点两次「搜索」会同时挂着两个请求：后到的旧关键词结果不许盖住新列表 */
+  const beginList = useLoadGuard()
 
   const load = async (kw = keyword) => {
+    const { isCurrent } = beginList()
     try {
-      setList(await window.api.customers.list(kw, includeInactive))
+      const rows = await window.api.customers.list(kw, includeInactive)
+      if (!isCurrent()) return
+      setList(rows)
       setLoadError('')
     } catch (e) {
+      if (!isCurrent()) return
       setLoadError((e as Error).message || '客户列表没加载出来')
     }
   }

@@ -774,6 +774,148 @@ async function main(): Promise<void> {
       r57RecAgain.status === 400 && String(r57RecAgain.body.error.message).includes('没有尚未追回的坏账')
     )
 
+    console.log('R58 后端同一份守门：钱档是账的结论、裸码不落库、作废把报价退回待跟进')
+    const r58Create = await http
+      .post('/api/orders/create')
+      .send({ input: { customerId: ocid, currency: 'USD', exchangeRate: 7.2, exchangeRateDate: localDate(), depositRatio: 0 } })
+    const r58Oid = Number(r58Create.body.id)
+    await http.post('/api/orders/addItems').send({ orderId: r58Oid, items: [{ styleNo: 'R58-1', quantity: 10, unitPrice: 5 }] })
+    await http.post('/api/orders/setPaymentStatus').send({ orderId: r58Oid, status: 'confirmed', note: '后端对拍：PI 已确认' })
+    const r58Partial = await http
+      .post('/api/orders/setPaymentStatus')
+      .send({ orderId: r58Oid, status: 'partial', note: '后端对拍：一分没收想勾部分收款' })
+    check(
+      '账上一分没收就想手工「部分收款」：后端按同一份阶梯拦下，并点名账上那一档',
+      r58Partial.status === 400 &&
+        String(r58Partial.body.error.message).includes('按账算') &&
+        String(r58Partial.body.error.message).includes('客户已确认')
+    )
+    const r58Settled = await http
+      .post('/api/orders/setPaymentStatus')
+      .send({ orderId: r58Oid, status: 'settled', note: '后端对拍：一分没收想勾结清' })
+    check(
+      '勾「已结清」先撞上欠款的闸门：后端把还欠多少说出来',
+      r58Settled.status === 400 && String(r58Settled.body.error.message).includes('还欠 50.00')
+    )
+    const r58Half = await http
+      .post('/api/orders/addPayment')
+      .send({ orderId: r58Oid, p: { paidAt: localDate(), amount: 20, bankRef: 'ZZ-SRV-R58' } })
+    check('收 20/50 后标签自己跟上（部分收款）', r58Half.status === 200 && r58Half.body.paymentStatus === 'partial')
+    const r58StillDebt = await http
+      .post('/api/orders/setPaymentStatus')
+      .send({ orderId: r58Oid, status: 'settled', note: '后端对拍：还欠着也想勾' })
+    check(
+      '还欠 30 时手工结清照样拦，话术点名还欠多少',
+      r58StillDebt.status === 400 && String(r58StillDebt.body.error.message).includes('还欠 30.00')
+    )
+    const r58Clear = await http
+      .post('/api/orders/addPayment')
+      .send({ orderId: r58Oid, p: { paidAt: localDate(), amount: 30, bankRef: 'ZZ-SRV-R58B' } })
+    check('补齐后自己走到已结清（后端不靠人手勾）', r58Clear.status === 200 && r58Clear.body.paymentStatus === 'settled')
+
+    const r58QBad = await http.post('/api/quotations/updateMeta').send({ id: qid, meta: { status: 'issued' } })
+    check(
+      '报价状态认裸码：后端说清只能选哪几种（桌面同一句）',
+      r58QBad.status === 400 && String(r58QBad.body.error.message).includes('不是报价单状态')
+    )
+    const r58QBadResult = await http.post('/api/quotations/updateMeta').send({ id: qid, meta: { result: 'win' } })
+    check(
+      '报价结果同样只认枚举：没成交不许写成 win',
+      r58QBadResult.status === 400 && String(r58QBadResult.body.error.message).includes('不是报价结果')
+    )
+
+    const r58SBad = await http.post('/api/samples/save').send({ input: { id: sid, status: 'done' } })
+    check(
+      '打样状态裸码同样进不了库（后端与桌面同一份白名单）',
+      r58SBad.status === 400 && String(r58SBad.body.error.message).includes('打样状态')
+    )
+    const r58SmpCreate = await http
+      .post('/api/samples/save')
+      .send({
+        input: {
+          customerId: ocid,
+          currency: 'USD',
+          exchangeRate: 7.2,
+          exchangeRateDate: localDate(),
+          sampleDate: localDate(),
+          items: [{ styleNo: 'R58-S', quantity: 1, unitPrice: 20, goodsUnitPrice: 10 }]
+        }
+      })
+    const r58SmpId = Number(r58SmpCreate.body.id)
+    const r58Waive = await http.post('/api/samples/save').send({ input: { id: r58SmpId, feeStatus: 'waived' } })
+    check(
+      '样品费改成「客户免单」不写原因：后端也拒（免收就是把钱从待收里抹掉）',
+      r58Waive.status === 400 && String(r58Waive.body.error.message).includes('客户免单')
+    )
+    const r58WaiveOk = await http
+      .post('/api/samples/save')
+      .send({ input: { id: r58SmpId, feeStatus: 'waived', feeWaiveReason: '后端对拍：客户自己承担' } })
+    check(
+      '补上原因就能免，原因落在收款说明里',
+      r58WaiveOk.status === 200 && String(r58WaiveOk.body.feeNote).includes('客户自己承担')
+    )
+
+    const r58HomeCust = await http.post('/api/customers/save').send({ input: { company: 'R58-HOME-SRV' } })
+    const r58HomeCid = Number(r58HomeCust.body.id)
+    const r58HomeSmp = await http
+      .post('/api/samples/save')
+      .send({
+        input: {
+          customerId: r58HomeCid,
+          currency: 'CNY',
+          sampleDate: localDate(),
+          status: 'sent',
+          items: [{ styleNo: 'R58-CNY', quantity: 2, unitPrice: 100 }]
+        }
+      })
+    // 升级前的老数据：本币单的汇率列留着 0。按原始列筛会把这张单从拆分表里漏掉，
+    // 而客户页页头「未收金额」明明含它——后端与桌面读的是同一份 baseRate 口径
+    await db.run('UPDATE sample_orders SET exchange_rate = 0 WHERE id = ?', [Number(r58HomeSmp.body.id)])
+    const r58HomeRows = await http.post('/api/report/customerOrderRows').send({ customerId: r58HomeCid })
+    check(
+      '汇率列是 0 的本币打样单照样进未收拆分表（认折好的价，不认裸列）',
+      r58HomeRows.status === 200 &&
+        (r58HomeRows.body as { kind: string; receivable: number }[]).some(
+          (r) => r.kind === 'sample' && r.receivable === 200
+        )
+    )
+
+    const r58Q = await http
+      .post('/api/quotations/save')
+      .send({
+        input: {
+          customerId: ocid,
+          currency: 'USD',
+          exchangeRate: 7.2,
+          exchangeRateDate: localDate(),
+          items: [{ styleNo: 'R58-Q', quantity: 2, unitPrice: 7 }]
+        }
+      })
+    const r58Qid = Number(r58Q.body.id)
+    const r58Convert = await http.post('/api/quotations/convert').send({ id: r58Qid })
+    const r58Void = await http
+      .post('/api/orders/void')
+      .send({ id: Number(r58Convert.body.id), reason: '后端对拍：客户取消', opts: { confirmDocs: true } })
+    check('后端作废单走得通', r58Void.status === 200 && r58Void.body.paymentStatus === 'void')
+    const r58QAfter = await http.post('/api/quotations/get').send({ id: r58Qid })
+    check(
+      '订单作废后报价退回待跟进：状态回到客户已确认、结果回到待回',
+      r58QAfter.status === 200 &&
+        r58QAfter.body.status === 'confirmed' &&
+        r58QAfter.body.result === 'pending' &&
+        !r58QAfter.body.convertedOrderId
+    )
+    const r58QEvents = await http.post('/api/quotations/events').send({ id: r58Qid })
+    check(
+      '退回这件事在报价时间线留痕（不靠 converted_order_id 那个空列交代）',
+      (r58QEvents.body as { note?: string }[]).some((e) => String(e.note ?? '').includes('已作废') && String(e.note ?? '').includes('退回'))
+    )
+    const r58OEvents = await http.post('/api/orders/events').send({ orderId: Number(r58Convert.body.id) })
+    check(
+      '订单侧也记一条「报价已退回」',
+      (r58OEvents.body as { kind?: string }[]).some((e) => e.kind === 'quotation_back')
+    )
+
     console.log('错误体')
     const unknown = await http.post('/api/no-such-route').send({})
     check('未知路由回中文错误体', unknown.status === 404 && unknown.body.error.message === '没有这个接口')

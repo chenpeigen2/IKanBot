@@ -18,6 +18,7 @@ import { likeAny } from '../electron/services/search'
 import { billPartyOf, emptyParty, parseParty, patchParty, stringifyParty } from '../src/shared/party'
 import { localDate, addDays } from '../src/shared/date'
 import { assertQuantity, assertUnitPrice } from '../src/shared/guards'
+import { QUOTATION_RESULT_LABEL, QUOTATION_STATUS_LABEL } from '../src/shared/types'
 import type {
   Currency,
   Incoterm,
@@ -85,6 +86,25 @@ export interface QuotationSnapshot {
   /** 抬头快照：转单时连抬头一起带走，事后改客户档案不影响已出的纸 */
   billTo?: PartySnapshot
   items: QuotationItemInput[]
+}
+
+/**
+ * 报价单的状态与结果只能落在枚举里。
+ * 裸码（'won '、'Converted'、随手拼错的一个词）落库不会报错，只会从提醒和列表标签里
+ * 静默消失——跟进的人看不见它，报表也数不着它，等于这张报价人间蒸发。
+ * 建单、编辑、改状态三条路共用这一句。
+ */
+function assertQuotationEnums(status?: QuotationStatus, result?: QuotationResult): void {
+  if (status !== undefined && !(status in QUOTATION_STATUS_LABEL)) {
+    throw bizError(
+      `「${String(status)}」不是报价单状态，请选择：${Object.values(QUOTATION_STATUS_LABEL).join(' / ')}`
+    )
+  }
+  if (result !== undefined && !(result in QUOTATION_RESULT_LABEL)) {
+    throw bizError(
+      `「${String(result)}」不是报价结果，请选择：${Object.values(QUOTATION_RESULT_LABEL).join(' / ')}`
+    )
+  }
 }
 
 export function quotationsCore(db: Db) {
@@ -388,6 +408,7 @@ export function quotationsCore(db: Db) {
     let revision = 1
     let status: QuotationStatus = input.status ?? 'draft'
     let result: QuotationResult = input.result ?? 'pending'
+    assertQuotationEnums(status, result)
     let changeNote = ''
     let oldStatus: string | null = null
 
@@ -724,6 +745,7 @@ export function quotationsCore(db: Db) {
     id: number,
     meta: { status?: QuotationStatus; result?: QuotationResult }
   ): Promise<QuotationDetail> {
+    assertQuotationEnums(meta.status, meta.result)
     const cur = await db.get(
       'SELECT status, result, sent_at, confirmed_at, converted_order_id FROM quotations WHERE id = ?',
       [id]

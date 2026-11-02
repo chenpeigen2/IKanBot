@@ -81,7 +81,11 @@ export default function EditOrderModal({
     vessel: order.vessel ?? '',
     sealNo: order.sealNo ?? ''
   })
-  const chargesTotal = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
+  // 合计、含费用合计、提交数组共用这一份「会进账的费用行」：
+  // 屏显按全部行加、落库按有名字的行，等于一张单两个费用合计（没名字的那行钱会在 PI 上凭空消失）
+  const cleanCharges = charges.filter((c) => c.label.trim())
+  const unnamedWithAmount = charges.filter((c) => !c.label.trim() && Math.abs(Number(c.amount) || 0) > 0.005)
+  const chargesTotal = cleanCharges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
   const baseCurrency = settings?.baseCurrency ?? 'CNY'
   // 本币单没有汇率可填：折算口径就是 1:1，问人要数字只会被随手填成 1
   const isHomeCurrency = form.currency === baseCurrency
@@ -172,7 +176,7 @@ export default function EditOrderModal({
         etdDate: form.etdDate || null,
         vessel: form.vessel,
         sealNo: form.sealNo,
-        charges: charges.filter((c) => c.label.trim()).map((c) => ({ label: c.label, amount: c.amount })),
+        charges: cleanCharges.map((c) => ({ label: c.label, amount: c.amount })),
         chargeReason: chargeReason.trim() || undefined
       })
       toast('订单已更新')
@@ -207,7 +211,7 @@ export default function EditOrderModal({
           <Button onClick={onClose}>
             取消
           </Button>
-          <Button variant="primary" disabled={busy} onClick={save}>
+          <Button variant="primary" disabled={busy || unnamedWithAmount.length > 0} onClick={save}>
             保存修改
           </Button>
         </>
@@ -542,6 +546,12 @@ export default function EditOrderModal({
       <div className="hint mt-1">
         含费用合计 {money((order.totalAmount ?? 0) + chargesTotal, form.currency)}
       </div>
+      {unnamedWithAmount.length > 0 ? (
+        <div className="alert error mt-1">
+          {unnamedWithAmount.length} 行费用没填名字却带着金额：这样的行不会落库（钱会在 PI 上凭空消失），
+          请补上费用名称或把金额清掉再保存。
+        </div>
+      ) : null}
       <div className="field mt-1">
         <label>让利原因</label>
         <input

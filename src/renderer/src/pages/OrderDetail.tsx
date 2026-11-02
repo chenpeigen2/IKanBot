@@ -16,7 +16,7 @@ import {
   type ShipStatus,
   type PaymentMethod
 } from '../../../shared/types'
-import { isBillingStatus, sampleOffsetFromCharges, shownRemaining } from '../../../shared/billing'
+import { isBillingStatus, isMoneyStatus, sampleOffsetFromCharges, shownRemaining } from '../../../shared/billing'
 import {
   renderPi,
   renderPl,
@@ -96,8 +96,8 @@ export default function OrderDetail() {
   const [editPayment, setEditPayment] = useState(false)
   const [editShip, setEditShip] = useState(false)
   const [docVersions, setDocVersions] = useState<any[]>([])
-  /** 作废走自建弹窗：凭据清单 + 真勾选框。confirm() 里没有勾选框，
-      「凭据已核对」只能自动代勾，闸门就形同虚设 */
+  /** 作废走自建弹窗：已发出的单据清单 + 真勾选框。confirm() 里没有勾选框，
+      「已发出单据我已确认处理」只能自动代勾，闸门就形同虚设 */
   const [voidModal, setVoidModal] = useState(false)
   const [voidChecked, setVoidChecked] = useState(false)
   const [voiding, setVoiding] = useState(false)
@@ -194,8 +194,10 @@ export default function OrderDetail() {
   const openPi = async () => {
     try {
       const images = await buildImages()
-      // 存进去会是第几版：先问存档；没存之前纸上印「待存为第 N 版」（N39，不占还不存在的版本号）
-      const rev = await window.api.docs.nextVersion(order.piNo, 'pi')
+      // 存进去会是第几版：先问存档；没存之前纸上印「待存为第 N 版」（N39，不占还不存在的版本号）。
+      // 问不到就按「没有版次」预览（后端模式下存档只在本机，这张表读不到）：
+      // 版次是附属信息，不许把打印这条主路径拖死——纸上一个字都不少，只是不印版次行
+      const rev = await window.api.docs.nextVersion(order.piNo, 'pi').catch(() => 0)
       const render = (pending: boolean) => renderPi({ order, settings, images, rev, pending })
       setPreview({
         kind: 'pi',
@@ -235,7 +237,7 @@ export default function OrderDetail() {
       return
     }
     const images = await buildImages()
-    const rev = await window.api.docs.nextVersion(pl.plNo, 'pl')
+    const rev = await window.api.docs.nextVersion(pl.plNo, 'pl').catch(() => 0)
     const render = (pending: boolean) => renderPl({ order, settings, images, rev, pending }, pl)
     // 存档金额按批次摊：三个批次各存自己那一份，加起来才等于 PI（服务层唯一口径 money.packingAmounts）
     const amounts = await window.api.pl.amounts(order.id)
@@ -310,7 +312,8 @@ export default function OrderDetail() {
         }
         title = `CI ${docNo}（批次 ${pl.plNo}）`
       }
-      const rev = await window.api.docs.nextVersion(docNo, 'ci')
+      // 版次读不到（后端模式存档只在本机）也照常出纸：附属数据不许拖死预览这条主路径
+      const rev = await window.api.docs.nextVersion(docNo, 'ci').catch(() => 0)
       const render = (pending: boolean) => renderCi({ order, settings, images, rev, pending }, { charges: ciCharges, batch })
       setPreview({
         kind: 'ci',
@@ -624,7 +627,7 @@ export default function OrderDetail() {
                     <span className="v">
                       {order.sourceQuotationNo}
                       {order.sourceRevision ? ` · 第 ${order.sourceRevision} 版` : ''}
-                      <span className="faint">（转单时的价格快照，之后改报价不影响这张单）</span>
+                      <span className="faint">（按转单那一版的价格，之后改报价不影响这张单）</span>
                     </span>
                   </div>
                 ) : null}
@@ -763,29 +766,19 @@ export default function OrderDetail() {
                         setExpirePrompt(true)
                         return
                       }
-                      // 还欠着钱却要勾「已结清」：界面不拦、也不收原因，交给 core 当面拒绝，
-                      // 报错里会把「登记收款」和「核销与坏账」两条正门说清楚
-                      if (
-                        next === 'settled' &&
-                        order.paymentStatus !== 'settled' &&
-                        Number(order.remaining ?? 0) > 0.001
-                      ) {
-                        toast(
-                          `这张单按流水还欠 ${money(Number(order.remaining), order.currency)}，不能标「已结清」——「已结清」的意思是钱真的收齐了。\n` +
-                            '客户给的是现金、或者水单还没录：先到下面「收款记录」里登记这一笔（流水号可以留空）。\n' +
-                            '确实不再收（抹零、协商免收、收不回来）：到「核销与坏账」里记一笔短款或坏账。',
-                          'error'
-                        )
-                        return
-                      }
+                      // 钱档状态（部分收款 / 定金已收 / 已结清）该是哪一档，一律由 core 按账裁。
+                      // 界面以前自己算过一份「还欠多少就不许勾结清」，同一条规矩两张嘴：
+                      // 界面放行、服务层拦下（或反过来），业务员就只能猜系统今天认哪个数
                       await applyPaymentStatus(next)
                     }}
                   >
-                    {/* 作废只能走「⋯ → 作废此单」的凭据核对弹窗，下拉里不给这个旁路。
-                        退回草稿的闸门只由服务层裁决：界面自己算一份，迟早和 core 对不上 */}
+                    {/* 作废只能走「⋯ → 作废此单」的发出单据核对弹窗，下拉里不给这个旁路。
+                        退回草稿的闸门、钱档状态是哪一档，都由服务层裁决：界面自己算一份，迟早和 core 对不上 */}
                     {PAYMENT_STATUS_ORDER.filter((s) => s !== 'void').map((s) => (
                       <option key={s} value={s}>
                         {PAYMENT_STATUS_LABEL[s]}
+                        {/* 这三档不是备注，是账的结论：标清楚它们是收钱收出来的 */}
+                        {isMoneyStatus(s) ? '（按账算）' : ''}
                       </option>
                     ))}
                   </select>
@@ -797,7 +790,10 @@ export default function OrderDetail() {
                     </Button>
                   </div>
                 )}
-                <div className="hint">收到定金/尾款时系统会自动流转，这里是手动覆盖。</div>
+                <div className="hint">
+                  登记收款、记核销或用预收抵扣之后，系统会按账流转；「部分收款 / 定金已收 / 已结清」只能标成账上那一档，
+                  这里手工勾错了会被当场拒——要改的是钱，不是标签。
+                </div>
               </div>
               <div className="field">
                 <label>出货状态</label>
@@ -939,7 +935,7 @@ export default function OrderDetail() {
                     variant="danger"
                     disabled={voiding || (needsCheck && !voidChecked)}
                     title={
-                      needsCheck && !voidChecked ? '先勾选「凭据已核对」才能作废' : undefined
+                      needsCheck && !voidChecked ? '先勾「已发出单据我已确认处理」才能作废' : undefined
                     }
                     onClick={() => void voidOrder()}
                   >
@@ -957,7 +953,8 @@ export default function OrderDetail() {
               </p>
               <p className="faint">
                 抵在这张单上的客户预收会退回客户余额；转单时抵进来的打样费退回打样单的未收；
-                已经认下的坏账不会跟着单消失，仍挂在内部报表里等追回。
+                已经认下的坏账不会跟着单消失，仍挂在内部报表里等追回；
+                由报价单转过来的，那张报价会退回「客户已确认」、结果回到「待回」，重新回到跟进列表。
               </p>
               {needsCheck ? (
                 <div className="alert warn">
@@ -973,7 +970,7 @@ export default function OrderDetail() {
                       checked={voidChecked}
                       onChange={(e) => setVoidChecked(e.target.checked)}
                     />
-                    凭据已核对：已确认发出去的 PI/CI 如何处理（重开、退款或留作退款凭据）
+                    已发出单据我已确认处理：客户手里的 PI/CI/箱单各自怎么收尾（重开一张、退款，还是留着当退款时的对账依据）
                   </label>
                 </div>
               ) : null}
@@ -1065,7 +1062,11 @@ function ChargesEditor({
   const [charges, setCharges] = useState<{ uid: string; label: string; amount: number }[]>(
     (order.charges ?? []).map((c: any) => ({ uid: clientKey(), label: String(c.label), amount: Number(c.amount) || 0 }))
   )
-  const total = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
+  // 屏显合计、含费用合计、提交数组共用这一份：没名字的行不落库，把它们算进合计会让屏上的数
+  // 和 PI/CI 上的数分叉（和 CiModal 里 clean 同一个口径）
+  const clean = charges.filter((c) => c.label.trim())
+  const unnamedWithAmount = charges.filter((c) => !c.label.trim() && Math.abs(Number(c.amount) || 0) > 0.005)
+  const total = clean.reduce((s, c) => s + (Number(c.amount) || 0), 0)
   const [reason, setReason] = useState('')
   // 让利要不要写原因由服务层那道门判（它比的是库里的原值和清掉空行之后的新值）。
   // 界面自己再算一遍会得出第三套基准：这儿放行、服务端拦下，而原因框当时还没露出来。
@@ -1075,7 +1076,7 @@ function ChargesEditor({
     try {
       await window.api.orders.updateCharges(
         order.id,
-        charges.filter((c) => c.label.trim()).map((c) => ({ label: c.label, amount: c.amount })),
+        clean.map((c) => ({ label: c.label, amount: c.amount })),
         reason.trim() || undefined
       )
       toast('费用已改，PI / CI 上的合计同步变了')
@@ -1165,10 +1166,16 @@ function ChargesEditor({
         <Button size="sm"  onClick={onClose}>
           取消
         </Button>
-        <Button variant="primary" size="sm"  onClick={() => void save()}>
+        <Button variant="primary" size="sm" disabled={unnamedWithAmount.length > 0} onClick={() => void save()}>
           保存费用
         </Button>
       </div>
+      {unnamedWithAmount.length > 0 ? (
+        <div className="alert error mt-1">
+          {unnamedWithAmount.length} 行费用没填名字却带着金额：这样的行不会落库（钱会在 PI / CI 上凭空消失），
+          请补上费用名称或把金额清掉再保存。
+        </div>
+      ) : null}
       <div className="field mt-2">
         <label>让利原因</label>
         <input
@@ -3224,9 +3231,17 @@ function EditBatchModal({
       // CI 印的就是柜号/船名/ETD/封条/提单号：已出 CI 的批次改这些字段，
       // 发出去的纸不会跟着变——先让人知道两边会分叉，再决定存不存
       const ciDocNo = ciNoOf(order.piNo, pl.plNo)
-      const liveCi = (await window.api.docs.list(order.id)).filter(
-        (d: any) => d.kind === 'ci' && d.docNo === ciDocNo && !d.voidedAt
-      )
+      // 存档是附属信息：读不到（后端模式下这张表在本机、或本机存档库本身报错）就跳过分叉提醒，
+      // 不许顶掉柜号/实收这些主数据的写入——附属数据不许拖死主数据（R57 同一条规矩）
+      let liveCi: any[] = []
+      let archiveBlind = false
+      try {
+        liveCi = (await window.api.docs.list(order.id)).filter(
+          (d: any) => d.kind === 'ci' && d.docNo === ciDocNo && !d.voidedAt
+        )
+      } catch {
+        archiveBlind = true
+      }
       if (liveCi.length > 0) {
         const paper: [string, unknown, string][] = [
           ['柜号', pl.containerNo, form.containerNo],
@@ -3260,7 +3275,11 @@ function EditBatchModal({
         docDate: form.docDate || null,
         deliveredDate: form.deliveredDate || null
       })
-      toast('批次信息已保存')
+      toast(
+        archiveBlind
+          ? '批次信息已保存（这次读不到单据存档，改动没能和已发出的 CI 比对，请自己核一眼纸面）'
+          : '批次信息已保存'
+      )
       await onDone()
     } catch (e) {
       toast((e as Error).message, 'error')
@@ -3932,6 +3951,7 @@ function TimelineTab({
         </div>
       )}
       {voidTarget ? (
+        // 要把布尔值原样交给弹窗：被拒时窗口不关，已经敲好的原因不能跟着一起丢
         <PromptModal
           title={`作废存档 ${voidTarget.docNo} 第 ${voidTarget.version} 版（金额 ${Number(voidTarget.amount).toFixed(2)}）`}
           label={

@@ -1393,9 +1393,12 @@ export function moneyCore(db: Db) {
         currency: r.currency,
         receivable: r.receivable
       }))
-    // 没填汇率的打样单摆进来也登记不了（服务层会拦），不如先让打样页提醒补汇率
+    // 折不出来的打样单摆进来也登记不了（服务层会拦），不如先让打样页提醒补汇率。
+    // 认 baseRate 而不是原始汇率：本币单本来就不涉汇率（baseRateOf 恒为 1），
+    // 但库里可能还留着升级前写的 0/空——按原始列筛会把这张单从拆分表里漏掉，
+    // 而客户页页头的未收数明明含它，分出来的钱永远不等于表头那个数。
     const samples: CustomerOpenRow[] = (await sampleOpenRows(customerId))
-      .filter((r) => r.exchangeRate > 0)
+      .filter((r) => r.baseRate > 0)
       .map((r) => ({
         kind: 'sample',
         docId: r.sampleId,

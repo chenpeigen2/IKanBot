@@ -34,7 +34,7 @@ import type {
   SampleOrderItem,
   SampleStatus
 } from '../src/shared/types'
-import { PAYMENT_STATUS_LABEL, SAMPLE_FEE_STATUS_LABEL, SAMPLE_FEE_STATUS_ORDER, SAMPLE_STATUS_LABEL } from '../src/shared/types'
+import { PAYMENT_STATUS_LABEL, SAMPLE_FEE_STATUS_LABEL, SAMPLE_FEE_STATUS_ORDER, SAMPLE_STATUS_LABEL, SAMPLE_STATUS_ORDER } from '../src/shared/types'
 export interface SampleItemInput {
   productId?: number | null
   styleNo: string
@@ -64,6 +64,8 @@ export interface SampleInput {
   factoryCost?: number
   feeStatus?: SampleFeeStatus
   feeNote?: string
+  /** 把样品费改成「免收」的理由：只在这一次真的改成免收时落进 fee_note（打样单没有操作历史表） */
+  feeWaiveReason?: string
   currency?: string
   exchangeRate?: number
   exchangeRateDate?: string
@@ -366,6 +368,13 @@ export function samplesCore(db: Db) {
       )
     }
     const feeStatus = rawFeeStatus as SampleFeeStatus
+    // 打样环节状态同一条闸门：脏值落库不报错，却会让这张单从样品台账、待跟进里静默消失
+    const rawStatus = (before ? keepText('status', 'status') : undefined) ?? input.status
+    if (rawStatus !== undefined && rawStatus !== '' && !SAMPLE_STATUS_ORDER.includes(rawStatus as SampleStatus)) {
+      throw bizError(
+        `打样状态「${String(rawStatus)}」不认识：只能是 ${SAMPLE_STATUS_ORDER.map((s) => SAMPLE_STATUS_LABEL[s]).join(' / ')}。`
+      )
+    }
     const currency = (before ? keepText('currency', 'currency') : String(input.currency ?? '')) || 'USD'
     const baseCurrency = (await settingsCore(db).get()).baseCurrency
     // 本币单没有汇率可折：统一落 1。库里可能还存着切基准币之前的外币汇率（比如 7.15），
@@ -459,6 +468,19 @@ export function samplesCore(db: Db) {
       throw bizError(
         '「已抵扣」不能手工标记：这是样品费已经抵进某张订单的凭据，只有转订单时勾「样品费抵货款」才会自动记上。如果是真收到了钱，请选「已向客户收」。'
       )
+    }
+    // 免收是一笔钱的终局：它把这张打样单从待收、欠款榜、对账单里一起摘掉，
+    // 而打样单没有操作历史表，fee_note 就是唯一的账本。以前免收什么都不要求，
+    // 客户问「上次那 200 块样品费怎么没算」，账上只有「免单」两个字，没人知道是谁答应的、为什么。
+    // 同一条保存通道上，取消要写原因、批次作废要写原因、存档作废要写原因——免收凭什么不用。
+    // 新建时就选免收的不算抹账：那笔钱从没进过待收，是生意一开始就说好的价。
+    if (before && feeStatus === 'waived' && String(before.fee_status ?? '') !== 'waived') {
+      const why = String(input.feeWaiveReason ?? '').trim()
+      if (!why) {
+        throw bizError(
+          '改成「客户免单」要写原因：这笔样品费不再向客户收，会从待收和欠款榜里消失，而打样单没有操作历史，只有收款说明能交代清楚。请补一句为什么免（例如「客户自己承担」「订单已含样品费」），再保存。'
+        )
+      }
     }
     // 反向同一条闸门：把「已抵扣」手工改回未收/已收，订单上那条负费用行还在，
     // 同一块样品费会在两张单上各收一遍；而改回「免收」更直接——钱既没抵也没收，账上凭空消失。
@@ -645,6 +667,9 @@ export function samplesCore(db: Db) {
     }
     if (feeStatus === 'waived' && String(before?.fee_status ?? '') !== 'waived') {
       await creditsOf().reverseCreditsForTarget('sample', id, '打样费改为免收，预收抵扣回退')
+      // 免收的原因落在 fee_note 上——打样单没有操作历史表，这句话就是唯一的账本
+      const why = String(input.feeWaiveReason ?? '').trim()
+      if (why) await appendFeeNote(id, `样品费免收：${why}`)
     }
 
     if (itemsProvided) {
@@ -978,7 +1003,8 @@ export function samplesCore(db: Db) {
             (isBillingStatus(o.paymentStatus)
               ? ''
               : `现在那张单是「${PAYMENT_STATUS_LABEL[o.paymentStatus] ?? o.paymentStatus}」，` +
-                `样品费抵扣挂在它身上还没生效，这笔钱又回到了打样账上——先把那张订单恢复成计费状态（确认/续期）再收款，` +
+                `样品费抵扣挂在它身上还没生效，这笔钱又回到了打样账上——先把那张订单改成「客户已确认」` +
+                `（过期了就延长有效期）再收款，` +
                 `在这里另收一笔会和抵扣重复计。`)
         )
       }
@@ -994,7 +1020,7 @@ export function samplesCore(db: Db) {
             ? `现在那张单是「${
                 PAYMENT_STATUS_LABEL[s.convertedOrderStatus as PaymentStatus] ?? s.convertedOrderStatus
               }」，抵扣暂时挂起、这笔样品费又回到了待收——` +
-              `要收钱先把那张订单恢复成计费状态（确认报价/延长有效期），抵扣会自动生效，钱登记在那张单上。`
+              `要收钱先把那张订单改成「客户已确认」（过期了就延长有效期），抵扣会自动生效，钱登记在那张单上。`
             : `要改成收现金，请先撤销那笔抵扣（作废/退回那张转出订单，或按订单页的抵扣撤销通道处理），再来这里登记。`)
       )
     }
