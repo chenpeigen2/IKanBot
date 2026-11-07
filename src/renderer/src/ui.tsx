@@ -26,7 +26,13 @@ export function Modal({
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  return (
+  // 必须挂到 body 上（portal），不能渲染在页面树里：
+  // .main .content 带着 page-in 动画（fill-mode: both 保留 transform 关键帧），
+  // Chromium 会把带 transform 动画的元素当成 position:fixed 后代的包含块——
+  // 遮罩的 inset:0 于是变成相对内容区而不是相对视口，长页面上弹窗既不居中、
+  // 顶部还被 sticky 页头盖住（R60：订单详情收款页签的「登记短款核销」弹窗）。
+  // portal 到 body 后祖先里没有任何 transform/动画，所有弹窗一起受益。
+  return createPortal(
     <div className="modal-mask" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className={`modal ${size ?? ''}`}>
         <div className="modal-head">
@@ -39,7 +45,8 @@ export function Modal({
         <div className="modal-body">{children}</div>
         {footer ? <div className="modal-foot">{footer}</div> : null}
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }
 
