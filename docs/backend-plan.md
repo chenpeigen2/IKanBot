@@ -465,6 +465,41 @@
   恢复备份不核对单据 PDF、对账单汇率列两种口径、后端模式 `doc_versions` 空表使四道存档闸门失明、打样弹窗自算成本混币种；
   沿用 R55/R56/R57：退款折基准币（需 v23 记汇率）、作废前流水冲正的新接口、水单批次账、提醒阈值拆分、
   报表全量 `listOrderMoney`、浮点常量统一、client-token 幂等。
+- **R59 换基线后的三个小尾巴 + M2 鉴权第一片（2026-11-07，覆盖率仍 90 / 119）**：主干整体落到 macOS 新基线
+  （R50–R58 九个提交，e2e 2290、schema v22、客户聚合三通道后端已搬完 90/119），旧线上复验留的三条小尾巴
+  在新基线上逐条重判：
+  ① 毛利口径标注：成本没录全的提示已由 R48/R53/R58 覆盖（工作台/报表/订单详情/客户页四处都在），
+     但重判时发现**第二种病没被认**：外币没填汇率的单 `profitBase=null`，按 0 求和后本月/该月毛利被
+     悄悄吃掉一块，界面还报着一个偏小的数当真毛利。修法：工作台 `monthProfitReliable` 同时认
+     成本没录与汇率没填（`monthMissingCostOrders`/`monthRateMissingOrders` 两个计数分开给界面，
+     说明按病提示该补成本还是补汇率）；月报逐月加 `rateMissingOrders`、`profit` 同口径置 null，
+     报表累计卡与逐行同步；月度汇总 CSV 加「汇率没填单数」列。e2e +5 锁死三处同一口径。
+  ② 工作台「定金」字样：重判结论是**会被误读，改了**。R54 把 paid 状态改叫「定金已收」之后，
+     待收款金额卡里光写「定金 1,823」会被读成「定金已收 1,823」；四个桶都是还没收的钱，
+     词面加「待收」（待收定金/待收尾款/待收打样费），`shot.sh` 实拍验证。
+  ③ **sweep 探针入库 + macOS 化 + 基线重钉**：探针本体从 out/（gitignore，搬机器即丢）收进
+     `scripts/probe-sweep.js` 入 git；`sweep.sh` 清掉 taskkill / MSYS_NO_PATHCONV 这些 Windows 残留，
+     数据目录自动指项目 data/。旧绝对值 233.031 / 91.641 是旧 Windows 机器（另一套字体/DPI）上的
+     表宽，探针文件与数据两样都换了，不复现也不必复现，作废。基线必须在设了演示数据
+     （`IKAN_DATA_DIR=<项目>/data` + `npm run seed`）的前提下跑；`/orders/133` 随旧库作废，
+     改用 seed 后固定的第一张单 `/orders/13`。2026-11-07 在 macOS 重钉如下——
+     版面没变的标准是「与这张表逐字节一致」：
+
+     | 路由 | tables（w/overflow） | phantom | clipped | docOverflow | mainOverflow |
+     | --- | --- | --- | --- | --- | --- |
+     | `/` | data#0 w=982 / 0 | 0 | reminder-sub×2（尾款提醒「已收 3000.00 / 待收 4805.00」、备份提醒「已经有 6 张单据…」） | 0 | 0 |
+     | `/orders` | data#0 w=1486.648 / 504.648 | 0 | — | 0 | 0 |
+     | `/orders/13` | data#0 w=982 / 0 | 0 | — | 0 | 0 |
+     | `/quotations` | data#0 w=982 / 0 | 0 | — | 0 | 0 |
+     | `/samples` | data#0 w=1339.109 / 357.109 | 0 | mono×2（「TS-001、PL-002」/「SF7788990011」） | 0 | 0 |
+     | `/products` | data#0 w=982 / 0 | 0 | — | 0 | 0 |
+     | `/customers` | data#0 w=982 / 0 | 0 | — | 0 | 0 |
+     | `/reports` | data#0、#1 w=982 / 0 | 0 | — | 0 | 0 |
+     | `/settings` | （无表格） | 0 | — | 0 | 0 |
+
+     说明：/orders、/samples 的表格横向 overflow 是设计内的（容器 overflow-x 滚动，探针的
+     phantom 只抓 overflow:visible 的真溢出）；clipped 是 ellipsis 截断的预期清单，内容跟演示
+     数据走（seed 后立即扫就是这个样子）。
 - **下一刀**：业务接口已 90 条全搬完，剩下 29 个通道都是本机基建（`docs:` / `backup:` / `images:` / `window:` /
   `shell:` / `app:` / `export:` / `mode:` / `updater:`）。下一步不是「再搬一条」，而是打印与单据渲染、备份与更新
   按 M2/M5 的鉴权与多机并发一起做——那些通道把本机文件路径当接口，单条搬过去只会把两边的账撕开。
