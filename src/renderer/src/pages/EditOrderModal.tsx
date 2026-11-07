@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { Modal, useToast, today, money, Button, clientKey } from '../ui'
 import {
+  draftOrderEditKey,
+  clearDraft,
+  loadDraft,
+  saveDraft,
+  type OrderEditDraft
+} from '../../../shared/drafts'
+import {
   CURRENCIES,
   INCOTERMS,
   PAYMENT_METHOD_LABEL,
@@ -50,15 +57,25 @@ export default function EditOrderModal({
   onSaved: () => Promise<void>
 }) {
   const toast = useToast()
+  // 草稿暂存（R62）：与新建订单同一套机制（src/shared/drafts.ts），键按单分开。
+  // 编辑改到一半 token 过期被 401 拦下、或程序重启，稿子都在；保存成功才清。
+  const draftStore = window.localStorage
+  const draftKey = draftOrderEditKey(order.id)
+  /** 上次没保存的草稿（打开时读一次；有才有恢复提示与回填） */
+  const restored = useRef<ReturnType<typeof loadDraft<OrderEditDraft>> | undefined>(undefined)
+  if (restored.current === undefined) restored.current = loadDraft(draftStore, draftKey)
   const [customers, setCustomers] = useState<any[]>([])
   const [ports, setPorts] = useState<{ loading: string[]; destination: string[] }>({
     loading: [],
     destination: []
   })
-  const [charges, setCharges] = useState<{ uid: string; label: string; amount: number }[]>(
-    (order.charges ?? []).map((c: any) => ({ uid: clientKey(), label: String(c.label), amount: Number(c.amount) || 0 }))
-  )
-  const [form, setForm] = useState<EditForm>({
+  const [charges, setCharges] = useState<{ uid: string; label: string; amount: number }[]>(() => {
+    // 草稿里的费用行优先：uid 是界面临时键，恢复时重新生成
+    const src = restored.current ? restored.current.value.charges : (order.charges ?? [])
+    return src.map((c: any) => ({ uid: clientKey(), label: String(c.label), amount: Number(c.amount) || 0 }))
+  })
+  const [form, setForm] = useState<EditForm>(() => {
+    const base: EditForm = {
     customerId: order.customerId,
     piNo: order.piNo ?? '',
     currency: order.currency,
@@ -80,6 +97,9 @@ export default function EditOrderModal({
     etdDate: order.etdDate ?? '',
     vessel: order.vessel ?? '',
     sealNo: order.sealNo ?? ''
+    }
+    // 草稿回填：只覆盖稿子里有的键，其余仍用库里的原值
+    return restored.current ? ({ ...base, ...restored.current.value.form } as EditForm) : base
   })
   // 合计、含费用合计、提交数组共用这一份「会进账的费用行」：
   // 屏显按全部行加、落库按有名字的行，等于一张单两个费用合计（没名字的那行钱会在 PI 上凭空消失）
@@ -103,6 +123,33 @@ export default function EditOrderModal({
     window.api.customers.list('', true).then(setCustomers, fail)
     window.api.orders.ports().then(setPorts, fail)
   }, [])
+
+  // 恢复提示只弹一次：告诉人这是几点存的那份稿，别让人以为是刚才改的
+  useEffect(() => {
+    if (restored.current) {
+      toast(`已恢复上次没保存的草稿（${new Date(restored.current.savedAt).toLocaleString()} 暂存），保存成功后自动清掉；不需要就改掉再存`)
+    }
+  }, [])
+
+  // 改动即暂存（R62）：打开那一刻的状态（含草稿回填）算未动笔，之后每次变化都存稿。
+  // 报错/取消都不清——重新打开弹窗就续上；保存成功才清（见 save() 成功分支）
+  const pristineEdit = useRef<string | null>(null)
+  useEffect(() => {
+    const snapshot = JSON.stringify({
+      form,
+      charges: charges.map((c) => ({ label: c.label, amount: c.amount }))
+    })
+    if (pristineEdit.current === null) {
+      pristineEdit.current = snapshot
+      return
+    }
+    if (snapshot !== pristineEdit.current) {
+      saveDraft(draftStore, draftKey, {
+        form,
+        charges: charges.map((c) => ({ label: c.label, amount: c.amount }))
+      })
+    }
+  }, [form, charges])
 
   // 保存期间按住按钮：一次改单要写主表 + 历史 + 状态重算，连点两下会把同一份改动提交两遍
   const [busy, setBusy] = useState(false)
@@ -179,6 +226,8 @@ export default function EditOrderModal({
         charges: cleanCharges.map((c) => ({ label: c.label, amount: c.amount })),
         chargeReason: chargeReason.trim() || undefined
       })
+      // 保存成功才算交卷：草稿当场清掉（401 拦下、取消、报错都留着，重开弹窗续上）
+      clearDraft(draftStore, draftKey)
       toast('订单已更新')
       await onSaved()
     } catch (e) {

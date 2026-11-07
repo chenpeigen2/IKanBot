@@ -19,6 +19,20 @@ export interface DraftStore {
 /** 新建订单表单的草稿键（v1：字段结构变了就换版本号，老草稿自然作废） */
 export const DRAFT_ORDER_NEW = 'ikan.draft.order-new.v1'
 
+/** 编辑已有订单的草稿键前缀（R62）：一张单一份稿，不同订单互不串 */
+export const DRAFT_ORDER_EDIT_PREFIX = 'ikan.draft.order-edit.v1.'
+
+/** 编辑某张订单时用的草稿键：弹窗里带上 order.id 取自己的那份 */
+export function draftOrderEditKey(orderId: number): string {
+  return `${DRAFT_ORDER_EDIT_PREFIX}${orderId}`
+}
+
+/** 编辑订单弹窗的草稿内容：订单级字段 + 费用行（uid 是界面临时键，不入稿） */
+export interface OrderEditDraft {
+  form: Record<string, unknown>
+  charges: Array<{ label: string; amount: number }>
+}
+
 export interface DraftRecord<T> {
   /** 暂存时刻（ISO 字符串），恢复时给人看「是什么时候存的」 */
   savedAt: string

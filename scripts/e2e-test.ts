@@ -45,7 +45,7 @@ import { isBillingStatus, shownRemaining } from '../src/shared/billing'
 import { likeContains } from '../electron/services/search'
 import { INCOTERMS, canIssueDocs, DOC_ISSUE_FORBIDDEN, PAYMENT_STATUS_ORDER } from '../src/shared/types'
 import { CSV_BOM, looksGarbled, pickCsvDecode } from '../src/shared/csv'
-import { DRAFT_ORDER_NEW, clearDraft, loadDraft, saveDraft } from '../src/shared/drafts'
+import { DRAFT_ORDER_NEW, draftOrderEditKey, clearDraft, loadDraft, saveDraft, type OrderEditDraft } from '../src/shared/drafts'
 
 let passed = 0
 let failed = 0
@@ -12734,6 +12734,48 @@ section('R61：token 过期不丢草稿（本地暂存）')
     '草稿的清只发生在建单成功之后（401 拦下时稿子还在，重登后续上）',
     createModalBody.indexOf('clearDraft(draftStore, DRAFT_ORDER_NEW') !== -1 &&
       createModalBody.indexOf('clearDraft(draftStore, DRAFT_ORDER_NEW') < createModalBody.indexOf('onCreated(order.id)')
+  )
+}
+
+/* ---------------- R62：编辑已有订单弹窗的草稿暂存（改动即暂存、保存成功才清） ---------------- */
+section('R62：编辑已有订单弹窗的草稿暂存')
+{
+  // 与新建订单同一套暂存机制（src/shared/drafts.ts），只是键按单分开
+  const mem = new Map<string, string>()
+  const store = {
+    getItem: (k: string) => mem.get(k) ?? null,
+    setItem: (k: string, v: string) => void mem.set(k, v),
+    removeItem: (k: string) => void mem.delete(k)
+  }
+  const keyA = draftOrderEditKey(5)
+  const keyB = draftOrderEditKey(6)
+  check('编辑草稿按单分键（两张单的稿子互不串）', keyA !== keyB && keyA.endsWith('.5') && keyB.endsWith('.6'), `${keyA} / ${keyB}`)
+  check('没存过就是没有（不凭空造一份）', loadDraft(store, keyA) === null)
+  const editDraft: OrderEditDraft = {
+    form: { customerPo: 'PO-R62', note: '改到一半' },
+    charges: [{ label: '运费 Freight', amount: 120 }]
+  }
+  saveDraft(store, keyA, editDraft)
+  const back = loadDraft<OrderEditDraft>(store, keyA)
+  check('编辑草稿能原样取回（表单字段 + 费用行）', back !== null && JSON.stringify(back.value) === JSON.stringify(editDraft))
+  check('草稿带暂存时刻（恢复时好告诉人是几点存的）', back !== null && !Number.isNaN(Date.parse(back.savedAt)))
+  saveDraft(store, keyA, { form: { note: '覆盖' }, charges: [] })
+  eq('重存覆盖旧稿（同一张单只有一份）', loadDraft<OrderEditDraft>(store, keyA)?.value.form, { note: '覆盖' })
+  mem.set(keyB, JSON.stringify({ savedAt: 123, value: { form: {} } }))
+  check('另一张单的坏稿不牵连这一张（按单各自拒收）', loadDraft(store, keyB) === null && loadDraft<OrderEditDraft>(store, keyA) !== null)
+  clearDraft(store, keyA)
+  check('保存成功清掉草稿（不残留上一次的影子）', loadDraft(store, keyA) === null)
+
+  // 接线检查：编辑弹窗真的接了这套暂存——改动即存、打开即恢复、保存成功才清
+  const editSrc = fs.readFileSync('src/renderer/src/pages/EditOrderModal.tsx', 'utf8')
+  check('编辑订单弹窗：改动即暂存（saveDraft 接在 form/charges 变化上）', editSrc.includes('saveDraft(draftStore, draftKey'), editSrc.includes('saveDraft') ? '有 saveDraft 但位置不对' : '没接 saveDraft')
+  check('编辑订单弹窗：打开时恢复上次没保存的草稿（loadDraft，按单分键）', editSrc.includes('loadDraft(draftStore, draftKey'))
+  const editBody = editSrc.slice(editSrc.indexOf('export default function EditOrderModal'))
+  const clearAt = editBody.indexOf('clearDraft(draftStore, draftKey')
+  check(
+    '编辑订单弹窗：保存成功才清草稿（clearDraft 在 update 成功之后、onSaved 之前，报错路径不清）',
+    clearAt !== -1 && editBody.indexOf('await onSaved()') > clearAt && editBody.indexOf('window.api.orders.update') < clearAt,
+    `clearAt=${clearAt} onSavedAt=${editBody.indexOf('await onSaved()')}`
   )
 }
 
