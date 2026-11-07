@@ -527,6 +527,13 @@
   ③ 基线重钉：在 1600x1000 窗口下九个路由的探针输出与 R59 那张表**逐字节一致**
      （表宽都是 max-content，不随窗口拉伸；唯一变化是 `/orders/13` → `/orders/1`，值 982 / 0 不变），
      重跑一遍复现一致。
+- **R60 发版账：v0.5.1 Linux job 的 rpm 缺件（2026-11-07）**：v0.5.1 的 Linux job 在「上传到 Release」
+     一步挂了——deb/AppImage 传上了，**rpm 和 latest-linux.yml 缺**（Release 资产缺件，按 AGENTS.md
+     第二条第 4 款记此账）。本机是 macOS，复现不了 x64 的 Linux 打包，已照 debug-e2e.yml 的手法
+     起了一次性诊断工作流 `.github/workflows/debug-rpm.yml`（ubuntu 环境只打 rpm、DEBUG 全量输出，
+     日志推 ci-debug-log 分支）。**注意：按「不要 push」的纪律本文件只落盘未推**——主管 push main
+     （或单推这个文件）即触发，拿到日志后：能修就修、修完删这个工作流；短期修不动就发版时
+     从 `electron-builder.yml` 的 linux.target 里去掉 rpm（deb/AppImage 够用），并把决策写在这里。
 - **下一刀**：业务接口已 90 条全搬完，剩下 29 个通道都是本机基建（`docs:` / `backup:` / `images:` / `window:` /
   `shell:` / `app:` / `export:` / `mode:` / `updater:`）。下一步不是「再搬一条」，而是打印与单据渲染、备份与更新
   按 M2/M5 的鉴权与多机并发一起做——那些通道把本机文件路径当接口，单条搬过去只会把两边的账撕开。
