@@ -611,6 +611,26 @@ CREATE TABLE customer_refunds (
 );
 CREATE INDEX idx_refunds_customer ON customer_refunds(customer_id, currency);
 `
+  },
+  {
+    version: 23,
+    name: 'users',
+    sql: `
+-- 登录用户（M2 鉴权第一片，R59）。
+-- 只在远端模式用得到：桌面本地模式仍是单人单机，不建账号也不拦人，
+-- 但表跟着 schema 走，两端同一份迁移纪律不变。
+-- 密码绝不落明文：scrypt + 随机盐在服务端哈希后只存 hash，
+-- 撞库没门（同一密码两次哈希不同）、计时侧信道没门（timingSafeEqual）。
+-- 用户名归一成小写再比（跟款号、客户名同一套口径），列上加 UNIQUE 兑底。
+CREATE TABLE users (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  username      TEXT NOT NULL UNIQUE,
+  display_name  TEXT NOT NULL DEFAULT '',
+  password_hash TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+`
   }
 ]
 

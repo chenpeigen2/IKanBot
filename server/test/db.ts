@@ -11,6 +11,9 @@ import { settingsCore } from '../../core/settings'
 import { moneyCore } from '../../core/money'
 import { loadConfig } from '../src/config/config'
 import { LATEST_DB_VERSION } from '../../electron/db/schema'
+import { createUser, findUserByUsername } from '../src/auth/users'
+import { hashPassword, verifyPassword } from '../src/auth/password'
+import { signToken, verifyToken } from '../src/auth/token'
 
 /**
  * 数据层冒烟：证明三件事
@@ -355,6 +358,43 @@ async function main(): Promise<void> {
     )
     const rank = (await mc.receivableByCustomer()).find((r) => r.customerId === id)
     check('待收榜：一张未结单、合计 1050', rank?.orders === 1 && rank?.totalBase === 1050)
+
+    console.log('鉴权数据层（M2 第一片）')
+    check('v23 迁移带出了 users 表，新库还没人', Number((await db.get('SELECT COUNT(*) AS n FROM users'))?.['n'] ?? -1) === 0)
+    const uCreated = await createUser(db, 'wenjuan', 'Secret#123', '周文娟')
+    check('建用户成功并带显示名', uCreated.id > 0 && uCreated.displayName === '周文娟')
+    const uRow = await findUserByUsername(db, 'wenjuan')
+    check('库里找得到这个用户名', uRow !== null && uRow!.username === 'wenjuan')
+    check('密码不落明文', uRow !== null && !uRow!.passwordHash.includes('Secret#123'))
+    check(
+      '密码验证：对的过、错的拒',
+      uRow !== null &&
+        (await verifyPassword('Secret#123', uRow!.passwordHash)) === true &&
+        (await verifyPassword('wrong', uRow!.passwordHash)) === false
+    )
+    check('同一密码两次哈希不同（随机盐，库被拖走也不能撞库）', hashPassword('Secret#123') !== hashPassword('Secret#123'))
+    let dupUser = ''
+    try {
+      await createUser(db, 'wenjuan', 'Another#1')
+    } catch (e) {
+      dupUser = (e as Error).message
+    }
+    check('重名用户拒建（中文说清）', dupUser.includes('已存在'))
+    let shortPw = ''
+    try {
+      await createUser(db, 'shorty', '123')
+    } catch (e) {
+      shortPw = (e as Error).message
+    }
+    check('太短的密码拒收', shortPw.includes('6'))
+
+    const authSecret = 'test-secret'
+    const tok = signToken('wenjuan', authSecret, 30)
+    check('签出的 token 能验回用户名', verifyToken(tok, authSecret)?.u === 'wenjuan')
+    check('换秘钥验不过（换机器/重置秘钥 = 全员重新登录）', verifyToken(tok, 'other-secret') === null)
+    check('过期 token 验不过', verifyToken(signToken('wenjuan', authSecret, -1), authSecret) === null)
+    check('随手编的 token 验不过', verifyToken('abc.def', authSecret) === null)
+    check('拿哈希当 token 也验不过', verifyToken(uRow!.passwordHash, authSecret) === null)
 
     console.log('并发与幂等')
     await Promise.all(
