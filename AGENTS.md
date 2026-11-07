@@ -17,7 +17,17 @@
 
 看图用 read 工具直接读 png；截图一律走 `scripts/shot.sh`（自带超时清理），**绝不要直接跑 electron**，会把会话卡死。
 
-## 二、双 agent 迭代流程（既定）
+## 二、每轮迭代收尾必须发小版本（每次，无例外）
+
+复验 `VERDICT: 通过` 且提交落盘后，当轮收尾动作：
+
+1. `npm version patch --no-git-tag-version`（0.5.1 → 0.5.2 → …）+ `chore: 版本号 X → Y` 提交
+2. 打 tag `vY` 并 push main + tag，由 CI 构建发布 GitHub Release（Windows/macOS/Linux）
+3. 发布前全量测试必须绿（`npm run test:all` + `typecheck`）；复验打回、返工未完成，不发版
+4. 发布后核对 Release 资产齐不齐（安装包/便携版/latest.yml），缺了要记账
+5. 不挪已发布的旧 tag；坏了就发下一个版本修
+
+## 三、双 agent 迭代流程（既定）
 
 - `yanfa`（研发）实现 → `waizhuan`（使用者）实跑复验 → 打回则返工；流水线脚本在 `workflows/`。
 - 报告写 `docs/feedback/<日期>-r<N>-yanfa.md` / `-verify.md`；复验报告末行 `VERDICT: 通过` 或 `VERDICT: 打回`。
