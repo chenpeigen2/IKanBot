@@ -458,6 +458,15 @@ export function clientKey(): string {
 }
 
 /**
+ * 落一笔钱的幂等键（M4）：收款/退款每次提交都随请求带给服务端。
+ * 语义：**成功之后才换号**——同一次提交的失败重试沿用同一个 id，服务端幂等重放不会落第二笔；
+ * 落账成功再要登记下一笔，就是新的一号。双击被按钮 busy 拦住，网络超时重试被这个号拦住。
+ */
+export function newRequestId(): string {
+  return 'req-' + clientKey()
+}
+
+/**
  * 输入防抖：搜索框每敲一个字就打一次查询，敲得快时一秒能发七八次。
  */
 export function useDebounced<T>(value: T, delayMs = 250): T {

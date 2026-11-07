@@ -12849,6 +12849,82 @@ section('R62/M4：写冲突检测（乐观锁）')
   check('商品编辑：保存带 expectedUpdatedAt（draft.updatedAt）', prodSrc.includes('expectedUpdatedAt: draft.updatedAt'))
 }
 
+/* ---------------- R62/M4：收款/退款幂等（request_id 重放只落一笔） ---------------- */
+section('R62/M4：收款/退款幂等（request_id 重放只落一笔）')
+{
+  // 订单收款：双击 / 网络重试同一个 request_id，第二次直接拿回第一次的结果
+  const idemOrder = await orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.2 })
+  await orders.addOrderItem(idemOrder.id, { styleNo: 'R62-IDEM', productName: '幂等测', quantity: 10, unitPrice: 100 })
+  await orders.setPaymentStatus(idemOrder.id, 'confirmed')
+  const idemPay = { paidAt: localDate(), amount: 300, bankRef: 'IDEM-REPLAY-1', note: '双击演练' }
+  const firstPay = await orders.addPayment(idemOrder.id, { ...idemPay, requestId: 'r62-idem-pay-1' })
+  // 重放连水单查重那道门都不该碰：同号同 id 要拿回第一次的结果，不是一句「已经登记过流水号」的报错
+  const secondPay = await orders.addPayment(idemOrder.id, { ...idemPay, requestId: 'r62-idem-pay-1' })
+  eq('同一个 request_id 重放：收款只落一笔', (await orders.getOrder(idemOrder.id)).payments.length, 1)
+  check(
+    '重放返回第一次的结果（金额分毫不差）',
+    Number(secondPay.payments[0]?.amount) === 300 && Number(firstPay.payments[0]?.amount) === 300
+  )
+  await orders.addPayment(idemOrder.id, { ...idemPay, amount: 50, bankRef: 'IDEM-REPLAY-2', requestId: 'r62-idem-pay-2' })
+  eq('不同的 request_id 是不同的钱，照常落账', (await orders.getOrder(idemOrder.id)).payments.length, 2)
+  await orders.addPayment(idemOrder.id, { ...idemPay, amount: 25, bankRef: 'IDEM-REPLAY-3' })
+  eq('不传 requestId 走老路（脚本/导入调用不受影响）', (await orders.getOrder(idemOrder.id)).payments.length, 3)
+
+  // 打样费收款：同一套语义
+  const idemSample = await samples.saveSample({
+    customerId: c1.id,
+    sampleDate: localDate(),
+    courier: '顺丰',
+    trackingNo: 'IDEM-SF-1',
+    expressFee: 0,
+    status: 'sent',
+    currency: 'USD',
+    exchangeRate: 7.2,
+    exchangeRateDate: localDate(),
+    items: [{ styleNo: 'R62-IDEM-S', productName: '打样幂等', color: 'Black', size: 'M', quantity: 2, unitPrice: 50 }]
+  })
+  const idemSamplePay = { paidAt: localDate(), amount: 100, bankRef: 'IDEM-SMP-1', note: '' }
+  await samples.addSamplePayment(idemSample.id, { ...idemSamplePay, requestId: 'r62-idem-smp-1' })
+  await samples.addSamplePayment(idemSample.id, { ...idemSamplePay, requestId: 'r62-idem-smp-1' })
+  eq('打样费同一 request_id 重放：流水只落一笔', (await samples.listSamplePayments(idemSample.id)).length, 1)
+
+  // 预收退款：多付产生客户预收，同一 request_id 重放退款，余额只减一次
+  const overOrder = await orders.createOrder({ customerId: c2.id, currency: 'USD', exchangeRate: 7.2 })
+  await orders.addOrderItem(overOrder.id, { styleNo: 'R62-OVER', productName: '多付测', quantity: 1, unitPrice: 100 })
+  await orders.setPaymentStatus(overOrder.id, 'confirmed')
+  await orders.addPayment(overOrder.id, { paidAt: localDate(), amount: 140, bankRef: 'IDEM-OVER-1' })
+  eq('多付 40 进客户预收', await money.customerCreditAvailable(c2.id, 'USD'), 40)
+  const idemRefund = {
+    customerId: c2.id,
+    currency: 'USD',
+    amount: 30,
+    refundAt: localDate(),
+    bankRef: 'IDEM-REFUND-1',
+    note: '退还多收'
+  }
+  const refundFirst = await credits.refundCredit({ ...idemRefund, requestId: 'r62-idem-refund-1' })
+  const refundReplay = await credits.refundCredit({ ...idemRefund, requestId: 'r62-idem-refund-1' })
+  eq(
+    '同一个 request_id 重放退款：可用预收只减一次（40 − 30 = 10）',
+    await money.customerCreditAvailable(c2.id, 'USD'),
+    10
+  )
+  check('重放返回第一次的余额快照（不是再扣一遍）', JSON.stringify(refundFirst) === JSON.stringify(refundReplay))
+  // 接线检查：桌面三个落钱入口都带上了幂等键，且成功才换号
+  const detailSrc = fs.readFileSync('src/renderer/src/pages/OrderDetail.tsx', 'utf8')
+  const sampleSrc = fs.readFileSync('src/renderer/src/pages/Samples.tsx', 'utf8')
+  const custSrcR62 = fs.readFileSync('src/renderer/src/pages/Customers.tsx', 'utf8')
+  check('订单收款带 requestId，成功才换号（报错路径不动号，重试仍被兑底）',
+    detailSrc.includes('requestId: requestIdRef.current') &&
+      /requestIdRef\.current = newRequestId\(\)[\s\S]{0,80}toast\('已记录收款'\)/.test(detailSrc))
+  check('打样费收款带 requestId，成功才换号',
+    sampleSrc.includes('requestId: requestIdRef.current') &&
+      /requestIdRef\.current = newRequestId\(\)[\s\S]{0,80}toast\('已登记打样费收款'\)/.test(sampleSrc))
+  check('预收退款带 requestId（每次打开退款框换新号）',
+    custSrcR62.includes('requestId: refundRequestId.current') &&
+      custSrcR62.includes('refundRequestId.current = newRequestId()'))
+}
+
 /* ---------------- 汇总 ---------------- */
 
 console.log(`\n${'='.repeat(46)}`)

@@ -1150,6 +1150,22 @@ async function main(): Promise<void> {
       .send({ id: conflictOrder.body.id, input: { customerId: conflictCust.body.id, customerPo: 'NO-LOCK' } })
     check('不传 expectedUpdatedAt 的老调用不受影响', noLock.status === 200 && noLock.body.customerPo === 'NO-LOCK')
 
+    console.log('收款幂等（M4：request_id 重放只落一笔）')
+    const idemCust = await http.post('/api/customers/save').send({ input: { company: 'R62 Idem Co' } })
+    const idemOrder = await http
+      .post('/api/orders/create')
+      .send({ input: { customerId: idemCust.body.id, currency: 'USD', exchangeRate: 7.2, paymentStatus: 'confirmed' } })
+    const idemPay = { paidAt: localDate(), amount: 100, bankRef: 'HTTP-IDEM-1', requestId: 'http-idem-1' }
+    const pay1 = await http.post('/api/orders/addPayment').send({ orderId: idemOrder.body.id, p: idemPay })
+    const pay2 = await http.post('/api/orders/addPayment').send({ orderId: idemOrder.body.id, p: idemPay })
+    check(
+      '同一个 request_id 重放：HTTP 两次都 200，且重放拿回第一次的结果（不落第二笔、不报错）',
+      pay1.status === 200 && pay2.status === 200 && pay2.body.payments.length === 1,
+      `pay1=${pay1.status} pay2=${pay2.status} text=${JSON.stringify(pay2.text)}`
+    )
+    const idemOd = await http.post('/api/orders/get').send({ id: idemOrder.body.id })
+    check('账面上确实只有一笔收款', idemOd.body.payments.length === 1, JSON.stringify(idemOd.body.payments))
+
     console.log('备份（R61：备份簇上后端，服务器侧打包与恢复，与桌面同一份 core）')
     const bkNoAuth = await raw.post('/api/backup/create').send({})
     check('备份是写操作，无 token 401', bkNoAuth.status === 401)

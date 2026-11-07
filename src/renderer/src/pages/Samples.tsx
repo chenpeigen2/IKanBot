@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Modal, useToast, money, moneyOrDash, num, Empty, fmtDate, today, ActionMenu, SampleStatusTag, Button, SampleFeeTag, clientKey, LoadError, useDebounced, useLoadGuard } from '../ui'
+import { Modal, useToast, money, moneyOrDash, num, Empty, fmtDate, today, ActionMenu, SampleStatusTag, Button, SampleFeeTag, clientKey, newRequestId, LoadError, useDebounced, useLoadGuard } from '../ui'
 import {
   SAMPLE_STATUS_LABEL,
   SAMPLE_STATUS_ORDER,
@@ -535,6 +535,8 @@ function SamplePayModal({
   const [detail, setDetail] = useState<any>(sample)
   const [rows, setRows] = useState<any[]>([])
   const [busy, setBusy] = useState(false)
+  // 幂等键（M4）：成功之后才换号——失败重试沿用同一个 id，服务端幂等重放不会落第二笔
+  const requestIdRef = useRef(newRequestId())
   const [form, setForm] = useState({ paidAt: today(), amount: '', method: 'T/T', bankRef: '', note: '' })
   const [revoking, setRevoking] = useState<{ id: number; reason: string } | null>(null)
 
@@ -587,8 +589,11 @@ function SamplePayModal({
         amount,
         method: form.method,
         bankRef: form.bankRef.trim(),
-        note: form.note.trim()
+        note: form.note.trim(),
+        requestId: requestIdRef.current
       })
+      // 成功才换号：下一次登记是一笔新钱；报错路径不动号，重试仍被幂等兑底
+      requestIdRef.current = newRequestId()
       toast('已登记打样费收款')
       setForm({ ...form, amount: '', bankRef: '', note: '' })
       await reload()

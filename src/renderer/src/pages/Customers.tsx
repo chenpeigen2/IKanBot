@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { Modal, useToast, money, moneyOrDash, Empty, fmtDate, PaymentTag, ShipTag, Button, LoadError, PromptModal, useLoadGuard } from '../ui'
+import { useEffect, useRef, useState } from 'react'
+import { Modal, useToast, money, moneyOrDash, Empty, fmtDate, PaymentTag, ShipTag, Button, LoadError, PromptModal, newRequestId, useLoadGuard } from '../ui'
 import { localDate } from '../../../shared/date'
 import { INCOTERMS, PAYMENT_METHOD_LABEL, type PaymentMethod } from '../../../shared/types'
 import type { Customer, CustomerCreditApplication, CustomerCreditCurrency, CustomerCreditRefund } from '../../../shared/types'
@@ -154,6 +154,8 @@ export default function Customers() {
     note: string
     saving: boolean
   } | null>(null)
+  /** 退款幂等键（M4）：每次打开退款框换新号；失败重试沿用同一个 id */
+  const refundRequestId = useRef(newRequestId())
   /**
    * 撤销抵扣 / 撤销退款前的那一句「为什么」。
    * 固定话术（「客户页手动撤销」）等于没写：后端要的留痕，得由人当场敲一句。
@@ -427,6 +429,8 @@ export default function Customers() {
    * 否则同一笔钱退了还能再抵下一张单。日期、水单、原因都是凭据。
    */
   const openRefund = (c: Customer, cc: CustomerCreditCurrency) => {
+    // 幂等键（M4）：每次打开退款框发一个新号；失败重试沿用同一个 id，服务端幂等重放不会落第二笔
+    refundRequestId.current = newRequestId()
     setRefundModal({
       c,
       currency: cc.currency,
@@ -462,7 +466,8 @@ export default function Customers() {
         amount,
         refundAt: refundModal.refundAt,
         bankRef: refundModal.bankRef.trim(),
-        note: refundModal.note.trim()
+        note: refundModal.note.trim(),
+        requestId: refundRequestId.current
       })
       toast(`已登记退还 ${amount.toFixed(2)} ${refundModal.currency}：这笔钱不再算可用预收`)
       const c = refundModal.c

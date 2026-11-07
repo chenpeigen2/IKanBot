@@ -631,6 +631,23 @@ CREATE TABLE users (
   updated_at    TEXT NOT NULL
 );
 `
+  },
+  {
+    version: 24,
+    name: 'request_dedup',
+    sql: `
+-- 收款/退款幂等（M4，R62）。
+-- 落一笔钱（订单收款、打样收款、预收退款）时可以带一个 request_id：落账前先查这张表，
+-- 同 id 重放直接返回第一次的结果快照，不再落第二笔（防双击、防网络重试）。
+-- result 存落账后的单据/余额 JSON 快照：重放的人要看到「第一次到底落了什么」，而不是一句「成功」。
+-- request_id 为空（老调用方、水单拆分）不检查，行为照旧。
+CREATE TABLE request_dedup (
+  request_id TEXT PRIMARY KEY,
+  kind       TEXT NOT NULL,
+  result     TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+`
   }
 ]
 

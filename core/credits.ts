@@ -10,6 +10,7 @@
  * 避免与 orders 在模块初始化时互相等待。
  */
 import { bizError, notFound } from '../src/shared/errors'
+import { findReplay, recordResult } from './idempotency'
 import type { Db } from './db'
 import { logEvent } from './events'
 import { actorOf } from './actor'
@@ -39,6 +40,8 @@ export interface RefundCreditInput {
   /** 银行水单/转账凭据号，必填：退款是真金白银的出口 */
   bankRef: string
   note?: string
+  /** 幂等键（M4）：同 id 重放直接返回第一次的结果，不再落第二笔；空/不传不检查 */
+  requestId?: string
 }
 
 export interface CreditTarget {
@@ -307,6 +310,9 @@ export function creditsCore(db: Db) {
     // 水单查重在事务外查过一次，两笔同号退款各自看到「没退过」，余额就会被凭空扣两遍。
     const actor = await actorOf(db)
     return await db.transact(async () => {
+      // 幂等重放（M4）：复查在事务里、且排在余额/水单守门之前——重放要拿回第一次的结果，不是报错
+      const replay = await findReplay<CustomerCreditCurrency[]>(db, input.requestId)
+      if (replay) return replay
       const available = await moneyOf().customerCreditAvailable(customerId, currency)
       if (available < -0.001) {
         throw bizError(
@@ -338,7 +344,9 @@ export function creditsCore(db: Db) {
          VALUES(?,?,?,?,?,?,?,?)`,
         [customerId, currency, amount, refundAt, bankRef, note, actor, new Date().toISOString()]
       )
-      return await moneyOf().customerCreditBalance(customerId)
+      const balances = await moneyOf().customerCreditBalance(customerId)
+      await recordResult(db, input.requestId, 'customer_refund', balances)
+      return balances
     })
   }
 

@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   Modal, useToast, money, num, fmtDate, fmtDateTime, Empty, Menu,
-  Button, PaymentTag, ShipTag, clientKey, LoadError, PromptModal, useLoadGuard
+  Button, PaymentTag, ShipTag, clientKey, newRequestId, LoadError, PromptModal, useLoadGuard
 } from '../ui'
 import {
   PAYMENT_METHOD_LABEL,
@@ -2051,6 +2051,8 @@ const PAYMENT_CHANNEL_OPTIONS = ['T/T', 'L/C', 'PayPal', '西联', '其他']
 
 function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<void> }) {
   const toast = useToast()
+  // 幂等键（M4）：成功之后才换号——失败重试沿用同一个 id，服务端幂等重放不会落第二笔
+  const requestIdRef = useRef(newRequestId())
   const [form, setForm] = useState({
     paidAt: localDate(),
     amount: '',
@@ -2115,7 +2117,9 @@ function PaymentTab({ order, onChange }: { order: any; onChange: () => Promise<v
     if (saving) return
     setSaving(true)
     try {
-      await window.api.orders.addPayment(order.id, { ...form, amount: amt })
+      await window.api.orders.addPayment(order.id, { ...form, amount: amt, requestId: requestIdRef.current })
+      // 成功才换号：下一次登记是一笔新钱；报错路径不动号，重试仍被幂等兑底
+      requestIdRef.current = newRequestId()
       toast('已记录收款')
       setForm({ ...form, amount: '', bankRef: '', note: '' })
       await onChange()

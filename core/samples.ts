@@ -10,6 +10,7 @@
  * 三边按需懒建工厂，拿到的是同一个连接。
  */
 import { bizError, notFound } from '../src/shared/errors'
+import { findReplay, recordResult } from './idempotency'
 import type { Db } from './db'
 import { nextNo } from './next-no'
 import { logEvent } from './events'
@@ -78,6 +79,8 @@ export interface SamplePaymentInput {
   method?: string
   bankRef?: string
   note?: string
+  /** 幂等键（M4）：同 id 重放直接返回第一次的结果，不再落第二笔；空/不传不检查 */
+  requestId?: string
 }
 
 export function samplesCore(db: Db) {
@@ -986,6 +989,10 @@ export function samplesCore(db: Db) {
    * 「下单抵扣」是订单里的负费用行，绝不在这里再落一笔（同一块钱算两遍）。
    */
   async function addSamplePayment(sampleId: number, p: SamplePaymentInput): Promise<SampleOrderDetail> {
+    // 幂等重放（M4）：排在所有守门之前——重放要拿回第一次的结果，
+    // 不是被「已收齐」「已抵扣」这些门拦成报错（那些门第一次落账时已经过过了）
+    const replay = await findReplay<SampleOrderDetail>(db, p.requestId)
+    if (replay) return replay
     const s = await getSample(sampleId)
     if (!s) throw notFound('打样单不存在')
     if (s.status === 'cancelled') {
@@ -1048,7 +1055,7 @@ export function samplesCore(db: Db) {
         `这笔 ${amount.toFixed(2)} 超过了还没收的 ${remaining.toFixed(2)} ${s.currency}（应收 ${s.totalFee.toFixed(2)} − 已收 ${s.collected.toFixed(2)}${creditPart}）。多出来的钱不属于这张打样单，请核对水单。`
       )
     }
-    await db.transact(async () => {
+    return await db.transact(async (): Promise<SampleOrderDetail> => {
       await ordersOf().assertBankRefUnused({ sampleOrderId: sampleId }, p.bankRef)
       // 同一句「还欠多少」再看一遍，这一眼要和落库同一口气（R57）：
       // 事务外那份是点按钮那一刻的快照，双击或两个人同登时两次都按旧余额过闸，
@@ -1077,8 +1084,10 @@ export function samplesCore(db: Db) {
         }）；汇率按 ${rate} 钉快照`
       )
       await syncSampleFeeStatus(sampleId)
+      const detail = (await getSample(sampleId))!
+      await recordResult(db, p.requestId, 'sample_payment', detail)
+      return detail
     })
-    return (await getSample(sampleId))!
   }
 
   /**

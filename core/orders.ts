@@ -9,6 +9,7 @@
  * 避免模块初始化时互相等——两边拿到的永远是同一个连接。
  */
 import { bizError, notFound, writeConflict } from '../src/shared/errors'
+import { findReplay, recordResult } from './idempotency'
 import type { Db } from './db'
 import { nextNo } from './next-no'
 import { logEvent } from './events'
@@ -161,6 +162,11 @@ export interface PaymentInput {
   method?: string
   bankRef?: string
   note?: string
+  /**
+   * 幂等键（M4）：桌面/服务端每要落一笔钱生成一个，随请求带上。
+   * 同 id 重放直接返回第一次的结果，不再落第二笔（防双击、防重试）；空/不传不检查。
+   */
+  requestId?: string
 }
 
 export interface BatchPaymentEntry {
@@ -2152,7 +2158,11 @@ export function ordersCore(db: Db) {
     // 读订单、算待收、读汇率全都放进同一个事务（R55）：以前在事务外读、事务内写，
     // 双击或两个人同时点，两次都按同一份旧待收过闸——同一笔钱记两遍，
     // 或者订单汇率刚被人改过、这笔到账却钉了改之前的快照。
-    await db.transact(async () => {
+    return await db.transact(async (): Promise<OrderDetail> => {
+      // 幂等重放（M4）：同一个 request_id 直接返回第一次的结果，不再落第二笔。
+      // 复查在事务里、且排在所有守门之前——重放的人要拿回第一次的结果，而不是被水单查重拦成报错
+      const replay = await findReplay<OrderDetail>(db, p.requestId)
+      if (replay) return replay
       const cur = await db.get(
         'SELECT order_no, payment_status, currency, base_currency, exchange_rate FROM orders WHERE id = ?',
         [orderId]
@@ -2222,8 +2232,11 @@ export function ordersCore(db: Db) {
             : `；汇率按 ${rate} 钉快照`)
       )
       await recomputePaymentStatus(orderId)
+      // 落账后的单据快照：幂等表里存的「第一次的结果」就是它
+      const afterDetail = (await getOrder(orderId))!
+      await recordResult(db, p.requestId, 'order_payment', afterDetail)
+      return afterDetail
     })
-    return (await getOrder(orderId))!
   }
 
   /** 一笔水单拆到多张单：每笔的落账参数（流水号必须整批一致，对账靠它归组） */
