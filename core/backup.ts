@@ -24,6 +24,8 @@ export interface BackupDirs {
   backupsDir(): string
   imagesDir(): string
   docsDir(): string
+  /** 库文件绝对路径（桌面固定 dataDir/ikanbot.db，服务器由环境变量定，不赶同名） */
+  dbFile(): string
 }
 
 export interface BackupHooks {
@@ -162,7 +164,7 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
 
   function collectBackupEntries(): ZipEntry[] {
     const entries: ZipEntry[] = []
-    const dbFile = join(dirs.dataDir(), 'ikanbot.db')
+    const dbFile = dirs.dbFile()
     const snap = existsSync(dbFile) ? hooks.snapshotDb(dbFile) : null
     if (snap) {
       if (snap.fallback) snapshotFallbackReason = snap.fallback
@@ -511,8 +513,7 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
     await createBackup('pre-restore')
 
     await hooks.closeDb()
-    const dir = dirs.dataDir()
-    const dbFile = join(dir, 'ikanbot.db')
+    const dbFile = dirs.dbFile()
     for (const junk of ['-wal', '-shm', '.lock']) {
       try {
         const p = `${dbFile}${junk}`

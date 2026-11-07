@@ -29,7 +29,8 @@ const core = backupCore(
     dataDir,
     backupsDir,
     imagesDir,
-    docsDir
+    docsDir,
+    dbFile: () => join(dataDir(), 'ikanbot.db')
   },
   {
     /**
