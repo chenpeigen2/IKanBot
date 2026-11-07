@@ -53,10 +53,13 @@ jobs:
       - name: 推送日志到 ci-debug-log 分支
         if: always()
         run: |
+          BRANCH="ci-debug-log-$(date +%s)"
           git config user.email "ci-debug@local"
           git config user.name "ci-debug"
-          git checkout --orphan ci-debug-log
+          git checkout --orphan "$BRANCH"
           git reset
+          ls -la rpm-out.txt release-ls.txt || true
           git add rpm-out.txt release-ls.txt
           git commit -m "ci rpm log"
-          git push -f origin ci-debug-log
+          git push -f origin "$BRANCH"
+          echo "推到了分支：$BRANCH"
