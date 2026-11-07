@@ -198,6 +198,26 @@ function createTray(): void {
 }
 
 app.whenReady().then(() => {
+  // macOS 的 Dock 图标不走 exe/安装包嵌入那套：开发模式与打包后都要显式 setIcon，
+  // 否则 Dock 里躺的是 Electron 默认图标（旧机器是 Windows，这个问题从来没露过头）。
+  if (process.platform === 'darwin' && app.dock) {
+    const loadDockIcon = (): Buffer | null => {
+      for (const dir of [process.resourcesPath, join(app.getAppPath(), '..', 'build')]) {
+        for (const name of ['icon.png', 'icon_1024.png']) {
+          const p = join(dir, name)
+          try {
+            if (existsSync(p)) return readFileSync(p)
+          } catch {
+            /* 试下一个 */
+          }
+        }
+      }
+      return null
+    }
+    const buf = loadDockIcon()
+    const dockIcon = buf ? nativeImage.createFromBuffer(buf) : nativeImage.createEmpty()
+    if (!dockIcon.isEmpty()) app.dock.setIcon(dockIcon)
+  }
   try {
     openDb()
   } catch (e) {

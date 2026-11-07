@@ -12,6 +12,10 @@
       "to": "icon.ico"
     },
     {
+      "from": "build/icon_1024.png",
+      "to": "icon.png"
+    },
+    {
       "from": "electron/resources/tray.png",
       "to": "tray.png"
     },
