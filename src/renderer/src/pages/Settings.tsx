@@ -60,6 +60,10 @@ export default function Settings() {
   const [urlDraft, setUrlDraft] = useState('')
   const [probe, setProbe] = useState<RemoteProbe | null>(null)
   const [probing, setProbing] = useState(false)
+  /** 后端登录表单（M2）：密码只送主进程换 token，不落任何文件 */
+  const [authUser, setAuthUser] = useState('')
+  const [authPass, setAuthPass] = useState('')
+  const [authBusy, setAuthBusy] = useState(false)
 
   /**
    * 这一页经手过、但还没进库的 Logo 文件。
@@ -166,6 +170,31 @@ export default function Settings() {
     }
   }
 
+  const doLogin = async () => {
+    setAuthBusy(true)
+    try {
+      const v = await window.api.mode.login(authUser.trim(), authPass)
+      setSource(v)
+      setAuthPass('')
+      toast(`已登录：${v.auth.displayName || v.auth.username}`, 'ok')
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  const doLogout = async () => {
+    try {
+      setSource(await window.api.mode.logout())
+      setAuthUser('')
+      setAuthPass('')
+      toast('已退出登录')
+    } catch (e) {
+      toast((e as Error).message, 'error')
+    }
+  }
+
   // 订阅自动更新事件
   useEffect(() => {
     return window.api.updater.on((info) => setUpdate(info))
@@ -230,11 +259,53 @@ export default function Settings() {
           ) : null}
 
           {source.mode === 'remote' ? (
-            <div className="alert warn">
-              现在是<strong>后端模式</strong>：客户、商品、设置、订单、报价、打样、装箱、预收与报表都读写后端那份数据（已搬到后端{' '}
-              {source.covered} / {source.total} 个接口）。备份与打印仍在本机；<strong>单据存档在后端模式下会当场拒绝</strong>
-              （存档的版次和金额记的是本机那本账，写进服务器对不上）；客户统计这类还没搬的点了也会当场报错，绝不会悄悄改本机那一份。
-            </div>
+            <>
+              <div className="field">
+                <label>后端登录</label>
+                {source.auth.loggedIn ? (
+                  <div className="row">
+                    <span>
+                      已登录：<strong>{source.auth.displayName || source.auth.username}</strong>
+                      （{source.auth.username}）
+                    </span>
+                    <Button onClick={doLogout}>退出登录</Button>
+                  </div>
+                ) : (
+                  <>
+                    <div className="row">
+                      <input
+                        className="w-md"
+                        placeholder="用户名"
+                        value={authUser}
+                        onChange={(e) => setAuthUser(e.target.value)}
+                      />
+                      <input
+                        className="w-md"
+                        type="password"
+                        placeholder="密码"
+                        value={authPass}
+                        onChange={(e) => setAuthPass(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && authUser.trim() && authPass && !authBusy) void doLogin()
+                        }}
+                      />
+                      <Button onClick={doLogin} disabled={authBusy || !authUser.trim() || !authPass}>
+                        {authBusy ? '登录中…' : '登录'}
+                      </Button>
+                    </div>
+                    <div className="hint">
+                      后端要求登录后才能读写数据。登录过期或没登录时，操作会提示「请先登录」——回到这里重新登录即可，
+                      不用重启程序。
+                    </div>
+                  </>
+                )}
+              </div>
+              <div className="alert warn">
+                现在是<strong>后端模式</strong>：客户、商品、设置、订单、报价、打样、装箱、预收与报表都读写后端那份数据（已搬到后端{' '}
+                {source.covered} / {source.total} 个接口）。备份与打印仍在本机；<strong>单据存档在后端模式下会当场拒绝</strong>
+                （存档的版次和金额记的是本机那本账，写进服务器对不上）；客户统计这类还没搬的点了也会当场报错，绝不会悄悄改本机那一份。
+              </div>
+            </>
           ) : (
             <div className="hint">
               后端已接好 {source.covered} / {source.total} 个接口（客户、商品、设置、订单、报价、打样、装箱、预收、工作台与报表）。其余功能搬完之前，后端模式只适合试接口。

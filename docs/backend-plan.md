@@ -500,6 +500,23 @@
      说明：/orders、/samples 的表格横向 overflow 是设计内的（容器 overflow-x 滚动，探针的
      phantom 只抓 overflow:visible 的真溢出）；clipped 是 ellipsis 截断的预期清单，内容跟演示
      数据走（seed 后立即扫就是这个样子）。
+  ④ **M2 鉴权第一片**：服务端发 token、全路由挂闸门、actor 从 token 注入；桌面远端模式登录。
+     决策记账：
+     - 密码哈希用 node 内置 `crypto.scrypt`（随机盐 + timingSafeEqual），不引 argon2/bcrypt——
+       原生依赖要编译或带二进制包，为一个哈希不值得；scrypt 是同档算法。
+     - token 用 node 内置 HMAC-SHA256 紧凑格式，不引 JWT 库——只需要「签发-验签-过期」三件事。
+     - 秘钥：`IKAN_AUTH_SECRET` 优先；没给就自动生成一把存库文件旁 `.auth-secret`（重启不变，
+       重启即全员登出是不可接受的）；文件丢了/换机器 = 全员重新登录，可接受。
+     - 首个用户引导：启动时 users 表为空且设了 `IKAN_BOOTSTRAP_USER` / `IKAN_BOOTSTRAP_PASSWORD`
+       （可加 `IKAN_BOOTSTRAP_NAME` 给显示名）则建一个；没设齐只打警告照常启动——此时除
+       /healthz 与 GET /api 外全部 401，服务是安全的，只是还没人能进来。后续加人：重启一次带环境
+       变量（表非空时跳过），或按 password.ts 的 hashPassword 直接往 users 表插行。
+     - token 有效期 12 小时；过期与未登录同一样 401 话术，桌面端 toast 指回「设置 · 数据来源」。
+     - 挂账：GET /api/files/images/:name 本片不挂鉴权（`<img>` 发不了 Authorization 头，
+       挂了远端模式商品卡全白）；签名 URL 按 M5 计划补。局域网内能看到图，账打不开。
+     - 留痕：core/actor.ts 用 AsyncLocalStorage 把 token 认定的身份套住整个请求调用链，
+       order_events / 预收抵扣 / 退款撤销的 actor 先认 token（显示名优先），本地模式回落
+       settings.operator——桌面本地行为一字不变；服务端不再信任何桌面传来的身份。
 - **下一刀**：业务接口已 90 条全搬完，剩下 29 个通道都是本机基建（`docs:` / `backup:` / `images:` / `window:` /
   `shell:` / `app:` / `export:` / `mode:` / `updater:`）。下一步不是「再搬一条」，而是打印与单据渲染、备份与更新
   按 M2/M5 的鉴权与多机并发一起做——那些通道把本机文件路径当接口，单条搬过去只会把两边的账撕开。

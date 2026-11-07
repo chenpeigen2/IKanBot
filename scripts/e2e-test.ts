@@ -12666,6 +12666,18 @@ eq('月报本月毛利为 null（不许拿 0 毛利冒充）', r59Monthly.profit
 const r59Csv = parseCsv(await dashboard.exportCsv('monthly'))
 check('月度汇总 CSV 带出「汇率没填单数」列，与屏幕同一口径', r59Csv[0].includes('汇率没填单数'), r59Csv[0].join('、'))
 
+section('R59 设置页登录卡片：远端要求已登录，本地模式一行不改')
+const r59SettingsSrc = fs.readFileSync(join(process.cwd(), 'src/renderer/src/pages/Settings.tsx'), 'utf8')
+check(
+  '数据来源卡有登录表单（用户名 + 密码 + 登录走 mode.login 通道）',
+  r59SettingsSrc.includes('type="password"') && r59SettingsSrc.includes('window.api.mode.login(')
+)
+check('登录态能看、退路也有（退出登录走 mode.logout）', r59SettingsSrc.includes('window.api.mode.logout('))
+check(
+  '登录表单只住在 remote 分支里（本地模式不出现登录框）',
+  /source\.mode === 'remote' \? \([\s\S]*?后端登录/.test(r59SettingsSrc)
+)
+
 /* ---------------- 汇总 ---------------- */
 
 console.log(`\n${'='.repeat(46)}`)
