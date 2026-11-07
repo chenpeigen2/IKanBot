@@ -1,0 +1,48 @@
+name: e2e 诊断（一次性）
+
+on:
+  push:
+    paths:
+      - '.github/workflows/debug-e2e.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  debug:
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 环境信息
+        shell: pwsh
+        run: node -e 'console.log("node", process.version, "| tz", Intl.DateTimeFormat().resolvedOptions().timeZone, "| locale", Intl.DateTimeFormat().resolvedOptions().locale)'
+
+      - name: 端到端测试（捕获全量输出）
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          npm run test:e2e 2>&1 | Tee-Object -FilePath e2e-out.txt
+          "EXIT=$LASTEXITCODE" | Add-Content -FilePath e2e-out.txt
+
+      - name: 推送日志到 ci-debug-log 分支
+        if: always()
+        shell: pwsh
+        run: |
+          git config user.email "ci-debug@local"
+          git config user.name "ci-debug"
+          git checkout --orphan ci-debug-log
+          git reset
+          git add e2e-out.txt
+          git commit -m "ci e2e log"
+          git push -f origin ci-debug-log
