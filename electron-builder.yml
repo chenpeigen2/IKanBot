@@ -57,8 +57,7 @@
   "linux": {
     "target": [
       { "target": "AppImage", "arch": ["x64"] },
-      { "target": "deb", "arch": ["x64"] },
-      { "target": "rpm", "arch": ["x64"] }
+      { "target": "deb", "arch": ["x64"] }
     ],
     "category": "Office",
     "icon": "build/icon_1024.png",
