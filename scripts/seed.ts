@@ -126,7 +126,7 @@ async function main() {
   })
 
   // 订单 1：进行中，已确认部分收款
-  const o1 = orders.createOrder({
+  const o1 = await orders.createOrder({
     customerId: c1.id,
     currency: 'USD',
     exchangeRate: 7.15,
@@ -160,12 +160,12 @@ async function main() {
   ]) {
     cur = await orders.addOrderItem(o1.id, it)
   }
-  orders.setPaymentStatus(o1.id, 'confirmed')
+  await orders.setPaymentStatus(o1.id, 'confirmed')
   cur = await orders.addPayment(o1.id, { paidAt: '2026-03-18', amount: 3000, method: 'T/T', bankRef: 'HSBC2303188842', note: '定金' })
-  orders.setShipStatus(o1.id, 'preparing')
+  await orders.setShipStatus(o1.id, 'preparing')
 
   // 装箱单
-  packing.createPackingList({
+  await packing.createPackingList({
     orderId: o1.id,
     containerNo: 'MSKU4471882',
     note: '40HQ 柜，装柜前需熏蒸',
@@ -178,7 +178,7 @@ async function main() {
   })
 
   // 报价单 1：还没成交的报价（不进销售额）
-  quotations.saveQuotation({
+  await quotations.saveQuotation({
     customerId: c1.id,
     currency: 'USD',
     exchangeRate: 7.15,
@@ -218,7 +218,7 @@ async function main() {
   })
 
   // 订单 2：已结清已签收
-  const o2 = orders.createOrder({
+  const o2 = await orders.createOrder({
     customerId: c2.id,
     currency: 'USD',
     exchangeRate: 7.15,
@@ -239,15 +239,15 @@ async function main() {
   ]) {
     cur = await orders.addOrderItem(o2.id, it)
   }
-  orders.setPaymentStatus(o2.id, 'confirmed')
+  await orders.setPaymentStatus(o2.id, 'confirmed')
   await orders.addPayment(o2.id, { paidAt: '2026-02-20', amount: cur.totalAmount, method: 'T/T', bankRef: 'SEB2202201199' })
-  orders.setShipStatus(o2.id, 'packed')
-  orders.setShipStatus(o2.id, 'shipped')
-  orders.setShipStatus(o2.id, 'cleared')
-  orders.setShipStatus(o2.id, 'delivered')
+  await orders.setShipStatus(o2.id, 'packed')
+  await orders.setShipStatus(o2.id, 'shipped')
+  await orders.setShipStatus(o2.id, 'cleared')
+  await orders.setShipStatus(o2.id, 'delivered')
 
   // 订单 3：草稿，待确认
-  const o3 = orders.createOrder({
+  const o3 = await orders.createOrder({
     customerId: c1.id,
     currency: 'USD',
     exchangeRate: 7.15,
@@ -264,10 +264,10 @@ async function main() {
   ]) {
     cur = await orders.addOrderItem(o3.id, it)
   }
-  orders.setPaymentStatus(o3.id, 'sent')
+  await orders.setPaymentStatus(o3.id, 'sent')
 
   // 订单 4：客户临时加的款号，成本还没录（毛利显示「—」，不给你一个假数字）
-  const o4 = orders.createOrder({
+  const o4 = await orders.createOrder({
     customerId: c2.id,
     currency: 'USD',
     exchangeRate: 7.15,
@@ -286,10 +286,10 @@ async function main() {
     quantity: 100,
     unitPrice: 8.5
   })
-  orders.setPaymentStatus(o4.id, 'confirmed')
+  await orders.setPaymentStatus(o4.id, 'confirmed')
 
   // 导出单据 HTML 供人工查看
-  const full = orders.getOrder(o1.id)!
+  const full = await orders.getOrder(o1.id)!
   const settings = getSettings()
   const images: Record<string, string> = {}
   for (const p of [tshirt, polo, shirt]) {
@@ -305,14 +305,14 @@ async function main() {
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, 'pi.html'), renderPi({ order: full, settings, images }))
   writeFileSync(join(dir, 'pl.html'), renderPl({ order: full, settings, images: {} }, full.packingLists[0]))
-  const qlist = quotations.listQuotations()
+  const qlist = await quotations.listQuotations()
   if (qlist[0]) {
     writeFileSync(join(dir, 'quotation.html'), renderQuotation({ quotation: qlist[0], settings, images: {} }))
   }
   // 打样单（样品单）：客户要打样，公司先垫快递费。
   // 寄出日期故意放 45 天前：样品费没收 + 超阈值 → 工作台「催打样费」青色圆点常驻，随时可抽查（r12）
   const shipped45 = new Date(Date.now() - 45 * 86400000).toISOString().slice(0, 10)
-  const sample = samples.saveSample({
+  const sample = await samples.saveSample({
     customerId: c1.id,
     sampleDate: shipped45,
     courier: '顺丰',
