@@ -1,6 +1,6 @@
 import { chmodSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { Test } from '@nestjs/testing'
 import type { NestExpressApplication } from '@nestjs/platform-express'
 import request from 'supertest'
@@ -36,6 +36,21 @@ async function main(): Promise<void> {
     console.log(`${cond ? '  ✓' : '  ✗'} ${name}`)
     if (!cond) throw new Error(`断言失败：${name}${extra !== undefined ? ` —— ${String(extra)}` : ''}`)
     passed++
+  }
+  // 「权限错误一律人话」锁死断言（R62）：把 r60（存档）与 r61（备份）两轮的 EACCES 断言
+  // 合成同一把尺——任何一条通往用户的路撞上文件系统权限错，都必须说清权限、路径、找谁，
+  // 绝不能又落回「服务器内部错误」五个字。以后新接口加文件读写，红灯插在这把尺上。
+  const checkPerm = (name: string, resp: { status: number; body?: any; text?: string }, where: string): void => {
+    const msg = String(resp.body?.error?.message ?? '')
+    check(
+      name,
+      resp.status === 500 &&
+        msg.includes('权限') &&
+        msg.includes(where) &&
+        msg.includes('管服务器') &&
+        msg !== '服务器内部错误',
+      'status=' + resp.status + ' text=' + JSON.stringify(resp.text)
+    )
   }
 
   console.log('鉴权（M2 第一片）')
@@ -813,16 +828,7 @@ async function main(): Promise<void> {
       .set('content-type', 'application/octet-stream')
       .send(Buffer.from('%PDF-1.4 eacces'))
     chmodSync(docsRoot, 0o755)
-    const permMsg = String(dPerm.body?.error?.message ?? '')
-    check(
-      '存档目录不可写（EACCES）给人话：说权限、说路径、指到管服务器的人',
-      dPerm.status === 500 &&
-        permMsg.includes('权限') &&
-        permMsg.includes(docsRoot) &&
-        permMsg.includes('管服务器') &&
-        permMsg !== '服务器内部错误',
-      'status=' + dPerm.status + ' text=' + JSON.stringify(dPerm.text)
-    )
+    checkPerm('存档目录不可写（EACCES）给人话：说权限、说路径、指到管服务器的人', dPerm, docsRoot)
     const dPermList = await http.post('/api/docs/list').send({ orderId: oid })
     check(
       '权限失败那次不留半条版本记录（R57 老规矩：存档区报错不污染账）',
@@ -1146,6 +1152,21 @@ async function main(): Promise<void> {
     )
     const bkNotZip = await http.post('/api/backup/inspect').send({ path: 'not-even-a-path' })
     check('不是 .zip 的路径当场拒', bkNotZip.status === 400)
+
+    // r61-verify 账：备份这条路当时把错误重包了一层（core/backup.ts 的 throw new Error(msg)
+    // 把原始错误的 .code/.path 吞了），同样的 chmod 000 在备份接口上又裸奍成「服务器内部错误」。
+    // R62 起与存档共用上面那把「权限错误一律人话」的尺。
+    const backupsRoot = dirname(String(bkCreate.body.path))
+    chmodSync(backupsRoot, 0o000)
+    const bkPerm = await http.post('/api/backup/create').send({})
+    chmodSync(backupsRoot, 0o755)
+    checkPerm('备份目录不可写（EACCES）给人话：说权限、说路径、指到管服务器的人', bkPerm, backupsRoot)
+    const bkPermList = await http.post('/api/backup/list').send({})
+    check(
+      '权限失败那次不留半包（临时文件当场清掉，列表里没有 .part 残骸）',
+      bkPermList.status === 200 && !bkPermList.body.some((b: { path: string }) => String(b.path).includes('.part')),
+      JSON.stringify(bkPermList.body)
+    )
 
     // 恢复对拍：恢复前的订单数 → 造一笔新账 → 恢复 → 行数回到备份那一刻，新账消失
     const beforeTotal = Number((await http.post('/api/orders/list').send({ filter: {} })).body.total)

@@ -140,7 +140,10 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
       } catch (markErr) {
         console.warn('[backup] 备份失败原因没记进设置：', markErr)
       }
-      throw new Error(msg)
+      // 原始错误原样往外抛，不能 new Error(msg) 重包：一重包 .code/.path 就丢了，
+      // 服务器那头的错误映射认不出这是 EACCES，用户看到的又变成「服务器内部错误」
+      // 五个字（r61-verify 账：备份目录 chmod 000 那次就是这么漏的）。
+      throw e
     }
 
     // 包已经落盘了：下面全是善后与留痕，任何一步坏了都不许把成功的备份说成失败
