@@ -29,6 +29,15 @@ async function main() {
   // 清空演示数据（含图片关联）
   db.exec('DELETE FROM product_images')
 
+  // 重置自增计数器：sqlite_sequence 只删数据不清零的话，重建出来的第一张单
+  // 的 id 取决于这台库历史上用过多少号——同一份演示数据，这台机器是 1~N、
+  // 那台是 17~20，钉了单号路由的 sweep 基线就必然漂（R59 复验记账第 1 条）。
+  // 只有带 AUTOINCREMENT 的表才建这张元表，没有就跳过。
+  const hasSeq = db.get("SELECT 1 AS n FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'") as
+    | { n?: number }
+    | null
+  if (hasSeq?.n) db.exec('DELETE FROM sqlite_sequence')
+
   // 商品
   const tshirt = await products.saveProduct({
     styleNo: 'TS-001',

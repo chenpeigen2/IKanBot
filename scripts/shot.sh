@@ -22,6 +22,8 @@ unset ELECTRON_RUN_AS_NODE
 
 export IKAN_SHOT="$ROUTE"
 export IKAN_SHOT_NAME="$NAME"
+# 截图窗口尺寸也钉死（与 sweep 一致）：界面证据要能复现，不随屏幕/缩放漂
+export IKAN_SHOT_SIZE="${IKAN_SHOT_SIZE:-1600x1000}"
 [ -n "$EXTRA_JS" ] && export IKAN_SHOT_JS="$EXTRA_JS"
 
 # 60 秒硬超时；应用正常会自己退出

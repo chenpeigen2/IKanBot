@@ -10,8 +10,22 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
-# /orders/<id> 取演示数据里的第一张单：npm run seed 后固定是 13（旧 Windows 库里是 133，已随基线作废）
-ROUTES="/ /orders /orders/13 /quotations /samples /products /customers /reports /settings"
+# 窗口尺寸钉死：基线要换台电脑也能对，窗口落在哪块屏、系统缩放多少都会改表宽。
+# 值与 main 进程里 IKAN_SHOT_SIZE 的解析对应；重钉基线时也是在这个尺寸下测的。
+export IKAN_SHOT_SIZE=1600x1000
+
+# 演示数据里的第一张单：seed 已重置自增计数器，重建后固定是 1。
+# 这里仍从库里现查，免得哪天 seed 又动了 id，路由悄悄扫到一张空单上还报平安。
+FIRST_ORDER=$(node -e "
+const { Database } = require('$ROOT/node_modules/node-sqlite3-wasm');
+const db = new Database('$ROOT/data/ikanbot.db');
+const r = db.get('SELECT MIN(id) AS id FROM orders');
+console.log(r && r.id ? Number(r.id) : 1);
+db.close();
+")
+
+# /orders/<id> 取演示数据里的第一张单（seed 重置计数器后固定是 1）
+ROUTES="/ /orders /orders/$FIRST_ORDER /quotations /samples /products /customers /reports /settings"
 
 # 演示数据没建时扫出来全是空页，先把数据目录指到项目 data/（没有就先 npm run seed）
 if [ -z "${IKAN_DATA_DIR:-}" ] && [ -f "$ROOT/data/ikanbot.db" ]; then

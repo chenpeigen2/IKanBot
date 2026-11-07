@@ -33,9 +33,15 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 function createWindow(): void {
+  // 截图/探针模式把窗口尺寸钉死：基线的意义是换台电脑、换块屏也能对，
+  // 窗口落在哪块屏、系统缩放多少都会改表宽（R59 复验记账第 2 条）。
+  // sweep.sh 传 IKAN_SHOT_SIZE=1600x1000；平时开发仍是 1440x900。
+  const shotSize = /^(\d+)x(\d+)$/.exec(process.env['IKAN_SHOT_SIZE'] ?? '')
+  const shotW = shotSize ? Number(shotSize[1]) : 0
+  const shotH = shotSize ? Number(shotSize[2]) : 0
   mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 900,
+    width: shotW || 1440,
+    height: shotH || 900,
     minWidth: 1100,
     minHeight: 700,
     show: false,
