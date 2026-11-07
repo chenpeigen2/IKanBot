@@ -717,8 +717,9 @@ export function moneyCore(db: Db) {
       params.push(filter.customerId)
     }
     if (filter.month) {
-      // created_at 是 UTC ISO 串，按月筛选必须换成本地月份，否则月底的单会串月
-      where.push("strftime('%Y-%m', o.created_at, 'localtime') = ?")
+      // created_at 是 UTC ISO 串，按月筛选必须换成本地月份，否则月底的单会串月；
+      // 业务月表达式走 Db 原语（bizMonthExpr），方言留在驱动层，MySQL 侧 M2 按服务器时区实现
+      where.push(`${db.bizMonthExpr('o.created_at')} = ?`)
       params.push(filter.month)
     }
 

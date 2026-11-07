@@ -4,6 +4,7 @@ import { join } from 'path'
 import { app } from 'electron'
 import { LATEST_DB_VERSION, MIGRATIONS } from './schema'
 import type { Db, Row } from '../../core/db'
+import { sqliteBizMonthExpr, sqliteInsertIgnoreSql, sqliteUpsertSql } from '../../core/sqlite-dialect'
 
 let db: Database | null = null
 let dbFile: string | null = null
@@ -264,6 +265,21 @@ export const coreDb: Db = {
   },
   async exec(sql) {
     getDb().exec(sql)
+  },
+  async upsert(spec) {
+    const { sql, params } = sqliteUpsertSql(spec)
+    const r = getDb().run(sql, params as never) as { lastInsertRowid?: number; changes?: number }
+    return { lastInsertRowid: Number(r?.lastInsertRowid ?? 0), changes: Number(r?.changes ?? 0) }
+  },
+  async insertIgnore(table, cols, params) {
+    const r = getDb().run(sqliteInsertIgnoreSql(table, cols), params as never) as {
+      lastInsertRowid?: number
+      changes?: number
+    }
+    return { lastInsertRowid: Number(r?.lastInsertRowid ?? 0), changes: Number(r?.changes ?? 0) }
+  },
+  bizMonthExpr(col) {
+    return sqliteBizMonthExpr(col)
   },
   // 与上面的同步 transact 共用 txDepth/txSeq：两条路混用时存档点也不能撞
   async transact<T>(fn: () => Promise<T>): Promise<T> {

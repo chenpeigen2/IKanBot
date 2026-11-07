@@ -426,6 +426,38 @@ async function main(): Promise<void> {
       await fdb.close()
     }
 
+    console.log('方言原语（R63：搬 MySQL 前 core 不认驱动）')
+    // GROUP_CONCAT 那处不设原语、直接换成「分开查 + JS 拼接」：
+    // MySQL 的 group_concat_max_len 默认 1024 字节，箱号一多会在纸面单据上静默截断不报错，
+    // 原语救不了它，换聚合方式才真没这个坑（见 core/orders.ts 列表柜号查询）
+    await db.exec('CREATE TABLE dialect_probe (k TEXT PRIMARY KEY, v TEXT NOT NULL)')
+    const up1 = await db.upsert({ table: 'dialect_probe', keyCol: 'k', valueCol: 'v', key: 'a', value: '1', mode: 'overwrite' })
+    check('upsert overwrite：没有就插', up1.changes === 1)
+    const up2 = await db.upsert({ table: 'dialect_probe', keyCol: 'k', valueCol: 'v', key: 'a', value: '2', mode: 'overwrite' })
+    check('upsert overwrite：有了就整格换新值', up2.changes === 1 && (await db.get(`SELECT v FROM dialect_probe WHERE k = 'a'`))?.['v'] === '2')
+    // 计数器（increment）单独一张整数列表：真实场景 counters.value 就是整数列，
+    // TEXT 列会把数字转成文字存，加法语义验不出来（列亲和性不是驱动的事，别混在一个探针里）
+    await db.exec('CREATE TABLE dialect_counter (k TEXT PRIMARY KEY, v INTEGER NOT NULL)')
+    await db.upsert({ table: 'dialect_counter', keyCol: 'k', valueCol: 'v', key: 'c', value: 1, mode: 'increment' })
+    await db.upsert({ table: 'dialect_counter', keyCol: 'k', valueCol: 'v', key: 'c', value: 1, mode: 'increment' })
+    await db.upsert({ table: 'dialect_counter', keyCol: 'k', valueCol: 'v', key: 'c', value: 1, mode: 'increment' })
+    check('upsert increment：并发计数器由数据库自己加（1+1+1=3，不是各自插一行）', (await db.get(`SELECT v FROM dialect_counter WHERE k = 'c'`))?.['v'] === 3)
+    const insDup1 = await db.insertIgnore('dialect_probe', ['k', 'v'], ['a', '晚了'])
+    const insDup2 = await db.insertIgnore('dialect_probe', ['k', 'v'], ['a', '更晚'])
+    check('insertIgnore：撞唯一索引整句放弃、原值不动', insDup1.changes === 0 && insDup2.changes === 0 && (await db.get(`SELECT v FROM dialect_probe WHERE k = 'a'`))?.['v'] === '2')
+    const newId = (await db.run(`INSERT INTO dialect_probe(k, v) VALUES('id-row', 'x')`)).lastInsertRowid
+    check('run() 自带刚插那行的 id（不再发 last_insert_rowid() 方言查询）', Number(newId) > 0 && (await db.get('SELECT k FROM dialect_probe WHERE rowid = ?', [newId]))?.['k'] === 'id-row')
+    // 业务月：UTC 存的时刻串按本机时区折成年月，月底的单不串月
+    const bm = db.bizMonthExpr('created_at')
+    check('业务月表达式由驱动出自己的方言（SQLite 侧是 strftime）', typeof bm === 'string' && bm.includes('%Y-%m'))
+    await db.exec("CREATE TABLE month_probe (created_at TEXT NOT NULL)")
+    await db.run("INSERT INTO month_probe(created_at) VALUES('2026-01-31T20:00:00.000Z')") // 本地 (+8) 已是 2 月 4 点
+    const monthHit = await db.all(`SELECT created_at FROM month_probe WHERE ${bm} = '2026-02'`)
+    check('UTC 时刻折本地月：月底的 1 月 31 日晚八点算 2 月的单', monthHit.length === 1)
+    await db.exec('DROP TABLE dialect_probe')
+    await db.exec('DROP TABLE dialect_counter')
+    await db.exec('DROP TABLE month_probe')
+
     console.log(`\n数据层冒烟通过 ${passed} 项`)
   } finally {
     await db.close()

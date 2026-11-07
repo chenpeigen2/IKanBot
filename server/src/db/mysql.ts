@@ -61,6 +61,42 @@ export class MysqlDb implements Db {
     await this.conn().query(sql)
   }
 
+  async upsert(spec: Parameters<Db['upsert']>[0]): Promise<RunResult> {
+    // ON DUPLICATE KEY UPDATE 与 SQLite 的 ON CONFLICT DO UPDATE 同一套语义；
+    // increment 时两个占位符都填新值（旧值 + 新值），与 SQLite 的 value = value + ? 对齐
+    const set =
+      spec.mode === 'increment'
+        ? `${spec.valueCol} = ${spec.valueCol} + ?`
+        : `${spec.valueCol} = VALUES(${spec.valueCol})`
+    const params = spec.mode === 'increment' ? [spec.key, spec.value, spec.value] : [spec.key, spec.value]
+    const [res] = await this.conn().query(
+      `INSERT INTO ${spec.table}(${spec.keyCol}, ${spec.valueCol}) VALUES(?, ?) ON DUPLICATE KEY UPDATE ${set}`,
+      params
+    )
+    const r = res as mysql.ResultSetHeader
+    return { lastInsertRowid: Number(r.insertId ?? 0), changes: Number(r.affectedRows ?? 0) }
+  }
+
+  async insertIgnore(table: string, cols: string[], params: unknown[]): Promise<RunResult> {
+    // INSERT IGNORE：撞唯一索引时整句放弃，与 SQLite 的 INSERT OR IGNORE 同一套语义
+    const [res] = await this.conn().query(
+      `INSERT IGNORE INTO ${table}(${cols.join(', ')}) VALUES(${cols.map(() => '?').join(', ')})`,
+      params
+    )
+    const r = res as mysql.ResultSetHeader
+    return { lastInsertRowid: Number(r.insertId ?? 0), changes: Number(r.affectedRows ?? 0) }
+  }
+
+  bizMonthExpr(_col: string): string {
+    // TODO(M2)：业务月的 MySQL 实现等列类型（DATETIME 还是 TEXT ISO 串）与服务器时区方案
+    // （backend-plan 第十节风险 3：业务日固定 Asia/Shanghai）定了再写——
+    // 现在写出来大概率是错的，宁可在这里报错，也不静默把月报切错月。
+    throw new Error(
+      '业务月函数还没有 MySQL 实现（排在 M2：列类型与时区方案定了再写）。' +
+        '请不要用 MySQL 跑报表，先用 SQLite 文件。'
+    )
+  }
+
   async transact<T>(fn: () => Promise<T>): Promise<T> {
     const outer = txConn.getStore()
     if (outer) {

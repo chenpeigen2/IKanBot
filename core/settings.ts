@@ -320,10 +320,15 @@ export function settingsCore(db: Db) {
     const main = { ...s } as Partial<AppSettings>
     delete main.lastBackupAt
     delete main.lastBackupError
-    await db.run(
-      'INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
-      [KEY, JSON.stringify(main)]
-    )
+    // upsert(overwrite)：设置行只有一行，整格换新 JSON（SQLite/MySQL 同一个原语，方言不在 core）
+    await db.upsert({
+      table: 'settings',
+      keyCol: 'key',
+      valueCol: 'value',
+      key: KEY,
+      value: JSON.stringify(main),
+      mode: 'overwrite'
+    })
   }
 
   async function save(rawInput: unknown): Promise<AppSettings> {
@@ -346,10 +351,14 @@ export function settingsCore(db: Db) {
   async function patchBackup(patch: Partial<Pick<AppSettings, 'lastBackupAt' | 'lastBackupError'>>): Promise<void> {
     const cur = await get()
     const next = { lastBackupAt: cur.lastBackupAt, lastBackupError: cur.lastBackupError, ...patch }
-    await db.run(
-      'INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
-      [BACKUP_STATE_KEY, JSON.stringify(next)]
-    )
+    await db.upsert({
+      table: 'settings',
+      keyCol: 'key',
+      valueCol: 'value',
+      key: BACKUP_STATE_KEY,
+      value: JSON.stringify(next),
+      mode: 'overwrite'
+    })
   }
 
   return { get, save, baseCurrencyLocked, patchBackup }

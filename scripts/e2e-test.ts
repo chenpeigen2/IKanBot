@@ -12925,6 +12925,37 @@ section('R62/M4：收款/退款幂等（request_id 重放只落一笔）')
       custSrcR62.includes('refundRequestId.current = newRequestId()'))
 }
 
+/* ---------------- R63：方言照妖镜 ---------------- */
+section('R63：方言照妖镜 —— core 里不出现 SQLite 专有语法（搬 MySQL 前的六处技术账，R46 挂账）')
+{
+  // 扫描范围只限 core/：方言住在驱动层（electron/db、server/src/db）是本分，
+  // core 只认 Db 接口。R46 数出来的六处：next-no/settings 的 ON CONFLICT DO UPDATE、
+  // orders 的 last_insert_rowid() 与 GROUP_CONCAT(DISTINCT …)、money 的 strftime(…,'localtime')、
+  // quotations 的 INSERT OR IGNORE。
+  // GROUP_CONCAT 那处最阴：MySQL 的 group_concat_max_len 默认 1024 字节，
+  // 箱号一多纸面单据会**静默截断**不报错——所以这处连原语都不加，
+  // 直接换成「柜号分开查、JS 拼接」，MySQL 侧根本没有这个坑可踩。
+  const forbidden: Array<[string, RegExp]> = [
+    ['ON CONFLICT（计数器/设置改走 Db.upsert 原语）', /ON\s+CONFLICT/i],
+    ['last_insert_rowid()（改用 run() 返回的 lastInsertRowid）', /last_insert_rowid/i],
+    ['GROUP_CONCAT（改成分开查 + JS 拼接，躲开 group_concat_max_len=1024 静默截断）', /GROUP_CONCAT/i],
+    ["strftime(…,'localtime')（业务月改走 Db.bizMonthExpr 原语）", /strftime/i],
+    ['INSERT OR IGNORE（存档改走 Db.insertIgnore 原语）', /INSERT\s+OR\s+IGNORE/i]
+  ]
+  // core/sqlite-dialect.ts 是两个 SQLite 驱动共用的方言拼装件（属于驱动层，见文件头注释），豁免
+  const coreFiles = fs.readdirSync('core').filter((f) => f.endsWith('.ts') && f !== 'sqlite-dialect.ts')
+  /** 只扫代码不扫散文：剥掉块注释与行注释，免得注释里提一句方言也被当命中 */
+  const stripComments = (src: string): string =>
+    src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  check('core/ 目录能读到源码（方言扫描依赖 npm script 的仓库根 cwd）', coreFiles.length > 10, coreFiles.join(','))
+  for (const f of coreFiles) {
+    const src = stripComments(fs.readFileSync(join('core', f), 'utf8'))
+    for (const [name, re] of forbidden) {
+      check(`${f} 不含 ${name}`, !re.test(src), (src.match(re)?.[0] ?? '').slice(0, 60))
+    }
+  }
+}
+
 /* ---------------- 汇总 ---------------- */
 
 console.log(`\n${'='.repeat(46)}`)

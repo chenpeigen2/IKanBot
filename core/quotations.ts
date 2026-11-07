@@ -241,9 +241,11 @@ export function quotationsCore(db: Db) {
     }
     const goodsTotal = items.reduce((s, i) => s + i.quantity * i.unitPrice, 0)
     const grandTotal = goodsTotal + charges.reduce((s, c) => s + (Number(c.amount) || 0), 0)
-    await db.run(
-      `INSERT OR IGNORE INTO quotation_versions(quotation_id, revision, snapshot_json, goods_total, grand_total, created_at)
-       VALUES(?,?,?,?,?,?)`,
+    // 存档是「同版只入一次」：并发保存两笔都到第 N 版时，后到的那笔放弃（撞唯一索引不报错）。
+    // 走 Db.insertIgnore 原语，SQLite/MySQL 同一套语义，方言不留在 core
+    await db.insertIgnore(
+      'quotation_versions',
+      ['quotation_id', 'revision', 'snapshot_json', 'goods_total', 'grand_total', 'created_at'],
       [qId, revision, JSON.stringify(snap), goodsTotal, grandTotal, at ?? now()]
     )
   }

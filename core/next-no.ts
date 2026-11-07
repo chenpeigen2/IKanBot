@@ -27,11 +27,18 @@ const NO_RESERVATION: Record<string, { table: string; col: string }> = {
 async function bumpCounter(db: Db, prefix: string): Promise<number> {
   const bumped = await db.run('UPDATE counters SET value = value + 1 WHERE name = ?', [prefix])
   if (bumped.changes !== 1) {
-    // 这个号段今天第一次用到：建行同样走数据库的加法，别让并发各自插一行
-    await db.run(
-      'INSERT INTO counters(name, value) VALUES(?, 1) ON CONFLICT(name) DO UPDATE SET value = value + 1',
-      [prefix]
-    )
+    // 这个号段今天第一次用到：建行同样走数据库的加法，别让并发各自插一行。
+    // upsert(increment)：没有就建 1，有（并发那一位刚建好的）就在旧值上加 1 ——
+    // SQLite 与 MySQL 同一个原语（ON CONFLICT / ON DUPLICATE KEY），方言不留在 core 里
+    const res = await db.upsert({
+      table: 'counters',
+      keyCol: 'name',
+      valueCol: 'value',
+      key: prefix,
+      value: 1,
+      mode: 'increment'
+    })
+    if (res.changes !== 1) throw new Error(`序号计数器 ${prefix} 没建起来，请重试建单`)
   }
   const row = await db.get('SELECT value FROM counters WHERE name = ?', [prefix])
   return Number(row?.value ?? 1)

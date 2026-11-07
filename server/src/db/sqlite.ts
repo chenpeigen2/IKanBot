@@ -3,6 +3,7 @@ import { Database } from 'node-sqlite3-wasm'
 import { existsSync, mkdirSync, renameSync, statSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import type { Db, Row, RunResult } from './types'
+import { sqliteBizMonthExpr, sqliteInsertIgnoreSql, sqliteUpsertSql } from '../../../core/sqlite-dialect'
 
 /** 本地模式与测试用：同步驱动包成 Promise，事务语义与 electron/db 的 transact 一致 */
 export class SqliteDb implements Db {
@@ -81,6 +82,24 @@ export class SqliteDb implements Db {
 
   async exec(sql: string): Promise<void> {
     this.db.exec(sql)
+  }
+
+  async upsert(spec: Parameters<Db['upsert']>[0]): Promise<RunResult> {
+    const { sql, params } = sqliteUpsertSql(spec)
+    const r = this.db.run(sql, params as never) as { lastInsertRowid?: number; changes?: number }
+    return { lastInsertRowid: Number(r?.lastInsertRowid ?? 0), changes: Number(r?.changes ?? 0) }
+  }
+
+  async insertIgnore(table: string, cols: string[], params: unknown[]): Promise<RunResult> {
+    const r = this.db.run(sqliteInsertIgnoreSql(table, cols), params as never) as {
+      lastInsertRowid?: number
+      changes?: number
+    }
+    return { lastInsertRowid: Number(r?.lastInsertRowid ?? 0), changes: Number(r?.changes ?? 0) }
+  }
+
+  bizMonthExpr(col: string): string {
+    return sqliteBizMonthExpr(col)
   }
 
   /**

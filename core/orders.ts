@@ -489,11 +489,13 @@ export function ordersCore(db: Db) {
     const packBy = new Map<number, { qty: number; batches: number; containers: string }>()
     const styleBy = new Map<number, { styles: number; first: string }>()
     if (ids.length > 0) {
-      // 已装箱件数、批次数与柜号：作废批次和空批次都不算（和 shipmentSummary 一个口径）
+      // 已装箱件数、批次数：作废批次和空批次都不算（和 shipmentSummary 一个口径）。
+      // 柜号不在这里聚合——GROUP_CONCAT 在 MySQL 下受 group_concat_max_len（默认 1024 字节）限制，
+      // 箱号一多会**静默截断**，纸面单据上悄悄少字不报错；改成单独查一行一柜号、在 JS 里拼接，
+      // 一页列表几十张单、每张几个柜号，分开查的代价可以忽略
       const packRows = await db.all(
         `SELECT pl.order_id AS order_id, COUNT(*) AS batches,
-                COALESCE(SUM(t.qty), 0) AS qty,
-                GROUP_CONCAT(DISTINCT NULLIF(t.container_no, '')) AS containers
+                COALESCE(SUM(t.qty), 0) AS qty
          FROM (
            SELECT pl2.id, pl2.order_id, pl2.container_no, COALESCE(SUM(l.quantity), 0) AS qty
            FROM packing_lists pl2
@@ -509,8 +511,30 @@ export function ordersCore(db: Db) {
         packBy.set(Number(r.order_id), {
           qty: Number(r.qty ?? 0),
           batches: Number(r.batches ?? 0),
-          containers: String(r.containers ?? '')
+          containers: ''
         })
+      // 柜号：去重（与原来 DISTINCT 一个口径）、空柜号不算，按柜号排序让屏幕上的顺序稳定
+      const containerRows = await db.all(
+        `SELECT DISTINCT t.order_id AS order_id, t.container_no AS container_no
+         FROM (
+           SELECT pl2.id, pl2.order_id, pl2.container_no, COALESCE(SUM(l.quantity), 0) AS qty
+           FROM packing_lists pl2
+           LEFT JOIN packing_list_lines l ON l.packing_list_id = pl2.id
+           WHERE pl2.order_id IN (${ph}) AND pl2.voided_at IS NULL
+           GROUP BY pl2.id
+           HAVING COALESCE(SUM(l.quantity), 0) > 0
+         ) t
+         WHERE NULLIF(TRIM(t.container_no), '') IS NOT NULL
+         ORDER BY t.order_id, t.container_no`,
+        ids
+      ) as Record<string, unknown>[]
+      for (const r of containerRows) {
+        const oid = Number(r.order_id)
+        const prev = packBy.get(oid) ?? { qty: 0, batches: 0, containers: '' }
+        const list = prev.containers ? prev.containers.split(',') : []
+        list.push(String(r.container_no ?? '').trim())
+        packBy.set(oid, { ...prev, containers: list.join(',') })
+      }
       const styleRows = await db.all(
         `SELECT order_id, COUNT(DISTINCT TRIM(style_no)) AS styles, MIN(style_no) AS first_style
          FROM order_items WHERE order_id IN (${ph}) GROUP BY order_id`,
@@ -2506,14 +2530,14 @@ export function ordersCore(db: Db) {
             `${(err as Error).message}\n如果是这笔追回登记重了，请到下面的核销记录里撤销——撤销会把自动登记的收款一起退掉。`
           )
         }
-        await db.run(
+        const payRes = await db.run(
           `INSERT INTO payments(order_id, paid_at, amount, method, bank_ref, note, exchange_rate, created_at)
            VALUES(?,?,?,?,?,?,?,?)`,
           [orderId, paidAt, amount, input.method ?? 'T/T', input.bankRef ?? '', `坏账追回：${reason}`, rate, now()]
         )
-        const payId = Number(
-          (await db.get('SELECT last_insert_rowid() AS id') as { id?: number } | null)?.id ?? 0
-        )
+        // 刚插进去那行的 id 直接拿 run() 的返回值：驱动各自会带回来（MySQL 的 insertId / SQLite 的 lastInsertRowid），
+        // 不再发一句方言查询 last_insert_rowid()
+        const payId = payRes.lastInsertRowid
         await db.run(
           `INSERT INTO order_settlements(order_id, kind, amount, reason, evidence, reverses_id, payment_id, at, created_at)
            VALUES(?,?,?,?,?,?,?,?,?)`,
