@@ -2805,7 +2805,7 @@ const d2 = await docs.saveDocFile({
 eq('第 2 版存档', d2.version, 2)
 let staleDocErr = ''
 try {
-  await docs.saveDocFile({ pdf: Buffer.from('stale'), docNo: r4no, kind: 'pi', expectedVersion: 1 })
+  await docs.saveDocFile({ pdf: Buffer.from('stale'), docNo: r4no, kind: 'pi', amount: 10, expectedVersion: 1 })
 } catch (e) {
   staleDocErr = (e as Error).message
 }
@@ -2814,14 +2814,14 @@ eq('被拦后没有多出存档行', (await docs.listDocVersions(order.id)).filt
 
 let docPathErr = ''
 try {
-  await docs.saveDocFile({ pdf: Buffer.from('x'), docNo: '../evil', kind: 'pi' })
+  await docs.saveDocFile({ pdf: Buffer.from('x'), docNo: '../evil', kind: 'pi', amount: 10 })
 } catch (e) {
   docPathErr = (e as Error).message
 }
 check('单号带路径穿越会被拦住', docPathErr.includes('存档目录'), docPathErr)
 let docKindErr = ''
 try {
-  await docs.saveDocFile({ pdf: Buffer.from('x'), docNo: r4no, kind: 'invoice' })
+  await docs.saveDocFile({ pdf: Buffer.from('x'), docNo: r4no, kind: 'invoice', amount: 10 })
 } catch (e) {
   docKindErr = (e as Error).message
 }
@@ -5133,7 +5133,7 @@ const r15Rate = await orders.createOrder({
   piNo: 'PI-R15-RATE'
 })
 await orders.addOrderItem(r15Rate.id, { styleNo: 'R15-RATE', quantity: 10, unitPrice: 10 })
-await docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r15 rate'), docNo: 'PI-R15-RATE', kind: 'pi', orderId: r15Rate.id })
+await docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r15 rate'), docNo: 'PI-R15-RATE', kind: 'pi', orderId: r15Rate.id, amount: 100 })
 check(
   '出过单据后改汇率被拒',
   (await r8err(async () => await orders.updateOrder(r15Rate.id, { customerId: c1.id, exchangeRate: 7.3 }))).includes('汇率')
@@ -5173,7 +5173,7 @@ eq(
 
 section('R15 物理删除只留给真正的空单；作废单不能绕过留档')
 const r15DelDoc = await orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7 })
-await docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r15 del'), docNo: 'PI-R15-DEL', kind: 'pi', orderId: r15DelDoc.id })
+await docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r15 del'), docNo: 'PI-R15-DEL', kind: 'pi', orderId: r15DelDoc.id, amount: 100 })
 check(
   '有单据存档的空单不能物理删除',
   (await r8err(async () => orders.deleteOrder(r15DelDoc.id))).includes('单据存档')
@@ -5389,7 +5389,7 @@ const r16Q = await quotations.saveQuotation({
   exchangeRateDate: '2026-10-21',
   items: [{ styleNo: 'R16-Q', quantity: 10, unitPrice: 7.5 }]
 })
-await docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r16 quote'), docNo: r16Q.qNo, kind: 'quotation', quotationId: r16Q.id })
+await docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r16 quote'), docNo: r16Q.qNo, kind: 'quotation', quotationId: r16Q.id, amount: 500 })
 check('有存档的报价单删不掉', (await r8err(async () => (await quotations.deleteQuotation(r16Q.id)))).includes('单据存档'))
 check('拦截提示给出替代方案（已失效）', (await r8err(async () => (await quotations.deleteQuotation(r16Q.id)))).includes('已失效'))
 check('拦截后报价单还在', (await quotations.getQuotation(r16Q.id)) !== null)
@@ -7710,7 +7710,7 @@ const r29Doc = await orders.createOrder({
   paymentStatus: 'confirmed',
   piNo: 'PI-R29-DOC'
 })
-await docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r29 doc'), docNo: 'PI-R29-DOC', kind: 'pi', orderId: r29Doc.id })
+await docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r29 doc'), docNo: 'PI-R29-DOC', kind: 'pi', orderId: r29Doc.id, amount: 100 })
 check(
   '有单据存档的订单不能换客户',
   (await r8err(async () => await orders.updateOrder(r29Doc.id, { customerId: r29B.id }))).includes('换客户')
