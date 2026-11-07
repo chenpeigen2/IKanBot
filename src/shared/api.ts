@@ -295,6 +295,12 @@ export interface IKanApi {
     login(username: string, password: string): Promise<DataSourceState>
     /** 退出登录：清掉本机存的 token */
     logout(): Promise<DataSourceState>
+    /**
+     * 订阅「登录已失效」：后端换了秘钥、token 被服务端拒认（401）时主进程广播，
+     * 登录态已被清掉——设置页好把「已登录」变回未登录并提示重新登录。
+     * 返回退订函数。
+     */
+    onAuthExpired(cb: (info: { message: string }) => void): () => void
   }
   /** 数据目录完整路径 */
   app: {

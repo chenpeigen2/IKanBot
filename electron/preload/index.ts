@@ -144,7 +144,13 @@ const api: IKanApi = {
     set: (patch: { mode?: any; remoteUrl?: string }) => call<any>('mode:set', patch),
     test: (url?: string) => call<any>('mode:test', url),
     login: (username: string, password: string) => call<any>('mode:login', username, password),
-    logout: () => call<any>('mode:logout')
+    logout: () => call<any>('mode:logout'),
+    /** 订阅「登录已失效」（远端请求收到 401 时主进程广播）：设置页好把登录卡变回未登录 */
+    onAuthExpired: (cb: (info: { message: string }) => void) => {
+      const listener = (_e: unknown, info: { message: string }) => cb(info)
+      ipcRenderer.on('auth:expired', listener)
+      return () => ipcRenderer.removeListener('auth:expired', listener)
+    }
   },
   /** 数据目录完整路径 */
   app: {

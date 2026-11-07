@@ -33,6 +33,7 @@ import {
   remoteReadDoc,
   remoteUploadImage,
   isRemoteChannel,
+  setAuthExpiredNotifier,
   REMOTE_ROUTES
 } from '../electron/remote/client'
 import { handle, handlerArity, isLocalOnlyChannel, registeredChannels } from '../electron/ipc/handle'
@@ -314,8 +315,10 @@ async function main(): Promise<void> {
     console.log('鉴权：后端要求登录，桌面端用真实 IPC 登录拿通行证')
     const gate = await ipc('customers:list', '')
     check(
-      '没登录时后端拒绝：401 中文「请先登录」，不是白屏也不是假死',
-      !gate.ok && String(gate.error).includes('请先登录') && String(gate.error).includes('设置 · 数据来源'),
+      // R61：401 话术升级为「登录已失效，请到「设置 · 数据来源」重新登录」——
+      // 没登录与登录态作废同一样 401，同一句话术指到同一个入口
+      '没登录时后端拒绝：401 中文指回「设置 · 数据来源」重新登录，不是白屏也不是假死',
+      !gate.ok && String(gate.error).includes('登录已失效') && String(gate.error).includes('设置 · 数据来源'),
       JSON.stringify(gate)
     )
     const wrongPw = await ipc('mode:login', 'wenjuan', 'wrong-pass')
@@ -609,7 +612,7 @@ async function main(): Promise<void> {
     const loggedOut = await ipc('mode:logout')
     check('登出后状态回到未登录', loggedOut.ok && (loggedOut as any).data.auth.loggedIn === false)
     const afterLogout = await ipc('customers:list', '')
-    check('登出后业务通道马上变回「请先登录」', !afterLogout.ok && String(afterLogout.error).includes('请先登录'))
+    check('登出后业务通道马上变回「登录已失效，请重新登录」', !afterLogout.ok && String(afterLogout.error).includes('登录已失效'))
     const relogin = await ipc('mode:login', 'wenjuan', 'Secret#123')
     check('重新登录马上恢复', relogin.ok && (relogin as any).data.auth.loggedIn === true)
     const afterRelogin = await ipc('customers:list', '')
@@ -682,10 +685,46 @@ async function main(): Promise<void> {
     // 登出后读侧也要关闸：401 与其他业务通道同一句话术
     await ipc('mode:logout')
     const docLoggedOut = (await ipc('docs:list', orderId)) as any
-    check('远端模式：登出后存档列表同样「请先登录」', !docLoggedOut.ok && String(docLoggedOut.error).includes('请先登录'))
+    check('远端模式：登出后存档列表同样「登录已失效」', !docLoggedOut.ok && String(docLoggedOut.error).includes('登录已失效'))
     await ipc('mode:login', 'wenjuan', 'Secret#123')
     const remoteDocAgain = (await ipc('docs:list', orderId)) as any
     check('远端模式：重新登录后存档列表马上回来', remoteDocAgain.ok && remoteDocAgain.data.length === 2)
+
+    console.log('401 清假登录态（R61：后端换秘钥后，设置页不能还挂着「已登录」）')
+    {
+      // 一个只会回 401 的假后端：模拟「服务器换了秘钥，旧 token 全部作废」——
+      // 界面此前显示的「已登录：某某」只是本地存的用户名，不是服务端验过的
+      const stale = createServer()
+      stale.on('request', (_req, res) => {
+        res.writeHead(401, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { message: '请先登录' } }))
+      })
+      const stalePort = await freePort()
+      await new Promise<void>((res) => stale.listen(stalePort, '127.0.0.1', () => res()))
+      let expiredNotified = false
+      setAuthExpiredNotifier(() => {
+        expiredNotified = true
+      })
+      saveConnection({ mode: 'remote', remoteUrl: `http://127.0.0.1:${stalePort}` })
+      check('前置：此刻确实有登录态（auth 文件在）', existsSync(join(root, 'auth-token.json')))
+      const staleCall = await ipc('customers:list', '')
+      check(
+        '401 后话术变成「登录已失效，请重新登录」（不再是干巴巴的「请先登录」）',
+        !staleCall.ok &&
+          String(staleCall.error).includes('登录已失效') &&
+          String(staleCall.error).includes('重新登录') &&
+          String(staleCall.error).includes('设置 · 数据来源'),
+        JSON.stringify(staleCall)
+      )
+      check('401 后登录态被清掉：safeStorage 那份 auth 文件删了', !existsSync(join(root, 'auth-token.json')))
+      const staleState = (await ipc('mode:get')) as any
+      check('401 后 mode:get 回到未登录（设置页登录卡跟着变脸）', staleState.ok && staleState.data.auth.loggedIn === false)
+      check('主进程通知了界面（渲染层好弹提示、刷新登录卡）', expiredNotified)
+      stale.close()
+      saveConnection({ mode: 'remote', remoteUrl: serverUrl })
+      await ipc('mode:login', 'wenjuan', 'Secret#123')
+      check('重新登录后同一通道照常走通（不是被 401 永久卡死）', ((await ipc('customers:list', '')) as any).ok === true)
+    }
     const remoteRevealNoFile = (await ipc('docs:reveal')) as any
     check(
       '远端模式：「打开目录」说清单据在后端机器上（不甩英文不假装打开了）',

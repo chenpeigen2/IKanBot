@@ -32,7 +32,8 @@ import {
   remoteReadDoc,
   remoteReadImage,
   remoteSaveDoc,
-  remoteUploadImage
+  remoteUploadImage,
+  setAuthExpiredNotifier
 } from '../remote/client'
 import { authState, clearStoredAuth, saveStoredAuth } from '../remote/token-store'
 import { handle, handleSync, registeredChannels } from './handle'
@@ -134,6 +135,15 @@ function safePdfName(name: unknown): string {
 }
 
 export function registerIpc(): void {
+  // 远端请求收到 401：主进程广播给所有窗口，设置页把「已登录」变回未登录并提示重登（R61）。
+  // 放在 registerIpc 里（不在模块顶层）：双模式测试导入本模块时不拉起窗口广播，
+  // 测试自己要用 setAuthExpiredNotifier 换成樁来验这条线
+  setAuthExpiredNotifier(() => {
+    for (const w of BrowserWindow.getAllWindows()) {
+      w.webContents.send('auth:expired', { message: '登录已失效，请重新登录' })
+    }
+  })
+
   /* ---- 自动更新 ---- */
   registerUpdaterIpc()
 

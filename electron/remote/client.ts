@@ -1,5 +1,5 @@
 import { getConnection, normalizeBaseUrl } from '../mode'
-import { currentToken } from './token-store'
+import { clearStoredAuth, currentToken } from './token-store'
 
 /** 一条通道在后端的落点：路由与请求体里的参数名 */
 interface RouteSpec {
@@ -169,7 +169,34 @@ function authHeaders(extra?: Record<string, string>): Record<string, string> {
   return h
 }
 
-async function readJson(res: Response): Promise<unknown> {
+/**
+ * 401 时的广播钩子：由 ipc 层注入（给所有窗口发 auth:expired），测试里可换成樁。
+ * 不直接 import BrowserWindow：让 client.ts 保持纯转发层，也避免测试环境拉起 electron。
+ */
+let notifyAuthExpired: () => void = () => {}
+export function setAuthExpiredNotifier(fn: () => void): void {
+  notifyAuthExpired = fn
+}
+
+/**
+ * 会话已失效（后端换了秘钥、token 被服务端拒认）：清掉 safeStorage 里的登录态、
+ * 通知界面把「已登录：某某」变回未登录，再抛人话。
+ * 不是本地存的用户名不算登录——那只是个名字，不是服务端验过的通行证（r60-verify 账）。
+ */
+function handleAuthExpired(): never {
+  clearStoredAuth()
+  try {
+    notifyAuthExpired()
+  } catch {
+    // 通知失败不挡登录态清理与报错（测试樁里没有窗口，也不能把话术变形成英文堆栈）
+  }
+  throw new Error('登录已失效，请到「设置 · 数据来源」重新登录')
+}
+
+async function readJson(res: Response, opts: { auth?: boolean } = {}): Promise<unknown> {
+  // 会话失效与「密码不对」是两回事：登录接口的 401 原样透回「用户名或密码不对」，
+  // 业务接口的 401 才按「这份登录态已经作废」处理
+  if (res.status === 401 && opts.auth) handleAuthExpired()
   const text = await res.text()
   let data: unknown = null
   try {
@@ -202,7 +229,7 @@ export async function remoteCall(channel: string, args: unknown[]): Promise<unkn
     headers: authHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify(body)
   })
-  return readJson(res)
+  return readJson(res, { auth: true })
 }
 
 /* ---------------- 登录 ---------------- */
@@ -244,7 +271,7 @@ export async function remoteExportCsv(
     headers: authHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify({ kind, filter })
   })
-  const data = (await readJson(res)) as { csv?: unknown; fileName?: unknown } | null
+  const data = (await readJson(res, { auth: true })) as { csv?: unknown; fileName?: unknown } | null
   return { csv: String(data?.csv ?? ''), fileName: String(data?.fileName ?? '') }
 }
 
@@ -267,7 +294,7 @@ export async function remoteUploadImage(originalName: string, bytes: Buffer): Pr
     // 大图走慢网络时 20 秒不够，单独给宽一点
     60000
   )
-  const data = (await readJson(res)) as { fileName?: unknown } | null
+  const data = (await readJson(res, { auth: true })) as { fileName?: unknown } | null
   const name = String(data?.fileName ?? '')
   if (!name) throw new Error('后端没有返回图片文件名，上传可能没成功')
   return name
@@ -280,7 +307,7 @@ export async function remoteDiscardImages(names: string[]): Promise<void> {
     headers: authHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify({ names })
   })
-  await readJson(res)
+  await readJson(res, { auth: true })
 }
 
 /* ---------------- 单据存档（R60） ---------------- */
@@ -318,7 +345,7 @@ export async function remoteSaveDoc(pdf: Buffer, meta: RemoteDocSaveMeta): Promi
     // 多页单据走慢网络时 20 秒不够
     60000
   )
-  const data = (await readJson(res)) as { filePath?: unknown; version?: unknown } | null
+  const data = (await readJson(res, { auth: true })) as { filePath?: unknown; version?: unknown } | null
   if (!data?.filePath || data.version == null) {
     throw new Error('后端没有回存档路径与版本号，存档可能没成功，请打开存档列表核对。')
   }
@@ -332,6 +359,7 @@ export async function remoteReadDoc(filePath: string): Promise<Buffer> {
     headers: authHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify({ filePath })
   })
+  if (res.status === 401) handleAuthExpired()
   if (res.status === 404) {
     let msg = '文件已不存在（可能被手工删了）'
     try {

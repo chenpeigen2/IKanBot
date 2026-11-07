@@ -200,6 +200,24 @@ export default function Settings() {
     return window.api.updater.on((info) => setUpdate(info))
   }, [])
 
+  // 订阅「登录已失效」（R61）：后端换了秘钥后，远端请求收到 401 时主进程会清掉
+  // safeStorage 里的登录态并广播过来——登录卡不能还挂着「已登录：某某」的假象，
+  // 当场刷新成未登录、弹一次提示，指到重新登录的入口
+  const authExpiredRef = useRef(false)
+  useEffect(() => {
+    return window.api.mode.onAuthExpired((info) => {
+      // 同一次失效可能被连续几个请求各报一次，提示只弹一次
+      if (authExpiredRef.current) {
+        void loadSource()
+        return
+      }
+      authExpiredRef.current = true
+      window.setTimeout(() => (authExpiredRef.current = false), 3000)
+      toast(info.message || '登录已失效，请重新登录', 'error')
+      void loadSource()
+    })
+  }, [])
+
   /**
    * 数据来源卡片单独拿出来：设置本身读不出来时（后端掉线、地址写错），
    * 这恰恰是最需要它的时候——把人挡在「加载失败」页面里，就再也切不回本机了。
