@@ -1,4 +1,4 @@
-import { ipcMain, dialog, shell, BrowserWindow } from 'electron'
+import { dialog, shell, BrowserWindow } from 'electron'
 import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync } from 'fs'
 import { join, basename, resolve, sep } from 'path'
 import { tmpdir } from 'os'
@@ -29,11 +29,13 @@ import {
   remoteExportCsv,
   remoteImageBase,
   remoteLogin,
+  remoteReadDoc,
   remoteReadImage,
+  remoteSaveDoc,
   remoteUploadImage
 } from '../remote/client'
 import { authState, clearStoredAuth, saveStoredAuth } from '../remote/token-store'
-import { handle, registeredChannels } from './handle'
+import { handle, handleSync, registeredChannels } from './handle'
 import { copyFileSync } from 'fs'
 import { randomUUID } from 'crypto'
 
@@ -111,6 +113,17 @@ export async function htmlToPdf(html: string, docLabel = ''): Promise<Buffer> {
       /* 临时文件删不掉不影响出单 */
     }
   }
+}
+
+/**
+ * HTML → PDF 的生成器。双模式测试的桩环境没有真的打印窗口，
+ * mode-test 用 setPdfProducerForTest 换成恒定字节；生产路径永远走 htmlToPdf。
+ */
+let pdfProducer: (html: string, docNo: string) => Promise<Buffer> = htmlToPdf
+
+/** 仅限双模式测试替换 PDF 生成器（生产代码不调它） */
+export function setPdfProducerForTest(fn: (html: string, docNo: string) => Promise<Buffer>): void {
+  pdfProducer = fn
 }
 
 /** 用户给的文件名只取最后一段，杜绝 ../../ 写出数据目录 */
@@ -463,10 +476,9 @@ export function registerIpc(): void {
       }
     }
   })
-  ipcMain.on('images:baseDir', (e) => {
-    // 远端模式下返回 HTTP 基地址，renderer 的 imageUrl() 按 http 前缀直接拼
-    e.returnValue = isRemoteMode() ? remoteImageBase() : imagesDir()
-  })
+  // 同步通道也进账（handleSync）：远端模式回 HTTP 基地址，本机回图片目录——
+  // 渲染层的 imageUrl() 拿到 http 前缀直接拼文件名
+  handleSync('images:baseDir', () => (isRemoteMode() ? remoteImageBase() : imagesDir()))
   handle('images:readDataUrl', async (fileName: string): Promise<string> => {
     const name = basename(String(fileName ?? ''))
     const mimeOf = (n: string): string => {
@@ -547,24 +559,13 @@ export function registerIpc(): void {
 
   /* ---- 单据存档 ---- */
   /**
-   * 存档的账（版次、金额、作废留痕）记在 doc_versions，而这张表只在本机库里：
-   * docs: 整族是「本机独有」通道，后端模式下它照样读本机那份数据。
-   * 于是存档会把凭据写进另一份账本——界面报了「已存为第 2 版」，服务器那边却查无此版，
-   * 「出过 CI 锁单价」「有存档禁删」「重版同号」这些闸门全部跟着瞎掉；
-   * 更糟的是本机库为空时 INSERT 撞外键，用户看到的是半句英文 SQLite 原话。
-   * 读侧同理：远端模式下列表里的 137 号是服务器那单，docs:list(137) 查到的
-   * 却是本机那个 137 号的存档，两家客户的单据会串进同一个弹窗。
-   * 打印/预览不吃这张表（window:printPdf 自己出 PDF），后端模式照常用。
+   * 存档账（版次、金额、作废留痕）在 doc_versions 表里，R60 起随库一起上后端：
+   * 读侧四条（list / listQuotation / void / nextVersion）在远端模式下由转发器直送服务器；
+   * save 的 PDF 仍由本机 Chromium 渲染（htmlToPdf），字节经 HTTP 上传，存到服务器的 docs 目录——
+   * 版次/纸面指纹/CI 重叠闸门在服务端 core/docs 落笔那一刻把关，两边同一份判据。
+   * 打印/预览不吃这张表（window:printPdf 自己出 PDF），两个模式照常用。
    */
-  const assertLocalArchive = (): void => {
-    if (!isRemoteMode()) return
-    throw new Error(
-      '「单据存档」目前只在本机模式下工作：存档的版次、金额和作废留痕记的是本机那份账，\n' +
-        '后端模式下存进去会写到另一份数据库里——界面报了成功，服务器却查不到这张凭据，\n' +
-        '「出过 CI 不许改单价」「有存档不许删单」这些闸门也就跟着失效。\n' +
-        '要存档请到「设置 · 数据来源」切回「本机」；打印和预览不存档，后端模式照常用。'
-    )
-  }
+
   handle('docs:save', async (payload: {
     html: string
     fileName: string
@@ -580,19 +581,32 @@ export function registerIpc(): void {
     /** 整单/批次 CI 重叠时，用户已在弹窗里看着重叠金额勾过确认 */
     confirmOverlap?: boolean
   }) => {
-    assertLocalArchive()
-    if (payload.kind === 'ci' && payload.orderId != null) {
-      await docsSvc.assertCiNoOverlap(Number(payload.orderId), payload.docNo, payload.confirmOverlap === true)
-    }
-    // 漏传金额不能按 0 存：存档金额是这张纸的凭据——批次 CI 记的是本批金额，PI/报价记的是整单金额，
-    // 钉成 0 以后对账只剩一张 0 元的纸（预览没带金额就存，只能重开预览）
+    // 漏传金额不能按 0 存：预览没带金额就存只能重开预览。
+    // 这道 fail-fast 放在打 PDF 之前，免得等完打印窗口才被告知；core 里同一道话术再把关一次
     const archiveAmount = payload.amount
     if (archiveAmount == null) {
       throw new Error(
         `这张 ${String(payload.kind).toUpperCase()} 没带金额，不能存档：存档金额是事后对账的依据，不能按 0 记。请关掉预览重新打开再存。`
       )
     }
-    const pdf = await htmlToPdf(payload.html, payload.docNo)
+    // CI 重叠提前拦一次（本机模式）：免得打完 PDF 才被告知重叠；服务端落账前还会复查同一道
+    if (payload.kind === 'ci' && payload.orderId != null && !isRemoteMode()) {
+      await docsSvc.assertCiNoOverlap(Number(payload.orderId), payload.docNo, payload.confirmOverlap === true)
+    }
+    const pdf = await pdfProducer(payload.html, payload.docNo)
+    if (isRemoteMode()) {
+      // 存档账在服务器那份库里：PDF 字节上传，版次/指纹/重叠闸门都在那边落笔那一刻把门
+      return remoteSaveDoc(pdf, {
+        docNo: payload.docNo,
+        kind: payload.kind,
+        orderId: payload.orderId ?? null,
+        quotationId: payload.quotationId ?? null,
+        amount: archiveAmount,
+        expectedVersion: payload.expectedVersion,
+        pageFingerprint: payload.pageFingerprint,
+        confirmOverlap: payload.confirmOverlap === true
+      })
+    }
     const saved = await docsSvc.saveDocFile({
       pdf,
       docNo: payload.docNo,
@@ -606,23 +620,36 @@ export function registerIpc(): void {
     })
     return { path: saved.absolutePath, filePath: saved.filePath, version: saved.version }
   })
-  handle('docs:list', (orderId: number) => {
-    assertLocalArchive()
-    return docsSvc.listDocVersions(orderId)
-  })
-  handle('docs:listQuotation', (quotationId: number) => {
-    assertLocalArchive()
-    return docsSvc.listQuotationDocVersions(quotationId)
-  })
-  handle('docs:void', (versionId: number, reason?: string) => {
-    assertLocalArchive()
-    return docsSvc.voidDocVersion(versionId, reason ?? '')
-  })
-  handle('docs:nextVersion', (docNo: string, kind: string) => {
-    assertLocalArchive()
-    return docsSvc.nextVersion(docNo, kind)
-  })
+  handle('docs:list', (orderId: number) => docsSvc.listDocVersions(orderId))
+  handle('docs:listQuotation', (quotationId: number) => docsSvc.listQuotationDocVersions(quotationId))
+  handle('docs:void', (versionId: number, reason?: string) => docsSvc.voidDocVersion(versionId, reason ?? ''))
+  handle('docs:nextVersion', (docNo: string, kind: string) => docsSvc.nextVersion(docNo, kind))
+
+  /** 远端模式下把一版 PDF 拉到本机临时文件：文件在服务器上，打开/显示都要先落地一份 */
+  const fetchDocToLocal = async (filePath: string): Promise<string> => {
+    if (!filePath) throw new Error('没有文件')
+    const bytes = await remoteReadDoc(filePath)
+    // 文件名带 kind + 版次，重版覆盖旧临时文件也不会串：同一版内容相同
+    const name = basename(filePath.replace(/\\/g, '/')) || 'document.pdf'
+    const dir = join(tmpdir(), 'ikanbot-docs')
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    const out = join(dir, name)
+    writeFileSync(out, bytes)
+    return out
+  }
   handle('docs:reveal', async (filePath?: string) => {
+    if (isRemoteMode()) {
+      // 单据在服务器的 docs 目录里：把这一版拉到本机临时文件再在文件夹中显示。
+      // 不带 filePath（整目录）时给句人话——服务器上的目录本机打不开。
+      if (!filePath) {
+        throw new Error(
+          '远端模式下单据存在后端机器上，本机没有这个目录。要点开某一版，请在存档列表里点那一版的「打开」。'
+        )
+      }
+      const local = await fetchDocToLocal(filePath)
+      shell.showItemInFolder(local)
+      return local
+    }
     // N34：点「打开目录」要打开**这一版文件**所在的文件夹，而不是整个 docs 根目录
     if (filePath) {
       const abs = docsSvc.resolveDocPath(filePath)
@@ -637,6 +664,12 @@ export function registerIpc(): void {
   handle('docs:openFile', async (filePath: string) => {
     // N34：每一版直接能打开看
     if (!filePath) throw new Error('没有文件')
+    if (isRemoteMode()) {
+      const local = await fetchDocToLocal(filePath)
+      const err = await shell.openPath(local)
+      if (err) throw new Error(`打开失败：${err}`)
+      return local
+    }
     const abs = docsSvc.resolveDocPath(filePath)
     if (!existsSync(abs)) throw new Error('文件已不存在（可能被手工删了）')
     const err = await shell.openPath(abs)

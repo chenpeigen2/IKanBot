@@ -199,7 +199,11 @@ const api: IKanApi = {
     importLogo: () => call<string>('images:importLogo'),
     url: (fileName: string) => call<string>('images:url', fileName),
     readDataUrl: (fileName: string) => call<string>('images:readDataUrl', fileName),
-    baseDir: () => ipcRenderer.sendSync('images:baseDir') as string
+    baseDir: () => {
+      // 同步通道走统一壳（R60 收编）：没登入/通道出错时回空串，imageUrl() 自己回退
+      const r = ipcRenderer.sendSync('images:baseDir') as { ok?: boolean; data?: string }
+      return r && r.ok && typeof r.data === 'string' ? r.data : ''
+    }
   },
   backup: {
     create: () => call<string>('backup:create'),

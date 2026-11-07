@@ -15,9 +15,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { openDb, closeDb } from '../electron/db'
-import { registerIpc } from '../electron/ipc'
-import { localDate } from '../src/shared/date'
+import { openDb, closeDb, dataDir } from '../electron/db'
+import { registerIpc, setPdfProducerForTest } from '../electron/ipc'
+import { localDate, localDateOf } from '../src/shared/date'
 import {
   getConnection,
   saveConnection,
@@ -30,6 +30,7 @@ import {
   remoteCall,
   remoteExportCsv,
   remoteImageBase,
+  remoteReadDoc,
   remoteUploadImage,
   isRemoteChannel,
   REMOTE_ROUTES
@@ -235,6 +236,7 @@ async function main(): Promise<void> {
         ...process.env,
         IKAN_SQLITE_FILE: join(root, 'server.db'),
         IKAN_IMAGES_DIR: join(root, 'server-images'),
+        IKAN_DOCS_DIR: join(root, 'data', 'docs'),
         IKAN_PORT: String(port),
         // M2 鉴权：空库启动时引导出首个用户；token 秘钥自动生成在库文件旁边
         IKAN_BOOTSTRAP_USER: 'wenjuan',
@@ -250,6 +252,9 @@ async function main(): Promise<void> {
 
     openDb()
     registerIpc()
+    // 桩环境没有真的打印窗口：把 PDF 生成器换成恒定字节，两个模式下存出的档案字节才有得对拍
+    const fakePdf = Buffer.from('%PDF-1.4 r60 dual-mode')
+    setPdfProducerForTest(async () => fakePdf)
     check(
       'IPC 通道都挂上了（客户 + 商品 + 设置 + 单据簇 + 分母那一批）',
       stub.__handlers.has('customers:list') &&
@@ -289,6 +294,19 @@ async function main(): Promise<void> {
       localSetSaved.ok && (localSetSaved as any).data.company.name === '本机工厂'
     )
 
+    // 单据存档在本机那份账上的样子（远端对拍的对照物；PDF 来自测试桩的恒定字节）
+    const localDoc = (await ipc('docs:save', {
+      html: '<p>local</p>',
+      fileName: 'PI-R60-LOC.pdf',
+      docNo: 'PI-R60-LOC',
+      kind: 'pi',
+      orderId: null,
+      amount: 10
+    })) as any
+    check('本机模式：存档落本机 docs 目录（版本 1，相对路径）', localDoc.ok && (localDoc as any).data.version === 1 && String((localDoc as any).data.filePath).startsWith('docs/'), JSON.stringify(localDoc))
+    const localDocBytes = readFileSync(join(dataDir(), String((localDoc as any).data.filePath)))
+    check('本机模式：落盘的 PDF 字节就是桌面生成的那份', localDocBytes.equals(fakePdf))
+
     // 切到后端：同一批通道，数据换了一整套
     const conn = saveConnection({ mode: 'remote', remoteUrl: serverUrl })
     check('切到后端模式（地址带端口）', conn.mode === 'remote' && conn.remoteUrl === serverUrl)
@@ -318,8 +336,8 @@ async function main(): Promise<void> {
 
     const state = await ipc('mode:get')
     check(
-      `覆盖率口径：90 / 119（实得 ${(state as any).data?.covered} / ${(state as any).data?.total}）`,
-      state.ok && (state as any).data.covered === 90 && (state as any).data.total === 119
+      `覆盖率口径：94 / 120（实得 ${(state as any).data?.covered} / ${(state as any).data?.total}）`,
+      state.ok && (state as any).data.covered === 94 && (state as any).data.total === 120
     )
     const probe = await ipc('mode:test')
     check('设置页的「测试连接」走真后端', probe.ok && (probe as any).data.ok === true)
@@ -624,27 +642,54 @@ async function main(): Promise<void> {
     const paths = await ipc('app:paths')
     check('本机独有通道在远端模式下照常可用', paths.ok && typeof (paths as any).data.db === 'string')
 
-    // 存档表（doc_versions）只在本机库里：docs: 整族在远端模式也走本机实现，
-    // 于是「把这张 PI 存成第 2 版」会把凭据记到另一份账上——服务器那边查无此版，
-    // 「出过 CI 锁单价」「有存档禁删」全跟着瞎掉，本机库为空时还会甩出英文 SQLite 原话。
-    const remoteDocSave = (await ipc('docs:save', {
-      html: '<p>x</p>',
-      fileName: 'PI-M44.pdf',
-      docNo: 'PI-M44',
+    // 单据存档簇上后端（R60）：存档账在服务器库里，PDF 字节经 HTTP 上传落服务器的 docs 目录。
+    // 远端保存走的是桌面「存到系统」的同一条 IPC 通道，只是落点换成了后端。
+    const remoteDocNext = (await ipc('docs:nextVersion', 'PI-R60-REM', 'pi')) as any
+    check('远端模式：下一版号问的是后端（空档是 1）', remoteDocNext.ok && (remoteDocNext as any).data === 1)
+    const remoteDocSave1 = (await ipc('docs:save', {
+      html: '<p>remote</p>',
+      fileName: 'PI-R60-REM.pdf',
+      docNo: 'PI-R60-REM',
       kind: 'pi',
-      orderId: null,
-      amount: 10
+      orderId,
+      amount: 30
     })) as any
+    check('远端模式：存档成功（版本 1，路径带 docs 段）', remoteDocSave1.ok && (remoteDocSave1 as any).data.version === 1 && String((remoteDocSave1 as any).data.filePath).startsWith('docs/'), JSON.stringify(remoteDocSave1))
+    const remoteDocSave2 = (await ipc('docs:save', {
+      html: '<p>remote</p>',
+      fileName: 'PI-R60-REM.pdf',
+      docNo: 'PI-R60-REM',
+      kind: 'pi',
+      orderId,
+      amount: 30
+    })) as any
+    check('远端模式：重版只增不减（第 2 版）', remoteDocSave2.ok && (remoteDocSave2 as any).data.version === 2)
+    const remoteDocList = (await ipc('docs:list', orderId)) as any
     check(
-      '远端模式存档当场说清楚（不写进本机那另一份账，也不报英文）',
-      !remoteDocSave.ok && String(remoteDocSave.error).includes('只在本机模式下工作'),
-      JSON.stringify(remoteDocSave)
-    )
-    const remoteDocList = (await ipc('docs:list', 1)) as any
-    check(
-      '远端模式连「本机第 1 号的存档」都不翻给服务器那 1 号看（两家的单据不串进一个弹窗）',
-      !remoteDocList.ok && String(remoteDocList.error).includes('只在本机模式下工作'),
+      '远端模式：存档列表读的是后端那份（两版都在）',
+      remoteDocList.ok && remoteDocList.data.length === 2,
       JSON.stringify(remoteDocList)
+    )
+    const remoteDoc0 = remoteDocList.data[0]
+    check('远端模式：存档时间戳按本地日显示不跨日（UTC 存、localDateOf 显）', localDateOf(remoteDoc0.createdAt) === localDate(), remoteDoc0.createdAt)
+    const remoteBytes = await remoteReadDoc(String((remoteDocSave2 as any).data.filePath))
+    check('远端模式：取回的字节与存入的逐字节一致（同一份单据两个模式同一个字节）', remoteBytes.equals(fakePdf))
+    const remoteDocLocalMiss = (await ipc('docs:nextVersion', 'PI-R60-LOC', 'pi')) as any
+    check(
+      '远端模式：本机刚存的那张档在服务器查无此档（下一版还是 1，不串账）',
+      remoteDocLocalMiss.ok && (remoteDocLocalMiss as any).data === 1
+    )
+    // 登出后读侧也要关闸：401 与其他业务通道同一句话术
+    await ipc('mode:logout')
+    const docLoggedOut = (await ipc('docs:list', orderId)) as any
+    check('远端模式：登出后存档列表同样「请先登录」', !docLoggedOut.ok && String(docLoggedOut.error).includes('请先登录'))
+    await ipc('mode:login', 'wenjuan', 'Secret#123')
+    const remoteDocAgain = (await ipc('docs:list', orderId)) as any
+    check('远端模式：重新登录后存档列表马上回来', remoteDocAgain.ok && remoteDocAgain.data.length === 2)
+    const remoteRevealNoFile = (await ipc('docs:reveal')) as any
+    check(
+      '远端模式：「打开目录」说清单据在后端机器上（不甩英文不假装打开了）',
+      !remoteRevealNoFile.ok && String(remoteRevealNoFile.error).includes('后端机器')
     )
 
     // 「最近一次成功备份」「上一次为什么没备齐」记的是这台电脑的账：backup: 前缀本机独有，
@@ -683,6 +728,12 @@ async function main(): Promise<void> {
       '切回本机：后端那份商品不会混进来',
       backProducts.ok && !(backProducts as any).data.some((p: any) => p.styleNo === 'REMOTE-1')
     )
+
+    // 存档账也各是各的：后端那份档没混进本机（本地那张 LOC 的下一版仍是 2，REM 查无此档）
+    const localNextLoc = (await ipc('docs:nextVersion', 'PI-R60-LOC', 'pi')) as any
+    check('切回本机：本机那张 LOC 档还在（下一版是 2）', localNextLoc.ok && (localNextLoc as any).data === 2)
+    const localNextRem = (await ipc('docs:nextVersion', 'PI-R60-REM', 'pi')) as any
+    check('切回本机：后端刚存的 REM 档在本机查无此档（下一版还是 1）', localNextRem.ok && (localNextRem as any).data === 1)
 
     const backSettings = await ipc('settings:get')
     check(

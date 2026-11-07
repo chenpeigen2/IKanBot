@@ -23,6 +23,16 @@
 | order-detail-void.png | 已作废单（SO…008）详情页头：**「商业发票 CI」「生成 PI」两个按钮不再渲染**，只剩「⋯」；存档那步本来就拒（能看不能存是设计使然），现在不再用看得见的按钮误导 | 「R60：作废/失效单不出单据入口」（e2e 锁的是门函数 `canIssueDocs`：void/expired 返回 false、其余六态 true、作废后的那张单落在禁名单里）；按钮不渲染本身是渲染层形态，无数据层接缝，证据为本实拍 |
 | order-detail-expired.png | 已失效单（SO…007）详情页头：同样不渲染两个出单据按钮 | 同上；失效退出销售口径的数据层断言原已存在，未动 |
 | order-detail-draft.png | 对照：草稿单（SO…005）详情页头「商业发票 CI」「生成 PI」照常在——草稿要能出 PI 发出去，不能误伤 | 「草稿订单不进报表」；`canIssueDocs('draft') === true` 由 e2e「其余六个状态都给出口」锁着 |
+| settings-coverage.png | 设置页「数据来源」卡：覆盖数从 90/119 变为 **94/120**，话术改为「含单据存档：远端模式也能出 PI/CI 并存档」 | 数字由 mode:get 自报（REMOTE_ROUTES 90+4、注册通道含 images:baseDir 收编），双模式测试「覆盖率口径 94/120」锁着 |
+
+## 本轮大件（docs 簇上后端）的画面说明
+
+单据存档搬后端**不改任何一张纸的样子**：PI/CI/报价/PL 预览与打印路径一字未动
+（`window:printPdf` 自己出纸），变的只是「存到系统」那一落的账本和 PDF 落点——
+本机模式照旧落 data/docs；远端模式字节上传到服务器的 docs 目录，版次/指纹/CI 重叠
+闸门在服务端落笔那一刻把门（同一份 core/docs）。
+数据层断言（双模式 128 项新增 12 条 + HTTP 冒烟 188 项新增 19 条）没有独立 UI 形态，
+证据为断言输出；上表 settings-coverage.png 是本轮唯一直接可见的界面变化。
 
 补一句边界：`position:fixed` 的另外两处都不受此 bug 影响、也未改动——
 `.menu-pop.fixed`（表格行内菜单）本来就是 portal 到 body 的；`.toast-wrap` 挂在 `ToastProvider`

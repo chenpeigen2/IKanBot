@@ -109,6 +109,13 @@ export const REMOTE_ROUTES: Record<string, RouteSpec> = {
   'report:receivables': { path: '/api/report/receivables', args: [] },
   'report:customerOrderRows': { path: '/api/report/customerOrderRows', args: ['customerId'] },
 
+  // 单据存档的读侧四条（R60）：存档账（doc_versions）在服务器库里，
+  // 「出过 CI 锁单价」「有存档禁删」这些闸门从此认服务器那份账
+  'docs:list': { path: '/api/docs/list', args: ['orderId'] },
+  'docs:listQuotation': { path: '/api/docs/listQuotation', args: ['quotationId'] },
+  'docs:void': { path: '/api/docs/void', args: ['versionId', 'reason'] },
+  'docs:nextVersion': { path: '/api/docs/nextVersion', args: ['docNo', 'kind'] },
+
   'credits:balance': { path: '/api/credits/balance', args: ['customerId'] },
   'credits:apply': { path: '/api/credits/apply', args: ['input'] },
   'credits:reverse': { path: '/api/credits/reverse', args: ['applicationId', 'reason'] },
@@ -126,7 +133,7 @@ export function remoteChannelCount(): number {
 
 /** 一句话说清覆盖到哪儿：设置页和远端模式的报错都用这一句 */
 export function coverageWords(): string {
-  return `后端目前接了客户、商品、设置、订单、报价、打样、装箱、预收与报表（${remoteChannelCount()} 个接口）`
+  return `后端目前接了客户、商品、设置、订单、报价、打样、装箱、预收、报表与单据存档（${remoteChannelCount()} 个接口）`
 }
 
 interface ErrorBody {
@@ -274,6 +281,78 @@ export async function remoteDiscardImages(names: string[]): Promise<void> {
     body: JSON.stringify({ names })
   })
   await readJson(res)
+}
+
+/* ---------------- 单据存档（R60） ---------------- */
+
+export interface RemoteDocSaveMeta {
+  docNo: string
+  kind: 'pi' | 'pl' | 'ci' | 'quotation'
+  orderId?: number | null
+  quotationId?: number | null
+  amount?: number
+  expectedVersion?: number
+  pageFingerprint?: string
+  confirmOverlap?: boolean
+}
+
+export interface RemoteDocSaveResult {
+  path: ''
+  filePath: string
+  version: number
+}
+
+/**
+ * 存档：桌面把 HTML 渲染成 PDF（Chromium 在本机），字节上传到服务器落档。
+ * 版次、纸面指纹、CI 重叠闸门都在服务端 core/docs 落笔那一刻把关。
+ */
+export async function remoteSaveDoc(pdf: Buffer, meta: RemoteDocSaveMeta): Promise<RemoteDocSaveResult> {
+  // meta 走查询参数（PDF 是二进制请求体，塞不进 JSON）
+  const res = await fetchRemote(
+    `/api/docs/save?meta=${encodeURIComponent(JSON.stringify(meta))}`,
+    {
+      method: 'POST',
+      headers: authHeaders({ 'content-type': 'application/octet-stream' }),
+      body: new Uint8Array(pdf)
+    },
+    // 多页单据走慢网络时 20 秒不够
+    60000
+  )
+  const data = (await readJson(res)) as { filePath?: unknown; version?: unknown } | null
+  if (!data?.filePath || data.version == null) {
+    throw new Error('后端没有回存档路径与版本号，存档可能没成功，请打开存档列表核对。')
+  }
+  return { path: '', filePath: String(data.filePath), version: Number(data.version) }
+}
+
+/** 取回一版 PDF 的字节（打开/在文件夹中显示用）；文件不在了把后端那句话透回界面 */
+export async function remoteReadDoc(filePath: string): Promise<Buffer> {
+  const res = await fetchRemote('/api/docs/read', {
+    method: 'POST',
+    headers: authHeaders({ 'content-type': 'application/json' }),
+    body: JSON.stringify({ filePath })
+  })
+  if (res.status === 404) {
+    let msg = '文件已不存在（可能被手工删了）'
+    try {
+      const data = (await res.json()) as { error?: { message?: string } }
+      if (data?.error?.message) msg = data.error.message
+    } catch {
+      /* 保留默认话术 */
+    }
+    throw new Error(msg)
+  }
+  if (!res.ok) {
+    let msg = `后端取单据失败（HTTP ${res.status}）`
+    try {
+      const data = (await res.json()) as { error?: { message?: string } }
+      if (data?.error?.message) msg = data.error.message
+    } catch {
+      /* 保留默认话术 */
+    }
+    throw new Error(msg)
+  }
+  return Buffer.from(await res.arrayBuffer())
 }
 
 /** 取图片字节；后端没有这张图时返回 null（公司 Logo 这类还在本机，由调用方回退） */

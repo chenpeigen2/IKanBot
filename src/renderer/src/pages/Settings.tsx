@@ -301,14 +301,13 @@ export default function Settings() {
                 )}
               </div>
               <div className="alert warn">
-                现在是<strong>后端模式</strong>：客户、商品、设置、订单、报价、打样、装箱、预收与报表都读写后端那份数据（已搬到后端{' '}
-                {source.covered} / {source.total} 个接口）。备份与打印仍在本机；<strong>单据存档在后端模式下会当场拒绝</strong>
-                （存档的版次和金额记的是本机那本账，写进服务器对不上）；客户统计这类还没搬的点了也会当场报错，绝不会悄悄改本机那一份。
+                现在是<strong>后端模式</strong>：客户、商品、设置、订单、报价、打样、装箱、预收、报表与单据存档都读写后端那份数据（已搬到后端{' '}
+                {source.covered} / {source.total} 个接口）。备份与打印仍在本机；没搬的通道点了会当场报错，绝不会悄悄改本机那一份。
               </div>
             </>
           ) : (
             <div className="hint">
-              后端已接好 {source.covered} / {source.total} 个接口（客户、商品、设置、订单、报价、打样、装箱、预收、工作台与报表）。其余功能搬完之前，后端模式只适合试接口。
+              后端已接好 {source.covered} / {source.total} 个接口（含单据存档：远端模式也能出 PI/CI 并存档，PDF 由本机渲染后传到后端机器）。备份与打印仍在本机。
             </div>
           )}
         </>
