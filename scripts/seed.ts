@@ -38,6 +38,10 @@ async function main() {
     | null
   if (hasSeq?.n) db.exec('DELETE FROM sqlite_sequence')
 
+  // 备份记账也归零：seed 是「重建」，上次试跑留下的 lastBackupAt 会把首页的
+  // 「还没有一份成功备份」提醒吃掉，sweep 基线（docs/backend-plan.md R59 表）就复现不了
+  db.exec("DELETE FROM settings WHERE key = 'backup_state'")
+
   // 商品
   const tshirt = await products.saveProduct({
     styleNo: 'TS-001',
