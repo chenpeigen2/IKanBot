@@ -39,6 +39,8 @@ import { handle, handlerArity, isLocalOnlyChannel, registeredChannels } from '..
 const root = mkdtempSync(join(tmpdir(), 'ikan-mode-'))
 process.env['IKAN_DATA_DIR'] = join(root, 'data')
 process.env['IKAN_CONNECTION_FILE'] = join(root, 'connection.json')
+// 登录态落盘位置也搬到临时目录（真程序在 userData 下，由 safeStorage 加密）
+process.env['IKAN_AUTH_FILE'] = join(root, 'auth-token.json')
 delete process.env['IKAN_MODE']
 delete process.env['IKAN_REMOTE_URL']
 
@@ -233,7 +235,11 @@ async function main(): Promise<void> {
         ...process.env,
         IKAN_SQLITE_FILE: join(root, 'server.db'),
         IKAN_IMAGES_DIR: join(root, 'server-images'),
-        IKAN_PORT: String(port)
+        IKAN_PORT: String(port),
+        // M2 鉴权：空库启动时引导出首个用户；token 秘钥自动生成在库文件旁边
+        IKAN_BOOTSTRAP_USER: 'wenjuan',
+        IKAN_BOOTSTRAP_PASSWORD: 'Secret#123',
+        IKAN_BOOTSTRAP_NAME: '周文娟'
       },
       stdio: ['ignore', 'pipe', 'pipe']
     })
@@ -286,6 +292,29 @@ async function main(): Promise<void> {
     // 切到后端：同一批通道，数据换了一整套
     const conn = saveConnection({ mode: 'remote', remoteUrl: serverUrl })
     check('切到后端模式（地址带端口）', conn.mode === 'remote' && conn.remoteUrl === serverUrl)
+
+    console.log('鉴权：后端要求登录，桌面端用真实 IPC 登录拿通行证')
+    const gate = await ipc('customers:list', '')
+    check(
+      '没登录时后端拒绝：401 中文「请先登录」，不是白屏也不是假死',
+      !gate.ok && String(gate.error).includes('请先登录') && String(gate.error).includes('设置 · 数据来源'),
+      JSON.stringify(gate)
+    )
+    const wrongPw = await ipc('mode:login', 'wenjuan', 'wrong-pass')
+    check('错密码当场说「用户名或密码不对」', !wrongPw.ok && wrongPw.error === '用户名或密码不对', JSON.stringify(wrongPw))
+    const emptyUser = await ipc('mode:login', '  ', 'Secret#123')
+    check('空用户名连请求都不发（本地先拦）', !emptyUser.ok && String(emptyUser.error).includes('用户名不能为空'))
+    const loggedIn = await ipc('mode:login', 'wenjuan', 'Secret#123')
+    check(
+      '登录成功：状态里带「登的是谁」，token 进了本机加密存储（渲染层拿不到本体）',
+      loggedIn.ok &&
+        (loggedIn as any).data.auth.loggedIn === true &&
+        (loggedIn as any).data.auth.username === 'wenjuan' &&
+        (loggedIn as any).data.auth.displayName === '周文娟',
+      JSON.stringify(loggedIn)
+    )
+    const authFile = JSON.parse(readFileSync(join(root, 'auth-token.json'), 'utf8'))
+    check('token 落盘的是加密后的（原文不在磁盘上）', !JSON.stringify(authFile).includes('wenjuan.') && !authFile.plain, JSON.stringify(authFile))
 
     const state = await ipc('mode:get')
     check(
@@ -557,6 +586,16 @@ async function main(): Promise<void> {
       '远端模式：客户不存在时后端那句原话透回界面',
       !remoteStatsMissing.ok && String(remoteStatsMissing.error).includes('客户不存在')
     )
+
+    // 登录态的出口也要在：登出后同一扇门立刻关上，重登后立刻打开
+    const loggedOut = await ipc('mode:logout')
+    check('登出后状态回到未登录', loggedOut.ok && (loggedOut as any).data.auth.loggedIn === false)
+    const afterLogout = await ipc('customers:list', '')
+    check('登出后业务通道马上变回「请先登录」', !afterLogout.ok && String(afterLogout.error).includes('请先登录'))
+    const relogin = await ipc('mode:login', 'wenjuan', 'Secret#123')
+    check('重新登录马上恢复', relogin.ok && (relogin as any).data.auth.loggedIn === true)
+    const afterRelogin = await ipc('customers:list', '')
+    check('重登后同一通道照常走通', afterRelogin.ok && Array.isArray((afterRelogin as any).data))
 
     // 业务通道全搬完了：只剩本机基建没登记后端路由。以后新加一条忘了登记，
     // 这里先把它揪出来——那种通道在远端模式下会当场报错，不会悄悄读本机。

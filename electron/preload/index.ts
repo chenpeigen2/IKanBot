@@ -142,7 +142,9 @@ const api: IKanApi = {
   mode: {
     get: () => call<any>('mode:get'),
     set: (patch: { mode?: any; remoteUrl?: string }) => call<any>('mode:set', patch),
-    test: (url?: string) => call<any>('mode:test', url)
+    test: (url?: string) => call<any>('mode:test', url),
+    login: (username: string, password: string) => call<any>('mode:login', username, password),
+    logout: () => call<any>('mode:logout')
   },
   /** 数据目录完整路径 */
   app: {

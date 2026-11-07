@@ -28,9 +28,11 @@ import {
   remoteDiscardImages,
   remoteExportCsv,
   remoteImageBase,
+  remoteLogin,
   remoteReadImage,
   remoteUploadImage
 } from '../remote/client'
+import { authState, clearStoredAuth, saveStoredAuth } from '../remote/token-store'
 import { handle, registeredChannels } from './handle'
 import { copyFileSync } from 'fs'
 import { randomUUID } from 'crypto'
@@ -157,7 +159,8 @@ export function registerIpc(): void {
     ...getConnection(),
     envLocked: envLocked(),
     covered: remoteChannelCount(),
-    total: registeredChannels().filter((c) => !c.startsWith('mode:') && !c.startsWith('updater:')).length
+    total: registeredChannels().filter((c) => !c.startsWith('mode:') && !c.startsWith('updater:')).length,
+    auth: authState()
   })
   handle('mode:get', dataSource)
   handle('mode:set', (patch: { mode?: unknown; remoteUrl?: unknown }) => {
@@ -165,6 +168,17 @@ export function registerIpc(): void {
     return dataSource()
   })
   handle('mode:test', (url?: string) => probeRemote(url))
+  // 登录：地址用当前配置里那份（改地址 → 先保存地址再登录）。
+  // token 落 safeStorage；登出清掉。401 的中文（密码不对 / 请先登录）由后端统一说
+  handle('mode:login', async (username?: unknown, password?: unknown) => {
+    const r = await remoteLogin(username, password)
+    saveStoredAuth(r)
+    return dataSource()
+  })
+  handle('mode:logout', () => {
+    clearStoredAuth()
+    return dataSource()
+  })
 
   /* ---- 商品 ---- */
   handle('products:list', (keyword?: string, includeInactive?: boolean) =>

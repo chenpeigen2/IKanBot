@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common'
 import { DiscoveryModule } from '@nestjs/core'
+import { AuthModule } from './auth/auth.module'
 import { ConfigModule } from './config/config.module'
 import { DbModule } from './db/db.module'
 import { CreditsModule } from './credits/credits.module'
@@ -23,6 +24,7 @@ import { AllExceptionsFilter } from './common/all-exceptions.filter'
     DiscoveryModule,
     ConfigModule,
     DbModule,
+    AuthModule,
     CustomersModule,
     ProductsModule,
     FilesModule,

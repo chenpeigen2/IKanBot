@@ -1,5 +1,5 @@
 import type { Db } from './db'
-import { settingsCore } from './settings'
+import { actorOf } from './actor'
 
 /**
  * 操作历史（order_events）的唯一写入口。桌面（本机 SQLite）与后端服务共用这一份。
@@ -15,7 +15,8 @@ export async function logEvent(
   toStatus: string | null,
   note: string
 ): Promise<void> {
-  const actor = (await settingsCore(db).get()).operator
+  // 操作者先认 token 认定的身份（远端模式服务端盖章），本地模式回落设置里那位业务员
+  const actor = await actorOf(db)
   await db.run(
     'INSERT INTO order_events(order_id, at, actor, kind, from_status, to_status, note) VALUES(?,?,?,?,?,?,?)',
     [orderId, new Date().toISOString(), actor, kind, fromStatus, toStatus, note]

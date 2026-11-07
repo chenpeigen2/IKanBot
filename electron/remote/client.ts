@@ -1,4 +1,5 @@
 import { getConnection, normalizeBaseUrl } from '../mode'
+import { currentToken } from './token-store'
 
 /** 一条通道在后端的落点：路由与请求体里的参数名 */
 interface RouteSpec {
@@ -153,6 +154,14 @@ async function fetchRemote(path: string, init: RequestInit, timeoutMs = 20000): 
   }
 }
 
+/** 登录后的请求一律带头；没登录就空著，后端回 401 统一说「请先登录」 */
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const token = currentToken()
+  const h: Record<string, string> = extra ? { ...extra } : {}
+  if (token) h['authorization'] = `Bearer ${token}`
+  return h
+}
+
 async function readJson(res: Response): Promise<unknown> {
   const text = await res.text()
   let data: unknown = null
@@ -183,10 +192,33 @@ export async function remoteCall(channel: string, args: unknown[]): Promise<unkn
   })
   const res = await fetchRemote(spec.path, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: authHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify(body)
   })
   return readJson(res)
+}
+
+/* ---------------- 登录 ---------------- */
+
+export interface RemoteLoginResult {
+  token: string
+  username: string
+  displayName: string
+}
+
+/** 拿用户名密码换 token：存不存由调用方（IPC 层）定，这里只管跟后端换 */
+export async function remoteLogin(usernameRaw: unknown, passwordRaw: unknown): Promise<RemoteLoginResult> {
+  const username = String(usernameRaw ?? '').trim()
+  if (!username) throw new Error('用户名不能为空')
+  if (!String(passwordRaw ?? '')) throw new Error('密码不能为空')
+  const res = await fetchRemote('/api/auth/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username, password: String(passwordRaw) })
+  })
+  const data = (await readJson(res)) as RemoteLoginResult | null
+  if (!data?.token) throw new Error('后端没有返回登录凭证，登录可能没成功')
+  return { token: data.token, username: String(data.username ?? username), displayName: String(data.displayName ?? '') }
 }
 
 /* ---------------- 导出 ---------------- */
@@ -202,7 +234,7 @@ export async function remoteExportCsv(
 ): Promise<{ csv: string; fileName: string }> {
   const res = await fetchRemote('/api/export/csv', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: authHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify({ kind, filter })
   })
   const data = (await readJson(res)) as { csv?: unknown; fileName?: unknown } | null
@@ -222,7 +254,7 @@ export async function remoteUploadImage(originalName: string, bytes: Buffer): Pr
     `/api/files/upload?name=${encodeURIComponent(originalName)}`,
     {
       method: 'POST',
-      headers: { 'content-type': 'application/octet-stream' },
+      headers: authHeaders({ 'content-type': 'application/octet-stream' }),
       body: bytes
     },
     // 大图走慢网络时 20 秒不够，单独给宽一点
@@ -238,7 +270,7 @@ export async function remoteDiscardImages(names: string[]): Promise<void> {
   if (names.length === 0) return
   const res = await fetchRemote('/api/files/discard', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: authHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify({ names })
   })
   await readJson(res)

@@ -19,17 +19,50 @@ async function main(): Promise<void> {
   process.env['IKAN_SQLITE_FILE'] = join(dir, 'e2e.db')
   process.env['IKAN_IMAGES_DIR'] = join(dir, 'images')
   delete process.env['IKAN_DB']
+  // 首个用户的引导走启动路径本身：users 空 + 环境变量齐全 → 建一个（M2 鉴权第一片）
+  process.env['IKAN_BOOTSTRAP_USER'] = 'wenjuan'
+  process.env['IKAN_BOOTSTRAP_PASSWORD'] = 'Secret#123'
+  process.env['IKAN_BOOTSTRAP_NAME'] = '周文娟'
 
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile()
   const app = moduleRef.createNestApplication<NestExpressApplication>()
   await configureApp(app)
-  const http = request(app.getHttpServer())
+  const raw = request(app.getHttpServer())
 
   let passed = 0
-  const check = (name: string, cond: boolean): void => {
+  const check = (name: string, cond: boolean, extra?: unknown): void => {
     console.log(`${cond ? '  ✓' : '  ✗'} ${name}`)
-    if (!cond) throw new Error(`断言失败：${name}`)
+    if (!cond) throw new Error(`断言失败：${name}${extra !== undefined ? ` —— ${String(extra)}` : ''}`)
     passed++
+  }
+
+  console.log('鉴权（M2 第一片）')
+  const noToken = await raw.post('/api/customers/list').send({})
+  check(
+    '无 token 401，中文说去哪登录',
+    noToken.status === 401 && String(noToken.body.error.message).includes('请先登录'),
+    JSON.stringify(noToken.body)
+  )
+  const badToken = await raw.post('/api/customers/list').set('Authorization', 'Bearer abc.def').send({})
+  check('随手编的 token 同样 401', badToken.status === 401)
+  const wrongLogin = await raw.post('/api/auth/login').send({ username: 'wenjuan', password: 'wrong-pass' })
+  check(
+    '错密码拒登录：401 +「用户名或密码不对」（查无此人也回同一句，不告诉试探的人用户名存不存在）',
+    wrongLogin.status === 401 && wrongLogin.body.error.message === '用户名或密码不对'
+  )
+  const login = await raw.post('/api/auth/login').send({ username: 'wenjuan', password: 'Secret#123' })
+  check(
+    '登录发 token 并带回显示名',
+    login.status === 200 && typeof login.body.token === 'string' && login.body.displayName === '周文娟',
+    JSON.stringify(login.body)
+  )
+  const token = login.body.token as string
+  // 闸门开启后的冒烟一律带这张通行证；查无此入口的三条已经用 raw 验过。
+  // 带着 token 打公开入口（/healthz、GET /api）也应照常——别把运维探活锁在门里
+  const http = {
+    get: (u: string) => raw.get(u).set('Authorization', `Bearer ${token}`),
+    post: (u: string) => raw.post(u).set('Authorization', `Bearer ${token}`),
+    put: (u: string) => raw.put(u).set('Authorization', `Bearer ${token}`)
   }
 
   try {
@@ -41,9 +74,11 @@ async function main(): Promise<void> {
     const routes: string[] = meta.body.routes ?? []
     check('GET /api 自描述已接接口', routes.includes('POST /api/customers/list') && routes.includes('GET /healthz'))
     check(
-      '路由数与控制器一致（96 个：前 30 + 订单 30 + 报价 8 + 打样 8 + 预收 4 + 装箱 9 + 工作台 2 + 月报 1 + 导出 1 + 客户聚合 3）',
-      routes.length === 96
+      '路由数与控制器一致（97 个：前 30 + 订单 30 + 报价 8 + 打样 8 + 预收 4 + 装箱 9 + 工作台 2 + 月报 1 + 导出 1 + 客户聚合 3 + 登录 1）',
+      routes.length === 97
     )
+    const metaNoAuth = await raw.get('/api')
+    check('GET /api 不挂锁（探活与覆盖率靠它）', metaNoAuth.status === 200)
 
     console.log('客户域')
     const empty = await http.post('/api/customers/list').send({})
@@ -940,6 +975,31 @@ async function main(): Promise<void> {
 
     const badId = await http.post('/api/customers/get').send({ id: 'abc' })
     check('编号不是整数时拒收', badId.status === 400 && String(badId.body.error.message).includes('客户编号'))
+
+    console.log('留痕：操作者是 token 认定的，不是桌面传的（M2 第一片）')
+    // 故意把本机设置里的业务员写成一个「不该出现的人」：
+    // 若留痕还在信 settings.operator，历史里就会出现这个名字
+    const actorSettings = (await http.post('/api/settings/get').send({})).body as Record<string, unknown>
+    await http.post('/api/settings/save').send({
+      input: { ...actorSettings, operator: '界面上传的名字不算数' }
+    })
+    const actorCust = await http.post('/api/customers/save').send({ input: { company: 'Auth Actor Co' } })
+    const actorOrder = await http
+      .post('/api/orders/create')
+      .send({ input: { customerId: actorCust.body.id, currency: 'USD', exchangeRate: 7.2 } })
+    check('带着 token 能建单（通行证真的开门）', actorOrder.status === 200 && actorOrder.body.id > 0)
+    const actorEvents = (
+      await http.post('/api/orders/events').send({ orderId: actorOrder.body.id })
+    ).body as Array<{ actor?: unknown; kind?: unknown }>
+    check(
+      '操作历史里的操作人是 token 里的显示名（周文娟），不是设置里那个人',
+      actorEvents.length >= 1 && actorEvents.every((e) => e.actor === '周文娟'),
+      JSON.stringify(actorEvents)
+    )
+    check(
+      '历史里找不到「界面上传的名字」（它只是 settings 里的一行字，不是身份）',
+      !actorEvents.some((e) => e.actor === '界面上传的名字不算数')
+    )
 
     console.log(`\nHTTP 冒烟通过 ${passed} 项`)
   } finally {

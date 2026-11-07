@@ -291,6 +291,10 @@ export interface IKanApi {
     set(patch: { mode?: DataMode; remoteUrl?: string }): Promise<DataSourceState>
     /** 探活：连不上、连错、少接口都给人话，不抛错 */
     test(url?: string): Promise<RemoteProbe>
+    /** 登录后端：token 存进系统钥匙串；密码不落任何文件 */
+    login(username: string, password: string): Promise<DataSourceState>
+    /** 退出登录：清掉本机存的 token */
+    logout(): Promise<DataSourceState>
   }
   /** 数据目录完整路径 */
   app: {
@@ -304,7 +308,7 @@ export interface IKanApi {
 
 export type DataMode = 'local' | 'remote'
 
-/** 当前数据来源 + 后端覆盖到哪儿 */
+/** 当前数据来源 + 后端覆盖到哪儿 + 登录了吗 */
 export interface DataSourceState {
   mode: DataMode
   remoteUrl: string
@@ -314,6 +318,15 @@ export interface DataSourceState {
   covered: number
   /** 业务通道总数 */
   total: number
+  /** 登录态：远端模式下没登录时，后端会回 401「请先登录」 */
+  auth: AuthState
+}
+
+/** 登录态（token 本体留在主进程的 safeStorage 里，渲染层只知道“登的是谁”） */
+export interface AuthState {
+  loggedIn: boolean
+  username: string
+  displayName: string
 }
 
 /** 后端探活结果：连不上也返回（ok:false），不抛错 */

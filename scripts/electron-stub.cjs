@@ -28,6 +28,12 @@ module.exports = {
     },
     on() {}
   },
+  // 登录态加密存储：测试里用可逆变换代替真钥匙串（语义一致：能存能取，别的进程解不开）
+  safeStorage: {
+    isEncryptionAvailable: () => true,
+    encryptString: (s) => Buffer.from([...Buffer.from(s, 'utf8')].reverse()),
+    decryptString: (b) => Buffer.from([...Uint8Array.from(b)].reverse()).toString('utf8')
+  },
   __handlers: handlers,
   dialog: {},
   shell: {},

@@ -12,7 +12,7 @@
 import { bizError, notFound } from '../src/shared/errors'
 import type { Db } from './db'
 import { logEvent } from './events'
-import { settingsCore } from './settings'
+import { actorOf } from './actor'
 import { ordersCore } from './orders'
 import { moneyCore } from './money'
 import { isLocalDate, localDate } from '../src/shared/date'
@@ -193,7 +193,7 @@ export function creditsCore(db: Db) {
           `客户 ${currency} 可用预收只有 ${available.toFixed(2)}，不够抵 ${amount.toFixed(2)}。`
         )
       }
-      const actor = (await settingsCore(db).get()).operator
+      const actor = await actorOf(db)
       await db.run(
         `INSERT INTO credit_applications(customer_id, currency, amount, target_kind, target_id, applied_at, note, actor, created_at)
          VALUES(?,?,?,?,?,?,?,?,?)`,
@@ -305,7 +305,7 @@ export function creditsCore(db: Db) {
     }
     // 余额够不够、这张水单退没退过，都要和落库同事务查：
     // 水单查重在事务外查过一次，两笔同号退款各自看到「没退过」，余额就会被凭空扣两遍。
-    const actor = (await settingsCore(db).get()).operator
+    const actor = await actorOf(db)
     return await db.transact(async () => {
       const available = await moneyOf().customerCreditAvailable(customerId, currency)
       if (available < -0.001) {
@@ -354,7 +354,7 @@ export function creditsCore(db: Db) {
     const customerId = Number(row.customer_id)
     // 撤销的人也留痕：以前只记原因，台账上一条撤销摆着，事后没人说得清是谁撤的（R55）。
     // 操作员没填就原样只存原因，不为留痕逼人先去做设置。
-    const actor = (await settingsCore(db).get()).operator
+    const actor = await actorOf(db)
     const trace = actor ? `${why}（操作人：${actor}）` : why
     // CAS 写：读出来时还没撤销，写回去这中间可能已经被撤过一次（后端多人同时点）。
     // 裸 UPDATE 会把对方的原因盖掉，台账上多一条撤销、余额只回来一次
