@@ -6,6 +6,7 @@ import type { NestExpressApplication } from '@nestjs/platform-express'
 import request from 'supertest'
 import { AppModule } from '../src/app.module'
 import { configureApp } from '../src/app.setup'
+import { BackupService } from '../src/backup/backup.service'
 import { DB } from '../src/db/db.module'
 import type { Db } from '../src/db/types'
 import { localDate } from '../../src/shared/date'
@@ -75,8 +76,8 @@ async function main(): Promise<void> {
     const routes: string[] = meta.body.routes ?? []
     check('GET /api 自描述已接接口', routes.includes('POST /api/customers/list') && routes.includes('GET /healthz'))
     check(
-      '路由数与控制器一致（103 个：前 30 + 订单 30 + 报价 8 + 打样 8 + 预收 4 + 装箱 9 + 工作台 2 + 月报 1 + 导出 1 + 客户聚合 3 + 登录 1 + 单据存档 6）',
-      routes.length === 103
+      '路由数与控制器一致（107 个：前 30 + 订单 30 + 报价 8 + 打样 8 + 预收 4 + 装箱 9 + 工作台 2 + 月报 1 + 导出 1 + 客户聚合 3 + 登录 1 + 单据存档 6 + 备份 4）',
+      routes.length === 107
     )
     const metaNoAuth = await raw.get('/api')
     check('GET /api 不挂锁（探活与覆盖率靠它）', metaNoAuth.status === 200)
@@ -1113,6 +1114,73 @@ async function main(): Promise<void> {
       '历史里找不到「界面上传的名字」（它只是 settings 里的一行字，不是身份）',
       !actorEvents.some((e) => e.actor === '界面上传的名字不算数')
     )
+
+    console.log('备份（R61：备份簇上后端，服务器侧打包与恢复，与桌面同一份 core）')
+    const bkNoAuth = await raw.post('/api/backup/create').send({})
+    check('备份是写操作，无 token 401', bkNoAuth.status === 401)
+    const bkCreate = await http.post('/api/backup/create').send({})
+    check(
+      '服务器侧打包成功：路径落在备份目录里',
+      bkCreate.status === 200 && String(bkCreate.body.path).endsWith('.zip'),
+      `${bkCreate.status} ${JSON.stringify(bkCreate.text)}`
+    )
+    const bkList = await http.post('/api/backup/list').send({})
+    check(
+      '备份列表里刚打包的这份在（带时间戳与体积）',
+      bkList.status === 200 &&
+        Array.isArray(bkList.body) &&
+        bkList.body.some((b: { path: string; size: number }) => b.path === bkCreate.body.path && b.size > 0),
+      JSON.stringify(bkList.body)
+    )
+    const bkInspect = await http.post('/api/backup/inspect').send({ path: bkCreate.body.path })
+    check(
+      '备份包能打开来看：带库、带订单与收款数（恢复前必须看得见，不等于闭眼按）',
+      bkInspect.status === 200 && bkInspect.body.hasDb === true && Number(bkInspect.body.orderCount) >= 1,
+      JSON.stringify(bkInspect.body)
+    )
+    const bkOutside = await http.post('/api/backup/inspect').send({ path: join(dir, 'elsewhere.zip') })
+    check(
+      '备份目录外的包不认（路径守卫：目录内或选择框点过的才收）',
+      bkOutside.status === 400 && String(bkOutside.body.error.message).includes('备份目录'),
+      JSON.stringify(bkOutside.text)
+    )
+    const bkNotZip = await http.post('/api/backup/inspect').send({ path: 'not-even-a-path' })
+    check('不是 .zip 的路径当场拒', bkNotZip.status === 400)
+
+    // 恢复对拍：恢复前的订单数 → 造一笔新账 → 恢复 → 行数回到备份那一刻，新账消失
+    const beforeTotal = Number((await http.post('/api/orders/list').send({ filter: {} })).body.total)
+    const r61Cust = await http.post('/api/customers/save').send({ input: { company: 'R61 Restore Probe' } })
+    const r61Order = await http
+      .post('/api/orders/create')
+      .send({ input: { customerId: r61Cust.body.id, currency: 'USD', exchangeRate: 7.2, exchangeRateDate: localDate() } })
+    await http
+      .post('/api/orders/addItems')
+      .send({ orderId: Number(r61Order.body.id), items: [{ styleNo: 'R61-1', quantity: 3, unitPrice: 2 }] })
+    const probeTotal = Number((await http.post('/api/orders/list').send({ filter: {} })).body.total)
+    check('造账成功：恢复前的订单比备份那一刻多一张', probeTotal === beforeTotal + 1, `${beforeTotal} -> ${probeTotal}`)
+    const bkRestore = await http.post('/api/backup/restore').send({ path: bkCreate.body.path })
+    check(
+      '恢复成功：整库导入 + 目录替换；服务器重开连接不重启进程',
+      bkRestore.status === 200 && bkRestore.body.restarted === false,
+      JSON.stringify(bkRestore.text)
+    )
+    const afterTotal = Number((await http.post('/api/orders/list').send({ filter: {} })).body.total)
+    check('恢复后订单回到备份那一刻（恢复期间写的那笔被旧包盖掉）', afterTotal === beforeTotal, `${probeTotal} -> ${afterTotal}`)
+
+    // 恢复在途的写闸门：多用户时别人正在录单，第一版先把话说清（完整并发方案留 M4/M5）
+    const backupSvc = app.get(BackupService)
+    backupSvc.setRestoringForTest(true)
+    const gated = await http.post('/api/customers/list').send({})
+    check(
+      '恢复期间业务请求被挡：请全员停手',
+      gated.status === 503 && String(gated.body.error.message).includes('恢复期间请全员停手'),
+      JSON.stringify(gated.text)
+    )
+    const bkDuring = await http.post('/api/backup/list').send({})
+    check('恢复期间备份页自己照常用（还得看得见列表、按得动取消）', bkDuring.status === 200)
+    backupSvc.setRestoringForTest(false)
+    const ungated = await http.post('/api/customers/list').send({})
+    check('恢复完成后写闸门放开', ungated.status === 200)
 
     console.log(`\nHTTP 冒烟通过 ${passed} 项`)
   } finally {

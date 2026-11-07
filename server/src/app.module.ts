@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common'
 import { DiscoveryModule } from '@nestjs/core'
 import { AuthModule } from './auth/auth.module'
+import { BackupModule } from './backup/backup.module'
 import { ConfigModule } from './config/config.module'
 import { DbModule } from './db/db.module'
 import { CreditsModule } from './credits/credits.module'
@@ -37,7 +38,8 @@ import { AllExceptionsFilter } from './common/all-exceptions.filter'
     CreditsModule,
     PackingModule,
     DashboardModule,
-    DocsModule
+    DocsModule,
+    BackupModule
   ],
   controllers: [HealthController, MetaController],
   providers: [RoutesService, AllExceptionsFilter]

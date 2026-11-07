@@ -22,4 +22,9 @@ export interface Db {
   /** 外层 BEGIN/COMMIT，嵌套 SAVEPOINT；抛错整体或局部回滚后原样抛出 */
   transact<T>(fn: () => Promise<T>): Promise<T>
   close(): Promise<void>
+  /**
+   * 恢复备份后重接库文件（可选能力，SQLite 实现）。MySQL 没有这个能力：
+   * 整库导入是另一套（mysqldump），备份簇对 MySQL 只做「不做」的人话，恢复同。
+   */
+  reopen?(file: string): void
 }

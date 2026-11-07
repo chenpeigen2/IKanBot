@@ -7,7 +7,7 @@ import type { Db, Row, RunResult } from './types'
 /** 本地模式与测试用：同步驱动包成 Promise，事务语义与 electron/db 的 transact 一致 */
 export class SqliteDb implements Db {
   readonly kind = 'sqlite' as const
-  private db: Database
+  private db!: Database
   private ownerPath = ''
   /**
    * 「我现在这一段代码是不是跑在本实例开的事务里」。
@@ -19,6 +19,23 @@ export class SqliteDb implements Db {
   private seq = 0
 
   constructor(file: string) {
+    this.open(file)
+  }
+
+  /**
+   * 恢复备份后重接库文件（R61）：库文件被整体换掉，旧连接的句柄全是旧的。
+   * close 再按新文件重开一遍构造逻辑；锁的登记、旁注、PRAGMA 与首次打开一致。
+   */
+  reopen(file: string): void {
+    try {
+      this.close()
+    } catch {
+      /* 旧连接关不掉也要接着开新库：卡死在旧句柄上比带病重开更糟 */
+    }
+    this.open(file)
+  }
+
+  private open(file: string): void {
     const path = resolve(file)
     const dir = dirname(path)
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
@@ -109,7 +126,8 @@ export class SqliteDb implements Db {
   }
 
   async close(): Promise<void> {
-    this.db.close()
+    // 已经关过的不重关：恢复备份会 close→换文件→reopen，重开后的关闭不能因为旧句柄报错
+    if (this.db.isOpen) this.db.close()
     // 锁目录已随 close() 释放；旁注跟着走，别让下次启动去问一个已退出的 pid
     try {
       if (this.ownerPath) unlinkSync(this.ownerPath)

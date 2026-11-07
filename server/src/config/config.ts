@@ -1,4 +1,4 @@
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 export type DbKind = 'sqlite' | 'mysql'
 
@@ -15,6 +15,10 @@ export interface ServerConfig {
    * 版次只增不减的语义在两边同一份 core/docs。
    */
   docsDir: string
+  /**
+   * 备份包目录（R61 备份簇上后端）。默认跟库文件放一起（桌面就是 data/backups 的布局）。
+   */
+  backupsDir: string
   db:
     | { kind: 'sqlite'; file: string }
     | {
@@ -52,5 +56,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
           database: env['IKAN_MYSQL_DATABASE'] ?? 'ikanbot'
         }
       : { kind: 'sqlite', file: env['IKAN_SQLITE_FILE'] ?? join(process.cwd(), '.tmp', 'ikanbot.db') }
-  return { port, db, imagesDir, docsDir }
+  // 备份目录默认跟库文件放一起：库在哪个盘，备份就落哪个盘，恢复时不用跨盘找
+  const backupsDir =
+    env['IKAN_BACKUP_DIR'] ?? (db.kind === 'sqlite' ? join(dirname(db.file), 'backups') : join(process.cwd(), '.tmp', 'backups'))
+  return { port, db, imagesDir, docsDir, backupsDir }
 }

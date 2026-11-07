@@ -80,7 +80,9 @@ const core = backupCore(
       app.relaunch()
       app.exit(0)
     },
-    isApprovedPath: (p: string) => dialogApproved.has(resolve(p))
+    isApprovedPath: (p: string) => dialogApproved.has(resolve(p)),
+    // 恢复成功后进程马上 relaunch 重启：旗子举到死，死之前的每一笔写都得拦
+    keepRestoringAfterRestore: true
   }
 )
 

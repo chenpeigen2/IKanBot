@@ -2,6 +2,7 @@ import { existsSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkS
 import { join, resolve, sep } from 'path'
 import { randomUUID } from 'crypto'
 import { createZip, collectDir, readZip, verifyZip, ZIP_MAX_BYTES, type ZipBudget, type ZipEntry } from './zip'
+import { bizError } from '../src/shared/errors'
 import { localDate } from '../src/shared/date'
 import { LATEST_DB_VERSION } from '../electron/db/schema'
 
@@ -47,6 +48,12 @@ export interface BackupHooks {
   afterRestore(): void | Promise<void>
   /** 桌面：这个路径是不是刚在原生选择框里亲手点过的（备份目录外的 zip 的唯一放行理由） */
   isApprovedPath(path: string): boolean
+  /**
+   * 恢复成功后要不要把「恢复在途」的旗子继续举着。
+   * 桌面：举着——进程马上 relaunch 重启，死之前的每一笔写都得拦（e2e 的闸门断言也认它）。
+   * 服务器：不举——连接已重开，恢复完接着服务，闸门立即放开。
+   */
+  keepRestoringAfterRestore?: boolean
   /** 服务器上有没有图/单据目录之外还该打进包的目录——现在没有，留接口不硬做 */
   extraEntries?(): ZipEntry[]
 }
@@ -102,6 +109,9 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
     snapshotFallbackReason = ''
     skippedFiles = []
     const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+    // 备份目录不存在就现建（服务器侧目录从没被打开过时是空的）：
+    // 不能因为目录还没人创建过就把第一次备份记成失败
+    if (!existsSync(dirs.backupsDir())) mkdirSync(dirs.backupsDir(), { recursive: true })
     const name = uniqueBackupName(dirs.backupsDir(), `ikanbot-${stamp}${note ? `-${note}` : ''}.zip`)
     const target = join(dirs.backupsDir(), name)
     // 临时名带 uuid：万一有别的进程（或上一轮没清干净的调用）也在写同一秒的包，
@@ -272,7 +282,7 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
     const target = resolve(dir, rel.replace(/[\\/]/g, sep))
     const root = resolve(dir)
     if (target !== root && !target.startsWith(root + sep)) {
-      throw new Error(`备份里的路径「${rel}」指向了数据目录外面，这份包不能用`)
+      throw bizError(`备份里的路径「${rel}」指向了数据目录外面，这份包不能用`)
     }
     return target
   }
@@ -288,18 +298,18 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
       database = hooks.openProbe(probeFile)
       const check = database.get('PRAGMA quick_check') as { quick_check?: string } | null
       if (String(check?.quick_check ?? '') !== 'ok') {
-        throw new Error('备份里的数据库自检没通过，这份包不能用')
+        throw bizError('备份里的数据库自检没通过，这份包不能用')
       }
       const v = Number((database.get('PRAGMA user_version') as { user_version?: number })?.user_version ?? 0)
       if (v > LATEST_DB_VERSION) {
-        throw new Error(
+        throw bizError(
           `这份备份来自更新的程序版本（数据格式 v${v}，当前只认到 v${LATEST_DB_VERSION}）。` +
             `请先把程序升级到该版本或更高，再恢复。`
         )
       }
       const orders = database.get('SELECT COUNT(*) AS n FROM orders') as { n: number } | null
       const payments = database.get('SELECT COUNT(*) AS n FROM payments') as { n: number } | null
-      if (!orders || !payments) throw new Error('备份里的数据库缺少核心数据表，这份包不能用')
+      if (!orders || !payments) throw bizError('备份里的数据库缺少核心数据表，这份包不能用')
     } finally {
       try {
         database?.close()
@@ -399,7 +409,7 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
       orderCount: null,
       paymentCount: null
     }
-    if (!dbEntry) throw new Error('这个备份包里没有数据库文件，不能用来恢复')
+    if (!dbEntry) throw bizError('这个备份包里没有数据库文件，不能用来恢复')
     const stamp = `${Date.now()}`
     const probeDir = join(dirs.dataDir(), `.inspect-${stamp}`)
     const probeFile = join(probeDir, 'check.db')
@@ -411,7 +421,7 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
       probe.orderCount = Number((database.get('SELECT COUNT(*) AS n FROM orders') as { n: number }).n)
       probe.paymentCount = Number((database.get('SELECT COUNT(*) AS n FROM payments') as { n: number }).n)
     } catch (e) {
-      throw new Error(`这个备份包打不开来看：${(e as Error).message}`)
+      throw bizError(`这个备份包打不开来看：${(e as Error).message}`)
     } finally {
       try {
         database?.close()
@@ -429,15 +439,15 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
 
   /** 只接受备份目录里的 .zip（桌面另有「原生选择框亲手点过」的放行，由 hooks 判） */
   function requireBackupPath(rawPath: string): string {
-    if (typeof rawPath !== 'string' || !rawPath.trim()) throw new Error('请先选择一个备份文件')
+    if (typeof rawPath !== 'string' || !rawPath.trim()) throw bizError('请先选择一个备份文件')
     const dir = resolve(dirs.backupsDir())
     const target = resolve(rawPath)
-    if (!target.toLowerCase().endsWith('.zip')) throw new Error('只能选 .zip 的备份文件')
+    if (!target.toLowerCase().endsWith('.zip')) throw bizError('只能选 .zip 的备份文件')
     const insideBackups = target === dir || target.startsWith(dir + sep)
     if (!insideBackups && !hooks.isApprovedPath(target)) {
-      throw new Error('只能从备份目录里选文件，或用「选择备份文件」按钮重新挑一个')
+      throw bizError('只能从备份目录里选文件，或用「选择备份文件」按钮重新挑一个')
     }
-    if (!existsSync(target)) throw new Error('这个备份文件已经不在了')
+    if (!existsSync(target)) throw bizError('这个备份文件已经不在了')
     return target
   }
 
@@ -468,7 +478,7 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
     // 重新挑一个包），于是第二个窗口能原样再进来一次：两次 runRestore 并发 closeDb、
     // 并发换目录，落在盘上的就是「A 包的库 + B 包的照片」，连 pre-restore 那份反悔药
     // 都可能被同名顶掉。恢复是唯一一个「做了两次比做一次更糟」的操作。
-    if (restoring) throw new Error('已经在恢复备份了，请等它跑完（成功后程序会自动重启）。')
+    if (restoring) throw bizError('已经在恢复备份了，请等它跑完（成功后程序会自动重启）。')
     // 立旗：从这里起，除了备份页自己的通道，别的读写一律先停一停（多用户时别人也在录单，
     // 服务端会把业务请求挡回去说「恢复期间请全员停手」）。
     // 关键是下面那句 await createBackup('pre-restore')——它是整段里让出执行权的地方，
@@ -476,7 +486,10 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
     // 那份号称「恢复前的样子」的包就没包含它，而恢复完它又被新库盖掉，两头都不认账。
     restoring = true
     try {
-      return await runRestore(rawPath)
+      const r = await runRestore(rawPath)
+      // 服务器侧连接已重开，旗子当场放下；桌面进程马上退出，旗子举到死（见 hooks 注释）
+      if (hooks.keepRestoringAfterRestore !== true) restoring = false
+      return r
     } catch (e) {
       // 能走到这里说明库还没换（包校验没过 / 反悔药没压成 / 附件目录已退回原样），
       // 原来的数据还是完整的，就把写通道放开——否则一次点错备份文件，
@@ -501,7 +514,7 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
     const entries = readZip(readFileSync(path))
     for (const e of entries) {
       if (!isAllowedEntry(e.name)) {
-        throw new Error(`备份包里有个不认识的文件「${e.name}」，为了安全这份包不能用`)
+        throw bizError(`备份包里有个不认识的文件「${e.name}」，为了安全这份包不能用`)
       }
     }
     const dbEntry = entries.find((e) => e.name === 'ikanbot.db')
@@ -556,7 +569,7 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
       } catch {
         /* 原库也打不开就只能交给上层重启 */
       }
-      throw new Error(
+      throw bizError(
         intact
           ? `恢复中途失败：${(e as Error).message}。数据库、图片和单据存档都已经退回恢复前的样子，原来的数据还能继续用；请检查磁盘空间后重试。`
           : `恢复中途失败：${(e as Error).message}。原来的数据库还在，但有附件目录没能退回去，可能停在半旧半新的状态。请先到「数据备份」立即备份一份当前数据，再联系技术支持。`
