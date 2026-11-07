@@ -582,7 +582,7 @@ export function registerIpc(): void {
   }) => {
     assertLocalArchive()
     if (payload.kind === 'ci' && payload.orderId != null) {
-      docsSvc.assertCiNoOverlap(Number(payload.orderId), payload.docNo, payload.confirmOverlap === true)
+      await docsSvc.assertCiNoOverlap(Number(payload.orderId), payload.docNo, payload.confirmOverlap === true)
     }
     // 漏传金额不能按 0 存：存档金额是这张纸的凭据——批次 CI 记的是本批金额，PI/报价记的是整单金额，
     // 钉成 0 以后对账只剩一张 0 元的纸（预览没带金额就存，只能重开预览）

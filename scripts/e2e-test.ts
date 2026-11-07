@@ -2792,7 +2792,7 @@ eq('第 1 版存档', d1.version, 1)
 check('存档路径是 data 下的相对路径', !isAbsolute(d1.filePath) && d1.filePath.startsWith('docs/'), d1.filePath)
 check('存档文件名带单据种类（PI / CI 同号也不会互盖）', d1.filePath.includes(`pi_${r4no}_v1.pdf`), d1.filePath)
 check('存档文件真的落盘', fs.existsSync(d1.absolutePath), d1.absolutePath)
-eq('下一版 = 2', docs.nextVersion(r4no, 'pi'), 2)
+eq('下一版 = 2', await docs.nextVersion(r4no, 'pi'), 2)
 
 const d2 = await docs.saveDocFile({
   pdf: Buffer.from('pdf-v2'),
@@ -2810,7 +2810,7 @@ try {
   staleDocErr = (e as Error).message
 }
 check('纸面版次过期会被拦住，不混版', staleDocErr.includes('纸面是第 1 版') && staleDocErr.includes('重新打开'), staleDocErr)
-eq('被拦后没有多出存档行', docs.listDocVersions(order.id).filter((d) => d.docNo === r4no).length, 2)
+eq('被拦后没有多出存档行', (await docs.listDocVersions(order.id)).filter((d) => d.docNo === r4no).length, 2)
 
 let docPathErr = ''
 try {
@@ -5646,7 +5646,7 @@ const r18Saved = await docs.saveDocFile({
   amount: 60 // 敲错一位：正确是 600
 })
 eq('存档按第 1 版记账', r18Saved.version, 1)
-const r18Ver = docs.listDocVersions(r18Order.id).find((d) => d.docNo === ciNoOf('PI-R18-VOID', r18Pl.plNo))!
+const r18Ver = (await docs.listDocVersions(r18Order.id)).find((d) => d.docNo === ciNoOf('PI-R18-VOID', r18Pl.plNo))!
 check('存档记录在且未作废', r18Ver != null && r18Ver.voidedAt == null)
 const r18Line = (await packing.listPackingLists(r18Order.id)).find((p) => p.id === r18Pl.id)!.lines[0]
 check(
@@ -5680,7 +5680,7 @@ check(
   '批次 CI 还在时出整单 CI 会被拦下确认',
   (await r8err(async () => docs.assertCiNoOverlap(r18Order.id, ciNoOf('PI-R18-VOID')))).includes('重叠')
 )
-eq('确认重叠后放行，重叠额 = 已存档批次金额', docs.assertCiNoOverlap(r18Order.id, ciNoOf('PI-R18-VOID'), true), 660)
+eq('确认重叠后放行，重叠额 = 已存档批次金额', await docs.assertCiNoOverlap(r18Order.id, ciNoOf('PI-R18-VOID'), true), 660)
 const r18Whole = await orders.createOrder({
   customerId: c1.id,
   currency: 'USD',
@@ -5700,9 +5700,9 @@ check(
   '先整单后补批次同样要确认',
   (await r8err(async () => docs.assertCiNoOverlap(r18Whole.id, ciNoOf('PI-R18-WHOLE', 'X1')))).includes('重叠')
 )
-const r18WholeVer = docs.listDocVersions(r18Whole.id)[0]
+const r18WholeVer = (await docs.listDocVersions(r18Whole.id))[0]
 await docs.voidDocVersion(r18WholeVer.id, '改按批次开票')
-eq('作废整单 CI 后批次可以开票，不再重叠', docs.assertCiNoOverlap(r18Whole.id, ciNoOf('PI-R18-WHOLE', 'X1')), 0)
+eq('作废整单 CI 后批次可以开票，不再重叠', await docs.assertCiNoOverlap(r18Whole.id, ciNoOf('PI-R18-WHOLE', 'X1')), 0)
 
 section('R18 订单作废：打样抵扣回退为未收，不再悬空')
 
@@ -5793,7 +5793,7 @@ section('R19 作废通道只认 CI：PI/箱单/报价存档作不了废，作废
 const r19Kind = await orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7, paymentStatus: 'confirmed', piNo: 'PI-R19-KIND' })
 await orders.addOrderItem(r19Kind.id, { styleNo: 'R19-KIND', quantity: 5, unitPrice: 10 })
 await docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r19 pi'), docNo: 'PI-R19-KIND', kind: 'pi', orderId: r19Kind.id, amount: 50 })
-const r19PiVer = docs.listDocVersions(r19Kind.id)[0]
+const r19PiVer = (await docs.listDocVersions(r19Kind.id))[0]
 check(
   '作废 PI 存档被拦（它不参与锁定）',
   (await r8err(async () => await docs.voidDocVersion(r19PiVer.id, '试一下'))).includes('只有 CI')
@@ -5806,7 +5806,7 @@ const r19KindCi = await docs.saveDocFile({
   amount: 50
 })
 eq('CI 存档记为第 1 版', r19KindCi.version, 1)
-check('CI 存档照常能作废', (await docs.voidDocVersion(docs.listDocVersions(r19Kind.id).find((d) => d.kind === 'ci')!.id, '改数重出')).length > 0)
+check('CI 存档照常能作废', (await docs.voidDocVersion((await docs.listDocVersions(r19Kind.id)).find((d) => d.kind === 'ci')!.id, '改数重出')).length > 0)
 await orders.voidOrder(r19Kind.id, '客户取消', { confirmDocs: true })
 // 作废后重出的一版（留档），也不能再作废
 const r19KindCiV2 = await docs.saveDocFile({
@@ -5820,7 +5820,7 @@ eq('重出记为第 2 版', r19KindCiV2.version, 2)
 check(
   '作废订单的 CI 存档不能再作废',
   (await r8err(async () =>
-    await docs.voidDocVersion(docs.listDocVersions(r19Kind.id).find((d) => d.kind === 'ci' && !d.voidedAt)!.id, '再试')
+    await docs.voidDocVersion((await docs.listDocVersions(r19Kind.id)).find((d) => d.kind === 'ci' && !d.voidedAt)!.id, '再试')
   )).includes('已作废')
 )
 
@@ -8355,8 +8355,8 @@ const r34Pl = (await packing.createPackingList({
 const r34BatchCi = ciNoOf('PI-R34-CI', r34Pl.plNo)
 await docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r34 a'), docNo: r34BatchCi, kind: 'ci', orderId: r34CiOrder.id, amount: 100 })
 await docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r34 b'), docNo: r34BatchCi, kind: 'ci', orderId: r34CiOrder.id, amount: 120 })
-eq('重版不作废旧版：库里两版都还在', docs.listDocVersions(r34CiOrder.id).filter((d) => d.docNo === r34BatchCi).length, 2)
-eq('整单 CI 的重叠额 = 最新版金额，不是两版相加', docs.assertCiNoOverlap(r34CiOrder.id, ciNoOf('PI-R34-CI'), true), 120)
+eq('重版不作废旧版：库里两版都还在', (await docs.listDocVersions(r34CiOrder.id)).filter((d) => d.docNo === r34BatchCi).length, 2)
+eq('整单 CI 的重叠额 = 最新版金额，不是两版相加', await docs.assertCiNoOverlap(r34CiOrder.id, ciNoOf('PI-R34-CI'), true), 120)
 check(
   '未确认时照样拦下重叠',
   (await r8err(async () => await docs.saveDocFile({ pdf: Buffer.from('%PDF-1.4 r34 w'), docNo: ciNoOf('PI-R34-CI'), kind: 'ci', orderId: r34CiOrder.id, amount: 200 }))).includes('重叠')
@@ -9075,7 +9075,7 @@ check(
 )
 eq(
   '被拒的两版没有留下存档',
-  docs.listDocVersions(r37CiOrder.id).filter((d) => d.kind === 'ci').length,
+  (await docs.listDocVersions(r37CiOrder.id)).filter((d) => d.kind === 'ci').length,
   2
 )
 
@@ -9894,10 +9894,10 @@ eq(
   '1,2'
 )
 check('两版 PDF 都还在盘上（失败的一方不许回滚掉对手的文件）', r43Saves.every((s) => fs.existsSync(s.absolutePath)))
-eq('库里也记了两版', docs.listDocVersions(r43Order.id).length, 2)
+eq('库里也记了两版', (await docs.listDocVersions(r43Order.id)).length, 2)
 check(
   '存档记录里的相对路径都解析得回盘上',
-  docs.listDocVersions(r43Order.id).every((v) => fs.existsSync(docs.resolveDocPath(v.filePath)))
+  (await docs.listDocVersions(r43Order.id)).every((v) => fs.existsSync(docs.resolveDocPath(v.filePath)))
 )
 
 section('R43 备份打包排队：同一秒点两次不留半截包')
@@ -10355,7 +10355,7 @@ const r45StaleErr = await r8err(
     })
 )
 check('纸面指纹对不上：拒存并叫人重开预览', r45StaleErr.includes('纸面已经过时') && r45StaleErr.includes('重新打开'), r45StaleErr)
-eq('拒存后库里没记这一版', docs.listDocVersions(r45DocOrder.id).length, 0)
+eq('拒存后库里没记这一版', (await docs.listDocVersions(r45DocOrder.id)).length, 0)
 const r45Saved = await docs.saveDocFile({
   pdf: r45Pdf,
   docNo: 'PI-R45-DOC',
@@ -10379,7 +10379,7 @@ const r45Stale2Err = await r8err(
     })
 )
 check('改过明细后用旧指纹存第 2 版被拦（不然 PDF 和账各说各话）', r45Stale2Err.includes('纸面已经过时'), r45Stale2Err)
-eq('被拦的这一次没多出第 2 版', docs.listDocVersions(r45DocOrder.id).length, 1)
+eq('被拦的这一次没多出第 2 版', (await docs.listDocVersions(r45DocOrder.id)).length, 1)
 check(
   '不带指纹的老调用照样存得进（脚本与老入口不能凭空判死）',
   (await docs.saveDocFile({ pdf: r45Pdf, docNo: 'PI-R45-DOC', kind: 'pi', orderId: r45DocOrder.id, amount: 200 })).version,
@@ -10402,7 +10402,7 @@ const r45CiErr = await r8err(
 )
 check('这张单还没 PI 号：CI 存档当场拒绝', r45CiErr.includes('还没有 PI 号'), r45CiErr)
 check('拒存时把闸门认错单这件事说给人听', r45CiErr.includes('补上 PI 号'), r45CiErr)
-eq('没落库，不会留下一个光秃秃的 CI 键', docs.listDocVersions(r45NoPi.id).length, 0)
+eq('没落库，不会留下一个光秃秃的 CI 键', (await docs.listDocVersions(r45NoPi.id)).length, 0)
 check('拦在落盘之前：盘上没多出 CI 目录', !fs.existsSync(join(docsDir(), 'CI')))
 await orders.updateOrder(r45NoPi.id, { customerId: r45NoPiCust.id, piNo: 'PI-R45-NOPI' })
 const r45CiOk = await docs.saveDocFile({
