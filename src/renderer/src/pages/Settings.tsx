@@ -340,8 +340,8 @@ export default function Settings() {
                 )}
               </div>
               <div className="alert warn">
-                现在是<strong>后端模式</strong>：客户、商品、设置、订单、报价、打样、装箱、预收、报表与单据存档都读写后端那份数据（已搬到后端{' '}
-                {source.covered} / {source.total} 个接口）。备份与打印仍在本机；没搬的通道点了会当场报错，绝不会悄悄改本机那一份。
+                现在是<strong>后端模式</strong>：客户、商品、设置、订单、报价、打样、装箱、预收、报表、单据存档与备份都读写后端那份数据（已搬到后端{' '}
+                {source.covered} / {source.total} 个接口）。备份也在服务器上打；只有打印仍在本机，没搬的通道点了会当场报错，绝不会悄悄改本机那一份。
               </div>
             </>
           ) : (
