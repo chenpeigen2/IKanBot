@@ -647,29 +647,22 @@ export function registerIpc(): void {
     writeFileSync(out, bytes)
     return out
   }
-  handle('docs:reveal', async (filePath?: string) => {
+  // R61 决策：「整目录浏览」正式不做（记账有底）：存档列表每一版都有「打开/所在文件夹」，
+  // 远端模式也能用（拉到本机临时目录再显示）；为看一眼服务器目录长什么样再做一个远端
+  // 列目录界面不值当。渲染层从来只传单版路径，无参分支删掉，入口只认单版。
+  handle('docs:reveal', async (filePath: string) => {
+    if (!filePath) throw new Error('没有文件')
     if (isRemoteMode()) {
-      // 单据在服务器的 docs 目录里：把这一版拉到本机临时文件再在文件夹中显示。
-      // 不带 filePath（整目录）时给句人话——服务器上的目录本机打不开。
-      if (!filePath) {
-        throw new Error(
-          '远端模式下单据存在后端机器上，本机没有这个目录。要点开某一版，请在存档列表里点那一版的「打开」。'
-        )
-      }
+      // 单据在服务器的 docs 目录里：把这一版拉到本机临时文件再在文件夹中显示
       const local = await fetchDocToLocal(filePath)
       shell.showItemInFolder(local)
       return local
     }
-    // N34：点「打开目录」要打开**这一版文件**所在的文件夹，而不是整个 docs 根目录
-    if (filePath) {
-      const abs = docsSvc.resolveDocPath(filePath)
-      if (!existsSync(abs)) throw new Error('文件已不存在（可能被手工删了）')
-      shell.showItemInFolder(abs)
-      return abs
-    }
-    const dir = docsDir()
-    await shell.openPath(dir)
-    return dir
+    // N34：点「所在文件夹」要打开**这一版文件**所在的文件夹，而不是整个 docs 根目录
+    const abs = docsSvc.resolveDocPath(filePath)
+    if (!existsSync(abs)) throw new Error('文件已不存在（可能被手工删了）')
+    shell.showItemInFolder(abs)
+    return abs
   })
   handle('docs:openFile', async (filePath: string) => {
     // N34：每一版直接能打开看

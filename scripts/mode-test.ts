@@ -727,8 +727,9 @@ async function main(): Promise<void> {
     }
     const remoteRevealNoFile = (await ipc('docs:reveal')) as any
     check(
-      '远端模式：「打开目录」说清单据在后端机器上（不甩英文不假装打开了）',
-      !remoteRevealNoFile.ok && String(remoteRevealNoFile.error).includes('后端机器')
+      // R61 决策：整目录浏览正式不做，无参分支删掉——入口只认单版，不带文件名直接拒
+      '远端模式不带文件名的 reveal 直接拒（入口只认单版，不再留半死分支）',
+      !remoteRevealNoFile.ok && String(remoteRevealNoFile.error).includes('没有文件')
     )
 
     // 「最近一次成功备份」「上一次为什么没备齐」记的是这台电脑的账：backup: 前缀本机独有，

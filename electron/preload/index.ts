@@ -132,7 +132,7 @@ const api: IKanApi = {
     listQuotation: (quotationId: number) => call<any[]>('docs:listQuotation', quotationId),
     void: (versionId: number, reason: string) => call<any[]>('docs:void', versionId, reason),
     nextVersion: (docNo: string, kind: string) => call<number>('docs:nextVersion', docNo, kind),
-    reveal: (filePath?: string) => call<string>('docs:reveal', filePath),
+    reveal: (filePath: string) => call<string>('docs:reveal', filePath),
     openFile: (filePath: string) => call<string>('docs:openFile', filePath)
   },
   /** 用系统浏览器打开外链 */

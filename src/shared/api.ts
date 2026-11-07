@@ -160,8 +160,8 @@ export interface IKanApi {
     void(versionId: number, reason: string): Promise<any[]>
     /** 下一版是第几版（打印前先问一句，纸面上要印版本号） */
     nextVersion(docNo: string, kind: 'pi' | 'pl' | 'ci' | 'quotation'): Promise<number>
-    /** 打开这一版文件所在的文件夹（N34）；不传路径则打开存档根目录 */
-    reveal(filePath?: string): Promise<string>
+    /** 打开这一版文件所在的文件夹（N34）；远端模式先拉到本机临时目录再显示 */
+    reveal(filePath: string): Promise<string>
     /** 直接打开某一版文件（N34） */
     openFile(filePath: string): Promise<string>
   }
