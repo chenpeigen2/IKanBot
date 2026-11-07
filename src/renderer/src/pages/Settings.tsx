@@ -53,6 +53,10 @@ export default function Settings() {
   const [restorePath, setRestorePath] = useState('')
   const [restoreInfo, setRestoreInfo] = useState<BackupPreview | null>(null)
   const [restoring, setRestoring] = useState(false)
+  /** 服务器上的备份包（远端模式专用：备份发生在服务器，恢复从这里挑） */
+  const [serverBackups, setServerBackups] = useState<
+    Array<{ path: string; name: string; takenAt: string | null; size: number }>
+  >([])
   /** 设置读不出来时别停在「加载中…」：给一句话和一次重试 */
   const [loadError, setLoadError] = useState('')
   /** 数据来源：本机 / 后端。与上面那份设置分开存，它不在库里 */
@@ -113,9 +117,26 @@ export default function Settings() {
     try {
       setBackupResult(await window.api.backup.lastResult())
     } catch (e) {
-      toast(`本机备份状态没读出来：${(e as Error).message}`, 'error')
+      toast(`备份状态没读出来：${(e as Error).message}`, 'error')
     }
   }
+
+  // 远端模式：备份发生在服务器，备份包列表也从服务器拉；切回本机就清掉
+  const loadServerBackups = async () => {
+    try {
+      setServerBackups(await window.api.backup.list())
+    } catch (e) {
+      toast(`服务器备份列表没读出来：${(e as Error).message}`, 'error')
+    }
+  }
+
+  useEffect(() => {
+    if (source?.mode !== 'remote') {
+      setServerBackups([])
+      return
+    }
+    void loadServerBackups()
+  }, [source?.mode])
 
   useEffect(() => {
     void loadSettings()
@@ -325,7 +346,7 @@ export default function Settings() {
             </>
           ) : (
             <div className="hint">
-              后端已接好 {source.covered} / {source.total} 个接口（含单据存档：远端模式也能出 PI/CI 并存档，PDF 由本机渲染后传到后端机器）。备份与打印仍在本机。
+              后端已接好 {source.covered} / {source.total} 个接口（含单据存档与备份：远端模式也能出 PI/CI 并存档、备份在服务器上打，PDF 由本机渲染后传到后端机器）。打印仍在本机。
             </div>
           )}
         </>
@@ -409,8 +430,9 @@ export default function Settings() {
     try {
       const f = await window.api.backup.create()
       setLastBackupFile(f)
-      // 备份时间戳是本机库里的备份服务写的，要单独取回来才能刷新「最近一次成功备份」
+      // 备份时间戳是备份服务写进设置里的，要单独取回来才能刷新「最近一次成功备份」
       await loadBackupResult()
+      if (source?.mode === 'remote') await loadServerBackups()
       toast('备份已创建')
     } catch (e) {
       toast((e as Error).message, 'error')
@@ -439,7 +461,7 @@ export default function Settings() {
     // 不然人会以为点下去连后端那份账也一起回到那天
     const scope =
       source?.mode === 'remote'
-        ? '现在是后端模式：这一步只替换这台电脑上的本机库（图片、单据存档这些还没搬的），\n服务器上那份订单/收款的账一点不动。\n'
+        ? '现在是后端模式：这一步替换的是服务器上的全部数据（库、商品图、单据存档）。\n恢复期间服务器会挡住别人的录单请求（提示「请全员停手」），恢复完成后大家再继续。\n'
         : ''
     const summary =
       `要用这一份恢复：\n` +
@@ -447,12 +469,19 @@ export default function Settings() {
       `  订单 ${restoreInfo.orderCount ?? '?'} 张 / 收款 ${restoreInfo.paymentCount ?? '?'} 笔 / 文件 ${restoreInfo.entryCount} 个\n\n` +
       scope +
       `现在的订单、图片、单据存档会被整体替换成这一份的内容（当前数据会先自动备份一份，选错了还能退回来）。\n` +
-      `确定要替换吗？程序随后会重启一次。`
+      `确定要替换吗？${source?.mode === 'remote' ? '恢复完成后页面会刷新成新数据。' : '程序随后会重启一次。'}`
     if (!confirm(summary)) return
     setRestoring(true)
     try {
-      await window.api.backup.restore(restoreInfo.path)
-      toast('恢复完成，程序正在重启…')
+      const r = await window.api.backup.restore(restoreInfo.path)
+      if (r.restarted) {
+        toast('恢复完成，程序正在重启…')
+      } else {
+        // 远端恢复：服务器重开连接接着服务，桌面刷新一遍就是新数据
+        toast('服务器已恢复完成，正在刷新数据…')
+        setRestoring(false)
+        window.setTimeout(() => window.location.reload(), 600)
+      }
     } catch (e) {
       setRestoring(false)
       toast((e as Error).message, 'error')
@@ -724,30 +753,33 @@ export default function Settings() {
         {sourceCard}
 
         <Card title="数据备份">
-          <div className="hint" style={{ marginBottom: 6 }}>
-            主数据库：<span className="mono">{paths?.db ?? '…'}</span>
-          </div>
-          <div className="hint" style={{ marginBottom: 6 }}>
-            图片目录：<span className="mono">{paths?.images ?? '…'}</span>
-          </div>
-          <div className="hint" style={{ marginBottom: 6 }}>
-            单据存档：<span className="mono">{paths?.docs ?? '…'}</span>
-          </div>
+          {source?.mode === 'remote' ? (
+            <div className="hint" style={{ marginBottom: 8 }}>
+              <strong>现在是后端模式</strong>：备份在服务器上打——服务器那份库、商品图、单据存档一起打包，每天至少一份、每小时补查一次，保留最近 30 份。
+              这台电脑的定时自动备份不跑（备份发生在服务器）。下面的备份列表和恢复，动的都是服务器那份账。
+            </div>
+          ) : (
+            <>
+              <div className="hint" style={{ marginBottom: 6 }}>
+                主数据库：<span className="mono">{paths?.db ?? '…'}</span>
+              </div>
+              <div className="hint" style={{ marginBottom: 6 }}>
+                图片目录：<span className="mono">{paths?.images ?? '…'}</span>
+              </div>
+              <div className="hint" style={{ marginBottom: 6 }}>
+                单据存档：<span className="mono">{paths?.docs ?? '…'}</span>
+              </div>
+              <div className="hint" style={{ marginBottom: 12 }}>
+                备份目录：<span className="mono">{paths?.backups ?? '…'}</span>
+              </div>
+              <div className="hint" style={{ marginBottom: 8 }}>
+                程序每天启动时自动备份一次，保留最近 30 份。备份把数据库、商品图片、单据存档 PDF 一起打包，缺一样都不算备齐。
+              </div>
+            </>
+          )}
           <div className="hint" style={{ marginBottom: 12 }}>
-            备份目录：<span className="mono">{paths?.backups ?? '…'}</span>
-          </div>
-          <div className="hint" style={{ marginBottom: 8 }}>
-            程序每天启动时自动备份一次，保留最近 30 份。备份把数据库、商品图片、单据存档 PDF 一起打包，缺一样都不算备齐。
-            {source?.mode === 'remote' ? (
-              <>
-                <br />
-                {/* 整段留在一行里：JSX 会把换行处的缩进折成一个空格，中文句子中间就多出缝了 */}
-                <strong>现在是后端模式</strong>：这一份打包的是<strong>这台电脑</strong>的库（图片、单据存档这些还没搬的都在本机），服务器上那份账它管不着——服务端备份要等多机鉴权那一版一起做。恢复同理：只替换本机这份，服务器上的账不会动。
-              </>
-            ) : null}
-          </div>
-          <div className="hint" style={{ marginBottom: 12 }}>
-            本机最近一次成功备份：<strong>{sinceWords(backupResult.lastBackupAt)}</strong>
+            {source?.mode === 'remote' ? '服务器最近一次成功备份：' : '本机最近一次成功备份：'}
+            <strong>{sinceWords(backupResult.lastBackupAt)}</strong>
           </div>
           {backupResult.lastBackupError ? (
             <div className="alert warn" style={{ marginBottom: 12 }}>
@@ -758,18 +790,63 @@ export default function Settings() {
             <Button variant="primary" disabled={busy} onClick={runBackup}>
               {busy ? '备份中，别关窗口…' : '立即备份'}
             </Button>
-            <Button
-              onClick={async () => {
-                const d = await window.api.backup.reveal()
-                if (d) setLastBackupFile(d)
-              }}
-            >
-              打开备份目录
-            </Button>
-            <Button disabled={restoring} onClick={chooseRestoreFile}>
-              从备份恢复…
-            </Button>
+            {source?.mode === 'remote' ? null : (
+              <>
+                <Button
+                  onClick={async () => {
+                    const d = await window.api.backup.reveal()
+                    if (d) setLastBackupFile(d)
+                  }}
+                >
+                  打开备份目录
+                </Button>
+                <Button disabled={restoring} onClick={chooseRestoreFile}>
+                  从备份恢复…
+                </Button>
+              </>
+            )}
           </div>
+
+          {/* 远端模式：备份包在服务器磁盘上，恢复从这份列表里挑（路径是服务器的） */}
+          {source?.mode === 'remote' ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="hint" style={{ marginBottom: 6 }}>
+                服务器上的备份包（新→旧）。点「查看」先看摘要，确认后替换：
+              </div>
+              {serverBackups.length === 0 ? (
+                <div className="hint">还没有备份包。点上面的「立即备份」先压一份。</div>
+              ) : (
+                serverBackups.map((b) => (
+                  <div
+                    key={b.path}
+                    className="row"
+                    style={{ justifyContent: 'space-between', gap: 8, padding: '6px 0', borderBottom: '1px solid #eee' }}
+                  >
+                    <span className="mono" style={{ wordBreak: 'break-all' }}>
+                      {b.name}
+                    </span>
+                    <span className="faint">{(b.size / MB).toFixed(1)} MB</span>
+                    <Button
+                      size="sm"
+                      disabled={restoring}
+                      onClick={async () => {
+                        setRestorePath(b.path)
+                        try {
+                          setRestoreInfo(await window.api.backup.inspect(b.path))
+                        } catch (e) {
+                          setRestorePath('')
+                          setRestoreInfo(null)
+                          toast((e as Error).message, 'error')
+                        }
+                      }}
+                    >
+                      查看
+                    </Button>
+                  </div>
+                ))
+              )}
+            </div>
+          ) : null}
           {lastBackupFile ? <div className="hint mono" style={{ marginTop: 8 }}>{lastBackupFile}</div> : null}
 
           {restoreInfo ? (

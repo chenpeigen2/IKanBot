@@ -24,6 +24,7 @@ import { registerUpdaterIpc } from '../services/updater'
 import { getConnection, saveConnection, envLocked, isRemoteMode } from '../mode'
 import {
   probeRemote,
+  remoteCall,
   remoteChannelCount,
   remoteDiscardImages,
   remoteExportCsv,
@@ -515,15 +516,30 @@ export function registerIpc(): void {
   })
 
   /* ---- 备份 / 导出 ---- */
+  // R61：远端模式下备份发生在服务器（库 + 图片 + 单据存档整包，同一份 core），桌面只转发；
+  // 本机模式全部走本机 backup 服务。备份在服务器磁盘上，restore 用的路径也是服务器的。
   handle('backup:create', async () => {
-    const file = await createBackup('manual')
-    return file
+    if (isRemoteMode()) {
+      const r = (await remoteCall('backup:create', [])) as { path?: unknown }
+      return String(r?.path ?? '')
+    }
+    return createBackup('manual')
   })
-  handle('backup:list', () => listBackups())
+  handle('backup:list', async () =>
+    isRemoteMode() ? await remoteCall('backup:list', []) : listBackups()
+  )
   handle('backup:pick', () => pickBackup())
-  handle('backup:inspect', (path: string) => inspectBackup(path))
-  handle('backup:restore', async (path: string) => restoreBackup(path))
+  handle('backup:inspect', async (path: string) =>
+    isRemoteMode() ? await remoteCall('backup:inspect', [path]) : inspectBackup(path)
+  )
+  handle('backup:restore', async (path: string) =>
+    isRemoteMode() ? await remoteCall('backup:restore', [path]) : restoreBackup(path)
+  )
   handle('backup:reveal', async () => {
+    if (isRemoteMode()) {
+      // 备份包在服务器磁盘上，本机没有这个目录可开；恢复入口在备份列表里
+      throw new Error('备份在服务器上，本机打不开这个目录。要恢复哪一份，直接在下面的备份列表里选。')
+    }
     // 直接打开备份目录（不弹选择框），让用户看到备份文件
     const dir = join(dataDir(), 'backups')
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
@@ -531,13 +547,16 @@ export function registerIpc(): void {
     return dir
   })
   /**
-   * 「最近一次成功备份」和「上一次为什么没备成」记的是本机这份账：
-   * 备份打的是这台电脑的图片目录与单据存档 PDF，成功标记也只写在本机库里。
-   * 后端模式下 settings:get 拿回来的是服务器那份设置，里面这两个字段
-   * 跟本机刚生成的那一包没有关系——所以这两个值单独走一条本机通道
-   * （backup: 前缀是本机独有，远端模式不会把它转发到服务器）。
+   * 「最近一次成功备份」和「上一次为什么没备成」跟备份发生在哪台机器走：
+   * 本机模式记本机库，远端模式备份发生在服务器、成败记在服务器的设置里——
+   * 两条路拿的是同一个字段，界面不用分叉。
    */
-  handle('backup:lastResult', () => {
+  handle('backup:lastResult', async () => {
+    if (isRemoteMode()) {
+      // 服务器那份备份的成败记在服务器的设置里（备份发生在服务器，见上）
+      const s = (await remoteCall('settings:get', [])) as { lastBackupAt?: unknown; lastBackupError?: unknown }
+      return { lastBackupAt: (s?.lastBackupAt as string) ?? null, lastBackupError: (s?.lastBackupError as string) ?? null }
+    }
     const s = settingsSvc.getSettings()
     return { lastBackupAt: s.lastBackupAt ?? null, lastBackupError: s.lastBackupError ?? null }
   })

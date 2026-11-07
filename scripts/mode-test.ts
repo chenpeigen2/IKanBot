@@ -339,8 +339,8 @@ async function main(): Promise<void> {
 
     const state = await ipc('mode:get')
     check(
-      `覆盖率口径：94 / 120（实得 ${(state as any).data?.covered} / ${(state as any).data?.total}）`,
-      state.ok && (state as any).data.covered === 94 && (state as any).data.total === 120
+      `覆盖率口径：98 / 120（实得 ${(state as any).data?.covered} / ${(state as any).data?.total}）`,
+      state.ok && (state as any).data.covered === 98 && (state as any).data.total === 120
     )
     const probe = await ipc('mode:test')
     check('设置页的「测试连接」走真后端', probe.ok && (probe as any).data.ok === true)
@@ -734,15 +734,51 @@ async function main(): Promise<void> {
 
     // 「最近一次成功备份」「上一次为什么没备齐」记的是这台电脑的账：backup: 前缀本机独有，
     // 远端模式下必须照常答得出来——跟着 settings:get 去问服务器，界面上会显示服务器那次备份
+    // 备份簇上后端（R61）：远端模式备份发生在服务器（库+图片+单据存档整包，同一份 core），
+    // 桌面只转发与展示；本机那份备份账不再被打
     const remoteBackup = (await ipc('backup:create')) as any
-    check('远端模式下照样能为这台电脑压一份备份（打的是本机这份库）', remoteBackup.ok === true, JSON.stringify(remoteBackup))
+    check(
+      '远端模式「立即备份」打的是服务器那份（路径落在服务器的备份目录里）',
+      remoteBackup.ok === true && String(remoteBackup.data).startsWith(join(root, 'backups')) && String(remoteBackup.data).endsWith('.zip'),
+      JSON.stringify(remoteBackup)
+    )
+    const remoteBackupList = (await ipc('backup:list')) as any
+    check(
+      '远端模式备份列表读的是服务器那份（刚打的包在，带体积）',
+      remoteBackupList.ok === true &&
+        Array.isArray(remoteBackupList.data) &&
+        remoteBackupList.data.some((b: { path: string; size: number }) => b.path === remoteBackup.data && b.size > 0),
+      JSON.stringify(remoteBackupList)
+    )
+    const remoteInspect = (await ipc('backup:inspect', remoteBackup.data)) as any
+    check('远端模式恢复前能看摘要（带库、订单/收款数）', remoteInspect.ok === true && remoteInspect.data.hasDb === true, JSON.stringify(remoteInspect))
     const lastResult = (await ipc('backup:lastResult')) as any
     check(
-      '远端模式读到的「本机最近一次成功备份」就是刚才这一次（没跑到服务器那份账上）',
+      '远端模式读到的「最近一次成功备份」是服务器那次（成败记在服务器的设置里）',
       lastResult.ok === true &&
         Date.now() - Date.parse(String(lastResult.data?.lastBackupAt ?? '')) < 5 * 60 * 1000 &&
         !lastResult.data?.lastBackupError,
       JSON.stringify(lastResult)
+    )
+    // 同一份数据备份/恢复后行数一致（搬迁校验口径）：造一笔新账 → 恢复 → 新账被旧包盖掉
+    const preRestoreTotal = ((await ipc('orders:list', {})) as any).data.total as number
+    const probeCust = (await ipc('customers:save', { company: 'R61 Restore Probe' })) as any
+    await ipc('orders:create', { customerId: probeCust.data.id, currency: 'USD', exchangeRate: 7.2 })
+    const withProbe = ((await ipc('orders:list', {})) as any).data.total as number
+    check('造账成功：恢复前比备份那一刻多一张', withProbe === preRestoreTotal + 1, `${preRestoreTotal} -> ${withProbe}`)
+    const remoteRestore = (await ipc('backup:restore', remoteBackup.data)) as any
+    check(
+      '远端恢复成功：整库导入 + 文件目录替换，服务器重开连接不重启',
+      remoteRestore.ok === true && remoteRestore.data.restarted === false,
+      JSON.stringify(remoteRestore)
+    )
+    const afterRestoreTotal = ((await ipc('orders:list', {})) as any).data.total as number
+    check('恢复后订单回到备份那一刻（恢复期间写的那笔没了）', afterRestoreTotal === preRestoreTotal, `${withProbe} -> ${afterRestoreTotal}`)
+    const afterList = (await ipc('customers:list', '')) as any
+    check(
+      '恢复期间新建的客户也被旧包盖掉（列表里查无此人）',
+      afterList.ok === true && !afterList.data.some((c: { company: string }) => c.company === 'R61 Restore Probe'),
+      JSON.stringify(afterList.data?.filter?.((c: { company: string }) => c.company === 'R61 Restore Probe'))
     )
 
     // 切回本机：后端那份数据必须原封不动地留在后端

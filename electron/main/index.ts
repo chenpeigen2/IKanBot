@@ -5,6 +5,7 @@ import { openDb, closeDb } from '../db'
 import { registerIpc } from '../ipc'
 import { initUpdater } from '../services/updater'
 import { autoBackupOnStart } from '../services/backup'
+import { isRemoteMode } from '../mode'
 import { TRAY_ICON_BASE64 } from '../resources/trayIcon'
 
 let tray: Tray | null = null
@@ -235,14 +236,16 @@ app.whenReady().then(() => {
     return
   }
   registerIpc()
-  autoBackupOnStart()
+  // R61：远端模式下备份发生在服务器（服务器自己有定时器），
+  // 这台电脑的自动备份不跑——本机库里那份账已经不动了
+  if (!isRemoteMode()) autoBackupOnStart()
   createWindow()
   if (!shotRoute) createTray()
   // 「每天一备」不按进程生命周期兑现：托盘常驻的用户一开几周，
-  // 每小时喊一次 autoBackupOnStart，当天已备过它自己会跳过
+  // 每小时喊一次 autoBackupOnStart，当天已备过它自己会跳过（远端模式同样不跑，备份在服务器）
   setInterval(() => {
     try {
-      autoBackupOnStart()
+      if (!isRemoteMode()) autoBackupOnStart()
     } catch (e) {
       console.warn('[backup] 定时备份检查失败', e)
     }

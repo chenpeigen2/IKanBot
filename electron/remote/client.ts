@@ -120,7 +120,14 @@ export const REMOTE_ROUTES: Record<string, RouteSpec> = {
   'credits:apply': { path: '/api/credits/apply', args: ['input'] },
   'credits:reverse': { path: '/api/credits/reverse', args: ['applicationId', 'reason'] },
   'credits:refund': { path: '/api/credits/refund', args: ['input'] },
-  'credits:reverseRefund': { path: '/api/credits/reverseRefund', args: ['refundId', 'reason'] }
+  'credits:reverseRefund': { path: '/api/credits/reverseRefund', args: ['refundId', 'reason'] },
+
+  // 备份簇上后端（R61）：远端模式备份发生在服务器（库+图片+单据存档整包），
+  // 桌面只转发与展示；恢复从服务器备份列表里挑，路径是服务器磁盘上的
+  'backup:create': { path: '/api/backup/create', args: [] },
+  'backup:list': { path: '/api/backup/list', args: [] },
+  'backup:inspect': { path: '/api/backup/inspect', args: ['path'] },
+  'backup:restore': { path: '/api/backup/restore', args: ['path'] }
 }
 
 export function isRemoteChannel(channel: string): boolean {
