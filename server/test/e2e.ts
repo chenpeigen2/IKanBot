@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { chmodSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Test } from '@nestjs/testing'
@@ -802,6 +802,32 @@ async function main(): Promise<void> {
       .post('/api/docs/read')
       .send({ filePath: 'docs/PI-DOCSRV/pi_PI-DOCSRV_v99.pdf' })
     check('路径在目录里但文件不在 → 404 说「文件已不存在」', dMissing.status === 404)
+
+    // r60-verify 账：文件系统权限错误不能裸奍成「服务器内部错误」五个字。
+    // 存档目录被 chmod 000（磁盘满、运维改权限都会遇到）要给人话：哪个路径、找谁。
+    const docsRoot = join(dir, 'docs')
+    chmodSync(docsRoot, 0o000)
+    const dPerm = await http
+      .post(`/api/docs/save?meta=${encodeURIComponent(JSON.stringify({ docNo: 'PI-EACCES', kind: 'pi', orderId: oid, amount: 70 }))}`)
+      .set('content-type', 'application/octet-stream')
+      .send(Buffer.from('%PDF-1.4 eacces'))
+    chmodSync(docsRoot, 0o755)
+    const permMsg = String(dPerm.body?.error?.message ?? '')
+    check(
+      '存档目录不可写（EACCES）给人话：说权限、说路径、指到管服务器的人',
+      dPerm.status === 500 &&
+        permMsg.includes('权限') &&
+        permMsg.includes(docsRoot) &&
+        permMsg.includes('管服务器') &&
+        permMsg !== '服务器内部错误',
+      'status=' + dPerm.status + ' text=' + JSON.stringify(dPerm.text)
+    )
+    const dPermList = await http.post('/api/docs/list').send({ orderId: oid })
+    check(
+      '权限失败那次不留半条版本记录（R57 老规矩：存档区报错不污染账）',
+      dPermList.status === 200 && !dPermList.body.some((d: any) => d.docNo === 'PI-EACCES'),
+      JSON.stringify(dPermList.body?.filter?.((d: any) => d.docNo === 'PI-EACCES'))
+    )
 
     // CI 存档 + 作废重出（R18/R45 的语义在服务端同样成立）
     const oidPiNo = String(oCreate.body.piNo ?? '').trim()

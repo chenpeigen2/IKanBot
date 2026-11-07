@@ -47,6 +47,12 @@ export class AllExceptionsFilter implements ExceptionFilter {
       if (status === 404 && /^Cannot [A-Z]+ /.test(message)) {
         message = notFoundText(req, this.routes)
       }
+    } else if (isFsError(exception)) {
+      // 文件系统错误（磁盘满、目录被 chmod、文件被手工移走）真会发生在服务器上，
+      // 不能裸奍成「服务器内部错误」五个字：说清是哪个路径坏了、该找谁（r60-verify 账）
+      console.error('[ikanbot-server] 文件系统错误', exception)
+      status = 500
+      message = fsErrorText(exception)
     } else {
       console.error('[ikanbot-server] 未处理的错误', exception)
     }
@@ -64,6 +70,35 @@ function notFoundText(req: Request, routes: RoutesService): string {
   const known = routes.list().filter((r) => r.path === req.path)
   if (known.length === 0) return '没有这个接口'
   return `这个接口不接 ${req.method}（只接 ${known.map((r) => r.method).join(' / ')}）`
+}
+
+function isFsError(e: unknown): e is NodeJS.ErrnoException {
+  return (
+    typeof e === 'object' &&
+    e !== null &&
+    typeof (e as { code?: unknown }).code === 'string' &&
+    // Node 系统调用的错误码就是这几个字母开头；避开把业务错误码误认成文件系统错
+    /^(EACCES|EPERM|ENOSPC|ENOENT|EISDIR|ENOTDIR|EMFILE|ENFILE|EROFS|EXDEV)$/.test(
+      (e as { code: string }).code
+    )
+  )
+}
+
+function fsErrorText(e: NodeJS.ErrnoException): string {
+  const where = typeof e.path === 'string' && e.path ? `（路径：${e.path}）` : ''
+  if (e.code === 'EACCES' || e.code === 'EPERM') {
+    return `服务器读写文件被系统拒绝：${where} 权限不对。找管服务器的人检查这个目录的权限`
+  }
+  if (e.code === 'ENOSPC') {
+    return `服务器磁盘满了，写不进去${where}。找管服务器的人清理磁盘`
+  }
+  if (e.code === 'ENOENT') {
+    return `服务器上要找的文件或目录不在了${where}（可能被手工移动或删除）。找管服务器的人看一眼`
+  }
+  if (e.code === 'EROFS') {
+    return `服务器上的文件系统是只读的，写不进去${where}。找管服务器的人`
+  }
+  return `服务器读写文件出了问题（${e.code}）${where}。找管服务器的人`
 }
 
 function isJsonParseError(e: unknown): boolean {
