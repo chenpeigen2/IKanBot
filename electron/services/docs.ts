@@ -381,21 +381,30 @@ export function resolveDocPath(filePath: string): string {
   const raw = String(filePath ?? '').trim()
   if (!raw) throw new Error('没有文件')
   const root = dataDir()
-  // 渲染层传来的路径一律当敌情：绝对路径只认落在数据目录里的，
-  // 其余（旧机器路径）走 docs 段回退接回当前数据目录，接不回就拒——
-  // 这条通道的终点是 shell.openPath，直通口等于给任意文件开系统默认程序。
+  const docsRoot = resolve(root, 'docs')
+  // 渲染层传来的路径一律当敌情：绝对路径只认落在数据目录里的。
+  // Windows 老库搬到本机（真事：我们刚搬过）后，D:\old-pc\… 这种盘符路径在 POSIX 上
+  // isAbsolute() 是 false，会掉进下面的相对分支被原样拼进数据目录放行——
+  // 所以盘符开头或带反斜杠的相对路径一律先按「外来绝对路径」处理。
   if (isAbsolute(raw)) {
     const abs = resolve(raw)
     if (abs.startsWith(root + sep)) return abs
+  } else if (raw.includes('\\') || /^[a-zA-Z]:[/\\]/.test(raw)) {
+    // 但反斜杠在 POSIX 也是合法文件名字符：数据目录里真有一个叫这个名字的文件时，
+    // 它就是本机相对路径，照常打开，不能被「接回 docs」的判断劫走
+    const asLocal = resolve(root, raw)
+    if (existsSync(asLocal) && asLocal.startsWith(root + sep)) return asLocal
   } else {
     const abs = resolve(root, raw)
     if (abs !== root && abs.startsWith(root + sep)) return abs
   }
-  const marker = `${sep}docs${sep}`
-  const i = raw.lastIndexOf(marker)
+  // 外来路径按 docs 段接回当前数据目录：老机器上分隔符可能是反斜杠，先归一成 / 再找；
+  // 没有 docs 段（例如 D:\old-pc\elsewhere\r42.pdf）就拒——那不是我们存档的布局，接不回。
+  const marker = '/docs/'
+  const i = raw.replace(/\\/g, '/').lastIndexOf(marker)
   if (i >= 0) {
-    const abs = resolve(root, raw.slice(i + 1))
-    if (abs.startsWith(resolve(root, 'docs') + sep)) return abs
+    const abs = resolve(docsRoot, raw.replace(/\\/g, '/').slice(i + marker.length))
+    if (abs.startsWith(docsRoot + sep)) return abs
   }
   throw new Error('单据路径不在数据目录里，已拒绝打开')
 }

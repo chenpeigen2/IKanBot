@@ -9841,6 +9841,15 @@ check(
     }
   })()
 )
+// 反斜杠在 POSIX 是合法文件名字符：数据目录里真有一个名字长得像老机器盘符路径的文件，
+// 必须还能当本机相对路径打开，不能被「接回 docs」的判断劫走
+const r42WeirdName = join(dataDir(), 'D:\\old-pc\\elsewhere\\docs\\r42-samename.pdf')
+fs.writeFileSync(r42WeirdName, '%PDF-1.4 weird name')
+eq(
+  '数据目录里真叫这个名字的文件照常打开（不被误当老机器路径接走）',
+  docs.resolveDocPath('D:\\old-pc\\elsewhere\\docs\\r42-samename.pdf'),
+  r42WeirdName
+)
 
 /* ---------------- R43 ---------------- */
 section('R43 同一张单的存档排队，不撞版本号')
