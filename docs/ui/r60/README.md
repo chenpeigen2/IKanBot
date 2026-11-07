@@ -20,6 +20,9 @@
 | pi-preview.png | 超宽弹窗（xwide）：PI 预览（A4 纸面 + 页脚按钮），portal 后照常铺满可用高度、纸面渲染不变 | 「单据渲染」「CI 与 PI 金额一致」；本轮未动 documents.ts |
 | order-new.png | 默认宽度弹窗：订单列表「+ 新建订单」表单弹窗 | 「订单与状态流转」（汇率手填）；本轮未动 |
 | quotation-preview.png | 超宽弹窗（xwide）：报价单预览，Rev.1 版次照常印在纸面 | 「单据渲染」「R5 报价单抬头快照」；本轮未动 |
+| order-detail-void.png | 已作废单（SO…008）详情页头：**「商业发票 CI」「生成 PI」两个按钮不再渲染**，只剩「⋯」；存档那步本来就拒（能看不能存是设计使然），现在不再用看得见的按钮误导 | 「R60：作废/失效单不出单据入口」（e2e 锁的是门函数 `canIssueDocs`：void/expired 返回 false、其余六态 true、作废后的那张单落在禁名单里）；按钮不渲染本身是渲染层形态，无数据层接缝，证据为本实拍 |
+| order-detail-expired.png | 已失效单（SO…007）详情页头：同样不渲染两个出单据按钮 | 同上；失效退出销售口径的数据层断言原已存在，未动 |
+| order-detail-draft.png | 对照：草稿单（SO…005）详情页头「商业发票 CI」「生成 PI」照常在——草稿要能出 PI 发出去，不能误伤 | 「草稿订单不进报表」；`canIssueDocs('draft') === true` 由 e2e「其余六个状态都给出口」锁着 |
 
 补一句边界：`position:fixed` 的另外两处都不受此 bug 影响、也未改动——
 `.menu-pop.fixed`（表格行内菜单）本来就是 portal 到 body 的；`.toast-wrap` 挂在 `ToastProvider`

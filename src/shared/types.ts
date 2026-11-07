@@ -58,6 +58,18 @@ export const PAYMENT_STATUS_ORDER: PaymentStatus[] = [
   'void'
 ]
 
+/**
+ * 这几个收款状态不给「出单据」的入口（生成 PI / 商业发票 CI 不渲染）。
+ * 存档那一步本来就会拒（作废/失效单不能出新存档），但按钮看得见点不动/点了报错
+ * 本身就是在误导——直接不渲染，能看（历史存档还在）不能存，是设计使然。
+ */
+export const DOC_ISSUE_FORBIDDEN: PaymentStatus[] = ['void', 'expired']
+
+/** 这张单现在给不给「出单据」按钮（订单详情页头用；报价单预览存档不走这里） */
+export function canIssueDocs(status: PaymentStatus): boolean {
+  return !DOC_ISSUE_FORBIDDEN.includes(status)
+}
+
 /** 手工能选的状态（部分出运是批次汇总出来的，不出现在下拉里）——服务层校验也只用这一份，别处不再抄一个数组 */
 export const SHIP_STATUS_ORDER: BatchShipStatus[] = [
   'not_prepared',

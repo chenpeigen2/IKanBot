@@ -190,7 +190,7 @@ section 的断言锁着；纯数据层断言、界面上没有独立形态的（
 
 - 当前矩阵：[docs/ui/r59/](docs/ui/r59/README.md) —— 9 个页面 × 29 个交互/状态形态 = 38 张实拍，
   收款状态标签 8 种全部露脸
-- 增量矩阵：[docs/ui/r60/](docs/ui/r60/README.md) —— Modal portal 化（弹窗居中修复）5 张实拍对照
+- 增量矩阵：[docs/ui/r60/](docs/ui/r60/README.md) —— Modal portal 化（弹窗居中修复）+ 作废/失效单隐藏出单据按钮，8 张实拍对照
 - 断言规模：e2e 2298 项 · 双模式 116 项 · 数据层 69 项 · HTTP 冒烟 169 项（`npm run test:all`）
 
 ---

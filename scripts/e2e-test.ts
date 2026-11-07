@@ -43,7 +43,7 @@ import {
 import { localDate, localMonthOf, addDays } from '../src/shared/date'
 import { isBillingStatus, shownRemaining } from '../src/shared/billing'
 import { likeContains } from '../electron/services/search'
-import { INCOTERMS } from '../src/shared/types'
+import { INCOTERMS, canIssueDocs, DOC_ISSUE_FORBIDDEN, PAYMENT_STATUS_ORDER } from '../src/shared/types'
 import { CSV_BOM, looksGarbled, pickCsvDecode } from '../src/shared/csv'
 
 let passed = 0
@@ -1903,6 +1903,20 @@ const r28inSales = (await dashboard.monthlyReport()).reduce((s, r) => s + r.sale
 await orders.voidOrder(r28.id, '再作废一次也不变')
 eq('作废后订单不进默认列表', (await orders.listOrders({})).some((o) => o.id === r28.id), false)
 check('作废的单在「已作废」页签里查得到', (await orders.listOrders({ paymentStatus: 'void' })).some((o) => o.id === r28.id))
+
+// R60：作废/失效单不给出单据入口（生成 PI / 商业发票 CI 按钮不渲染）。
+// 渲染层没有数据层断言的接缝（e2e 不渲染 DOM），锁的是「门」本身：
+// 订单详情页头用 canIssueDocs(paymentStatus) 决定渲不渲染这两个按钮，
+// 门函义与「作废/失效不能出新存档」的服务层闸门同向；界面形态证据在 docs/ui/r60/（void/expired 两张实拍）。
+section('R60：作废/失效单不出单据入口')
+for (const st of ['void', 'expired'] as const) {
+  check(`收款状态 ${st} 不给出单据入口`, canIssueDocs(st) === false, String(canIssueDocs(st)))
+}
+check(
+  '其余六个状态都给出口（含草稿，草稿要能出 PI 发出去）',
+  PAYMENT_STATUS_ORDER.filter((s) => !DOC_ISSUE_FORBIDDEN.includes(s)).length === 6
+)
+check('刚作废的那张单落在被禁名单里', canIssueDocs(r28voided.paymentStatus) === false, r28voided.paymentStatus)
 eq('作废后本月销售额不变', (await dashboard.dashboard()).monthSales, salesBeforeVoid)
 eq('作废后待收款不变', (await dashboard.dashboard()).pendingAmount, pendingBeforeVoid)
 // 空单可以真删

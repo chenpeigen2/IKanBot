@@ -11,6 +11,7 @@ import {
   PAYMENT_STATUS_ORDER,
   SHIP_STATUS_ORDER,
   SETTLEMENT_KIND_LABEL,
+  canIssueDocs,
   type PaymentStatus,
   type PackingAmount,
   type ShipStatus,
@@ -494,12 +495,18 @@ export default function OrderDetail() {
         <div className="spacer" />
         {/* R1-④：页头只留 2 种按钮形态（描边 + 主按钮），
             「作废此单」「删除订单」收进「⋯」菜单，不再是裸文字链接 */}
-        <Button  onClick={() => setShowCi(true)}>
-          商业发票 CI
-        </Button>
-        <Button variant="primary"  onClick={openPi}>
-          生成 PI
-        </Button>
+        {/* R60：作废/失效单不给「出单据」的入口——存档那一步本来就会拒（拦截在存档、能看不能存），
+            但按钮看得见、点了就报错，本身就是在误导。直接不渲染；历史存档列表照常可看。 */}
+        {canIssueDocs(order.paymentStatus) ? (
+          <>
+            <Button  onClick={() => setShowCi(true)}>
+              商业发票 CI
+            </Button>
+            <Button variant="primary"  onClick={openPi}>
+              生成 PI
+            </Button>
+          </>
+        ) : null}
         <Menu
           label="⋯"
           items={[
