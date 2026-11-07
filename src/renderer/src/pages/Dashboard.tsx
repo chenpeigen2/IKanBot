@@ -180,8 +180,10 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
             {/* N37：口径含打样费，说明必须跟着数走（money.ts 唯一入口）
                 R6：拆成四桶给一眼看清楚该催谁——合计仍等于上面这个数 */}
             <div className="stat-hint">
-              未确认 {money(stats?.pendingUnconfirmed, cur)} · 定金 {money(stats?.pendingDeposit, cur)} · 尾款{' '}
-              {money(stats?.pendingBalance, cur)} · 打样 {money(stats?.pendingSample, cur)}
+              {/* R54 把收款状态 paid 改叫「定金已收」之后，这里光写「定金」
+                  容易被读成「定金已经收了」——四个桶都是还没收的钱，词面上说死 */}
+              未确认 {money(stats?.pendingUnconfirmed, cur)} · 待收定金 {money(stats?.pendingDeposit, cur)} · 待收尾款{' '}
+              {money(stats?.pendingBalance, cur)} · 待收打样费 {money(stats?.pendingSample, cur)}
             </div>
           </div>
           <div className="stat">
