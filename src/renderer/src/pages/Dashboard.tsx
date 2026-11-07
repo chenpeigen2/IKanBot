@@ -266,7 +266,16 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
                 {!stats?.monthProfitReliable ? (
                   <div>
                     <span className="muted">说明</span>
-                    <span>本月有单成本没录全，毛利不可信（宁可给你「—」）</span>
+                    {/* 两种病分开说：该去补成本还是补汇率，一眼分清（R59） */}
+                    <span>
+                      {[
+                        stats?.monthMissingCostOrders ? `本月有 ${stats.monthMissingCostOrders} 单成本没录全` : '',
+                        stats?.monthRateMissingOrders ? `${stats.monthRateMissingOrders} 单外币没填汇率，毛利折不全` : ''
+                      ]
+                        .filter(Boolean)
+                        .join('，')}
+                      ，毛利不可信（宁可给你「—」）
+                    </span>
                   </div>
                 ) : null}
                 <div>

@@ -347,6 +347,9 @@ export function mapDashboard(r: Row): DashboardStats {
     monthSales: num(r.month_sales),
     monthProfit: r.month_profit == null ? null : num(r.month_profit),
     monthProfitReliable: true,
+    // 毛利可信度与两个病由 services/dashboard.ts 按本月的实际行覆盖（mapper 只认 SQL 列）
+    monthMissingCostOrders: 0,
+    monthRateMissingOrders: 0,
     monthReceived: num(r.month_received),
     monthUnconverted: num(r.month_unconverted),
     monthRefunded: num(r.month_refunded),
@@ -375,6 +378,7 @@ export function mapMonthlyReport(r: Row): MonthlyReportRow {
     unconvertedCount: num(r.unconverted_count),
     refundCount: num(r.refund_count),
     refundText: str(r.refund_text),
-    missingCostOrders: num(r.missing_cost_orders)
+    missingCostOrders: num(r.missing_cost_orders),
+    rateMissingOrders: num(r.rate_missing_orders)
   }
 }

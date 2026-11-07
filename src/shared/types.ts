@@ -782,10 +782,14 @@ export interface DashboardStats {
   pendingShipOrders: number
   completedThisMonth: number
   monthSales: number
-  /** 本月毛利；本月的单有成本没录全时为 null（不可信，界面显示「—」） */
+  /** 本月毛利；本月的单有成本没录全、或外币没填汇率时为 null（不可信，界面显示「—」） */
   monthProfit: number | null
-  /** 本月毛利是否可信 */
+  /** 本月毛利是否可信（两种病都不有：成本没录全、汇率没填） */
   monthProfitReliable: boolean
+  /** 本月成本没录全的订单数（毛利不可信的原因之一，界面按它提示去补成本） */
+  monthMissingCostOrders: number
+  /** 本月外币没填汇率的订单数（毛利不可信的原因之二，界面按它提示去补汇率） */
+  monthRateMissingOrders: number
   monthReceived: number
   /** 本月有几笔到账**没折进** monthReceived（外币单汇率没填）：钱到过银行，只是折不出基准币 */
   monthUnconverted: number
@@ -1019,7 +1023,7 @@ export interface MonthlyReportRow {
   /** 销售额（含费用合计，基准币）—— 按订单创建月份 */
   sales: number
   cost: number
-  /** 毛利；该月有成本没录全的订单时为 null（不可信，界面显示「—」） */
+  /** 毛利；该月有成本没录全、或外币没填汇率的订单时为 null（不可信，界面显示「—」） */
   profit: number | null
   /** 折让（负向费用：抵扣/让利，正数表示让出去多少）—— 按订单创建月份 */
   discount: number
@@ -1037,6 +1041,8 @@ export interface MonthlyReportRow {
   refundText: string
   /** 该月里成本没录全的订单数：这些单的毛利是假的 */
   missingCostOrders: number
+  /** 该月里外币没填汇率的订单数：这些单的毛利折不出来，按 0 混进合计就是偏小的数 */
+  rateMissingOrders: number
 }
 
 /** 客户维度欠款榜（基准币） */

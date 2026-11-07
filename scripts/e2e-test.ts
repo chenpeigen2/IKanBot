@@ -12652,6 +12652,20 @@ check(
   /const beginList = useLoadGuard\(\)/.test(r58CustSrc) && /const \{ isCurrent \} = beginList\(\)/.test(r58CustSrc)
 )
 
+/* ---------------- R59：毛利不可信的第二种病 —— 汇率没填 ---------------- */
+
+section('R59 汇率没填的单不许让毛利装可信（工作台与月报同一口径）')
+// R48 那张外币单（汇率被改成 0）还在本月：它的毛利折不出来，
+// 以前按 0 混进合计，工作台与月报都顶着一个偏小的数冒充真毛利。
+const r59Stats = await dashboard.dashboard()
+eq('本月有汇率没填的单 → 工作台毛利不可信', r59Stats.monthProfitReliable, false)
+check('点得出是几单（不是笼统一句「不可信」）', r59Stats.monthRateMissingOrders >= 1, `${r59Stats.monthRateMissingOrders}`)
+const r59Monthly = (await dashboard.monthlyReport()).find((m) => m.month === localDate().slice(0, 7))!
+check('月报本月行数得出汇率没填的单数', r59Monthly.rateMissingOrders >= 1, `${r59Monthly.rateMissingOrders}`)
+eq('月报本月毛利为 null（不许拿 0 毛利冒充）', r59Monthly.profit, null)
+const r59Csv = parseCsv(await dashboard.exportCsv('monthly'))
+check('月度汇总 CSV 带出「汇率没填单数」列，与屏幕同一口径', r59Csv[0].includes('汇率没填单数'), r59Csv[0].join('、'))
+
 /* ---------------- 汇总 ---------------- */
 
 console.log(`\n${'='.repeat(46)}`)

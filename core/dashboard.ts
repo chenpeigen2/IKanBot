@@ -84,12 +84,17 @@ export function dashboardCore(db: Db) {
     // 含作废/失效单——作废只是不再向客户计收，我们账上没收到的那笔债并没有因此消失
     const outstandingBadDebt = everyOrder.reduce((s, r) => s + r.badDebtBase, 0)
 
-    // 本月毛利：本月的单只要有一单成本没录全，毛利就不可信 → null（界面显示「—」）
-    const monthMissingCost = monthRows.some((r) => r.missingCostItems > 0)
+    // 本月毛利：本月的单只要有一单成本没录全、或外币汇率没填，毛利就不可信 → null（界面显示「—」）。
+    // 汇率没填的单 profitBase 是 null，按 0 求和会把它的毛利悄悄吃掉——
+    // 不把它算进「不可信」，工作台就会顶着一个偏小的数字冒充真毛利。
+    // 两个计数分开给界面：哪种病让人一看就知道该去补成本还是补汇率。
+    const monthMissingCostOrders = monthRows.filter((r) => r.missingCostItems > 0).length
+    const monthRateMissingOrders = monthRows.filter((r) => r.rateMissing).length
+    const monthProfitUnreliable = monthMissingCostOrders > 0 || monthRateMissingOrders > 0
     // 折基准币吃 money.ts 那份 profitBase（本币单不乘汇率、成本没录全是 null），
     // 这里再乘一次 exchangeRate 就会出现「本币单毛利被 0 吃掉」
     const monthProfitBase = monthRows.reduce((s, r) => s + (r.profitBase ?? 0), 0)
-    const monthProfit = monthMissingCost ? null : monthProfitBase
+    const monthProfit = monthProfitUnreliable ? null : monthProfitBase
 
     // 作废/失效单不进销售与在途（真收到的钱留在现金流里，那份口径在 money.receivedByMonth）
     const sales = notInStatuses('payment_status', EXCLUDED_STATUSES)
@@ -152,7 +157,9 @@ export function dashboardCore(db: Db) {
         month_profit: monthProfitBase
       }),
       monthProfit,
-      monthProfitReliable: !monthMissingCost,
+      monthProfitReliable: !monthProfitUnreliable,
+      monthMissingCostOrders,
+      monthRateMissingOrders,
       pendingUnconfirmed,
       pendingDeposit,
       pendingBalance,
@@ -1027,6 +1034,7 @@ export function dashboardCore(db: Db) {
       /** 有几笔到账折不出基准币（外币单汇率没填），没进 received */
       unconverted: number
       missingCostOrders: number
+      rateMissingOrders: number
     }
     const empty = (month: string): MonthAcc => ({
       month,
@@ -1039,7 +1047,8 @@ export function dashboardCore(db: Db) {
       badDebt: 0,
       received: 0,
       unconverted: 0,
-      missingCostOrders: 0
+      missingCostOrders: 0,
+      rateMissingOrders: 0
     })
     const byMonth = new Map<string, MonthAcc>()
     const baseCurrency = (await settingsCore(db).get()).baseCurrency
@@ -1064,6 +1073,7 @@ export function dashboardCore(db: Db) {
         cur.discount += -inBase(r.negativeCharges)
         cur.shortage += inBase(r.shortageAmount)
         if (r.missingCostItems > 0) cur.missingCostOrders += 1
+        if (r.rateMissing) cur.rateMissingOrders += 1
       }
       cur.badDebt += badDebt
       byMonth.set(r.month, cur)
@@ -1101,8 +1111,9 @@ export function dashboardCore(db: Db) {
           orders: r.orders,
           sales: r.sales,
           cost: r.cost,
-          // 成本没录全的月份：毛利不可信 → null（界面上显示「—」）
-          profit: r.missingCostOrders > 0 ? null : r.profit,
+          // 成本没录全或汇率没填的月份：毛利不可信 → null（界面上显示「—」）。
+          // 汇率没填的单毛利折不出来，混进去就是按 0 算，偏小也要点破。
+          profit: r.missingCostOrders > 0 || r.rateMissingOrders > 0 ? null : r.profit,
           discount: r.discount,
           shortage: r.shortage,
           bad_debt: r.badDebt,
@@ -1110,7 +1121,8 @@ export function dashboardCore(db: Db) {
           unconverted_count: r.unconverted,
           refund_count: refundByMonth.get(r.month)?.count ?? 0,
           refund_text: refundByMonth.get(r.month)?.text ?? '',
-          missing_cost_orders: r.missingCostOrders
+          missing_cost_orders: r.missingCostOrders,
+          rate_missing_orders: r.rateMissingOrders
         })
       )
   }
@@ -1347,6 +1359,7 @@ export function dashboardCore(db: Db) {
       `短款核销(${base})`,
       `坏账未追回(${base})`,
       '成本未录全单数',
+      '汇率没填单数',
       `收款(${base}·按到账月)`,
       // 退款与收款方向相反、且没有汇率快照，所以单独两列，不混进收款里
       '本月退款笔数',
@@ -1362,6 +1375,7 @@ export function dashboardCore(db: Db) {
       money2(r.shortage),
       money2(r.badDebt),
       r.missingCostOrders,
+      r.rateMissingOrders,
       money2(r.received),
       r.refundCount,
       r.refundText

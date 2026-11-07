@@ -58,7 +58,8 @@ export default function Reports() {
       refundCount: a.refundCount + r.refundCount,
       unconvertedCount: a.unconvertedCount + r.unconvertedCount,
       orders: a.orders + r.orders,
-      missingCostOrders: a.missingCostOrders + r.missingCostOrders
+      missingCostOrders: a.missingCostOrders + r.missingCostOrders,
+      rateMissingOrders: a.rateMissingOrders + r.rateMissingOrders
     }),
     {
       sales: 0,
@@ -71,13 +72,14 @@ export default function Reports() {
       refundCount: 0,
       unconvertedCount: 0,
       orders: 0,
-      missingCostOrders: 0
+      missingCostOrders: 0,
+      rateMissingOrders: 0
     }
   )
-  // 有成本没录的单：毛利是按 0 成本算的，偏大（不能当成真毛利）
-  const missingMonths = rows.filter((r) => r.missingCostOrders > 0)
+  // 毛利不可信的两种病：成本没录（偏大）与外币没填汇率（折不出来，按 0 混进去是偏小）
+  const missingMonths = rows.filter((r) => r.missingCostOrders > 0 || r.rateMissingOrders > 0)
   // 有任何一个月不可信，累计毛利就不可信
-  const profitReliable = totals.missingCostOrders === 0
+  const profitReliable = totals.missingCostOrders === 0 && totals.rateMissingOrders === 0
   const totalOwed = r2(owed.reduce((s, o) => s + r2(o.totalBase), 0))
 
   const exportBtn = (kind: ExportKind, label: string, toastText: string) => (
@@ -135,9 +137,12 @@ export default function Reports() {
               {profitReliable ? money(totals.profit, cur) : '—'}
             </div>
             <div className="stat-hint">
-              {totals.missingCostOrders
-                ? `有 ${totals.missingCostOrders} 单成本没录全，毛利不算`
-                : `成本 ${money(totals.cost, cur)}`}
+              {[
+                totals.missingCostOrders ? `有 ${totals.missingCostOrders} 单成本没录全，毛利不算` : '',
+                totals.rateMissingOrders ? `有 ${totals.rateMissingOrders} 单外币没填汇率，毛利折不全` : ''
+              ]
+                .filter(Boolean)
+                .join('；') || `成本 ${money(totals.cost, cur)}`}
             </div>
           </div>
           <div className="stat">
@@ -221,6 +226,9 @@ export default function Reports() {
                         {r.profit == null || r.orders === 0 ? '—' : money(r.profit, cur)}
                         {r.missingCostOrders ? (
                           <span className="faint"> （{r.missingCostOrders} 单成本未录）</span>
+                        ) : null}
+                        {r.rateMissingOrders ? (
+                          <span className="faint">（{r.rateMissingOrders} 单汇率没填）</span>
                         ) : null}
                       </td>
                       <td className={`num ${r.profit == null || r.orders === 0 || r.sales <= 0 ? 'na' : ''}`}>
