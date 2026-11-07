@@ -45,6 +45,7 @@ import { isBillingStatus, shownRemaining } from '../src/shared/billing'
 import { likeContains } from '../electron/services/search'
 import { INCOTERMS, canIssueDocs, DOC_ISSUE_FORBIDDEN, PAYMENT_STATUS_ORDER } from '../src/shared/types'
 import { CSV_BOM, looksGarbled, pickCsvDecode } from '../src/shared/csv'
+import { DRAFT_ORDER_NEW, clearDraft, loadDraft, saveDraft } from '../src/shared/drafts'
 
 let passed = 0
 let failed = 0
@@ -12695,6 +12696,46 @@ check(
   '登录表单只住在 remote 分支里（本地模式不出现登录框）',
   /source\.mode === 'remote' \? \([\s\S]*?后端登录/.test(r59SettingsSrc)
 )
+
+/* ---------------- R61：token 过期不丢草稿（远端录单被 401 拦下，本地暂存能续上） ---------------- */
+section('R61：token 过期不丢草稿（本地暂存）')
+{
+  // 渲染进程传 window.localStorage，这里用内存桩验同一套逻辑
+  const mem = new Map<string, string>()
+  const store = {
+    getItem: (k: string) => mem.get(k) ?? null,
+    setItem: (k: string, v: string) => void mem.set(k, v),
+    removeItem: (k: string) => void mem.delete(k)
+  }
+  check('没存过就是没有（返回 null，不凭空造一张空表单）', loadDraft(store, DRAFT_ORDER_NEW) === null)
+  const draftForm = { customerId: 7, currency: 'USD', exchangeRate: 7.12, customerPo: 'PO-88', note: '先记着，回头补' }
+  saveDraft(store, DRAFT_ORDER_NEW, draftForm)
+  const back = loadDraft<typeof draftForm>(store, DRAFT_ORDER_NEW)
+  check('草稿能原样取回', back !== null && JSON.stringify(back.value) === JSON.stringify(draftForm))
+  check('草稿带暂存时刻（恢复时好告诉人是几点存的）', back !== null && !Number.isNaN(Date.parse(back.savedAt)))
+  saveDraft(store, DRAFT_ORDER_NEW, { customerId: 8 })
+  eq('重存覆盖旧稿（同名只有一个）', loadDraft(store, DRAFT_ORDER_NEW)?.value, { customerId: 8 })
+  clearDraft(store, DRAFT_ORDER_NEW)
+  check('保存成功清掉草稿（不残留上一次的影子）', loadDraft(store, DRAFT_ORDER_NEW) === null && mem.size === 0)
+  // 断电/被杀写出的半截 JSON：当没有，且当场清掉，不给表单填半截
+  mem.set(DRAFT_ORDER_NEW, '{"savedAt":"2026-11-07T0')
+  check('半截 JSON 当没有（坏了的稿子不清空成半个表单）', loadDraft(store, DRAFT_ORDER_NEW) === null && mem.size === 0)
+  mem.set(DRAFT_ORDER_NEW, JSON.stringify({ savedAt: 123, value: { a: 1 } }))
+  check('时刻不是字符串也算坏稿（同样拒收）', loadDraft(store, DRAFT_ORDER_NEW) === null)
+
+  // 接线检查：渲染层没有 DOM 接缝，锁「新建订单弹窗真的接了这套暂存」——
+  // 改动即存、打开即恢复、保存成功才清、报错路径不清
+  const ordersSrc = fs.readFileSync('src/renderer/src/pages/Orders.tsx', 'utf8')
+  check('新建订单弹窗：表单每次改动都暂存（saveDraft 接在 form effect 上）', ordersSrc.includes('saveDraft(draftStore, DRAFT_ORDER_NEW'), ordersSrc.includes('saveDraft') ? '有 saveDraft 但位置不对' : '没接 saveDraft')
+  check('新建订单弹窗：打开时恢复上次没保存的草稿（loadDraft）', ordersSrc.includes('loadDraft(draftStore, DRAFT_ORDER_NEW'))
+  check('新建订单弹窗：建单成功才清草稿（clearDraft 在成功分支）', ordersSrc.includes('clearDraft(draftStore, DRAFT_ORDER_NEW'))
+  const createModalBody = ordersSrc.slice(ordersSrc.indexOf('function CreateOrderModal'))
+  check(
+    '草稿的清只发生在建单成功之后（401 拦下时稿子还在，重登后续上）',
+    createModalBody.indexOf('clearDraft(draftStore, DRAFT_ORDER_NEW') !== -1 &&
+      createModalBody.indexOf('clearDraft(draftStore, DRAFT_ORDER_NEW') < createModalBody.indexOf('onCreated(order.id)')
+  )
+}
 
 /* ---------------- 汇总 ---------------- */
 

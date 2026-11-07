@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Modal,
@@ -17,6 +17,30 @@ import {
   LoadError
 } from '../ui'
 import { isBillingStatus, shownRemaining } from '../../../shared/billing'
+import { DRAFT_ORDER_NEW, clearDraft, loadDraft, saveDraft } from '../../../shared/drafts'
+
+/** 新建订单表单的空白稿（草稿回填的基准，也用它判「用户到底动没动过」） */
+function blankOrderForm() {
+  return {
+    customerId: 0,
+    currency: 'USD' as Currency,
+    exchangeRate: '' as number | '',
+    exchangeRateDate: today(),
+    incoterm: 'FOB' as Incoterm,
+    portOfLoading: '',
+    portOfDestination: '',
+    paymentMethod: 'tt_deposit' as PaymentMethod,
+    depositRatio: 0.3,
+    expectedShipDate: '',
+    expectedArrivalDate: '',
+    customerPo: '',
+    note: ''
+  }
+}
+
+/** 草稿落在渲染进程的 localStorage：程序重启也在；测试里可换内存桩 */
+const draftStore = window.localStorage
+
 import {
   CURRENCIES,
   INCOTERMS,
@@ -468,20 +492,12 @@ function CreateOrderModal({
     loading: [],
     destination: []
   })
-  const [form, setForm] = useState({
-    customerId: 0,
-    currency: 'USD' as Currency,
-    exchangeRate: '' as number | '',
-    exchangeRateDate: today(),
-    incoterm: 'FOB' as Incoterm,
-    portOfLoading: '',
-    portOfDestination: '',
-    paymentMethod: 'tt_deposit' as PaymentMethod,
-    depositRatio: 0.3,
-    expectedShipDate: '',
-    expectedArrivalDate: '',
-    customerPo: '',
-    note: ''
+  /** 上次没保存的草稿（打开时读一次；有才有恢复提示与回填） */
+  const restored = useRef<ReturnType<typeof loadDraft<Record<string, unknown>>> | undefined>(undefined)
+  if (restored.current === undefined) restored.current = loadDraft(draftStore, DRAFT_ORDER_NEW)
+  const [form, setForm] = useState(() => {
+    const base = blankOrderForm()
+    return restored.current ? ({ ...base, ...restored.current.value } as typeof base) : base
   })
   const [lastRate, setLastRate] = useState<{ rate: number; date: string } | null>(null)
   // 本币单没有汇率可填：折算口径固定 1:1，硬要一个数字只会被随手填成 1，
@@ -499,6 +515,9 @@ function CreateOrderModal({
         setCustomers(cs)
         setSettings(s)
         setPorts(pt)
+        // 拉到设置后的默认定金是自动带出的，不算「用户动过笔」——不能因为这一次
+        // 变化就存下一份没人填过的草稿（下一次打开平白多一句「已恢复草稿」）
+        defaultsRef.current = true
         setForm((f) => ({
           ...f,
           depositRatio: s.defaultDepositRatio ?? 0.3
@@ -509,6 +528,31 @@ function CreateOrderModal({
       }
     })()
   }, [])
+
+  // 恢复提示只弹一次：告诉人这是几点存的那份稿，别让她以为是刚才填的
+  useEffect(() => {
+    if (restored.current) {
+      toast(`已恢复上次没保存的草稿（${new Date(restored.current.savedAt).toLocaleString()} 暂存），保存成功后自动清掉；不需要就改掉再存`)
+    }
+  }, [])
+
+  // 改动即暂存（R61）：录单到一半 token 过期被 401 拦下、或程序重启，稿子都在。
+  // 初始表单与自动带默认值的那一次不算动笔——没动过笔的人不该在下一次打开时看到「已恢复草稿」
+  const defaultsRef = useRef(false)
+  const pristineForm = useRef<string | null>(null)
+  useEffect(() => {
+    if (defaultsRef.current) {
+      defaultsRef.current = false
+      return
+    }
+    if (pristineForm.current === null) {
+      pristineForm.current = JSON.stringify(form)
+      return
+    }
+    if (JSON.stringify(form) !== pristineForm.current) {
+      saveDraft(draftStore, DRAFT_ORDER_NEW, form)
+    }
+  }, [form])
 
   // 汇率参考值按币种取：USD 的 7.1 不能抄到 EUR 单上，换币种就重新查同币种的上一次
   useEffect(() => {
@@ -599,6 +643,8 @@ function CreateOrderModal({
         customerPo: form.customerPo,
         note: form.note
       })
+      // 建单成功才算交卷：草稿当场清掉（401 拦下、取消、报错都留着，重登后续上）
+      clearDraft(draftStore, DRAFT_ORDER_NEW)
       toast(`订单 ${order.orderNo} 已创建`)
       onCreated(order.id)
     } catch (e) {
