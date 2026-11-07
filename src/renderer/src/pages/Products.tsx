@@ -23,6 +23,8 @@ interface Draft {
   note: string
   sizes: string[]
   colors: string[]
+  /** 读款那一刻的 updated_at（M4 乐观锁：保存时带上，别人先改过就拦下）；新建为 undefined */
+  updatedAt?: string
 }
 
 function emptyDraft(): Draft {
@@ -111,7 +113,8 @@ export default function Products() {
       boxHeight: p.boxHeight == null ? '' : String(p.boxHeight),
       note: p.note,
       sizes: [...p.sizes],
-      colors: [...p.colors]
+      colors: [...p.colors],
+      updatedAt: p.updatedAt
     })
     setImages(await window.api.products.images(p.id))
   }
@@ -146,7 +149,9 @@ export default function Products() {
         boxHeight: draft.boxHeight.trim() === '' ? null : Number(draft.boxHeight),
         sizes: draft.sizes,
         colors: draft.colors,
-        note: draft.note
+        note: draft.note,
+        // 乐观锁（M4）：别人在我看着这个款的这段时间里改过，就别悄悄盖掉
+        expectedUpdatedAt: draft.updatedAt ?? undefined
       })
       toast(draft.id ? '已保存' : '已新增商品')
       setDraft(null)

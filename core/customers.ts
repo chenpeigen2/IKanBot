@@ -10,7 +10,7 @@ import { mapCustomer, mapCustomerStats } from '../electron/db/mappers'
 import { likeAny } from '../electron/services/search'
 import { assertDepositRatio } from '../src/shared/guards'
 import { NON_BILLING_STATUSES, isBillingStatus, shownRemaining } from '../src/shared/billing'
-import { BizError, notFound } from '../src/shared/errors'
+import { BizError, notFound, writeConflict } from '../src/shared/errors'
 import { moneyCore } from './money'
 import type { Db } from './db'
 
@@ -38,6 +38,11 @@ export interface CustomerInput {
   note?: string
   /** 明知重名还要建（同名不同采购办是常态，不能硬拦） */
   allowDuplicate?: boolean
+  /**
+   * 乐观锁（M4）：界面读档案那一刻看到的 updated_at；写入前已被别人改过 → 409。
+   * 不传（undefined/空）不检查（兼容脚本/迁移调用）。
+   */
+  expectedUpdatedAt?: string | null
 }
 
 /** 外部输入按白名单读字段：多传的键不进 SQL，也防止把 id 写成字符串带进 WHERE */
@@ -69,7 +74,8 @@ function normalize(raw: Record<string, unknown>): CustomerInput {
     defaultPortLoading: s('defaultPortLoading'),
     defaultPortDestination: s('defaultPortDestination'),
     note: s('note'),
-    allowDuplicate: raw['allowDuplicate'] === true
+    allowDuplicate: raw['allowDuplicate'] === true,
+    expectedUpdatedAt: s('expectedUpdatedAt') ?? null
   }
 }
 
@@ -143,11 +149,15 @@ export function customersCore(db: Db) {
     }
     if (input.id != null) {
       await mustGet(input.id)
-      await db.run(
+      // 乐观锁（M4）：带上了读档那一刻的 updated_at 就条件更新；affected 0 = 有人先改过 → 409。
+      // 复查在写入这一刻做（mustGet 只证明「存在过」），SQLite 与未来的 MySQL 同一套语义
+      const expectedUpdatedAt = typeof input.expectedUpdatedAt === 'string' ? input.expectedUpdatedAt.trim() : ''
+      const res = await db.run(
         `UPDATE customers SET company=?, contact=?, email=?, phone=?, country=?, address=?,
          zip_code=?, attn=?, payment_pref=?, ship_attn=?, ship_address=?, ship_zip_code=?, ship_country=?,
          default_payment_method=?, default_deposit_ratio=?,
-         default_incoterm=?, default_port_loading=?, default_port_destination=?, note=?, updated_at=? WHERE id=?`,
+         default_incoterm=?, default_port_loading=?, default_port_destination=?, note=?, updated_at=?
+         WHERE id=?${expectedUpdatedAt ? ' AND updated_at = ?' : ''}`,
         [
           company,
           input.contact ?? '',
@@ -169,9 +179,11 @@ export function customersCore(db: Db) {
           input.defaultPortDestination ?? '',
           input.note ?? '',
           ts,
-          input.id
+          input.id,
+          ...(expectedUpdatedAt ? [expectedUpdatedAt] : [])
         ]
       )
+      if (expectedUpdatedAt && res.changes === 0) throw writeConflict()
       return mustGet(input.id)
     }
     const res = await db.run(

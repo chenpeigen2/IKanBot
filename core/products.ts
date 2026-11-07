@@ -8,7 +8,7 @@
 import type { Product, ProductImage } from '../src/shared/types'
 import { mapProduct, mapProductImage } from '../electron/db/mappers'
 import { likeAny } from '../electron/services/search'
-import { BizError, notFound } from '../src/shared/errors'
+import { BizError, notFound, writeConflict } from '../src/shared/errors'
 import type { Db, Row } from './db'
 
 export interface ProductInput {
@@ -32,6 +32,11 @@ export interface ProductInput {
   factoryNo?: string
   note?: string
   active?: number
+  /**
+   * 乐观锁（M4）：界面读款号那一刻看到的 updated_at；写入前已被别人改过 → 409。
+   * 不传（undefined/空）不检查（兼容脚本/迁移调用）。
+   */
+  expectedUpdatedAt?: string | null
 }
 
 /** 款号归一：去掉首尾空格，A001 和 a001 是同一个款（重印找图就靠它） */
@@ -72,7 +77,8 @@ function normalize(raw: Record<string, unknown>): ProductInput {
     factory: s('factory'),
     factoryNo: s('factoryNo'),
     note: s('note'),
-    active: active === 0 || active === 1 ? active : undefined
+    active: active === 0 || active === 1 ? active : undefined,
+    expectedUpdatedAt: s('expectedUpdatedAt') ?? null
   }
 }
 
@@ -310,10 +316,13 @@ export function productsCore(db: Db) {
         // active 不传就保留原值：不能因为编辑一下就把「停用」的款重新启用
         const cur = await db.get('SELECT active FROM products WHERE id = ?', [input.id])
         if (!cur) throw new BizError('商品不存在，改不了')
-        await db.run(
+        // 乐观锁（M4）：带上了读款那一刻的 updated_at 就条件更新；affected 0 = 有人先改过 → 409
+        const expectedUpdatedAt = typeof input.expectedUpdatedAt === 'string' ? input.expectedUpdatedAt.trim() : ''
+        const res = await db.run(
           `UPDATE products SET style_no=?, name=?, composition=?, category=?, brand=?, season=?,
          cost_price=?, sizes=?, colors=?, unit_net_weight=?, box_pieces=?, box_length=?, box_width=?, box_height=?,
-         factory=?, factory_no=?, note=?, active=?, updated_at=? WHERE id=?`,
+         factory=?, factory_no=?, note=?, active=?, updated_at=?
+         WHERE id=?${expectedUpdatedAt ? ' AND updated_at = ?' : ''}`,
           [
             styleNo,
             input.name ?? '',
@@ -334,9 +343,11 @@ export function productsCore(db: Db) {
             input.note ?? '',
             input.active ?? Number(cur['active'] ?? 1),
             ts,
-            input.id
+            input.id,
+            ...(expectedUpdatedAt ? [expectedUpdatedAt] : [])
           ]
         )
+        if (expectedUpdatedAt && res.changes === 0) throw writeConflict()
         return mustGet(input.id)
       }
 

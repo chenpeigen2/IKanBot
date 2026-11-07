@@ -1121,6 +1121,35 @@ async function main(): Promise<void> {
       !actorEvents.some((e) => e.actor === '界面上传的名字不算数')
     )
 
+    console.log('写冲突检测（M4 乐观锁：两个窗口同改一单，后写者收到 409）')
+    const conflictCust = await http.post('/api/customers/save').send({ input: { company: 'R62 Conflict Co' } })
+    const conflictOrder = await http
+      .post('/api/orders/create')
+      .send({ input: { customerId: conflictCust.body.id, currency: 'USD', exchangeRate: 7.2, exchangeRateDate: localDate() } })
+    const conflictOd = await http.post('/api/orders/get').send({ id: conflictOrder.body.id })
+    const seenAt = String(conflictOd.body.updatedAt ?? '')
+    check('读单带回 updated_at（乐观锁的凭据）', seenAt.length > 0, seenAt)
+    const winA = await http
+      .post('/api/orders/update')
+      .send({ id: conflictOrder.body.id, input: { customerId: conflictCust.body.id, customerPo: 'WIN-A', expectedUpdatedAt: seenAt } })
+    check('窗口 A 拿读单那一刻的 updated_at 先存成功', winA.status === 200 && winA.body.customerPo === 'WIN-A', JSON.stringify(winA.text))
+    const winB = await http
+      .post('/api/orders/update')
+      .send({ id: conflictOrder.body.id, input: { customerId: conflictCust.body.id, customerPo: 'WIN-B', expectedUpdatedAt: seenAt } })
+    check(
+      '窗口 B 还拿着旧 updated_at 后存被拦：409 + 「刚被别人改过」人话',
+      winB.status === 409 && String(winB.body?.error?.message ?? '').includes('刚被别人改过'),
+      'status=' + winB.status + ' text=' + JSON.stringify(winB.text)
+    )
+    const winB2 = await http
+      .post('/api/orders/update')
+      .send({ id: conflictOrder.body.id, input: { customerId: conflictCust.body.id, customerPo: 'WIN-B2', expectedUpdatedAt: String(winA.body.updatedAt) } })
+    check('窗口 B 刷新后重存成功（矛盾解开，不卡死）', winB2.status === 200 && winB2.body.customerPo === 'WIN-B2', JSON.stringify(winB2.text))
+    const noLock = await http
+      .post('/api/orders/update')
+      .send({ id: conflictOrder.body.id, input: { customerId: conflictCust.body.id, customerPo: 'NO-LOCK' } })
+    check('不传 expectedUpdatedAt 的老调用不受影响', noLock.status === 200 && noLock.body.customerPo === 'NO-LOCK')
+
     console.log('备份（R61：备份簇上后端，服务器侧打包与恢复，与桌面同一份 core）')
     const bkNoAuth = await raw.post('/api/backup/create').send({})
     check('备份是写操作，无 token 401', bkNoAuth.status === 401)

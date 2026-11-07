@@ -224,7 +224,9 @@ export default function EditOrderModal({
         vessel: form.vessel,
         sealNo: form.sealNo,
         charges: cleanCharges.map((c) => ({ label: c.label, amount: c.amount })),
-        chargeReason: chargeReason.trim() || undefined
+        chargeReason: chargeReason.trim() || undefined,
+        // 乐观锁（M4）：别人在我看着这张单的这段时间里改过，就别拿旧画面盖掉新账
+        expectedUpdatedAt: order.updatedAt
       })
       // 保存成功才算交卷：草稿当场清掉（401 拦下、取消、报错都留着，重开弹窗续上）
       clearDraft(draftStore, draftKey)

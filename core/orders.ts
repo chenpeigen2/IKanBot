@@ -8,7 +8,7 @@
  * 与 credits / samples 互相调用（转单、抵扣、回退），这里按需懒建对方的工厂，
  * 避免模块初始化时互相等——两边拿到的永远是同一个连接。
  */
-import { bizError, notFound } from '../src/shared/errors'
+import { bizError, notFound, writeConflict } from '../src/shared/errors'
 import type { Db } from './db'
 import { nextNo } from './next-no'
 import { logEvent } from './events'
@@ -109,6 +109,12 @@ export interface OrderInput {
   billTo?: Partial<PartySnapshot>
   /** 收货抬头覆盖（这单要送别的仓就在这里改） */
   shipTo?: Partial<PartySnapshot>
+  /**
+   * 乐观锁（M4）：界面读单那一刻看到的 updated_at。传了就按「读时的那一刻」条件更新
+   * （UPDATE … WHERE id=? AND updated_at=?）；写入前已被别人改过 → 409「刚被别人改过」。
+   * 不传（undefined/空）走老路：不检查（兼容脚本/迁移调用）。
+   */
+  expectedUpdatedAt?: string | null
 }
 
 export interface OrderItemInput {
@@ -801,6 +807,8 @@ export function ordersCore(db: Db) {
     const ts = now()
     const before = await db.get('SELECT * FROM orders WHERE id = ?', [id]) as Record<string, unknown> | null
     if (!before) throw notFound('订单不存在')
+    // 乐观锁（M4）：界面带上它读单那一刻的 updated_at；空/未传不检查（老调用方照旧）
+    const expectedUpdatedAt = typeof input.expectedUpdatedAt === 'string' ? input.expectedUpdatedAt.trim() : ''
     await assertOrderWritable(id, '改这张单')
     // 单号是凭据：编辑时把 PI 号改成别人的号要拦住（改成自己的号不算重号）
     const oldPiNo = String(before.pi_no ?? '').trim()
@@ -1019,10 +1027,22 @@ export function ordersCore(db: Db) {
             `单号是凭据，两张单不能共用一个号——请换一个号再保存。`
         )
       }
-      await db.run(
-        `UPDATE orders SET ${cells.map(([col]) => `${col}=?`).join(', ')}, updated_at=? WHERE id=?`,
-        [...cells.map(([, v]) => v as string | number | null), ts, id]
+      const res = await db.run(
+        `UPDATE orders SET ${cells.map(([col]) => `${col}=?`).join(', ')}, updated_at=? WHERE id=?${expectedUpdatedAt ? ' AND updated_at = ?' : ''}`,
+        [
+          ...cells.map(([, v]) => v as string | number | null),
+          ts,
+          id,
+          ...(expectedUpdatedAt ? [expectedUpdatedAt] : [])
+        ]
       )
+      // 乐观锁复查（M4）：affected 0 行 = 读单到写入之间被人改过（或整张单没了）。
+      // 在 transact 内复查而不是前端预检：SQLite 与未来的 MySQL 都能用「条件更新 + 行数」表达同一套语义
+      if (expectedUpdatedAt && res.changes === 0) {
+        const still = await db.get('SELECT id FROM orders WHERE id = ?', [id])
+        if (still) throw writeConflict()
+        throw notFound('订单不存在')
+      }
       // 让利让过头（合计为负）的单不许落库。这道门在事务里按库内的货值现算：
       // 事务外读到的货值可能在「守门 → 写入」之间被另一笔改小明细抽走，
       // 两边各自看自己那一改都合法，库里就留下负合计单——负数会被当成客户多付，生出能抵能退的假预收。

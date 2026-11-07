@@ -11,7 +11,7 @@
 export class BizError extends Error {
   constructor(
     message: string,
-    readonly status: 400 | 404 = 400
+    readonly status: 400 | 404 | 409 = 400
   ) {
     super(message)
     this.name = 'BizError'
@@ -26,4 +26,14 @@ export function bizError(message: string): BizError {
 /** 找不到东西：桌面只认 message，后端落 404 */
 export function notFound(message: string): BizError {
   return new BizError(message, 404)
+}
+
+/**
+ * 写冲突（M4 乐观锁）：按读时的 updated_at 条件更新，affected 0 行 = 别人刚改过。
+ * 后端落 409，桌面 toast 这句原话——后写的人当场知道要刷新，不能拿旧内容悄悄盖掉新账。
+ */
+export const WRITE_CONFLICT_MESSAGE = '这条记录刚被别人改过，请刷新后再试'
+
+export function writeConflict(): BizError {
+  return new BizError(WRITE_CONFLICT_MESSAGE, 409)
 }

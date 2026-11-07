@@ -12779,6 +12779,76 @@ section('R62：编辑已有订单弹窗的草稿暂存')
   )
 }
 
+/* ---------------- R62/M4：写冲突检测（乐观锁：读时 updated_at 不对就 409） ---------------- */
+section('R62/M4：写冲突检测（乐观锁）')
+{
+  /** 统一的「想拦下」捕获器：拿错误原句 */
+  const attempt = async (fn: () => Promise<unknown>): Promise<string> => {
+    try {
+      await fn()
+      return ''
+    } catch (e) {
+      return (e as Error).message
+    }
+  }
+
+  // 订单：后写者必须被拦下，不能拿旧画面盖掉新账
+  const lockOrder = await orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.2 })
+  const lockOd = await orders.getOrder(lockOrder.id)
+  check('订单带 updated_at（乐观锁的凭据）', typeof lockOd.updatedAt === 'string' && lockOd.updatedAt.length > 0)
+  const staleOrder = await attempt(() =>
+    orders.updateOrder(lockOrder.id, { customerId: c1.id, customerPo: 'STALE', expectedUpdatedAt: '2000-01-01T00:00:00.000Z' })
+  )
+  check('旧 updated_at 保存订单被拦：这条记录刚被别人改过', staleOrder.includes('刚被别人改过'), staleOrder)
+  const freshOrder = await orders.updateOrder(lockOrder.id, {
+    customerId: c1.id,
+    customerPo: 'FRESH',
+    expectedUpdatedAt: lockOd.updatedAt
+  })
+  check('带着读单那一刻的 updated_at 保存成功', freshOrder.customerPo === 'FRESH')
+  const legacyOrder = await orders.updateOrder(lockOrder.id, { customerId: c1.id, customerPo: 'LEGACY' })
+  check('不传 expectedUpdatedAt 走老路（脚本/迁移调用不受影响）', legacyOrder.customerPo === 'LEGACY')
+
+  // 客户档案：同一套语义
+  const lockCust = await customers.saveCustomer({ company: 'R62 Lock Co' })
+  check('客户带 updatedAt', typeof lockCust.updatedAt === 'string' && lockCust.updatedAt.length > 0)
+  const staleCust = await attempt(() =>
+    customers.saveCustomer({ id: lockCust.id, company: 'R62 Lock Co 改', expectedUpdatedAt: '2000-01-01T00:00:00.000Z' })
+  )
+  check('旧 updated_at 存客户被拦：这条记录刚被别人改过', staleCust.includes('刚被别人改过'), staleCust)
+  const freshCust = await customers.saveCustomer({
+    id: lockCust.id,
+    company: 'R62 Lock Co 改',
+    expectedUpdatedAt: lockCust.updatedAt
+  })
+  check('带着读档那一刻的 updated_at 保存成功', freshCust.company === 'R62 Lock Co 改')
+
+  // 商品：同一套语义
+  const lockProd = await products.saveProduct({ styleNo: 'R62-LOCK', name: '锁测', sizes: [], colors: [] })
+  check('商品带 updatedAt', typeof lockProd.updatedAt === 'string' && lockProd.updatedAt.length > 0)
+  const staleProd = await attempt(() =>
+    products.saveProduct({ id: lockProd.id, styleNo: 'R62-LOCK', name: '被人先改过', expectedUpdatedAt: '2000-01-01T00:00:00.000Z' })
+  )
+  check('旧 updated_at 存商品被拦：这条记录刚被别人改过', staleProd.includes('刚被别人改过'), staleProd)
+  const freshProd = await products.saveProduct({
+    id: lockProd.id,
+    styleNo: 'R62-LOCK',
+    name: '锁测改',
+    sizes: [],
+    colors: [],
+    expectedUpdatedAt: lockProd.updatedAt
+  })
+  check('带着读款那一刻的 updated_at 保存成功', freshProd.name === '锁测改')
+
+  // 接线检查：界面把读到的 updated_at 随保存带给服务层（后写者才会看到人话提示）
+  const editModalSrc = fs.readFileSync('src/renderer/src/pages/EditOrderModal.tsx', 'utf8')
+  check('编辑订单弹窗：保存带 expectedUpdatedAt（order.updatedAt）', editModalSrc.includes('expectedUpdatedAt: order.updatedAt'))
+  const custSrc = fs.readFileSync('src/renderer/src/pages/Customers.tsx', 'utf8')
+  check('客户编辑：保存带 expectedUpdatedAt（draft.updatedAt）', custSrc.includes('expectedUpdatedAt: draft.updatedAt'))
+  const prodSrc = fs.readFileSync('src/renderer/src/pages/Products.tsx', 'utf8')
+  check('商品编辑：保存带 expectedUpdatedAt（draft.updatedAt）', prodSrc.includes('expectedUpdatedAt: draft.updatedAt'))
+}
+
 /* ---------------- 汇总 ---------------- */
 
 console.log(`\n${'='.repeat(46)}`)

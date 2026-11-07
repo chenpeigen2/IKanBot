@@ -25,6 +25,8 @@ interface Draft {
   defaultPortLoading: string
   defaultPortDestination: string
   note: string
+  /** 读档那一刻的 updated_at（M4 乐观锁：保存时带上，别人先改过就拦下）；新建为 undefined */
+  updatedAt?: string
 }
 
 const blank: Draft = {
@@ -72,7 +74,8 @@ function toDraft(c: Customer): Draft {
     defaultIncoterm: c.defaultIncoterm,
     defaultPortLoading: c.defaultPortLoading,
     defaultPortDestination: c.defaultPortDestination,
-    note: c.note
+    note: c.note,
+    updatedAt: c.updatedAt
   }
 }
 
@@ -192,6 +195,8 @@ export default function Customers() {
       await window.api.customers.save({
         ...draft,
         allowDuplicate,
+        // 乐观锁（M4）：别人在我看着这份档案的这段时间里改过，就别悄悄盖掉
+        expectedUpdatedAt: draft.updatedAt ?? null,
         defaultDepositRatio: draft.defaultDepositRatio === '' ? null : Number(draft.defaultDepositRatio)
       })
       toast(draft.id ? '已保存' : '已新增客户')
