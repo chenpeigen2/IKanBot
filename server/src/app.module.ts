@@ -6,6 +6,7 @@ import { DbModule } from './db/db.module'
 import { CreditsModule } from './credits/credits.module'
 import { CustomersModule } from './customers/customers.module'
 import { DashboardModule } from './dashboard/dashboard.module'
+import { DocsModule } from './docs/docs.module'
 import { FilesModule } from './files/files.module'
 import { MoneyModule } from './money/money.module'
 import { OrdersModule } from './orders/orders.module'
@@ -35,7 +36,8 @@ import { AllExceptionsFilter } from './common/all-exceptions.filter'
     SamplesModule,
     CreditsModule,
     PackingModule,
-    DashboardModule
+    DashboardModule,
+    DocsModule
   ],
   controllers: [HealthController, MetaController],
   providers: [RoutesService, AllExceptionsFilter]

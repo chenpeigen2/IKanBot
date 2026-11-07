@@ -51,6 +51,11 @@ export class AllExceptionsFilter implements ExceptionFilter {
       console.error('[ikanbot-server] 未处理的错误', exception)
     }
 
+    // 错误体必须是 JSON：路由上用 @Header 声明过别的 Content-Type（如单据存档的
+    // application/pdf）时，Nest 在方法抛错前就把头设好了，express 的 res.json
+    // 见「已有 Content-Type」就不再改——错误体会被客户端按 PDF 去解，
+    // 话术全变成二进制。错误体永远显式回 JSON。
+    res.setHeader('content-type', 'application/json; charset=utf-8')
     res.status(status).json({ error: { message } })
   }
 }

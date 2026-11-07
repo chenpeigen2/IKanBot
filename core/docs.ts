@@ -14,6 +14,7 @@ import { settingsCore } from './settings'
 import { computeOrderMoney, parseCharges } from './money'
 import { logEvent } from './events'
 import { assertDocNo } from '../src/shared/guards'
+import { bizError, notFound } from '../src/shared/errors'
 import { ciNoOf, latestAmountPerDocNo } from '../src/shared/documents'
 import { docPageFingerprint, stalePageMessage } from '../src/shared/docFingerprint'
 import type { DocKind } from '../src/shared/types'
@@ -47,7 +48,7 @@ function now(): string {
 
 export function assertDocKind(kind: unknown): DocKind {
   const v = String(kind ?? '')
-  if (!DOC_KINDS.includes(v as DocKind)) throw new Error(`不认识这种单据：${v || '(空)'}`)
+  if (!DOC_KINDS.includes(v as DocKind)) throw bizError(`不认识这种单据：${v || '(空)'}`)
   return v as DocKind
 }
 
@@ -161,17 +162,17 @@ export function docsCore(db: Db, dirs: DocsDirs) {
    */
   async function voidDocVersion(versionId: number, reason = ''): Promise<DocVersion[]> {
     const why = String(reason ?? '').trim()
-    if (!why) throw new Error('作废存档要写原因（例如“金额敲错一位”“箱数装错”），操作历史要留痕。')
+    if (!why) throw bizError('作废存档要写原因（例如“金额敲错一位”“箱数装错”），操作历史要留痕。')
     const row = (await db.get('SELECT * FROM doc_versions WHERE id = ?', [versionId])) as
       | Record<string, unknown>
       | undefined
-    if (!row) throw new Error('这一版存档已经不存在了，刷新页面后再试。')
+    if (!row) throw notFound('这一版存档已经不存在了，刷新页面后再试。')
     const v = mapDocVersion(row)
-    if (v.voidedAt) throw new Error(`存档 ${v.docNo} 第 ${v.version} 版已经是作废状态，不用重复作废。`)
+    if (v.voidedAt) throw bizError(`存档 ${v.docNo} 第 ${v.version} 版已经是作废状态，不用重复作废。`)
     // 作废重出是 CI 专用通道：批次锁定与金额钉住都只认 CI，作废 PI/箱单/报价的存档
     // 改变不了任何计算，只会污染审计口径；这些纸面要更正直接重出一版即可。
     if (v.kind !== 'ci') {
-      throw new Error(
+      throw bizError(
         `只有 CI 存档支持作废重出；${v.docNo} 是 ${v.kind.toUpperCase()} 存档，它不参与锁定，` +
           `作废它改变不了任何计算——纸面要更正直接重出一版即可。`
       )
@@ -182,7 +183,7 @@ export function docsCore(db: Db, dirs: DocsDirs) {
           | { payment_status?: string }
           | undefined)?.payment_status ?? ''
       )
-      if (st === 'void') throw new Error('这张订单已作废，存档是留档凭据，不能再作废。')
+      if (st === 'void') throw bizError('这张订单已作废，存档是留档凭据，不能再作废。')
     }
     await db.transact(async () => {
       await db.run('UPDATE doc_versions SET voided_at = ?, void_reason = ? WHERE id = ?', [now(), why, versionId])
@@ -237,15 +238,23 @@ export function docsCore(db: Db, dirs: DocsDirs) {
     input: Parameters<DocsApi['saveDocFile']>[0]
   ): Promise<{ filePath: string; absolutePath: string; version: number }> {
     // 存档金额是事后对账的依据：NaN/负数直接拒收，不能静默落成 0
+    // 漏传金额不能按 0 存：存档金额是这张纸的凭据——批次 CI 记的是本批金额，PI/报价记的是整单金额，
+    // 钉成 0 以后对账只剩一张 0 元的纸（预览没带金额就存，只能重开预览）。
+    // 这道检查从桌面 IPC 收进 core（R60）：HTTP 入口同样要拦，一句话术。
+    if (input.amount == null) {
+      throw bizError(
+        `这张 ${kind.toUpperCase()} 没带金额，不能存档：存档金额是事后对账的依据，不能按 0 记。请关掉预览重新打开再存。`
+      )
+    }
     if (input.amount != null) {
       const amt = Number(input.amount)
       if (!Number.isFinite(amt) || amt < 0) {
-        throw new Error(`存档金额「${String(input.amount)}」不是有效金额，不能存这一版。请关掉预览重新打开再存。`)
+        throw bizError(`存档金额「${String(input.amount)}」不是有效金额，不能存这一版。请关掉预览重新打开再存。`)
       }
     }
     const version = await nextVersion(docNo, kind)
     if (input.expectedVersion != null && Number(input.expectedVersion) !== version) {
-      throw new Error(
+      throw bizError(
         `这一版已经变了：纸面是第 ${input.expectedVersion} 版，系统现在该存第 ${version} 版。` +
           `请关掉预览重新打开再存，别把两版内容混在一起。`
       )
@@ -260,7 +269,7 @@ export function docsCore(db: Db, dirs: DocsDirs) {
           ?.pi_no ?? ''
       ).trim()
       if (!piNo) {
-        throw new Error(
+        throw bizError(
           `这张单还没有 PI 号，CI 存档不能出：CI 的编号、以及「出过 CI 就锁单价、锁箱明细、批次金额按存档钉」` +
             `这几道闸门都按 PI 号认单。PI 号空着，它们会认错别家的单，这张单看着却像「还没出过 CI」，想怎么改就怎么改。` +
             `请先到订单里补上 PI 号，再出这一版。`
@@ -297,7 +306,7 @@ export function docsCore(db: Db, dirs: DocsDirs) {
         if (orphan) {
           writeFileSync(absolutePath, input.pdf)
         } else {
-          throw new Error(`存档文件 ${fileName} 已经存在，不能覆盖。请刷新后重新生成这一版。`)
+          throw bizError(`存档文件 ${fileName} 已经存在，不能覆盖。请刷新后重新生成这一版。`)
         }
       } else {
         throw e
@@ -356,7 +365,7 @@ export function docsCore(db: Db, dirs: DocsDirs) {
       }
       const msg = (e as Error).message ?? ''
       if (/UNIQUE|unique/i.test(msg)) {
-        throw new Error(`单据 ${docNo} 第 ${version} 版已经存过了（可能另一窗口同时点了存档）。请刷新后核对存档列表。`)
+        throw bizError(`单据 ${docNo} 第 ${version} 版已经存过了（可能另一窗口同时点了存档）。请刷新后核对存档列表。`)
       }
       throw e
     }
@@ -395,7 +404,7 @@ export function docsCore(db: Db, dirs: DocsDirs) {
   /** 存档里存的是相对路径；老数据是绝对路径，照样能解析（换机后按 docs 段回退） */
   function resolveDocPath(filePath: string): string {
     const raw = String(filePath ?? '').trim()
-    if (!raw) throw new Error('没有文件')
+    if (!raw) throw bizError('没有文件')
     const root = dirs.dataDir()
     const docsRoot = resolve(root, 'docs')
     // 渲染层传来的路径一律当敌情：绝对路径只认落在数据目录里的。
@@ -422,7 +431,7 @@ export function docsCore(db: Db, dirs: DocsDirs) {
       const abs = resolve(docsRoot, raw.replace(/\\/g, '/').slice(i + marker.length))
       if (abs.startsWith(docsRoot + sep)) return abs
     }
-    throw new Error('单据路径不在数据目录里，已拒绝打开')
+    throw bizError('单据路径不在数据目录里，已拒绝打开')
   }
 
   async function listDocVersions(orderId: number): Promise<DocVersion[]> {

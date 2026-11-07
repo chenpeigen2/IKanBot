@@ -18,6 +18,7 @@ async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'ikan-e2e-'))
   process.env['IKAN_SQLITE_FILE'] = join(dir, 'e2e.db')
   process.env['IKAN_IMAGES_DIR'] = join(dir, 'images')
+  process.env['IKAN_DOCS_DIR'] = join(dir, 'docs')
   delete process.env['IKAN_DB']
   // 首个用户的引导走启动路径本身：users 空 + 环境变量齐全 → 建一个（M2 鉴权第一片）
   process.env['IKAN_BOOTSTRAP_USER'] = 'wenjuan'
@@ -74,8 +75,8 @@ async function main(): Promise<void> {
     const routes: string[] = meta.body.routes ?? []
     check('GET /api 自描述已接接口', routes.includes('POST /api/customers/list') && routes.includes('GET /healthz'))
     check(
-      '路由数与控制器一致（97 个：前 30 + 订单 30 + 报价 8 + 打样 8 + 预收 4 + 装箱 9 + 工作台 2 + 月报 1 + 导出 1 + 客户聚合 3 + 登录 1）',
-      routes.length === 97
+      '路由数与控制器一致（103 个：前 30 + 订单 30 + 报价 8 + 打样 8 + 预收 4 + 装箱 9 + 工作台 2 + 月报 1 + 导出 1 + 客户聚合 3 + 登录 1 + 单据存档 6）',
+      routes.length === 103
     )
     const metaNoAuth = await raw.get('/api')
     check('GET /api 不挂锁（探活与覆盖率靠它）', metaNoAuth.status === 200)
@@ -736,6 +737,92 @@ async function main(): Promise<void> {
 
     const plDel = await http.post('/api/pl/delete').send({ orderId: oid, plId })
     check('没出过 CI 的批次可以删', plDel.status === 200 && plDel.body.length === 0)
+
+    console.log('单据存档（R60：docs 簇上后端，PDF 字节走 HTTP）')
+    const docPdf = Buffer.from('%PDF-1.4 server doc v1')
+    const docMeta = encodeURIComponent(JSON.stringify({ docNo: 'PI-DOCSRV', kind: 'pi', orderId: oid, amount: 50 }))
+    const docNoAuth = await raw
+      .post(`/api/docs/save?meta=${docMeta}`)
+      .set('content-type', 'application/octet-stream')
+      .send(docPdf)
+    check('存档是写操作，无 token 401', docNoAuth.status === 401)
+    const dSave = await http
+      .post(`/api/docs/save?meta=${docMeta}`)
+      .set('content-type', 'application/octet-stream')
+      .send(docPdf)
+    check(
+      'PDF 字节上传落档：版本 1，路径带 docs 段',
+      dSave.status === 200 && dSave.body.version === 1 && String(dSave.body.filePath).includes('docs/'),
+      JSON.stringify(dSave.body)
+    )
+    const dBytes = await http.post('/api/docs/read').send({ filePath: dSave.body.filePath })
+    check(
+      '按路径取回的字节与存入的逐字节一致',
+      dBytes.status === 200 && Buffer.compare(Buffer.from(dBytes.body), docPdf) === 0
+    )
+    const dNext = await http.post('/api/docs/nextVersion').send({ docNo: 'PI-DOCSRV', kind: 'pi' })
+    check('下一版 = 2（版本只增不减）', dNext.status === 200 && Number(dNext.text) === 2, 'status=' + dNext.status + ' text=' + JSON.stringify(dNext.text))
+    const dV2 = await http
+      .post(`/api/docs/save?meta=${docMeta}`)
+      .set('content-type', 'application/octet-stream')
+      .send(Buffer.from('%PDF-1.4 server doc v2'))
+    check('重版存档版本递增', dV2.status === 200 && dV2.body.version === 2)
+    const dStale = await http
+      .post(`/api/docs/save?meta=${encodeURIComponent(JSON.stringify({ docNo: 'PI-DOCSRV', kind: 'pi', orderId: oid, amount: 50, expectedVersion: 1 }))}`)
+      .set('content-type', 'application/octet-stream')
+      .send(docPdf)
+    check(
+      '纸面版次过时拒存（原句）',
+      dStale.status === 400 && String(dStale.body.error.message).includes('该存第'),
+      JSON.stringify(dStale.body)
+    )
+    const dNoAmt = await http
+      .post(`/api/docs/save?meta=${encodeURIComponent(JSON.stringify({ docNo: 'PI-DOCSRV', kind: 'pi', orderId: oid }))}`)
+      .set('content-type', 'application/octet-stream')
+      .send(docPdf)
+    check('漏金额拒存（存档金额是凭据，不能按 0 记）', dNoAmt.status === 400 && String(dNoAmt.body.error.message).includes('没带金额'))
+    const dList = await http.post('/api/docs/list').send({ orderId: oid })
+    check(
+      '存档列表按订单查到两版',
+      dList.status === 200 && dList.body.filter((d: any) => d.docNo === 'PI-DOCSRV').length === 2,
+      JSON.stringify(dList.body)
+    )
+    check('存档时间戳在，且是这一刻的（UTC 存、桌面按本地日显示）',
+      dList.body.every((d: any) => !Number.isNaN(Date.parse(d.createdAt)))
+    )
+    const dVoidPi = await http.post('/api/docs/void').send({ versionId: Number(dList.body.find((d: any) => d.docNo === 'PI-DOCSRV').id), reason: '试一下' })
+    check('PI 存档不作废（只有 CI 支持作废重出，原句）', dVoidPi.status === 400 && String(dVoidPi.body.error.message).includes('只有 CI'))
+
+    // 路径守卫与桌面同一份判据（R42 语义服务端同样要守）
+    for (const evil of ['../../secret.pdf', 'D:\\old-pc\\x.pdf', '/etc/passwd', 'docs/../../ikanbot.db']) {
+      const evilRead = await http.post('/api/docs/read').send({ filePath: evil });
+      check(`外来路径拒读：${evil}`, evilRead.status === 400 && String(evilRead.body.error.message).includes('拒绝打开'), 'status=' + evilRead.status + ' text=' + JSON.stringify(evilRead.text))
+    }
+    const dMissing = await http
+      .post('/api/docs/read')
+      .send({ filePath: 'docs/PI-DOCSRV/pi_PI-DOCSRV_v99.pdf' })
+    check('路径在目录里但文件不在 → 404 说「文件已不存在」', dMissing.status === 404)
+
+    // CI 存档 + 作废重出（R18/R45 的语义在服务端同样成立）
+    const oidPiNo = String(oCreate.body.piNo ?? '').trim()
+    check('订单带着 PI 号（CI 认账靠它）', oidPiNo !== '', oidPiNo)
+    const ciNo = `CI${oidPiNo}`
+    const ciSave = await http
+      .post(`/api/docs/save?meta=${encodeURIComponent(JSON.stringify({ docNo: ciNo, kind: 'ci', orderId: oid, amount: 60 }))}`)
+      .set('content-type', 'application/octet-stream')
+      .send(Buffer.from('%PDF-1.4 server ci'))
+    check('CI 存档落档', ciSave.status === 200 && ciSave.body.version === 1, JSON.stringify(ciSave.body))
+    const ciList = await http.post('/api/docs/list').send({ orderId: oid })
+    const ciRow = ciList.body.find((d: any) => d.docNo === ciNo)
+    const ciVoidBad = await http.post('/api/docs/void').send({ versionId: Number(ciRow.id), reason: '  ' })
+    check('作废存档不写原因被拦（原句）', ciVoidBad.status === 400 && String(ciVoidBad.body.error.message).includes('原因'))
+    const ciVoid = await http
+      .post('/api/docs/void')
+      .send({ versionId: Number(ciRow.id), reason: 'CI 金额敲错一位：60 应为 600' })
+    check('CI 作废重出通道在服务端同样打开',
+      ciVoid.status === 200 && ciVoid.body.find((d: any) => d.docNo === ciNo).voidedAt !== null,
+      JSON.stringify(ciVoid.body)
+    )
 
     console.log('工作台与报表')
     const stats = await http.post('/api/dashboard/stats').send({})
