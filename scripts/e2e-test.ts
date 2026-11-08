@@ -26,6 +26,7 @@ import * as money from '../electron/services/money'
 import * as credits from '../electron/services/credits'
 import { getSettings, saveSettings, markBackupOk, markBackupFail, baseCurrencyLocked } from '../electron/services/settings'
 import { createBackup, inspectBackup, isRestoring, listBackups, pruneBackups, restoreBackup, uniqueBackupName } from '../electron/services/backup'
+import { migrationReport } from '../core/migration'
 import * as docs from '../electron/services/docs'
 import { collectDir, createZip, readZip, verifyZip, zhFsError } from '../electron/services/zip'
 import { docPageFingerprint } from '../src/shared/docFingerprint'
@@ -4117,6 +4118,32 @@ section('R65：备份顺手清恢复孤儿目录（崩溃漏清的那种）')
   }
   check('刚出现的探针目录不是孤儿，不许动', fs.existsSync(fresh))
   fs.rmSync(fresh, { recursive: true, force: true })
+}
+
+/* ---------------- R66：搬迁对账（migrationReport）——逐表行数 + 口径指纹 ---------------- */
+section('R66：搬迁对账（migrationReport）')
+{
+  // 口径指纹用「前后差一张」锁死：整库 SUM 会被前面所有测试的账垫底，绝对数不稳定，
+  // 增量才是搬没搬对的判据
+  const rep1 = await migrationReport(coreDb)
+  const mCust = await customers.saveCustomer({ company: 'R66 Migration Co' })
+  const m1 = await orders.createOrder({ customerId: mCust.id, currency: 'USD', exchangeRate: 7.2 })
+  await orders.addOrderItem(m1.id, { styleNo: 'R66-M1', productName: '对账测', color: 'Black', size: 'M', quantity: 4, unitPrice: 25 })
+  await orders.setPaymentStatus(m1.id, 'confirmed')
+  await orders.addPayment(m1.id, { paidAt: localDate(), amount: 72, method: 'T/T', bankRef: 'R66-PAY-1' })
+  const rep2 = await migrationReport(coreDb)
+  check('orders 行数 +1（表行数指纹）', rep2.tables.orders === rep1.tables.orders + 1, `${rep1.tables.orders} → ${rep2.tables.orders}`)
+  check('order_items 行数 +1', rep2.tables.order_items === rep1.tables.order_items + 1)
+  check('payments 行数 +1 且收款合计恰好 +72', rep2.tables.payments === rep1.tables.payments + 1 && Math.abs(rep2.paymentTotal - rep1.paymentTotal - 72) < 0.001, `${rep1.paymentTotal} → ${rep2.paymentTotal}`)
+  check('单号唯一在搬迁口径下成立（行数 = 去重单号数）', rep2.orderNoDistinct === rep2.orderNoCount, `${rep2.orderNoDistinct} / ${rep2.orderNoCount}`)
+  check('抵扣台账合计是数（本轮没造抵扣，不变）', typeof rep2.creditAppliedTotal === 'number' && rep2.creditAppliedTotal === rep1.creditAppliedTotal)
+  check('核心表一张不缺（12 张全在对账里）', Object.keys(rep2.tables).length === 12, JSON.stringify(Object.keys(rep2.tables)))
+
+  // 接线检查：远端模式的 inspect/restore 会把本机包先上传（搬迁最后一公里）
+  const ipcSrc = fs.readFileSync('electron/ipc/index.ts', 'utf8')
+  check('备份 inspect/restore 远端分支：本机包先上传（remoteUploadBackup）', ipcSrc.includes('remoteUploadBackup'))
+  const clientSrc = fs.readFileSync('electron/remote/client.ts', 'utf8')
+  check('上传打到服务器的搬迁口（/api/backup/upload）', clientSrc.includes('/api/backup/upload'))
 }
 
 section('R9 工作台会盯住备份（数据只躺在这台电脑上）')

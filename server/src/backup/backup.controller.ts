@@ -1,4 +1,5 @@
-import { BadRequestException, Body, Controller, HttpCode, Post } from '@nestjs/common'
+import { BadRequestException, Body, Controller, HttpCode, Post, Req } from '@nestjs/common'
+import type { Request } from 'express'
 import { BackupService } from './backup.service'
 
 /**
@@ -39,5 +40,20 @@ export class BackupController {
   restore(@Body() body: Record<string, unknown>) {
     if (body['path'] == null) throw new BadRequestException('请先选择一个备份文件')
     return this.backup.restore(body['path'])
+  }
+
+  /**
+   * 搬迁上传（R66）：老桌面的整库包以 octet-stream 原样传上来（学 docs:save 的形态），
+   * 服务器落进备份目录并按同一条闸门验收（结构/quick_check/版本守卫），回服务器路径。
+   * 恢复仍然走 POST /api/backup/restore——两步分开，恢复前还能「查看摘要后确认替换」。
+   */
+  @Post('upload')
+  @HttpCode(200)
+  async upload(@Req() req: Request): Promise<{ path: string; hasDb: boolean; orderCount: number | null; paymentCount: number | null }> {
+    const body: unknown = req.body
+    if (!Buffer.isBuffer(body)) {
+      throw new BadRequestException('备份包要以 application/octet-stream 原样上传，不要 base64。')
+    }
+    return await this.backup.upload(body)
   }
 }

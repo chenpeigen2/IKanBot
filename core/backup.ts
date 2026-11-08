@@ -432,6 +432,35 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
   }
 
   /** 打开一个备份包看看里面是什么（不落任何盘），恢复确认框用 */
+  /**
+   * 收一份外来的整库包（搬迁：老桌面的整库传上来，R61 挂的「上传本机 zip 去恢复」口子）。
+   * 字节落进备份目录（uniqueBackupName 防撞名），然后走与「列表里选一份」**完全同一条**
+   * inspect 闸门（zip 结构、quick_check、版本守卫）——能进备份列表的包才配被恢复；
+   * 验不过的包当场删掉，列表里不留垃圾。
+   */
+  function importBackupZip(bytes: Buffer, note = 'imported'): BackupPreview {
+    if (!bytes || bytes.length === 0) throw bizError('收到的备份包是空的，上传可能没成功，请在本机重新导出。')
+    if (bytes.length > ZIP_MAX_BYTES) throw bizError('这份包超过了备份大小上限，先在本机核对包是否完整。')
+    if (!(bytes.length > 2 && bytes[0] === 0x50 && bytes[1] === 0x4b)) {
+      throw bizError('这不是一份 IKanBot 备份包（zip），请从老桌面重新导出整库。')
+    }
+    if (!existsSync(dirs.backupsDir())) mkdirSync(dirs.backupsDir(), { recursive: true })
+    const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+    const name = uniqueBackupName(dirs.backupsDir(), `ikanbot-${stamp}-${note || 'imported'}.zip`)
+    const target = join(dirs.backupsDir(), name)
+    writeFileSync(target, bytes)
+    try {
+      return inspectBackup(target)
+    } catch (e) {
+      try {
+        rmSync(target, { force: true })
+      } catch {
+        /* 删不掉就留着（列表可见、可手删），别把真错误顶掉 */
+      }
+      throw e
+    }
+  }
+
   function inspectBackup(rawPath: string): BackupPreview {
     const path = requireBackupPath(rawPath)
     const entries = readZip(readFileSync(path))
@@ -628,6 +657,7 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
     autoBackupOnStart,
     listBackups,
     inspectBackup,
+    importBackupZip,
     restoreBackup,
     isRestoring
   }

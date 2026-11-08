@@ -1,3 +1,5 @@
+import { basename } from 'path'
+import { readFileSync } from 'fs'
 import { getConnection, normalizeBaseUrl } from '../mode'
 import { clearStoredAuth, currentToken } from './token-store'
 
@@ -287,6 +289,34 @@ export async function remoteExportCsv(
 /** 远端模式下商品图的基地址：<img src> 直接用它拼文件名 */
 export function remoteImageBase(): string {
   return `${getConnection().remoteUrl}/api/files/images`
+}
+
+/**
+ * 老桌面的整库包传到服务器（搬迁最后一公里，R66）：本机 zip 字节原样 POST，
+ * 服务器落进备份目录并按同一条闸门验收，回服务器路径。同一本机路径的本次会话
+ * 上传结果缓存一份——界面流程「先看摘要再确认恢复」是两次调用，不该传两遍。
+ */
+const uploadedBackupCache = new Map<string, string>()
+
+export async function remoteUploadBackup(localPath: string): Promise<string> {
+  const cached = uploadedBackupCache.get(localPath)
+  if (cached) return cached
+  const bytes = readFileSync(localPath)
+  const res = await fetchRemote(
+    `/api/backup/upload?name=${encodeURIComponent(basename(localPath))}`,
+    {
+      method: 'POST',
+      headers: authHeaders({ 'content-type': 'application/octet-stream' }),
+      body: bytes
+    },
+    // 整库包比图片大得多，慢网络下给足时间
+    120000
+  )
+  const data = (await readJson(res, { auth: true })) as { path?: unknown } | null
+  const serverPath = String(data?.path ?? '')
+  if (!serverPath) throw new Error('后端没有返回备份包路径，上传可能没成功')
+  uploadedBackupCache.set(localPath, serverPath)
+  return serverPath
 }
 
 /** 上传一张图片，返回后端生成的文件名（桌面端只拿这个名字登记进库） */

@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, rmSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Test } from '@nestjs/testing'
@@ -91,8 +91,8 @@ async function main(): Promise<void> {
     const routes: string[] = meta.body.routes ?? []
     check('GET /api 自描述已接接口', routes.includes('POST /api/customers/list') && routes.includes('GET /healthz'))
     check(
-      '路由数与控制器一致（107 个：前 30 + 订单 30 + 报价 8 + 打样 8 + 预收 4 + 装箱 9 + 工作台 2 + 月报 1 + 导出 1 + 客户聚合 3 + 登录 1 + 单据存档 6 + 备份 4）',
-      routes.length === 107
+      '路由数与控制器一致（108 个：前 30 + 订单 30 + 报价 8 + 打样 8 + 预收 4 + 装箱 9 + 工作台 2 + 月报 1 + 导出 1 + 客户聚合 3 + 登录 1 + 单据存档 6 + 备份 5）',
+      routes.length === 108
     )
     const metaNoAuth = await raw.get('/api')
     check('GET /api 不挂锁（探活与覆盖率靠它）', metaNoAuth.status === 200)
@@ -1206,6 +1206,39 @@ async function main(): Promise<void> {
         Array.isArray(bkList.body) &&
         bkList.body.some((b: { path: string; size: number }) => b.path === bkCreate.body.path && b.size > 0),
       JSON.stringify(bkList.body)
+    )
+
+    console.log('搬迁上传（R66：老桌面的整库包传上来，走同一条恢复闸门）')
+    const upNoAuth = await raw
+      .post('/api/backup/upload')
+      .set('content-type', 'application/octet-stream')
+      .send(Buffer.from('not-a-zip'))
+    check('上传是写操作，无 token 401', upNoAuth.status === 401)
+    const badUp = await http
+      .post('/api/backup/upload')
+      .set('content-type', 'application/octet-stream')
+      .send(Buffer.from('definitely not a zip file'))
+    check('不是 zip 的字节被当场退回（人话）', badUp.status === 400 && String(badUp.body?.error?.message ?? '').includes('备份包'), JSON.stringify(badUp.text))
+    // 模拟老桌面：把自己刚打的包原样字节传上来（搬迁 = 本机 zip → 服务器备份目录）
+    const localZip = readFileSync(String(bkCreate.body.path))
+    const upResp = await http.post('/api/backup/upload').set('content-type', 'application/octet-stream').send(localZip)
+    check(
+      '整库包上传成功：落在服务器备份目录并带回摘要（带库、订单/收款数）',
+      upResp.status === 200 && upResp.body?.path !== bkCreate.body.path && upResp.body?.hasDb === true && upResp.body?.orderCount > 0,
+      `${upResp.status} ${JSON.stringify(upResp.text)}`
+    )
+    const upRestore = await http.post('/api/backup/restore').send({ path: upResp.body.path })
+    check('上传的包走既有恢复闸门成功', upRestore.status === 200 && upRestore.body?.restarted === false, JSON.stringify(upRestore.text))
+    const rep = upRestore.body?.report
+    check(
+      '恢复响应带搬迁对账：表行数在、收款合计是数、单号唯一、抵扣台账合计是数',
+      rep &&
+        rep.tables?.orders > 0 &&
+        rep.tables?.payments > 0 &&
+        typeof rep.paymentTotal === 'number' &&
+        rep.orderNoDistinct === rep.orderNoCount &&
+        typeof rep.creditAppliedTotal === 'number',
+      JSON.stringify(rep)
     )
     const bkInspect = await http.post('/api/backup/inspect').send({ path: bkCreate.body.path })
     check(

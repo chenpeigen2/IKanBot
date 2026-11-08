@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { Database } from 'node-sqlite3-wasm'
 import { Inject } from '@nestjs/common'
 import { backupCore, type BackupCore } from '../../../core/backup'
+import { migrationReport, type MigrationReport } from '../../../core/migration'
 import { settingsCore } from '../../../core/settings'
 import { DB } from '../db/db.module'
 import type { Db } from '../db/types'
@@ -142,11 +143,19 @@ export class BackupService implements OnModuleInit, OnModuleDestroy {
     return this.core!.inspectBackup(requireBackupPath(rawPath))
   }
 
-  async restore(_rawPath: unknown): Promise<{ restarted: boolean }> {
+  async restore(_rawPath: unknown): Promise<{ restarted: boolean; report: MigrationReport }> {
     this.assertSqlite()
     await this.core!.restoreBackup(requireBackupPath(_rawPath))
-    // 服务器不重启进程（连接已重开）；桌面端拿到 restarted:false 后自己刷新界面
-    return { restarted: false }
+    // 服务器不重启进程（连接已重开）；桌面端拿到 restarted:false 后自己刷新界面。
+    // 恢复完顺手跑搬迁对账（第七节第 2 条第一版）：行数/收款合计/单号唯一逐项带回去
+    const report = await migrationReport(this.db)
+    return { restarted: false, report }
+  }
+
+  /** 老桌面的整库包落进备份目录并按同一条闸门验收（core 里把门，这里只转发字节） */
+  async upload(bytes: Buffer) {
+    this.assertSqlite()
+    return this.core!.importBackupZip(bytes)
   }
 
   isRestoring(): boolean {

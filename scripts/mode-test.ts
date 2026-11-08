@@ -11,7 +11,7 @@
  * 运行：npm run test:mode（会先构建 server/dist）
  */
 import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -780,6 +780,29 @@ async function main(): Promise<void> {
       afterList.ok === true && !afterList.data.some((c: { company: string }) => c.company === 'R61 Restore Probe'),
       JSON.stringify(afterList.data?.filter?.((c: { company: string }) => c.company === 'R61 Restore Probe'))
     )
+
+    // 搬迁最后一公里（R66）：老桌面带来的本机包传上来，走同一条恢复闸门。
+    // 服务器包的字节复制成本机临时文件，伪装「老桌面导出的整库包」
+    const fromOldDesktop = join(root, `mode-import-${Date.now()}.zip`)
+    writeFileSync(fromOldDesktop, readFileSync(String(remoteBackup.data)))
+    const importedInspect = (await ipc('backup:inspect', fromOldDesktop)) as any
+    check(
+      '老桌面带来的本机包：inspect 时自动上传，摘要是服务器那份（落在服务器备份目录）',
+      importedInspect.ok === true &&
+        String(importedInspect.data?.path ?? '').startsWith(join(root, 'backups')) &&
+        importedInspect.data?.hasDb === true,
+      JSON.stringify(importedInspect)
+    )
+    const importedRestore = (await ipc('backup:restore', fromOldDesktop)) as any
+    check(
+      '老桌面带来的本机包：恢复成功（上传缓存命中不重传）且带搬迁对账（表行数/收款合计/单号唯一）',
+      importedRestore.ok === true &&
+        importedRestore.data?.restarted === false &&
+        importedRestore.data?.report?.tables?.orders > 0 &&
+        importedRestore.data?.report?.orderNoDistinct === importedRestore.data?.report?.orderNoCount,
+      JSON.stringify(importedRestore)
+    )
+    rmSync(fromOldDesktop, { force: true })
 
     // 切回本机：后端那份数据必须原封不动地留在后端
     saveConnection({ mode: 'local' })

@@ -95,6 +95,7 @@ export const collectBackupEntries = core.collectBackupEntries
 export const autoBackupOnStart = core.autoBackupOnStart
 export const listBackups = core.listBackups
 export const inspectBackup = core.inspectBackup
+export const importBackupZip = core.importBackupZip
 export const restoreBackup = core.restoreBackup
 export const isRestoring = core.isRestoring
 

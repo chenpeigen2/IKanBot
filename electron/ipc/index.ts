@@ -34,6 +34,7 @@ import {
   remoteReadImage,
   remoteSaveDoc,
   remoteUploadImage,
+  remoteUploadBackup,
   setAuthExpiredNotifier
 } from '../remote/client'
 import { authState, clearStoredAuth, saveStoredAuth } from '../remote/token-store'
@@ -530,11 +531,19 @@ export function registerIpc(): void {
     isRemoteMode() ? await remoteCall('backup:list', []) : listBackups()
   )
   handle('backup:pick', () => pickBackup())
+  // 搬迁最后一公里（R66）：远端模式下「选择要恢复的备份」选到的是本机盘上的包
+  //（pick 的对话框永远在本机）——先上传到服务器备份目录（同一包会话内缓存，摘要+恢复不重传），
+  // 之后的 inspect/restore 走的全是服务器路径与既有闸门。服务器自己的包（本机不存在）原样转发。
+  const resolveRemoteBackupPath = async (path: string): Promise<string> => {
+    if (typeof path !== 'string' || !path) return path
+    if (existsSync(path)) return await remoteUploadBackup(path)
+    return path
+  }
   handle('backup:inspect', async (path: string) =>
-    isRemoteMode() ? await remoteCall('backup:inspect', [path]) : inspectBackup(path)
+    isRemoteMode() ? await remoteCall('backup:inspect', [await resolveRemoteBackupPath(path)]) : inspectBackup(path)
   )
   handle('backup:restore', async (path: string) =>
-    isRemoteMode() ? await remoteCall('backup:restore', [path]) : restoreBackup(path)
+    isRemoteMode() ? await remoteCall('backup:restore', [await resolveRemoteBackupPath(path)]) : restoreBackup(path)
   )
   handle('backup:reveal', async () => {
     if (isRemoteMode()) {
