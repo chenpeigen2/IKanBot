@@ -619,6 +619,18 @@
   返回第一次的结果（e2e + HTTP 双锁）。**剩余**：`row_version BIGINT` 大字段方案（读时带出、
   写时自增，比 updated_at 抗同秒碰撞）留给切 MySQL 时一起做；列表页「有人正在改」弱提示
   （需要在线状态/心跳，属于第二片）未做。
+- **R73：每日备份自动校验 + M2 通道收口审计（2026-11-09，自动化第 4 轮）**：
+  ① **「成功备份」定义升级**（M5 运维件「每日备份校验」）：writeBackup 在 rename 前对包内
+     库字节跑 restore 侧同一道探针闸（inspectRestoredDb：自检/版本/核心表）——字节在手零额外
+     读；验不过本轮按失败计（外层 markFail + rethrow），坏包不落盘不进备份列表。「打出来就
+     当成功，等恢复那天才发现库读不回」从此不可能。e2e 回归锁：成功备份的包必须过
+     inspectBackup（探针闸的对外表现）。
+  ② **M2 通道收口审计**：handle 注册 125 条 vs 远端转发表 99 条 → 26 条本机通道逐条判定——
+     原生对话框/窗口/OS（images:pick、importLogo、backup:pick|reveal、shell:openExternal、
+     window:hide|printPdf|print、app:paths 四件、mode: 五件）+ 已有远端分支的自定义组装
+     （images:url|discard|readDataUrl、docs:save|reveal|openFile、export:csv 远端由后端算
+     CSV 本机另存、backup:lastResult 跟备份发生地走）。**M2 业务通道迁移实质完成**：
+     99/121 的口径只数转发表，实际业务数据通道已全部有远端路径。
 - **R72：搬迁对账改从快照字节算（2026-11-09，自动化第 3 轮，R70 记账挂账转实做）**：
   R70 的对账走主连接算——与包里的库快照之间有写间隙，间隙里的写会让 diff 假警报。
   钩子改形 `migrationReport?()` → `migrationReportFromSnapshot?(dbData)`：从 **VACUUM INTO

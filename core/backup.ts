@@ -178,6 +178,12 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
       // 从盘上重新读回来验：光看内存里那份不算数，写坏的是盘上那几个字节
       const onDisk = readFileSync(temp)
       verifyZip(onDisk, entries)
+      // 读回自验（R73/M5 运维件「每日备份校验」）：verifyZip 只验包结构；库本身要能开、
+      // 能过三道闸（自检/版本/核心表）——打出来就当成功，等恢复那天才发现库读不回，
+      // 备份的意义就没了。字节就在手上零额外读；验不过：本轮按失败计（外层 markFail +
+      // rethrow），坏包不落盘、不进备份列表
+      const selfCheckEntry = entries.find((e) => e.name === 'ikanbot.db')
+      if (selfCheckEntry) inspectRestoredDb(selfCheckEntry.data, `${Date.now()}`)
       renameSync(temp, target)
     } catch (e) {
       try {

@@ -347,6 +347,10 @@ check('PL 毛重按净重×1.1', pl.includes('13.20'))
 section('备份')
 const backupPath = await createBackup('test')
 check('备份文件已生成', fs.existsSync(backupPath), backupPath)
+// 读回自验的回归锁（R73）：「成功备份」= 打出来且能过恢复侧同一道探针闸——
+// inspectBackup 对每份成功产物都必须放行；验不过的包在 writeBackup 里就不会存在
+const r73Preview = await inspectBackup(backupPath)
+check('成功备份的包能过恢复侧同一道探针闸（读回自验的对外表现）', r73Preview.hasDb === true && r73Preview.orderCount !== null)
 const zipBuf = fs.readFileSync(backupPath)
 check('备份是有效 zip', zipBuf[0] === 0x50 && zipBuf[1] === 0x4b)
 check('备份含 db', zipBuf.includes(Buffer.from('ikanbot.db')))
