@@ -1250,6 +1250,12 @@ async function main(): Promise<void> {
     )
     const upRestore = await http.post('/api/backup/restore').send({ path: upResp.body.path })
     check('上传的包走既有恢复闸门成功', upRestore.status === 200 && upRestore.body?.restarted === false, JSON.stringify(upRestore.text))
+    const upDiff = upRestore.body?.report?.diff
+    check(
+      '恢复响应带 diff：包内对账 vs 恢复后现算逐项全零差（R70）',
+      upDiff && upDiff.ok === true && Object.keys(upDiff.tables ?? {}).length === 0 && Math.abs(upDiff.paymentTotal.before - upDiff.paymentTotal.after) < 0.001,
+      JSON.stringify(upDiff)
+    )
     const rep = upRestore.body?.report
     check(
       '恢复响应带搬迁对账：表行数在、收款合计是数、单号唯一、抵扣台账合计是数',

@@ -44,6 +44,9 @@ async function main() {
   // 恢复对账（R68/R69）同账：seed 是「重建」，上一次恢复留下的对账卡会在 /settings
   // 的截图与 sweep 基线里多出一块，基线复现不了（先例：d851ffd 把 lastBackupAt 归零）
   db.exec("DELETE FROM settings WHERE key = 'last_restore_report'")
+  // pending_restore_report 是空防键：全仓库没有写入者（真正的补算标记是 userData 根目录的
+  // restore-report-pending 文件，seed 只碰 db 碰不着它，语义上也不该碰——标记在说明恢复
+  // 真发生过）。留着这条 DELETE 防「将来有人真用这个键」
   db.exec("DELETE FROM settings WHERE key = 'pending_restore_report'")
 
   // 商品

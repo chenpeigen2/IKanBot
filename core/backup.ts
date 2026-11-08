@@ -56,6 +56,12 @@ export interface BackupHooks {
   keepRestoringAfterRestore?: boolean
   /** 服务器上有没有图/单据目录之外还该打进包的目录——现在没有，留接口不硬做 */
   extraEntries?(): ZipEntry[]
+  /**
+   * 打包时现算一份搬迁对账进包（R70，可选）：包里带「导出那一刻」的 12 表行数与口径指纹，
+   * 恢复完成后现算一份逐项对——两份全零差才说明包和恢复两头都好。没有实现（旧测试桩）就
+   * 不进包，行为与 R70 之前一致。
+   */
+  migrationReport?(): Promise<import('./migration').MigrationReport | null>
 }
 
 export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
@@ -153,6 +159,17 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
 
     try {
       const entries = collectBackupEntries()
+      // 搬迁对账进包（R70）：打包的是「此刻的库」，对账也算「此刻的库」——
+      // 两次查询之间有间隙，切库窗口本来就停写（第七节），接受
+      if (hooks.migrationReport) {
+        try {
+          const mr = await hooks.migrationReport()
+          if (mr) entries.push({ name: 'migration-report.json', data: Buffer.from(JSON.stringify(mr, null, 2)) })
+        } catch (e) {
+          // 对账算不出来不能把备份也拖死：包照打，只是这一份没有对账可比
+          console.warn('[backup] 搬迁对账没算出来，本包不含对账：', (e as Error).message)
+        }
+      }
       const buf = createZip(entries)
       writeFileSync(temp, buf)
       // 从盘上重新读回来验：光看内存里那份不算数，写坏的是盘上那几个字节
@@ -305,7 +322,8 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
   /* ---------------- 恢复备份 ---------------- */
 
   /** 备份包里允许出现的顶层目录；其余一律拒绝，免得有人拿别的 zip 来点这个按钮 */
-  const RESTORE_ALLOWED = ['ikanbot.db', `images${sep}`, `docs${sep}`, 'images/', 'docs/']
+  // migration-report.json（R70）：打包时现算的搬迁对账——恢复侧只读它做逐项对，不落盘不参与换库
+  const RESTORE_ALLOWED = ['ikanbot.db', `images${sep}`, `docs${sep}`, 'images/', 'docs/', 'migration-report.json']
 
   function isAllowedEntry(name: string): boolean {
     if (name.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(name)) return false

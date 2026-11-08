@@ -619,6 +619,21 @@
   返回第一次的结果（e2e + HTTP 双锁）。**剩余**：`row_version BIGINT` 大字段方案（读时带出、
   写时自增，比 updated_at 抗同秒碰撞）留给切 MySQL 时一起做；列表页「有人正在改」弱提示
   （需要在线状态/心跳，属于第二片）未做。
+- **R70：搬迁对账进包——包与恢复两头自动对平（2026-11-08）**：
+  ① 打包时现算一份搬迁对账进包（`migration-report.json` entry）：BackupHooks 加可选
+     `migrationReport()`（桌面调 coreDb、服务器调 this.db——与客户页「可用预收」同一份
+     migrationReport），writeBackup 在 collectBackupEntries 后追加 entry；算不出来不拖死备份
+     （包照打、本份无对账可比）。恢复白名单放行该文件（只读不落盘）。
+  ② `diffMigrationReports(before, after)` 纯函数：表行数 / 收款合计 / 单号计数 / 抵扣台账 /
+     逐客户余额逐项对，全零差 ok=true。恢复完成后现算 after 跟包里 before 对——恢复就是把库
+     换成包内容，**两份必须全零差**，对不上说明包或恢复有一头坏了。
+  ③ 组装在壳层：服务器 restore 响应带 `report.diff`（并持久化进 last_restore_report）；
+     桌面本机 `restoreBackupWithReport` 同样组装。diff 纯函数 e2e 锁「同账全零差 /
+     差一笔就翻脸且指出差在哪」；HTTP 锁「恢复响应带 diff 全零差」。
+  本轮验收：e2e 2507 → 2512、双模式 145、数据层 76、HTTP 223 → 224；typecheck 零错误；
+  sweep 九路由与基线一致。无 UI 变更（对账进包是数据层），证据为断言输出。
+  顺带清 R69 复验的三笔表述账：services 注释旧名（pending_restore_report → restore-report-pending
+  文件）、seed 空防键说明补全、R69 报告计数口径更正小注。
 - **R69：恢复对账的语义小账（2026-11-08，R68 复验挂账转实做）**：
   ① **恢复失败不留孤儿标记**：标记武装/撤除/恢复编排抽成 services 的
      `restoreBackupWithReport`（arm → try restore → catch disarm + rethrow），ipc 本机分支改调它——

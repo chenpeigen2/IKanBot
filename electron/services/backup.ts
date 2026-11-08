@@ -4,7 +4,8 @@ import { app, dialog } from 'electron'
 import { Database } from 'node-sqlite3-wasm'
 import { dataDir, imagesDir, backupsDir, docsDir, closeDb, openDb, getDb, coreDb} from '../db'
 import { backupCore } from '../../core/backup'
-import { migrationReport } from '../../core/migration'
+import { readZip } from '../../core/zip'
+import { migrationReport, diffMigrationReports, type MigrationReport, type MigrationDiff } from '../../core/migration'
 import type { BackupPreview } from '../../core/backup'
 import { markBackupFail, markBackupOk } from './settings'
 
@@ -83,7 +84,8 @@ const core = backupCore(
     },
     isApprovedPath: (p: string) => dialogApproved.has(resolve(p)),
     // 恢复成功后进程马上 relaunch 重启：旗子举到死，死之前的每一笔写都得拦
-    keepRestoringAfterRestore: true
+    keepRestoringAfterRestore: true,
+    migrationReport: () => migrationReport(coreDb)
   }
 )
 
@@ -102,7 +104,7 @@ export const isRestoring = core.isRestoring
 
 /**
  * 上次恢复的对账补算（R68）：本机恢复成功那一刻进程马上退出（afterRestore relaunch+exit），
- * 恢复后的账当时算不了。restore 分支只在恢复前写 pending_restore_report 标记，
+ * 恢复后的账当时算不了。restore 分支只在恢复前写 restore-report-pending（userData 文件） 标记，
  * 重启后启动流程调这里补算：算好写进 last_restore_report（设置页对账卡读它），清掉标记。
  * 没 pending 就什么都不做；算错不挡启动（对账是锦上添花，闸门在恢复那一刻已经把过关）。
  */
@@ -143,13 +145,40 @@ export function disarmRestoreReport(): void {
  * 武装标记 → 恢复；恢复抛错（坏包/已在恢复/路径非法）必须把标记撤掉再抛——
  * 恢复没发生，对账就不该在下次启动被补算出来。
  */
-export async function restoreBackupWithReport(path: string): Promise<{ restarted: boolean }> {
+export async function restoreBackupWithReport(path: string): Promise<{
+  restarted: boolean
+  report?: MigrationReport & { diff?: MigrationDiff }
+}> {
   armRestoreReport()
   try {
-    return await restoreBackup(path)
+    const r = await restoreBackup(path)
+    // 恢复后现算一份对账，跟包里带的「导出那一刻」逐项对（R70）：全零差才说明两头都好
+    try {
+      const after = await migrationReport(coreDb)
+      const before = packedMigrationReport(path)
+      if (after && before) {
+        return { ...r, report: { ...after, diff: diffMigrationReports(before, after) } }
+      }
+      if (after) return { ...r, report: after }
+    } catch {
+      /* 对账算不出不影响恢复本身 */
+    }
+    return r
   } catch (e) {
     disarmRestoreReport()
     throw e
+  }
+}
+
+/** 读包里带的「导出那一刻」对账（没有或解析不了返回 null） */
+function packedMigrationReport(packPath: string): MigrationReport | null {
+  try {
+    const entries = readZip(readFileSync(packPath))
+    const entry = entries.find((e) => e.name === 'migration-report.json')
+    if (!entry) return null
+    return JSON.parse(Buffer.from(entry.data).toString('utf8')) as MigrationReport
+  } catch {
+    return null
   }
 }
 

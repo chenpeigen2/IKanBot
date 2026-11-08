@@ -26,7 +26,7 @@ import * as money from '../electron/services/money'
 import * as credits from '../electron/services/credits'
 import { getSettings, saveSettings, markBackupOk, markBackupFail, baseCurrencyLocked } from '../electron/services/settings'
 import { createBackup, inspectBackup, isRestoring, listBackups, pruneBackups, restoreBackup, uniqueBackupName } from '../electron/services/backup'
-import { migrationReport } from '../core/migration'
+import { migrationReport, diffMigrationReports } from '../core/migration'
 import { settleRestoreReport, restoreReportPendingFile, armRestoreReport, disarmRestoreReport, restoreBackupWithReport } from '../electron/services/backup'
 import * as docs from '../electron/services/docs'
 import { collectDir, createZip, readZip, verifyZip, zhFsError } from '../electron/services/zip'
@@ -13205,6 +13205,35 @@ section('R69：恢复对账的语义小账')
     | { value?: string }
     | null
   check('补算的对账确实落库（lastReport 通道的数据源）', !!lastRep69?.value)
+}
+
+/* ---------------- R70：搬迁对账进包（migration-report.json + 恢复后自动对平） ---------------- */
+section('R70：搬迁对账进包')
+{
+  // 包里带一份「导出那一刻」的对账；恢复完成后现算一份，两份逐项对——
+  // 恢复就是把库换成包内容，两份必须全零差。对不上 = 包或恢复有一头坏了
+  const r70Pack = await createBackup('test')
+  const r70Zip = readZip(fs.readFileSync(r70Pack))
+  const r70Entry = r70Zip.find((e) => e.name === 'migration-report.json')
+  check('备份包里带 migration-report.json', !!r70Entry)
+  const baseline70 = await migrationReport(coreDb)
+  const packed70 = r70Entry ? (JSON.parse(Buffer.from(r70Entry.data).toString('utf8')) as { tables?: Record<string, number> }) : null
+  check('包内对账的表行数与打包那一刻的库一致（orders 对齐基线）', !!packed70?.tables && packed70.tables.orders === baseline70.tables.orders, `${baseline70.tables.orders} vs ${JSON.stringify(packed70?.tables?.orders)}`)
+  // 恢复响应的 diff 由 server 段锁（桌面本机恢复成功后旗子举到进程死，套件里连着两次恢复撞旗）；
+  // 桌面这里锁 diff 纯函数本身：同账全零差、差一笔就翻脸并指出差在哪
+  const same70 = diffMigrationReports(packed70, packed70)
+  check('diff 纯函数：同账全零差（ok）', same70.ok === true && Object.keys(same70.tables).length === 0)
+  const drifted70 = JSON.parse(JSON.stringify(packed70))
+  drifted70.tables.orders += 1
+  drifted70.paymentTotal += 72
+  const off70 = diffMigrationReports(drifted70, packed70)
+  check(
+    'diff 纯函数：差一笔就翻脸且指出差在哪（orders 差 1、收款差 72）',
+    off70.ok === false && off70.tables.orders?.before === drifted70.tables.orders && off70.tables.orders?.after === packed70.tables.orders && Math.abs(off70.paymentTotal.before - off70.paymentTotal.after - 72) < 0.001,
+    JSON.stringify(off70.tables)
+  )
+  const srvSrc = fs.readFileSync('server/src/backup/backup.service.ts', 'utf8')
+  check('server 侧 hooks 提供搬迁对账（migrationReport 进包 + diff 组装）', srvSrc.includes('migrationReport') && srvSrc.includes('diffMigrationReports'))
 }
 
 console.log(`通过 ${passed} 项，失败 ${failed} 项`)

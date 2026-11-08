@@ -100,3 +100,45 @@ export async function migrationReport(db: Db): Promise<MigrationReport> {
     creditBalances
   }
 }
+
+/**
+ * 搬迁对账两份逐项对（R70）：before = 包里「导出那一刻」的对账，after = 恢复完成后现算的。
+ * 恢复就是把库换成包内容——两份必须全零差；对不上说明包或恢复有一头坏了。
+ * ok = 全零差（表行数、收款合计、单号计数、抵扣台账、逐客户余额全部一致）。
+ */
+export interface MigrationDiff {
+  ok: boolean
+  tables: Record<string, { before: number; after: number }>
+  paymentTotal: { before: number; after: number }
+  orderNoCount: { before: number; after: number }
+  orderNoDistinct: { before: number; after: number }
+  creditAppliedTotal: { before: number; after: number }
+  creditBalances: { before: MigrationCreditRow[]; after: MigrationCreditRow[] }
+}
+
+const sameRows = (a: MigrationCreditRow[], b: MigrationCreditRow[]): boolean =>
+  a.length === b.length &&
+  a.every((x, i) => x.customerId === b[i].customerId && x.currency === b[i].currency && Math.abs(x.available - b[i].available) < 0.001)
+
+export function diffMigrationReports(before: MigrationReport, after: MigrationReport): MigrationDiff {
+  const tables: MigrationDiff['tables'] = {}
+  const allTables = new Set([...Object.keys(before.tables ?? {}), ...Object.keys(after.tables ?? {})])
+  for (const t of allTables) {
+    const b = Number(before.tables?.[t] ?? 0)
+    const a = Number(after.tables?.[t] ?? 0)
+    if (b !== a) tables[t] = { before: b, after: a }
+  }
+  const paymentTotal = { before: Number(before.paymentTotal ?? 0), after: Number(after.paymentTotal ?? 0) }
+  const orderNoCount = { before: Number(before.orderNoCount ?? 0), after: Number(after.orderNoCount ?? 0) }
+  const orderNoDistinct = { before: Number(before.orderNoDistinct ?? 0), after: Number(after.orderNoDistinct ?? 0) }
+  const creditAppliedTotal = { before: Number(before.creditAppliedTotal ?? 0), after: Number(after.creditAppliedTotal ?? 0) }
+  const creditBalances = { before: before.creditBalances ?? [], after: after.creditBalances ?? [] }
+  const ok =
+    Object.keys(tables).length === 0 &&
+    Math.abs(paymentTotal.before - paymentTotal.after) < 0.001 &&
+    orderNoCount.before === orderNoCount.after &&
+    orderNoDistinct.before === orderNoDistinct.after &&
+    Math.abs(creditAppliedTotal.before - creditAppliedTotal.after) < 0.001 &&
+    sameRows(creditBalances.before, creditBalances.after)
+  return { ok, tables, paymentTotal, orderNoCount, orderNoDistinct, creditAppliedTotal, creditBalances }
+}
