@@ -810,6 +810,36 @@ export default function Settings() {
                 {restoreReport.orderNoCount === restoreReport.orderNoDistinct ? '（平）' : '（重复了，别录单）'}
                 {' · '}抵扣台账合计 <strong className="mono">{Number(restoreReport.creditAppliedTotal ?? 0).toFixed(2)}</strong>
               </div>
+              {restoreReport.diff ? (
+                restoreReport.diff.ok ? (
+                  <div className="hint" style={{ color: 'var(--ok, #2f7d32)' }}>
+                    与包内对账逐项对平（导出那一刻 vs 恢复后现算，表行数/收款合计/单号/预收余额全零差）。
+                  </div>
+                ) : (
+                  <div className="alert error" style={{ marginBottom: 6 }}>
+                    <div style={{ fontWeight: 600 }}>对账不平——包和恢复有一头出了问题，别用这份数据录单，先来问。</div>
+                    <div className="hint diffWarnRows">
+                      {Object.entries(restoreReport.diff.tables ?? {}).map(([t, d]: [string, any]) => (
+                        <div key={t}>
+                          {t}: 包内 {d.before} / 恢复后 {d.after}
+                        </div>
+                      ))}
+                      <div>
+                        收款合计: 包内 {Number(restoreReport.diff.paymentTotal.before).toFixed(2)} / 恢复后{' '}
+                        {Number(restoreReport.diff.paymentTotal.after).toFixed(2)}
+                      </div>
+                      {(restoreReport.diff.creditBalances?.before?.length ?? 0) + (restoreReport.diff.creditBalances?.after?.length ?? 0) > 0 ? (
+                        <div>
+                          客户预收余额两边不一致（包内 {restoreReport.diff.creditBalances.before?.length ?? 0} 行 / 恢复后{' '}
+                          {restoreReport.diff.creditBalances.after?.length ?? 0} 行）
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                )
+              ) : restoreReport.reportedAt ? (
+                <div className="hint">这份包没有带对账（升级前的老包），升级到 v0.5.12 之后导出的包才会自动带。</div>
+              ) : null}
               {restoreReport.creditBalances?.length ? (
                 <div className="hint">
                   客户预收余额：

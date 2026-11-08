@@ -4163,6 +4163,17 @@ section('R68：恢复对账持久化（本机补算）')
   check('对账带逐客户预收余额字段（数组，可为空）', Array.isArray(parsed68 && (parsed68 as any).creditBalances))
 }
 
+/* ---------------- R71：对账卡的 diff 呈现（包内 vs 恢复后，接线检查） ---------------- */
+section('R71：对账卡的 diff 呈现（接线）')
+{
+  // 数据层（diffMigrationReports + restore 响应 + 持久化）R70 已锁；这里锁渲染层接线：
+  const setSrc = fs.readFileSync('src/renderer/src/pages/Settings.tsx', 'utf8')
+  check('对账卡渲染 diff（读 restoreReport.diff）', setSrc.includes('restoreReport.diff'))
+  check('对平了有明说（diff.ok 文案）', setSrc.includes('与包内对账逐项对平'))
+  check('不平要红着说（diff 不平时渲染差异块）', setSrc.includes('diffWarnRows'))
+  check('老包没有对账也明说（无 diff 时的文案）', setSrc.includes('这份包没有带对账'))
+}
+
 section('R9 工作台会盯住备份（数据只躺在这台电脑上）')
 const r9setStamp = (at: string | null, err: string | null): void => {
   // R54 起戳单独一行（backup_state）：这里模拟备份服务写凭据，别再往设置正文里塞
