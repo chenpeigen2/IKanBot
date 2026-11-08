@@ -80,7 +80,9 @@ export interface IKanApi {
         method?: string
         bankRef?: string
         note?: string
-      }[]
+      }[],
+      /** R64：整批一个幂等键（一张水单一次登记动作），重放拿回第一次的整组结果 */
+      requestId?: string | null
     ): Promise<any[]>
     deletePayment(orderId: number, paymentId: number, reason: string): Promise<any>
     listSettlements(orderId: number): Promise<any[]>

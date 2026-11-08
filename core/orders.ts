@@ -2279,7 +2279,15 @@ export function ordersCore(db: Db) {
    * 落一半会让「水单总额」和「系统里的收款」对不上。
    * R25：打样单的样品费也接进同一笔水单（客户一笔钱同时付订单和打样费是常事）。
    */
-  async function batchAddPayments(entries: BatchPaymentEntry[]): Promise<(OrderDetail | SampleOrderDetail)[]> {
+  async function batchAddPayments(
+    entries: BatchPaymentEntry[],
+    requestId?: string | null
+  ): Promise<(OrderDetail | SampleOrderDetail)[]> {
+    // 幂等重放（R64）：拆分收款是「一张水单拆到 N 张单」的同一个动作，键盖整批。
+    // 重放排在所有守门之前——重试要拿回第一次的整组结果，不是被水单查重拦成报错
+    // （那正是这颗键要防的：第一次其实已落账、响应丢了，人重试一次就被查重硬顶回来）。
+    const batchReplay = await findReplay<(OrderDetail | SampleOrderDetail)[]>(db, requestId)
+    if (batchReplay) return batchReplay
     if (!entries.length) throw bizError('没有要登记的收款：至少选一张单填金额。')
     const bankRef = String(entries[0].bankRef ?? '').trim()
     if (!bankRef) {
@@ -2339,6 +2347,8 @@ export function ordersCore(db: Db) {
           throw bizError(`第 ${i + 1} 笔（${isSample ? '打样单' : '订单'} ${no}）没登进去，整批已回滚：${(err as Error).message}`)
         }
       }
+      // 快照跟落账同事务（R64）：整批提交的那一刻结果也记进幂等表，重放拿到的就是这一份
+      await recordResult(db, requestId, 'batch_payment', results)
     })
     return results
   }

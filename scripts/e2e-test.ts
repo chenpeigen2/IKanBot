@@ -12944,6 +12944,43 @@ section('R63/M4 第二片：写冲突检测（row_version）')
   check('弱提示钩子存在且导出 useStaleSnapshot', hookSrc.includes('export function useStaleSnapshot'))
 }
 
+/* ---------------- R64：水单拆分收款（batchAddPayments）幂等——整批一个键 ---------------- */
+section('R64：水单拆分收款幂等（整批一个 request_id）')
+{
+  // 拆分收款是「一张水单拆到 N 张单」的同一个动作：键盖整批，重放拿回第一次的整组结果，
+  // 不做逐行去重——逐行键会让「重试时只补上了失败那几行」这种半截账有隙可钻
+  const bsCust = await customers.saveCustomer({ company: 'R64 Batch Co' })
+  const b1 = await orders.createOrder({ customerId: bsCust.id, currency: 'USD', exchangeRate: 7.2 })
+  await orders.addOrderItem(b1.id, { styleNo: 'R64-B1', productName: '拆分测一', quantity: 10, unitPrice: 50 })
+  const b2 = await orders.createOrder({ customerId: bsCust.id, currency: 'USD', exchangeRate: 7.2 })
+  await orders.addOrderItem(b2.id, { styleNo: 'R64-B2', productName: '拆分测二', quantity: 5, unitPrice: 40 })
+  await orders.setPaymentStatus(b1.id, 'confirmed')
+  await orders.setPaymentStatus(b2.id, 'confirmed')
+  const batchEntries = [
+    { orderId: b1.id, paidAt: localDate(), amount: 100, method: 'T/T', bankRef: 'R64-SLIP-1', note: '拆 1' },
+    { orderId: b2.id, paidAt: localDate(), amount: 80, method: 'T/T', bankRef: 'R64-SLIP-1', note: '拆 2' }
+  ]
+  const batchFirst = await orders.batchAddPayments(batchEntries, 'r64-batch-1')
+  check('水单拆分一次登记两笔', batchFirst.length === 2)
+  const batchCount = async () =>
+    ((await orders.getOrder(b1.id))!.payments.length ?? 0) + ((await orders.getOrder(b2.id))!.payments.length ?? 0)
+  const batchCount1 = await batchCount()
+  check('首次登记落了两笔流水', batchCount1 === 2, String(batchCount1))
+  const batchReplay = await orders.batchAddPayments(batchEntries, 'r64-batch-1')
+  check('同键重放拿回第一次的整组结果（不报错）', batchReplay.length === 2 && batchReplay[0].id === batchFirst[0].id)
+  check('重放后流水数没变（整批只落一次）', (await batchCount()) === batchCount1)
+  // 新键 = 新水单：流水号也要换（同一张水单记两次会被水单查重拦，那是另一道正经闸门）
+  await orders.batchAddPayments(batchEntries.map((e) => ({ ...e, bankRef: 'R64-SLIP-2' })), 'r64-batch-2')
+  check('换新键的新水单照常落账', (await batchCount()) === batchCount1 + 2)
+  const batchLegacy = await orders.batchAddPayments(batchEntries.map((e) => ({ ...e, bankRef: 'R64-SLIP-3' })))
+  check('不传 request_id 的老调用不受影响（水单照旧整批落）', batchLegacy.length === 2 && (await batchCount()) === batchCount1 + 4)
+
+  // 接线检查：客户页的水单拆分弹窗带键提交，成功才换号
+  const splitSrc = fs.readFileSync('src/renderer/src/pages/Customers.tsx', 'utf8')
+  check('客户页水单拆分：提交带 requestId', splitSrc.includes('split.requestId'))
+  check('客户页水单拆分：打开弹窗就发号（newRequestId）', splitSrc.includes('requestId: newRequestId()'))
+}
+
 /* ---------------- R62/M4：收款/退款幂等（request_id 重放只落一笔） ---------------- */
 section('R62/M4：收款/退款幂等（request_id 重放只落一笔）')
 {

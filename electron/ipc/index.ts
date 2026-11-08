@@ -281,7 +281,8 @@ export function registerIpc(): void {
   )
   handle('orders:summarizeSkus', (orderId: number) => orders.summarizeSkus(orderId))
   handle('orders:addPayment', (orderId: number, p: any) => orders.addPayment(orderId, p))
-  handle('orders:batchAddPayments', (entries: orders.BatchPaymentEntry[]) => orders.batchAddPayments(entries))
+  handle('orders:batchAddPayments', (entries: orders.BatchPaymentEntry[], requestId?: string | null) =>
+    orders.batchAddPayments(entries, requestId))
   handle('orders:deletePayment', (orderId: number, paymentId: number, reason?: string) =>
     orders.deletePayment(orderId, paymentId, reason ?? '')
   )

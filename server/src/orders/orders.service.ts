@@ -98,8 +98,8 @@ export class OrdersService {
     return this.core.addPayment(orderId, p as unknown as PaymentInput)
   }
 
-  batchAddPayments(entries: unknown[]): Promise<(OrderDetail | SampleOrderDetail)[]> {
-    return this.core.batchAddPayments(entries as BatchPaymentEntry[])
+  batchAddPayments(entries: unknown[], requestId?: string | null): Promise<(OrderDetail | SampleOrderDetail)[]> {
+    return this.core.batchAddPayments(entries as BatchPaymentEntry[], requestId)
   }
 
   deletePayment(orderId: number, paymentId: number, reason: string): Promise<OrderDetail> {

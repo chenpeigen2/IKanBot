@@ -71,7 +71,8 @@ const api: IKanApi = {
     replaceItems: (orderId: number, items: any[]) => call<any>('orders:replaceItems', orderId, items),
     summarizeSkus: (orderId: number) => call<any[]>('orders:summarizeSkus', orderId),
     addPayment: (orderId: number, p: any) => call<any>('orders:addPayment', orderId, p),
-    batchAddPayments: (entries: any[]) => call<any[]>('orders:batchAddPayments', entries),
+    batchAddPayments: (entries: any[], requestId?: string | null) =>
+      call<any[]>('orders:batchAddPayments', entries, requestId),
     deletePayment: (orderId: number, paymentId: number, reason: string) =>
       call<any>('orders:deletePayment', orderId, paymentId, reason),
     listSettlements: (orderId: number) => call<any[]>('orders:listSettlements', orderId),

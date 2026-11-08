@@ -58,7 +58,7 @@ export const REMOTE_ROUTES: Record<string, RouteSpec> = {
   'orders:replaceItems': { path: '/api/orders/replaceItems', args: ['orderId', 'items'] },
   'orders:summarizeSkus': { path: '/api/orders/summarizeSkus', args: ['orderId'] },
   'orders:addPayment': { path: '/api/orders/addPayment', args: ['orderId', 'p'] },
-  'orders:batchAddPayments': { path: '/api/orders/batchAddPayments', args: ['entries'] },
+  'orders:batchAddPayments': { path: '/api/orders/batchAddPayments', args: ['entries', 'requestId'] },
   'orders:deletePayment': { path: '/api/orders/deletePayment', args: ['orderId', 'paymentId', 'reason'] },
   'orders:listSettlements': { path: '/api/orders/listSettlements', args: ['orderId'] },
   'orders:addSettlement': { path: '/api/orders/addSettlement', args: ['orderId', 'input'] },

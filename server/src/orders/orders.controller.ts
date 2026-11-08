@@ -116,7 +116,7 @@ export class OrdersController {
   @Post('batchAddPayments')
   @HttpCode(200)
   batchAddPayments(@Body() body: Record<string, unknown>) {
-    return this.orders.batchAddPayments(arrayParam(body['entries'], '批量收款'))
+    return this.orders.batchAddPayments(arrayParam(body['entries'], '批量收款'), String(body['requestId'] ?? '') || null)
   }
 
   @Post('deletePayment')

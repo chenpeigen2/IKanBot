@@ -1166,6 +1166,30 @@ async function main(): Promise<void> {
     const idemOd = await http.post('/api/orders/get').send({ id: idemOrder.body.id })
     check('账面上确实只有一笔收款', idemOd.body.payments.length === 1, JSON.stringify(idemOd.body.payments))
 
+    console.log('水单拆分收款幂等（R64：整批一个 request_id）')
+    const bCust = await http.post('/api/customers/save').send({ input: { company: 'R64 Batch Co' } })
+    const bOrder = await http
+      .post('/api/orders/create')
+      .send({ input: { customerId: bCust.body.id, currency: 'USD', exchangeRate: 7.2, paymentStatus: 'confirmed' } })
+    const batchEntries = [{ orderId: bOrder.body.id, paidAt: localDate(), amount: 60, method: 'T/T', bankRef: 'HTTP-SLIP-1' }]
+    const bCount = async () => {
+      const od = await http.post('/api/orders/get').send({ id: bOrder.body.id })
+      return od.body.payments.length as number
+    }
+    const b1st = await http.post('/api/orders/batchAddPayments').send({ entries: batchEntries, requestId: 'http-batch-1' })
+    check('HTTP 拆分收款落一笔', b1st.status === 200 && (await bCount()) === 1, `${b1st.status} ${JSON.stringify(b1st.text)}`)
+    const bReplay = await http.post('/api/orders/batchAddPayments').send({ entries: batchEntries, requestId: 'http-batch-1' })
+    check(
+      'HTTP 同键重放拿回第一次结果、流水不翻倍',
+      bReplay.status === 200 && bReplay.body[0].id === b1st.body[0].id && (await bCount()) === 1,
+      `${bReplay.status} ${JSON.stringify(bReplay.text)}`
+    )
+    // 新键 = 新水单：流水号也要换（同一张水单记两次会被水单查重拦，那是另一道正经闸门）
+    await http
+      .post('/api/orders/batchAddPayments')
+      .send({ entries: batchEntries.map((e) => ({ ...e, bankRef: 'HTTP-SLIP-2' })), requestId: 'http-batch-2' })
+    check('HTTP 换新键的新水单照常落账', (await bCount()) === 2)
+
     console.log('备份（R61：备份簇上后端，服务器侧打包与恢复，与桌面同一份 core）')
     const bkNoAuth = await raw.post('/api/backup/create').send({})
     check('备份是写操作，无 token 401', bkNoAuth.status === 401)

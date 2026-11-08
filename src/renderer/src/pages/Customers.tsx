@@ -133,6 +133,8 @@ export default function Customers() {
     /** 水单总额：只用来当场核对分配合不平，不落库、不硬拦（分期/尾款/汇损都会让两边不等） */
     bankTotal: string
     saving: boolean
+    /** 幂等键（R64）：整批一个，打开弹窗发号、失败重试沿用、成功才随弹窗一起清掉 */
+    requestId: string
   } | null>(null)
   /** 客户预收抵扣弹窗：同币种、仍待收的单里挑一张 */
   const [creditApply, setCreditApply] = useState<{
@@ -301,7 +303,10 @@ export default function Customers() {
         note: '',
         amounts: {},
         bankTotal: '',
-        saving: false
+        saving: false,
+        // 幂等键（R64）：打开弹窗就发号，失败重试沿用同一个（第一次其实落了账、响应丢了的情形，
+        // 重试拿回服务端的快照而不是被水单查重硬顶回来）；保存成功整份清掉，下次开换新号
+        requestId: newRequestId()
       })
     } catch (e) {
       toast((e as Error).message || '待收订单没加载出来', 'error')
@@ -350,7 +355,8 @@ export default function Customers() {
           method: split.method,
           bankRef,
           note: split.note.trim()
-        }))
+        })),
+        split.requestId
       )
       toast(`已按水单 ${bankRef} 拆分登记 ${filled.length} 笔收款`)
       setSplit(null)
