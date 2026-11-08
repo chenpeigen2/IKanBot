@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Modal, useToast, money, num, Empty, fmtDate, fmtDateTime, today, ActionMenu, QuotationStatusTag, Button, clientKey, LoadError, useDebounced, useLoadGuard } from '../ui'
+import { useStaleSnapshot } from '../hooks/useStaleSnapshot'
 import {
   CURRENCIES,
   INCOTERMS,
@@ -962,6 +963,13 @@ function QuotationModal({
 }) {
   const toast = useToast()
   const isEdit = !!draft.id
+  // 弱提示（M4 第二片）：编辑弹窗开着时盯一眼别人改没改（row_version 比对，30 秒一次 + 窗口聚焦时）。
+  // 不拦保存——闸门在保存时的 CAS；这里只是让人在按保存前就知道画面旧了
+  const staleInfo = useStaleSnapshot(
+    draft,
+    () => (isEdit ? window.api.quotations.get(draft.id) : Promise.resolve(null)),
+    isEdit
+  )
   const [customers, setCustomers] = useState<any[]>([])
   const [settings, setSettings] = useState<any>(null)
   const [products, setProducts] = useState<any[]>([])
@@ -1172,6 +1180,8 @@ function QuotationModal({
     try {
       const q = await window.api.quotations.save({
         id: draft.id,
+        // 乐观锁（M4 第二片）：别人在我看着这张报价单的这段时间里改过，就别拿旧画面盖掉
+        expectedRowVersion: isEdit ? draft.rowVersion : undefined,
         customerId: form.customerId,
         currency: form.currency,
         exchangeRate: isHomeCurrency ? 1 : Number(form.exchangeRate),
@@ -1222,6 +1232,14 @@ function QuotationModal({
           </>
         }
       >
+        {staleInfo ? (
+          <div className="stale-hint">
+            <span>
+              这张报价单{staleInfo.changedAt ? `在 ${fmtDateTime(staleInfo.changedAt)} ` : ''}刚被别人改过，你看到的内容可能旧了——
+              现在保存会被拦下，建议先取消、重新打开再改
+            </span>
+          </div>
+        ) : null}
         <div className="field">
           <label>客户 *</label>
           <select value={form.customerId || ''} onChange={(e) => void onCustomerChange(Number(e.target.value))}>

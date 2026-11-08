@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { Modal, useToast, money, moneyOrDash, Empty, fmtDate, PaymentTag, ShipTag, Button, LoadError, PromptModal, newRequestId, useLoadGuard } from '../ui'
+import { Modal, useToast, money, moneyOrDash, Empty, fmtDate, fmtDateTime, PaymentTag, ShipTag, Button, LoadError, PromptModal, newRequestId, useLoadGuard } from '../ui'
+import { useStaleSnapshot } from '../hooks/useStaleSnapshot'
 import { localDate } from '../../../shared/date'
 import { INCOTERMS, PAYMENT_METHOD_LABEL, type PaymentMethod } from '../../../shared/types'
 import type { Customer, CustomerCreditApplication, CustomerCreditCurrency, CustomerCreditRefund } from '../../../shared/types'
@@ -25,8 +26,8 @@ interface Draft {
   defaultPortLoading: string
   defaultPortDestination: string
   note: string
-  /** 读档那一刻的 updated_at（M4 乐观锁：保存时带上，别人先改过就拦下）；新建为 undefined */
-  updatedAt?: string
+  /** 读档那一刻的 row_version（M4 乐观锁凭据）：保存时带上，别人先改过就拦下；新建为 undefined */
+  rowVersion?: number
 }
 
 const blank: Draft = {
@@ -75,7 +76,7 @@ function toDraft(c: Customer): Draft {
     defaultPortLoading: c.defaultPortLoading,
     defaultPortDestination: c.defaultPortDestination,
     note: c.note,
-    updatedAt: c.updatedAt
+    rowVersion: c.rowVersion
   }
 }
 
@@ -187,6 +188,14 @@ export default function Customers() {
     void load()
   }, [includeInactive])
 
+  // 弱提示（M4 第二片）：编辑弹窗开着时盯一眼别人改没改（row_version 比对，30 秒一次 + 窗口聚焦时）。
+  // 不拦保存——闸门在保存时的 CAS；这里只是让人在按保存前就知道画面旧了
+  const staleInfo = useStaleSnapshot(
+    draft,
+    () => (draft?.id ? window.api.customers.get(draft.id) : Promise.resolve(null)),
+    Boolean(draft?.id)
+  )
+
   const save = async (allowDuplicate = false) => {
     if (!draft) return
     if (!draft.company.trim()) {
@@ -198,7 +207,7 @@ export default function Customers() {
         ...draft,
         allowDuplicate,
         // 乐观锁（M4）：别人在我看着这份档案的这段时间里改过，就别悄悄盖掉
-        expectedUpdatedAt: draft.updatedAt ?? null,
+        expectedRowVersion: draft.rowVersion ?? null,
         defaultDepositRatio: draft.defaultDepositRatio === '' ? null : Number(draft.defaultDepositRatio)
       })
       toast(draft.id ? '已保存' : '已新增客户')
@@ -616,6 +625,14 @@ export default function Customers() {
             </>
           }
         >
+          {staleInfo ? (
+            <div className="stale-hint">
+              <span>
+                这份档案{staleInfo.changedAt ? `在 ${fmtDateTime(staleInfo.changedAt)} ` : ''}刚被别人改过，你看到的内容可能旧了——
+                现在保存会被拦下，建议先取消、重新打开再改
+              </span>
+            </div>
+          ) : null}
           <div className="field">
             <label>公司名称 *</label>
             <input

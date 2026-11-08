@@ -137,7 +137,9 @@ export async function applyShipStatus(db: Db, orderId: number): Promise<ShipStat
     )
     if (!(Number(counts?.total ?? 0) > 0 && Number(counts?.live ?? 0) === 0)) return null
   }
-  await db.run('UPDATE orders SET ship_status = ? WHERE id = ?', [next, orderId])
+  // 出货状态回写也要 bump row_version：这处原先连 updated_at 都不碰——编辑中的窗口
+  // 拿旧快照保存时 updated_at CAS 看不见这笔改动（R62 那套的真窟窿），行版本号补上后堵死
+  await db.run('UPDATE orders SET ship_status = ?, row_version = row_version + 1 WHERE id = ?', [next, orderId])
   // 整单状态由批次推着走，跃迁要进操作历史：日后说「哪天算已出运」得有一条凭据。
   // 只在真的换了状态才写——改一格箱重也会走到这里，不然历史会被刷屏。
   if (String(cur ?? '') !== next) {

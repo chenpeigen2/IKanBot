@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Modal, useToast, money, moneyOrDash, num, Empty, fmtDate, today, ActionMenu, SampleStatusTag, Button, SampleFeeTag, clientKey, newRequestId, LoadError, useDebounced, useLoadGuard } from '../ui'
+import { Modal, useToast, money, moneyOrDash, num, Empty, fmtDate, fmtDateTime, today, ActionMenu, SampleStatusTag, Button, SampleFeeTag, clientKey, newRequestId, LoadError, useDebounced, useLoadGuard } from '../ui'
+import { useStaleSnapshot } from '../hooks/useStaleSnapshot'
 import {
   SAMPLE_STATUS_LABEL,
   SAMPLE_STATUS_ORDER,
@@ -805,6 +806,13 @@ function SampleModal({
 }) {
   const toast = useToast()
   const isEdit = !!draft.id
+  // 弱提示（M4 第二片）：编辑弹窗开着时盯一眼别人改没改（row_version 比对，30 秒一次 + 窗口聚焦时）。
+  // 不拦保存——闸门在保存时的 CAS；这里只是让人在按保存前就知道画面旧了
+  const staleInfo = useStaleSnapshot(
+    draft,
+    () => (isEdit ? window.api.samples.get(draft.id) : Promise.resolve(null)),
+    isEdit
+  )
   const [customers, setCustomers] = useState<any[]>([])
   const [products, setProducts] = useState<any[]>([])
   const [form, setForm] = useState({
@@ -907,6 +915,8 @@ function SampleModal({
     try {
       await window.api.samples.save({
         id: draft.id,
+        // 乐观锁（M4 第二片）：别人在我看着这张打样单的这段时间里改过，就别拿旧画面盖掉
+        expectedRowVersion: isEdit ? draft.rowVersion : undefined,
         customerId: form.customerId,
         sampleNo: form.sampleNo,
         sampleDate: form.sampleDate,
@@ -955,6 +965,14 @@ function SampleModal({
         </>
       }
     >
+      {staleInfo ? (
+        <div className="stale-hint">
+          <span>
+            这张打样单{staleInfo.changedAt ? `在 ${fmtDateTime(staleInfo.changedAt)} ` : ''}刚被别人改过，你看到的内容可能旧了——
+            现在保存会被拦下，建议先取消、重新打开再改
+          </span>
+        </div>
+      ) : null}
       <div className="field">
         <label>样品单号（对外就用这个号对账；留空 = 保存时自动编号）</label>
         <input

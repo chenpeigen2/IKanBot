@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { Modal, useToast, today, money, Button, clientKey } from '../ui'
+import { Modal, useToast, today, money, Button, clientKey, fmtDateTime } from '../ui'
+import { useStaleSnapshot } from '../hooks/useStaleSnapshot'
 import {
   draftOrderEditKey,
   clearDraft,
@@ -57,6 +58,9 @@ export default function EditOrderModal({
   onSaved: () => Promise<void>
 }) {
   const toast = useToast()
+  // 弱提示（M4 第二片）：弹窗开着时每 30 秒/窗口聚焦时盯一眼别人改没改（row_version 比对）。
+  // 不拦保存——闸门在保存时的 CAS；这里只是让人在按保存前就知道画面旧了
+  const staleInfo = useStaleSnapshot(order, () => window.api.orders.get(order.id), Boolean(order?.id))
   // 草稿暂存（R62）：与新建订单同一套机制（src/shared/drafts.ts），键按单分开。
   // 编辑改到一半 token 过期被 401 拦下、或程序重启，稿子都在；保存成功才清。
   const draftStore = window.localStorage
@@ -226,7 +230,7 @@ export default function EditOrderModal({
         charges: cleanCharges.map((c) => ({ label: c.label, amount: c.amount })),
         chargeReason: chargeReason.trim() || undefined,
         // 乐观锁（M4）：别人在我看着这张单的这段时间里改过，就别拿旧画面盖掉新账
-        expectedUpdatedAt: order.updatedAt
+        expectedRowVersion: order.rowVersion
       })
       // 保存成功才算交卷：草稿当场清掉（401 拦下、取消、报错都留着，重开弹窗续上）
       clearDraft(draftStore, draftKey)
@@ -268,6 +272,14 @@ export default function EditOrderModal({
         </>
       }
     >
+      {staleInfo ? (
+        <div className="stale-hint">
+          <span>
+            这张单{staleInfo.changedAt ? `在 ${fmtDateTime(staleInfo.changedAt)} ` : ''}刚被别人改过，你看到的内容可能旧了——
+            现在保存会被拦下，建议先取消、重新打开再改
+          </span>
+        </div>
+      ) : null}
       <div className="field-row">
         <div className="field">
           <label>客户 *</label>

@@ -9,7 +9,7 @@
  * 转单要建订单、收款要认预收抵扣，所以会回头调订单域与抵扣域；
  * 三边按需懒建工厂，拿到的是同一个连接。
  */
-import { bizError, notFound } from '../src/shared/errors'
+import { bizError, notFound, writeConflict } from '../src/shared/errors'
 import { findReplay, recordResult } from './idempotency'
 import type { Db } from './db'
 import { nextNo } from './next-no'
@@ -53,6 +53,11 @@ export interface SampleInput {
   id?: number
   /** N-3：样品单号可在保存时指定/修改；不填（新建）则自动编号。撞号会被拦住 */
   sampleNo?: string
+  /**
+   * 乐观锁（M4 第二片）：界面读单那一刻看到的 row_version；写入前已被别人改过 → 409。
+   * 不传（undefined/空）不检查（兼容脚本/迁移调用）。
+   */
+  expectedRowVersion?: number | null
   customerId: number
   sampleDate?: string
   courier?: string
@@ -130,7 +135,8 @@ export function samplesCore(db: Db) {
       convertedOrderStatus:
         r.converted_order_status == null ? null : (String(r.converted_order_status) as SampleOrder['convertedOrderStatus']),
       createdAt: String(r.created_at ?? ''),
-      updatedAt: String(r.updated_at ?? '')
+      updatedAt: String(r.updated_at ?? ''),
+      rowVersion: Number(r.row_version ?? 0)
     }
   }
 
@@ -619,10 +625,23 @@ export function samplesCore(db: Db) {
         ['exchange_rate', exchangeRate],
         ['exchange_rate_date', keepText('exchangeRateDate', 'exchange_rate_date')]
       ]
-      await db.run(
-        `UPDATE sample_orders SET ${cells.map(([col]) => `${col}=?`).join(', ')}, updated_at=? WHERE id=?`,
-        [...cells.map(([, v]) => v as string | number | null), ts, id]
+      // 乐观锁（M4 第二片）：带上了读单那一刻的 row_version 就条件更新；affected 0 = 有人先改过 → 409。
+      // 不传（老调用方/脚本）不检查，与订单/商品/客户同一套语义
+      const expectedRowVersion =
+        input.expectedRowVersion === null || input.expectedRowVersion === undefined
+          ? null
+          : Number(input.expectedRowVersion)
+      const res = await db.run(
+        `UPDATE sample_orders SET ${cells.map(([col]) => `${col}=?`).join(', ')}, updated_at=?, row_version = row_version + 1 WHERE id=?${
+          expectedRowVersion !== null ? ' AND row_version = ?' : ''
+        }`,
+        [...cells.map(([, v]) => v as string | number | null), ts, id, ...(expectedRowVersion !== null ? [expectedRowVersion] : [])]
       )
+      if (expectedRowVersion !== null && res.changes === 0) {
+        const still = await db.get('SELECT id FROM sample_orders WHERE id = ?', [id])
+        if (still) throw writeConflict()
+        throw notFound('打样单不存在')
+      }
       if (itemsProvided) await db.run('DELETE FROM sample_order_items WHERE sample_order_id = ?', [id])
     } else {
       let sampleNo = requestedNo
@@ -905,12 +924,12 @@ export function samplesCore(db: Db) {
           ]
         )
       }
-      await db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), order.id])
+      await db.run('UPDATE orders SET updated_at = ?, row_version = row_version + 1 WHERE id = ?', [now(), order.id])
       // 打样单标记：转过的不能再转；样品费标记为「下单抵扣」（否则以后收不回来还被忘了）
-      await db.run('UPDATE sample_orders SET converted_order_id = ?, updated_at = ? WHERE id = ?', [order.id, now(), id])
+      await db.run('UPDATE sample_orders SET converted_order_id = ?, updated_at = ?, row_version = row_version + 1 WHERE id = ?', [order.id, now(), id])
       if (offsetTotal > 0) {
         await db.run(
-          'UPDATE sample_orders SET fee_status = ?, fee_note = ?, offset_amount = ?, updated_at = ? WHERE id = ?',
+          'UPDATE sample_orders SET fee_status = ?, fee_note = ?, offset_amount = ?, updated_at = ?, row_version = row_version + 1 WHERE id = ?',
           [
             'offset',
             `已抵扣到订单 ${order.orderNo}（样品费 ${s.sampleFee.toFixed(2)}${
@@ -972,7 +991,7 @@ export function samplesCore(db: Db) {
     const collected = Number(paidRow?.paid ?? 0)
     const next = total > 0.001 && collected >= total - 0.001 ? 'paid' : 'unpaid'
     if (next !== cur) {
-      await db.run('UPDATE sample_orders SET fee_status = ?, updated_at = ? WHERE id = ?', [next, now(), id])
+      await db.run('UPDATE sample_orders SET fee_status = ?, updated_at = ?, row_version = row_version + 1 WHERE id = ?', [next, now(), id])
     }
   }
 

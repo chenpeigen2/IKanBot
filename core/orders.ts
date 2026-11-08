@@ -111,11 +111,11 @@ export interface OrderInput {
   /** 收货抬头覆盖（这单要送别的仓就在这里改） */
   shipTo?: Partial<PartySnapshot>
   /**
-   * 乐观锁（M4）：界面读单那一刻看到的 updated_at。传了就按「读时的那一刻」条件更新
-   * （UPDATE … WHERE id=? AND updated_at=?）；写入前已被别人改过 → 409「刚被别人改过」。
+   * 乐观锁（M4）：界面读单那一刻看到的 row_version。传了就按「读时的行版本」条件更新
+   * （UPDATE … WHERE id=? AND row_version=?）；写入前已被别人改过 → 409「刚被别人改过」。
    * 不传（undefined/空）走老路：不检查（兼容脚本/迁移调用）。
    */
-  expectedUpdatedAt?: string | null
+  expectedRowVersion?: number | null
 }
 
 export interface OrderItemInput {
@@ -837,8 +837,13 @@ export function ordersCore(db: Db) {
     const ts = now()
     const before = await db.get('SELECT * FROM orders WHERE id = ?', [id]) as Record<string, unknown> | null
     if (!before) throw notFound('订单不存在')
-    // 乐观锁（M4）：界面带上它读单那一刻的 updated_at；空/未传不检查（老调用方照旧）
-    const expectedUpdatedAt = typeof input.expectedUpdatedAt === 'string' ? input.expectedUpdatedAt.trim() : ''
+    // 乐观锁（M4）：界面带上它读单那一刻的 row_version；空/未传不检查（老调用方照旧）。
+    // R63 收口：CAS 凭据从 updated_at 换成 row_version——出货状态回写这类不碰 updated_at
+    // 的路径也曾能溜过去，行版本号任何写都 +1，没有这个窟窿
+    const expectedRowVersion =
+      input.expectedRowVersion === null || input.expectedRowVersion === undefined
+        ? null
+        : Number(input.expectedRowVersion)
     await assertOrderWritable(id, '改这张单')
     // 单号是凭据：编辑时把 PI 号改成别人的号要拦住（改成自己的号不算重号）
     const oldPiNo = String(before.pi_no ?? '').trim()
@@ -1058,17 +1063,19 @@ export function ordersCore(db: Db) {
         )
       }
       const res = await db.run(
-        `UPDATE orders SET ${cells.map(([col]) => `${col}=?`).join(', ')}, updated_at=? WHERE id=?${expectedUpdatedAt ? ' AND updated_at = ?' : ''}`,
+        `UPDATE orders SET ${cells.map(([col]) => `${col}=?`).join(', ')}, updated_at=?, row_version = row_version + 1 WHERE id=?${
+          expectedRowVersion !== null ? ' AND row_version = ?' : ''
+        }`,
         [
           ...cells.map(([, v]) => v as string | number | null),
           ts,
           id,
-          ...(expectedUpdatedAt ? [expectedUpdatedAt] : [])
+          ...(expectedRowVersion !== null ? [expectedRowVersion] : [])
         ]
       )
       // 乐观锁复查（M4）：affected 0 行 = 读单到写入之间被人改过（或整张单没了）。
       // 在 transact 内复查而不是前端预检：SQLite 与未来的 MySQL 都能用「条件更新 + 行数」表达同一套语义
-      if (expectedUpdatedAt && res.changes === 0) {
+      if (expectedRowVersion !== null && res.changes === 0) {
         const still = await db.get('SELECT id FROM orders WHERE id = ?', [id])
         if (still) throw writeConflict()
         throw notFound('订单不存在')
@@ -1140,7 +1147,7 @@ export function ordersCore(db: Db) {
     const note = changed.join('；') || '抬头没改动'
     // 抬头和留痕一起落：分开写会留下「纸面已经改了、历史却说没改」的对不上
     await db.transact(async () => {
-      await db.run('UPDATE orders SET bill_to_json=?, ship_to_json=?, updated_at=? WHERE id=?', [
+      await db.run('UPDATE orders SET bill_to_json=?, ship_to_json=?, updated_at=?, row_version = row_version + 1 WHERE id=?', [
         billJson,
         shipJson,
         now(),
@@ -1250,7 +1257,7 @@ export function ordersCore(db: Db) {
       // 一串连带动作全按错前提做了，历史里还留着「从 X 作废」这条假话。
       // 条件写：状态不是读过的那个就一行不动，写不进去当场把整个事务顶回。
       const wrote = await db.run(
-        'UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ? AND payment_status = ?',
+        'UPDATE orders SET payment_status = ?, updated_at = ?, row_version = row_version + 1 WHERE id = ? AND payment_status = ?',
         ['void', now(), id, cur.payment_status]
       )
       if (wrote.changes !== 1) {
@@ -1280,7 +1287,7 @@ export function ordersCore(db: Db) {
       for (const s of offsetSamples) {
         await db.run(
           `UPDATE sample_orders SET fee_status = 'unpaid',
-            fee_note = ?, updated_at = ? WHERE id = ?`,
+            fee_note = ?, updated_at = ?, row_version = row_version + 1 WHERE id = ?`,
           [
             `${String(s.fee_note ?? '')}；订单 ${cur.order_no} 已作废，抵扣回退为未收`,
             now(),
@@ -1547,7 +1554,7 @@ export function ordersCore(db: Db) {
     // offset_amount 留着不动，和 voidOrder 那条回退一个口径——它只是历史额。
     if (after <= 0.001) {
       for (const s of linked) {
-        await db.run('UPDATE sample_orders SET fee_status = ?, fee_note = ?, updated_at = ? WHERE id = ?', [
+        await db.run('UPDATE sample_orders SET fee_status = ?, fee_note = ?, updated_at = ?, row_version = row_version + 1 WHERE id = ?', [
           'unpaid',
           `${String(s.fee_note ?? '')}；订单 ${orderNo} 的抵扣行已取消，回退为未收`,
           now(),
@@ -1587,7 +1594,7 @@ export function ordersCore(db: Db) {
           `确实要少收客户这么多，请用正费用行之外的让利并写明原因。`
       )
     }
-    await db.run('UPDATE sample_orders SET offset_amount = ?, fee_note = ?, updated_at = ? WHERE id = ?', [
+    await db.run('UPDATE sample_orders SET offset_amount = ?, fee_note = ?, updated_at = ?, row_version = row_version + 1 WHERE id = ?', [
       after,
       `${String(s.fee_note ?? '')}；订单 ${orderNo} 费用行调整后抵扣 ${after.toFixed(2)}`,
       now(),
@@ -1646,7 +1653,7 @@ export function ordersCore(db: Db) {
     }
     // 改费用、抵扣联动、留痕、重算状态必须同生同死：中途失败留着「费用改了、应收没重算」的单
     await db.transact(async () => {
-      await db.run('UPDATE orders SET charges=?, updated_at=? WHERE id=?', [JSON.stringify(clean), now(), orderId])
+      await db.run('UPDATE orders SET charges=?, updated_at=?, row_version = row_version + 1 WHERE id=?', [JSON.stringify(clean), now(), orderId])
       await syncSampleOffsetFromCharges(orderId, String(before.order_no ?? ''), beforeCharges, clean)
       const parts = describeChargeChange(beforeCharges, clean)
       const detail = parts.length ? `修改费用：${parts.join('；')}` : '修改费用行'
@@ -1801,7 +1808,7 @@ export function ordersCore(db: Db) {
     )
     await db.transact(async () => {
       for (const item of items) await insertOrderItem(orderId, item)
-      await db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
+      await db.run('UPDATE orders SET updated_at = ?, row_version = row_version + 1 WHERE id = ?', [now(), orderId])
       // 件数变了，订单的「装够没有 / 走了没有」跟着变
       await applyShipStatus(db, orderId)
       // 金额变了，应收总额 / 定金 / 待收都变了，收款状态要重算（可以往上也可以往下）
@@ -1920,7 +1927,7 @@ export function ordersCore(db: Db) {
           orderId
         ]
       )
-      await db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
+      await db.run('UPDATE orders SET updated_at = ?, row_version = row_version + 1 WHERE id = ?', [now(), orderId])
       // 改小数量/单价会把费用行里的抵扣顶出去：合计一旦为负，抵扣静默蒸发、还生出假预收。
       // 这道门在事务里按改完的库内货值现算：事务外那一次读挡不住并发的第二笔改行——
       // 两个人各把一行砍半，彼此都只看见自己的改动，双双放行，库里留下的是一张负合计单
@@ -1981,7 +1988,7 @@ export function ordersCore(db: Db) {
     }
     await db.transact(async () => {
       await db.run('DELETE FROM order_items WHERE id = ? AND order_id = ?', [itemId, orderId])
-      await db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
+      await db.run('UPDATE orders SET updated_at = ?, row_version = row_version + 1 WHERE id = ?', [now(), orderId])
       // 删掉这一行等于抽走一截货值：剩下的货撑不住费用行里的抵扣就成了负合计。
       // 同改行那道门一样，守门读的是事务内已经删完的货值，不给并发插队留缝
       await assertTotalNonNegativeAfter(orderId, await orderGoodsTotal(orderId))
@@ -2063,7 +2070,7 @@ export function ordersCore(db: Db) {
           ]
         )
       }
-      await db.run('UPDATE orders SET updated_at = ? WHERE id = ?', [now(), orderId])
+      await db.run('UPDATE orders SET updated_at = ?, row_version = row_version + 1 WHERE id = ?', [now(), orderId])
       // 换成一批更小的货，费用行里的抵扣可能顶不住新货值：守门读事务内已经换完的货值
       await assertTotalNonNegativeAfter(orderId, await orderGoodsTotal(orderId))
       await applyShipStatus(db, orderId)
@@ -2689,7 +2696,7 @@ export function ordersCore(db: Db) {
     const next = booksStatusOf(status, money)
 
     if (next !== status) {
-      await db.run('UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?', [next, now(), orderId])
+      await db.run('UPDATE orders SET payment_status = ?, updated_at = ?, row_version = row_version + 1 WHERE id = ?', [next, now(), orderId])
       await logEvent(db, 
         orderId,
         'status_auto',
@@ -2725,7 +2732,7 @@ export function ordersCore(db: Db) {
     await db.transact(async () => {
       // 状态和留痕必须一起落：中间断掉会变成「状态改了、历史里没有」，
       // 出货提醒的主钟（ship_status 事件）也就失去了那笔兜底时间
-      await db.run('UPDATE orders SET ship_status = ?, updated_at = ? WHERE id = ?', [next, now(), orderId])
+      await db.run('UPDATE orders SET ship_status = ?, updated_at = ?, row_version = row_version + 1 WHERE id = ?', [next, now(), orderId])
       await logEvent(db, orderId, 'ship_status', cur.ship_status, next, note)
     })
     return (await getOrder(orderId))!
@@ -2862,7 +2869,7 @@ export function ordersCore(db: Db) {
       // 而退回草稿/失效已经顺手把预收抵扣回退掉了——按错前提做的连带动作收不回来。
       // 所以用条件写：状态不是我们读过的那个就一行也不动，写不进去就说明前提变了。
       const wrote = await db.run(
-        'UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ? AND payment_status = ?',
+        'UPDATE orders SET payment_status = ?, updated_at = ?, row_version = row_version + 1 WHERE id = ? AND payment_status = ?',
         [next, now(), orderId, cur.payment_status]
       )
       if (wrote.changes !== 1) {

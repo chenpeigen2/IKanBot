@@ -6,7 +6,7 @@
  *
  * 转单要建订单、要按历史版本钉价格，所以回头调订单域；按需懒建工厂，共用同一个连接。
  */
-import { bizError, notFound } from '../src/shared/errors'
+import { bizError, notFound, writeConflict } from '../src/shared/errors'
 import type { Db } from './db'
 import { nextNo } from './next-no'
 import { logEvent } from './events'
@@ -45,6 +45,11 @@ export interface QuotationItemInput {
 
 export interface QuotationInput {
   id?: number
+  /**
+   * 乐观锁（M4 第二片）：界面读单那一刻看到的 row_version；写入前已被别人改过 → 409。
+   * 不传（undefined/空）不检查（兼容脚本/迁移调用）。
+   */
+  expectedRowVersion?: number | null
   customerId: number
   currency?: Currency
   exchangeRate?: number
@@ -547,10 +552,23 @@ export function quotationsCore(db: Db) {
         ['sent_at', sentAt],
         ['confirmed_at', confirmedAt]
       ]
-      await db.run(
-        `UPDATE quotations SET ${cells.map(([col]) => `${col}=?`).join(', ')}, updated_at=? WHERE id=?`,
-        [...cells.map(([, v]) => v as string | number | null), ts, qId]
+      // 乐观锁（M4 第二片）：带上了读单那一刻的 row_version 就条件更新；affected 0 = 有人先改过 → 409。
+      // 不传（老调用方/脚本）不检查，与订单/商品/客户同一套语义
+      const expectedRowVersion =
+        input.expectedRowVersion === null || input.expectedRowVersion === undefined
+          ? null
+          : Number(input.expectedRowVersion)
+      const res = await db.run(
+        `UPDATE quotations SET ${cells.map(([col]) => `${col}=?`).join(', ')}, updated_at=?, row_version = row_version + 1 WHERE id=?${
+          expectedRowVersion !== null ? ' AND row_version = ?' : ''
+        }`,
+        [...cells.map(([, v]) => v as string | number | null), ts, qId, ...(expectedRowVersion !== null ? [expectedRowVersion] : [])]
       )
+      if (expectedRowVersion !== null && res.changes === 0) {
+        const still = await db.get('SELECT id FROM quotations WHERE id = ?', [qId])
+        if (still) throw writeConflict()
+        throw notFound('报价单不存在')
+      }
       await db.run('DELETE FROM quotation_items WHERE quotation_id = ?', [qId])
     } else {
       const createCurrency = String(input.currency ?? '') || 'USD'
@@ -792,7 +810,7 @@ export function quotationsCore(db: Db) {
     // 状态、时间和留痕必须一起落：中间断掉就是「状态改了、历史里没有」，
     // 工作台按 sent_at/confirmed_at 起算的等待天数也会跟历史对不上
     await db.transact(async () => {
-      await db.run('UPDATE quotations SET status=?, result=?, sent_at=?, confirmed_at=?, updated_at=COALESCE(?, updated_at) WHERE id=?', [
+      await db.run('UPDATE quotations SET status=?, result=?, sent_at=?, confirmed_at=?, updated_at=COALESCE(?, updated_at), row_version = row_version + 1 WHERE id=?', [
         status,
         meta.result ?? cur.result,
         sentAt,
@@ -961,7 +979,7 @@ export function quotationsCore(db: Db) {
           ]
         )
       }
-      await db.run('UPDATE orders SET source_quotation_id = ?, source_revision = ?, updated_at = ? WHERE id = ?', [
+      await db.run('UPDATE orders SET source_quotation_id = ?, source_revision = ?, updated_at = ?, row_version = row_version + 1 WHERE id = ?', [
         id,
         targetRevision,
         now(),
@@ -1002,7 +1020,7 @@ export function quotationsCore(db: Db) {
       )
 
       const done = await db.run(
-        `UPDATE quotations SET status=?, result=?, converted_order_id=?, updated_at=?
+        `UPDATE quotations SET status=?, result=?, converted_order_id=?, updated_at=?, row_version = row_version + 1
          WHERE id = ? AND (converted_order_id IS NULL OR converted_order_id = ?)`,
         ['converted', 'won', order.id, now(), id, allowFrom]
       )

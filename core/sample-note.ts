@@ -11,7 +11,7 @@ export async function appendSampleFeeNote(db: Db, sampleOrderId: number, line: s
     sampleOrderId
   ])) as { fee_note?: string } | null
   const prev = String(row?.fee_note ?? '').trim()
-  await db.run('UPDATE sample_orders SET fee_note = ?, updated_at = ? WHERE id = ?', [
+  await db.run('UPDATE sample_orders SET fee_note = ?, updated_at = ?, row_version = row_version + 1 WHERE id = ?', [
     prev ? `${prev}；${line}` : line,
     new Date().toISOString(),
     sampleOrderId

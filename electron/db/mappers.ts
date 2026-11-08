@@ -73,7 +73,8 @@ export function mapProduct(r: Row): Product {
     note: str(r.note),
     active: num(r.active),
     createdAt: str(r.created_at),
-    updatedAt: str(r.updated_at)
+    updatedAt: str(r.updated_at),
+    rowVersion: num(r.row_version)
   }
 }
 
@@ -111,7 +112,8 @@ export function mapCustomer(r: Row): Customer {
     defaultPortDestination: str(r.default_port_destination),
     note: str(r.note),
     createdAt: str(r.created_at),
-    updatedAt: str(r.updated_at)
+    updatedAt: str(r.updated_at),
+    rowVersion: num(r.row_version)
   }
 }
 
@@ -147,7 +149,8 @@ export function mapOrder(r: Row): Order {
     sourceQuotationId: optNum(r.source_quotation_id),
     sourceRevision: optNum(r.source_revision),
     createdAt: str(r.created_at),
-    updatedAt: str(r.updated_at)
+    updatedAt: str(r.updated_at),
+    rowVersion: num(r.row_version)
   }
 }
 
@@ -186,7 +189,8 @@ export function mapQuotation(r: Row): Quotation {
     revision: num(r.revision),
     sentAt: optStr(r.sent_at),
     createdAt: str(r.created_at),
-    updatedAt: str(r.updated_at)
+    updatedAt: str(r.updated_at),
+    rowVersion: num(r.row_version)
   }
 }
 

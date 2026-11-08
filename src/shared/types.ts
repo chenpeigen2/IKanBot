@@ -152,6 +152,8 @@ export interface Product {
   active: number
   createdAt: string
   updatedAt: string
+  /** 乐观锁凭据（M4 第二片）：读那一刻的行版本号，保存时随 expectedRowVersion 带回去 */
+  rowVersion: number
 }
 
 export interface ProductImage {
@@ -213,6 +215,8 @@ export interface Customer {
   note: string
   createdAt: string
   updatedAt: string
+  /** 乐观锁凭据（M4 第二片）：读那一刻的行版本号，保存时随 expectedRowVersion 带回去 */
+  rowVersion: number
 }
 
 /** 客户聚合统计 */
@@ -332,6 +336,8 @@ export interface Order {
   sourceRevision: number | null
   createdAt: string
   updatedAt: string
+  /** 乐观锁凭据（M4 第二片）：读那一刻的行版本号，保存时随 expectedRowVersion 带回去 */
+  rowVersion: number
 }
 
 /** 订单 + 关联展开 */
@@ -581,6 +587,8 @@ export interface Quotation {
   sentAt: string | null
   createdAt: string
   updatedAt: string
+  /** 乐观锁凭据（M4 第二片）：读那一刻的行版本号，保存时随 expectedRowVersion 带回去 */
+  rowVersion: number
 }
 
 /** 报价单 + 展开 */
@@ -964,6 +972,11 @@ export interface SampleOrder {
   convertedOrderStatus: PaymentStatus | null
   createdAt: string
   updatedAt: string
+  /**
+   * 乐观锁凭据（M4 第二片）：读那一刻的行版本号，保存时随 expectedRowVersion 带回去。
+   * 任何写路径都会把它 +1，别人动过你手里的快照就旧了。
+   */
+  rowVersion: number
 }
 
 /** 打样单 + 展开 */

@@ -619,6 +619,53 @@
   返回第一次的结果（e2e + HTTP 双锁）。**剩余**：`row_version BIGINT` 大字段方案（读时带出、
   写时自增，比 updated_at 抗同秒碰撞）留给切 MySQL 时一起做；列表页「有人正在改」弱提示
   （需要在线状态/心跳，属于第二片）未做。
+- **R63 大件一：M4 第二片收口——乐观锁凭据换成 row_version + 「有人正在改」弱提示（2026-11-08）**：
+  ① v25 迁移：五张热表（orders/products/customers/sample_orders/quotations）加 `row_version INTEGER NOT NULL DEFAULT 0`，
+     读时带出（mappers/samples 内联映射）、任何写路径 `row_version = row_version + 1`。
+     为什么把 R62 的 updated_at CAS 收口掉：① updated_at 是展示用的业务时间戳，拿来当锁语义缠死；
+     ② 它有真窟窿——`shipping.ts` 的出货状态回写原先连 updated_at 都不碰，编辑中的窗口拿旧快照
+     保存不被警告（丢更新）；行版本号把「这行改过没有」从时间戳解耦，任何写路径漏 bump 会被
+     e2e 照妖镜当场抓住；③ MySQL BIGINT 自增无时区/精度问题。
+  ② CAS 换凭据：orders/customers/products 的 `expectedUpdatedAt` → `expectedRowVersion`（409 人话不变）；
+     quotations/samples 本轮新纳入 CAS——且报价/打样的编辑弹窗原先没回传凭据（CAS 在界面上空转），本轮补齐。
+     不传凭据的老调用（脚本/迁移）照旧不检查。
+  ③ 照妖镜断言：加明细 / 收款登记 / 费用行修改 / 出货回写四条写路径逐一断言 row_version 自增，
+     最后一条是 R62 真窟窿的回归断言；红验证——临时还原 shipping.ts（去掉 bump）后全量跑，
+     恰好且只有出货两条断言变红（`5 → 5`、旧快照保存溜过去），恢复后全绿。
+  ④ 弱提示：`useStaleSnapshot` 钩子（30 秒一轮 + 窗口聚焦时拉最新 row_version 与手里快照比对，
+     不做长连接、不阻断保存——闸门在 CAS），接线六处：订单编辑弹窗、订单详情（带「重新载入」）、
+     客户/商品/报价/打样编辑弹窗。截图 7 张入库 `docs/ui/r63/`。
+  本轮验收：e2e 2347 → 2470（凭据收口 + 报价/打样 CAS + 照妖镜 + 接线检查）；HTTP 211、
+  双模式 140、数据层 76 全绿；typecheck 零错误。
+  **M4 收口**：冲突检测（五热表 CAS + 出货回写在内的一切写路径可见）、收款幂等、「有人正在改」
+  弱提示——**M4 三片全部落地**。留 M5：MySQL 侧 row_version 直接沿用同一套 SQL（BIGINT 自增语义一致，
+  无需分叉）；水单拆分收款（addBatchPayments）的幂等键按 R62 记账沿用同一模式，下轮可补。
+- **R63 大件二（已提交 f068b3c）：搬 MySQL 前的六处方言清账（R46 挂账 #1）**：
+  Db 接口加最小原语 `upsert(overwrite/increment)` / `insertIgnore` / `bizMonthExpr`；SQLite 实现收进
+  `core/sqlite-dialect.ts`（业务代码不准 import），MySQL 侧各自实现（bizMonthExpr 留 TODO(M2) 报错不静默）。
+  六处逐一：next-no/settings 的 ON CONFLICT → upsert；orders 的 last_insert_rowid() → run() 返回值；
+  orders 列表 GROUP_CONCAT(DISTINCT 柜号) → 分开查 + JS 拼接（MySQL group_concat_max_len 默认 1024
+  会静默截断纸面单据，换聚合方式才真没坑）；money 的 strftime → bizMonthExpr；quotations 的
+  INSERT OR IGNORE → insertIgnore。e2e「方言照妖镜」扫 core/*.ts 五类专有语法零命中。
+  **R46 挂账 #2（时间账）同轮清掉**：跨日假失败的机理是「UTC 时刻串直接 slice(0,10) 当本地日」，
+  现比较前一律 `localDateOf`/`localMonthOf` 换算（dashboard 的 daysFrom/dayOf、报表按月归集走
+  bizMonthExpr）；11-07 与 11-08 连续两日全量绿。
+- **R63 小修：seed 把备份记账一并归零（已提交 d851ffd）**：上次试跑留下的 lastBackupAt 会吃掉首页
+  「还没有一份成功备份」提醒，sweep 基线（R59 表）复现不了；重建演示数据时归零。
+- **R63 小修：开发模式 Dock 图标路径（2026-11-08）**：`loadDockIcon` 找的是 `getAppPath()/../build`
+  ——指到仓库上一级去了，永远找不到，macOS 开发模式 Dock 躺的一直是 Electron 默认图标（视觉上
+  「图标怎么不是之前那个」；打包版不受影响，图标文件自首个提交从未变过）。改找 `getAppPath()/build`。
+- **R63 小修：截图/探针模式不自动备份（2026-11-08）**：`IKAN_SHOT` 模式下跳过 `autoBackupOnStart`
+  ——sweep 起九次应用，第一趟就把 lastBackupAt 写上，工作台「还没有成功备份」提醒被吃掉，
+  sweep 基线从此对不齐；探针是只读的，本就不该动账。
+- **R63 sweep 基线重钉（2026-11-08，仅两处微漂，逐项验过原因）**：`/orders` 1486.648/504.648 →
+  **1488.883/506.883**；`/samples` 1339.109/357.109 → **1339.156/357.156**。原因：昨天的旧构建
+  （R62 时的 out/，不含 R63 任何改动）今天同样量出 1488.883——与代码无关的环境渲染微漂
+  （系统字体度量随日变化）；/samples 的 0.047px 为亚像素级（新旧构建各得旧值/新值，两次重播
+  稳定在新值），肉眼不可见。其余七路由（含 `/` 的备份提醒两条 clipped）与基线逐字节一致。
+- **v25 与版本守卫（给升过级的人）**：工作区代码带 v25 迁移，`npm run seed` 重建的演示库即 v25；
+  已发布的 v0.5.4（只认到 v24）打开它会弹「这份数据的新版结构是 v25…请先升级程序再打开」——
+  这是版本守卫在正常工作，数据没坏。装上 v0.5.5 即恢复；本地开发跑 `npm run dev` 走源码不受影响。
 - **下一刀**：业务接口 98/120 已上后端，剩下 22 个通道全是本机基建（`images:` / `window:` / `shell:` / `app:` /
   `export:` / `mode:` / `updater:` / `backup:pick|reveal|lastResult`）。下一步不是「再搬一条」，而是打印与单据渲染、
   更新与 MySQL 备份按 M2/M5 的鉴权与多机并发一起做——那些通道把本机文件路径当接口，单条搬过去只会把两边的账撕开。
@@ -643,8 +690,10 @@
 - 多用户冲突（现在是单写者假设）：
   - 第一版：`UPDATE` 带 `WHERE id=? AND updated_at=?`，`affectedRows=0` 即视为「别人改过」，抛 409 + 中文提示「这单刚被别人改过，请刷新再看」。
   - 第二版（M4）：给热表加 `row_version BIGINT`，读时带出、写时校验并自增；列表页可做「有人正在改」的弱提示。
-  - **R62 进度：第一版已落**（订单/商品/客户三张热表，复查在 transact 内，SQLite/MySQL 同语义，
-    409 话术「这条记录刚被别人改过，请刷新后再试」）；`row_version` 大字段与列表页弱提示仍是第二片。
+  - **R63 进度：收口完成**——凭据从 updated_at 换成 row_version（v25，五热表任何写路径自增），
+    复查在 transact 内，SQLite/MySQL 同语义，409 话术「这条记录刚被别人改过，请刷新后再试」；
+    报价/打样本轮纳入 CAS（界面凭据回传同步补齐）；「有人正在改」弱提示已落
+    （useStaleSnapshot，30 秒 + 聚焦时比对 row_version，六处编辑/详情面）。M4 三片全部落地。
 - 幂等：收款/退款这类入口收到 `request_id` 去重（防双击与重试造成两笔）。
   **R62 进度：已落**——`request_dedup` 表（v24）+ 三个落钱入口（订单收款/打样费收款/预收退款）
   事务内重放返回第一次的结果快照；桌面端成功才换号。水单拆分收款不传 id，行为照旧。

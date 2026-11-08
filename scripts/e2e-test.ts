@@ -12779,8 +12779,8 @@ section('R62：编辑已有订单弹窗的草稿暂存')
   )
 }
 
-/* ---------------- R62/M4：写冲突检测（乐观锁：读时 updated_at 不对就 409） ---------------- */
-section('R62/M4：写冲突检测（乐观锁）')
+/* ---------------- R63/M4 第二片：写冲突检测（乐观锁凭据收口成 row_version） ---------------- */
+section('R63/M4 第二片：写冲突检测（row_version）')
 {
   /** 统一的「想拦下」捕获器：拿错误原句 */
   const attempt = async (fn: () => Promise<unknown>): Promise<string> => {
@@ -12792,61 +12792,156 @@ section('R62/M4：写冲突检测（乐观锁）')
     }
   }
 
-  // 订单：后写者必须被拦下，不能拿旧画面盖掉新账
+  // 订单：后写者必须被拦下，不能拿旧画面盖掉新账。
+  // R63 收口：CAS 凭据从 updated_at 换成 row_version——出货状态回写这类不碰 updated_at
+  // 的路径曾能溜过去；行版本号任何写都 +1，没有这个窟窿
   const lockOrder = await orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.2 })
   const lockOd = await orders.getOrder(lockOrder.id)
-  check('订单带 updated_at（乐观锁的凭据）', typeof lockOd.updatedAt === 'string' && lockOd.updatedAt.length > 0)
+  check('订单带 row_version（乐观锁的凭据）', Number.isInteger(lockOd.rowVersion) && lockOd.rowVersion >= 0, String(lockOd.rowVersion))
   const staleOrder = await attempt(() =>
-    orders.updateOrder(lockOrder.id, { customerId: c1.id, customerPo: 'STALE', expectedUpdatedAt: '2000-01-01T00:00:00.000Z' })
+    orders.updateOrder(lockOrder.id, { customerId: c1.id, customerPo: 'STALE', expectedRowVersion: 999999 })
   )
-  check('旧 updated_at 保存订单被拦：这条记录刚被别人改过', staleOrder.includes('刚被别人改过'), staleOrder)
+  check('旧 row_version 保存订单被拦：这条记录刚被别人改过', staleOrder.includes('刚被别人改过'), staleOrder)
   const freshOrder = await orders.updateOrder(lockOrder.id, {
     customerId: c1.id,
     customerPo: 'FRESH',
-    expectedUpdatedAt: lockOd.updatedAt
+    expectedRowVersion: lockOd.rowVersion
   })
-  check('带着读单那一刻的 updated_at 保存成功', freshOrder.customerPo === 'FRESH')
+  check('带着读单那一刻的 row_version 保存成功', freshOrder.customerPo === 'FRESH')
+  check('保存成功后 row_version 自增', freshOrder.rowVersion === lockOd.rowVersion + 1, `${lockOd.rowVersion} → ${freshOrder.rowVersion}`)
   const legacyOrder = await orders.updateOrder(lockOrder.id, { customerId: c1.id, customerPo: 'LEGACY' })
-  check('不传 expectedUpdatedAt 走老路（脚本/迁移调用不受影响）', legacyOrder.customerPo === 'LEGACY')
+  check('不传 expectedRowVersion 走老路（脚本/迁移调用不受影响）', legacyOrder.customerPo === 'LEGACY')
 
   // 客户档案：同一套语义
-  const lockCust = await customers.saveCustomer({ company: 'R62 Lock Co' })
-  check('客户带 updatedAt', typeof lockCust.updatedAt === 'string' && lockCust.updatedAt.length > 0)
+  const lockCust = await customers.saveCustomer({ company: 'R63 Lock Co' })
+  check('客户带 rowVersion', Number.isInteger(lockCust.rowVersion) && lockCust.rowVersion >= 0, String(lockCust.rowVersion))
   const staleCust = await attempt(() =>
-    customers.saveCustomer({ id: lockCust.id, company: 'R62 Lock Co 改', expectedUpdatedAt: '2000-01-01T00:00:00.000Z' })
+    customers.saveCustomer({ id: lockCust.id, company: 'R63 Lock Co 改', expectedRowVersion: 999999 })
   )
-  check('旧 updated_at 存客户被拦：这条记录刚被别人改过', staleCust.includes('刚被别人改过'), staleCust)
+  check('旧 row_version 存客户被拦：这条记录刚被别人改过', staleCust.includes('刚被别人改过'), staleCust)
   const freshCust = await customers.saveCustomer({
     id: lockCust.id,
-    company: 'R62 Lock Co 改',
-    expectedUpdatedAt: lockCust.updatedAt
+    company: 'R63 Lock Co 改',
+    expectedRowVersion: lockCust.rowVersion
   })
-  check('带着读档那一刻的 updated_at 保存成功', freshCust.company === 'R62 Lock Co 改')
+  check('带着读档那一刻的 row_version 保存成功', freshCust.company === 'R63 Lock Co 改')
 
   // 商品：同一套语义
-  const lockProd = await products.saveProduct({ styleNo: 'R62-LOCK', name: '锁测', sizes: [], colors: [] })
-  check('商品带 updatedAt', typeof lockProd.updatedAt === 'string' && lockProd.updatedAt.length > 0)
+  const lockProd = await products.saveProduct({ styleNo: 'R63-LOCK', name: '锁测', sizes: [], colors: [] })
+  check('商品带 rowVersion', Number.isInteger(lockProd.rowVersion) && lockProd.rowVersion >= 0, String(lockProd.rowVersion))
   const staleProd = await attempt(() =>
-    products.saveProduct({ id: lockProd.id, styleNo: 'R62-LOCK', name: '被人先改过', expectedUpdatedAt: '2000-01-01T00:00:00.000Z' })
+    products.saveProduct({ id: lockProd.id, styleNo: 'R63-LOCK', name: '被人先改过', sizes: [], colors: [], expectedRowVersion: 999999 })
   )
-  check('旧 updated_at 存商品被拦：这条记录刚被别人改过', staleProd.includes('刚被别人改过'), staleProd)
+  check('旧 row_version 存商品被拦：这条记录刚被别人改过', staleProd.includes('刚被别人改过'), staleProd)
   const freshProd = await products.saveProduct({
     id: lockProd.id,
-    styleNo: 'R62-LOCK',
+    styleNo: 'R63-LOCK',
     name: '锁测改',
     sizes: [],
     colors: [],
-    expectedUpdatedAt: lockProd.updatedAt
+    expectedRowVersion: lockProd.rowVersion
   })
-  check('带着读款那一刻的 updated_at 保存成功', freshProd.name === '锁测改')
+  check('带着读款那一刻的 row_version 保存成功', freshProd.name === '锁测改')
 
-  // 接线检查：界面把读到的 updated_at 随保存带给服务层（后写者才会看到人话提示）
+  // 报价单：本轮新纳入 CAS 的两张单之一
+  const lockQ = await quotations.saveQuotation({
+    customerId: c1.id,
+    currency: 'USD',
+    exchangeRate: 7.15,
+    items: [{ styleNo: 'A001', productName: '纯棉圆领T恤', color: 'Black', size: 'M', quantity: 10, unitPrice: 7.5 }]
+  })
+  const staleQ = await attempt(() =>
+    quotations.saveQuotation({
+      id: lockQ.id,
+      customerId: c1.id,
+      currency: 'USD',
+      exchangeRate: 7.15,
+      customerPo: 'STALE-Q',
+      // 报价单是整单替换语义：明细必带
+      items: [{ styleNo: 'A001', productName: '纯棉圆领T恤', color: 'Black', size: 'M', quantity: 10, unitPrice: 7.5 }],
+      expectedRowVersion: 999999
+    })
+  )
+  check('旧 row_version 存报价单被拦：这条记录刚被别人改过', staleQ.includes('刚被别人改过'), staleQ)
+  const freshQ = await quotations.saveQuotation({
+    id: lockQ.id,
+    customerId: c1.id,
+    currency: 'USD',
+    exchangeRate: 7.15,
+    customerPo: 'FRESH-Q',
+    items: [{ styleNo: 'A001', productName: '纯棉圆领T恤', color: 'Black', size: 'M', quantity: 10, unitPrice: 7.5 }],
+    expectedRowVersion: lockQ.rowVersion
+  })
+  check('带着读单那一刻的 row_version 存报价单成功', freshQ.customerPo === 'FRESH-Q')
+
+  // 打样单：本轮新纳入 CAS 的另一张
+  const lockS = await samples.saveSample({
+    customerId: c1.id,
+    sampleDate: localDate(),
+    note: 'R63 锁测',
+    currency: 'USD',
+    exchangeRate: 7.15,
+    items: [{ styleNo: 'A001', productName: '纯棉圆领T恤', color: 'Black', size: 'M', quantity: 2, unitPrice: 15 }]
+  })
+  const staleS = await attempt(() =>
+    samples.saveSample({ id: lockS.id, customerId: c1.id, note: 'STALE-S', expectedRowVersion: 999999 })
+  )
+  check('旧 row_version 存打样单被拦：这条记录刚被别人改过', staleS.includes('刚被别人改过'), staleS)
+  const freshS = await samples.saveSample({ id: lockS.id, customerId: c1.id, note: 'FRESH-S', expectedRowVersion: lockS.rowVersion })
+  check('带着读单那一刻的 row_version 存打样单成功', freshS.note === 'FRESH-S')
+
+  // 照妖镜：热表任何写路径都要 bump row_version——漏 bump 的写对旧快照不可见，CAS 形同虚设。
+  // 四条代表路径：加明细 / 收款登记 / 费用行修改 / 出货回写（最后这条是 R62 真窟窿的回归断言：
+  // 出货回写原先连 updated_at 都不碰，旧 CAS 对它全盲）
+  const bumpOrder = await orders.createOrder({ customerId: c1.id, currency: 'USD', exchangeRate: 7.2 })
+  let bumpOd = await orders.getOrder(bumpOrder.id)
+  const vBase = bumpOd.rowVersion
+  await orders.addOrderItem(bumpOrder.id, { styleNo: 'R63-BUMP', productName: 'bump 测', color: 'Black', size: 'M', quantity: 10, unitPrice: 50 })
+  // 草稿不进现金流：先出草稿状态再收款（业务规则，与照妖镜无关）
+  await orders.setPaymentStatus(bumpOrder.id, 'confirmed')
+  bumpOd = await orders.getOrder(bumpOrder.id)
+  check('加明细 bump row_version', bumpOd.rowVersion > vBase, `${vBase} → ${bumpOd.rowVersion}`)
+  const vItem = bumpOd.rowVersion
+  await orders.addPayment(bumpOrder.id, { paidAt: localDate(), amount: 500, method: 'T/T', bankRef: 'R63-BUMP-PAY' })
+  bumpOd = await orders.getOrder(bumpOrder.id)
+  check('收款登记 bump row_version（收款状态重算必经 orders 行）', bumpOd.rowVersion > vItem, `${vItem} → ${bumpOd.rowVersion}`)
+  const vPay = bumpOd.rowVersion
+  await orders.updateOrder(bumpOrder.id, { customerId: c1.id, charges: [{ label: '运费 Freight', amount: 80 }] })
+  bumpOd = await orders.getOrder(bumpOrder.id)
+  check('费用行修改 bump row_version', bumpOd.rowVersion > vPay, `${vPay} → ${bumpOd.rowVersion}`)
+  const vCharge = bumpOd.rowVersion
+  await packing.createPackingList({
+    orderId: bumpOrder.id,
+    containerNo: 'R63BUMP001',
+    lines: [{ boxNo: 'NO.1', styleNo: 'R63-BUMP', productName: 'bump 测', color: 'Black', size: 'M', quantity: 10, netWeight: 12 }]
+  })
+  bumpOd = await orders.getOrder(bumpOrder.id)
+  check('出货回写（装箱触发）bump row_version —— R62 updated_at CAS 的真窟窿，行版本堵死', bumpOd.rowVersion > vCharge, `${vCharge} → ${bumpOd.rowVersion}`)
+  const staleAfterShip = await attempt(() =>
+    orders.updateOrder(bumpOrder.id, { customerId: c1.id, customerPo: 'STALE-AFTER-SHIP', expectedRowVersion: vCharge })
+  )
+  check('出货后旧快照保存照样被拦（不靠 updated_at 也能看见别人的写）', staleAfterShip.includes('刚被别人改过'), staleAfterShip)
+
+  // 接线检查：界面把读到的 row_version 随保存带回（后写者才会看到人话提示）
   const editModalSrc = fs.readFileSync('src/renderer/src/pages/EditOrderModal.tsx', 'utf8')
-  check('编辑订单弹窗：保存带 expectedUpdatedAt（order.updatedAt）', editModalSrc.includes('expectedUpdatedAt: order.updatedAt'))
+  check('编辑订单弹窗：保存带 expectedRowVersion（order.rowVersion）', editModalSrc.includes('expectedRowVersion: order.rowVersion'))
   const custSrc = fs.readFileSync('src/renderer/src/pages/Customers.tsx', 'utf8')
-  check('客户编辑：保存带 expectedUpdatedAt（draft.updatedAt）', custSrc.includes('expectedUpdatedAt: draft.updatedAt'))
+  check('客户编辑：保存带 expectedRowVersion（draft.rowVersion）', custSrc.includes('expectedRowVersion: draft.rowVersion'))
   const prodSrc = fs.readFileSync('src/renderer/src/pages/Products.tsx', 'utf8')
-  check('商品编辑：保存带 expectedUpdatedAt（draft.updatedAt）', prodSrc.includes('expectedUpdatedAt: draft.updatedAt'))
+  check('商品编辑：保存带 expectedRowVersion（draft.rowVersion）', prodSrc.includes('expectedRowVersion: draft.rowVersion'))
+
+  // 弱提示（M4 第二片）：详情/编辑面开着时会盯别人改没改——基于 row_version 轮询比对，不阻断
+  check('编辑订单弹窗：开着时盯改动（useStaleSnapshot）', editModalSrc.includes('useStaleSnapshot'))
+  const detailSrc = fs.readFileSync('src/renderer/src/pages/OrderDetail.tsx', 'utf8')
+  check('订单详情：开着时盯改动（useStaleSnapshot）', detailSrc.includes('useStaleSnapshot'))
+  check('客户编辑：开着时盯改动（useStaleSnapshot）', custSrc.includes('useStaleSnapshot'))
+  check('商品编辑：开着时盯改动（useStaleSnapshot）', prodSrc.includes('useStaleSnapshot'))
+  const quotationSrc = fs.readFileSync('src/renderer/src/pages/Quotations.tsx', 'utf8')
+  check('报价单编辑：开着时盯改动（useStaleSnapshot）', quotationSrc.includes('useStaleSnapshot'))
+  const sampleSrc = fs.readFileSync('src/renderer/src/pages/Samples.tsx', 'utf8')
+  check('打样单编辑：开着时盯改动（useStaleSnapshot）', sampleSrc.includes('useStaleSnapshot'))
+  const hookSrc = fs.readFileSync('src/renderer/src/hooks/useStaleSnapshot.ts', 'utf8')
+  check('弱提示钩子存在且导出 useStaleSnapshot', hookSrc.includes('export function useStaleSnapshot'))
 }
 
 /* ---------------- R62/M4：收款/退款幂等（request_id 重放只落一笔） ---------------- */

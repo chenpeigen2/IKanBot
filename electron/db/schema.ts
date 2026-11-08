@@ -648,6 +648,24 @@ CREATE TABLE request_dedup (
   created_at TEXT NOT NULL
 );
 `
+  },
+  {
+    version: 25,
+    name: 'row_version',
+    sql: `
+-- 乐观锁凭据升级（M4 第二片，R63）：热表加 row_version，读时带出、写时自增。
+-- 为什么把 R62 的 updated_at CAS 收口成 row_version 一套：
+-- ① updated_at 是展示用的业务时间戳，拿来当锁容易跟「修改时间」语义缠死；
+-- ② 更要紧的是 updated_at CAS 有真窟窿：shipping.ts 的出货状态回写不碰 updated_at，
+--    编辑中的窗口拿旧快照保存不会被告警（丢更新）；row_version 把「这行改过没有」
+--    从时间戳里解耦出来，任何写路径漏 bump 会被 e2e 照妖镜当场抓住；
+-- ③ MySQL 侧 BIGINT 自增无时区/精度问题，桌面与服务端同一语义。
+ALTER TABLE orders         ADD COLUMN row_version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE products       ADD COLUMN row_version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE customers      ADD COLUMN row_version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sample_orders  ADD COLUMN row_version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE quotations     ADD COLUMN row_version INTEGER NOT NULL DEFAULT 0;
+`
   }
 ]
 

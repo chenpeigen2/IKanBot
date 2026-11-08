@@ -39,10 +39,10 @@ export interface CustomerInput {
   /** 明知重名还要建（同名不同采购办是常态，不能硬拦） */
   allowDuplicate?: boolean
   /**
-   * 乐观锁（M4）：界面读档案那一刻看到的 updated_at；写入前已被别人改过 → 409。
+   * 乐观锁（M4）：界面读档案那一刻看到的 row_version；写入前已被别人改过 → 409。
    * 不传（undefined/空）不检查（兼容脚本/迁移调用）。
    */
-  expectedUpdatedAt?: string | null
+  expectedRowVersion?: number | null
 }
 
 /** 外部输入按白名单读字段：多传的键不进 SQL，也防止把 id 写成字符串带进 WHERE */
@@ -75,7 +75,7 @@ function normalize(raw: Record<string, unknown>): CustomerInput {
     defaultPortDestination: s('defaultPortDestination'),
     note: s('note'),
     allowDuplicate: raw['allowDuplicate'] === true,
-    expectedUpdatedAt: s('expectedUpdatedAt') ?? null
+    expectedRowVersion: raw['expectedRowVersion'] == null ? null : Number(raw['expectedRowVersion'])
   }
 }
 
@@ -151,13 +151,16 @@ export function customersCore(db: Db) {
       await mustGet(input.id)
       // 乐观锁（M4）：带上了读档那一刻的 updated_at 就条件更新；affected 0 = 有人先改过 → 409。
       // 复查在写入这一刻做（mustGet 只证明「存在过」），SQLite 与未来的 MySQL 同一套语义
-      const expectedUpdatedAt = typeof input.expectedUpdatedAt === 'string' ? input.expectedUpdatedAt.trim() : ''
+      const expectedRowVersion =
+        input.expectedRowVersion === null || input.expectedRowVersion === undefined
+          ? null
+          : Number(input.expectedRowVersion)
       const res = await db.run(
         `UPDATE customers SET company=?, contact=?, email=?, phone=?, country=?, address=?,
          zip_code=?, attn=?, payment_pref=?, ship_attn=?, ship_address=?, ship_zip_code=?, ship_country=?,
          default_payment_method=?, default_deposit_ratio=?,
-         default_incoterm=?, default_port_loading=?, default_port_destination=?, note=?, updated_at=?
-         WHERE id=?${expectedUpdatedAt ? ' AND updated_at = ?' : ''}`,
+         default_incoterm=?, default_port_loading=?, default_port_destination=?, note=?, updated_at=?, row_version = row_version + 1
+         WHERE id=?${expectedRowVersion !== null ? ' AND row_version = ?' : ''}`,
         [
           company,
           input.contact ?? '',
@@ -180,10 +183,10 @@ export function customersCore(db: Db) {
           input.note ?? '',
           ts,
           input.id,
-          ...(expectedUpdatedAt ? [expectedUpdatedAt] : [])
+          ...(expectedRowVersion !== null ? [expectedRowVersion] : [])
         ]
       )
-      if (expectedUpdatedAt && res.changes === 0) throw writeConflict()
+      if (expectedRowVersion !== null && res.changes === 0) throw writeConflict()
       return mustGet(input.id)
     }
     const res = await db.run(
@@ -221,7 +224,7 @@ export function customersCore(db: Db) {
 
   async function setActive(id: number, active: 0 | 1): Promise<Customer> {
     await mustGet(id)
-    await db.run('UPDATE customers SET active = ?, updated_at = ? WHERE id = ?', [
+    await db.run('UPDATE customers SET active = ?, updated_at = ?, row_version = row_version + 1 WHERE id = ?', [
       active ? 1 : 0,
       new Date().toISOString(),
       id

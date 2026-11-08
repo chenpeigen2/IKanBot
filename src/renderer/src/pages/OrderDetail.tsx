@@ -4,6 +4,7 @@ import {
   Modal, useToast, money, num, fmtDate, fmtDateTime, Empty, Menu,
   Button, PaymentTag, ShipTag, clientKey, newRequestId, LoadError, PromptModal, useLoadGuard
 } from '../ui'
+import { useStaleSnapshot } from '../hooks/useStaleSnapshot'
 import {
   PAYMENT_METHOD_LABEL,
   PAYMENT_STATUS_LABEL,
@@ -112,6 +113,9 @@ export default function OrderDetail() {
   // 并发在途时快速切单，先发的旧单响应可能后到——
   // 不设栅栏会把 5 号单的金额/收款整套写进 7 号页面（金额串单，比列表串结果疼得多）
   const beginLoad = useLoadGuard()
+  // 弱提示（M4 第二片）：详情开着时盯一眼别人改没改（row_version 比对，30 秒一次 + 窗口聚焦时）。
+  // 页面只提示不拦人——保存的闸门在各入口的 CAS；「重新载入」重拉快照，提示即消
+  const staleInfo = useStaleSnapshot(order, () => window.api.orders.get(orderId), Boolean(order?.id))
   const load = async () => {
     const { isCurrent } = beginLoad()
     try {
@@ -519,6 +523,14 @@ export default function OrderDetail() {
       </div>
 
       <div className="content">
+        {staleInfo ? (
+          <div className="stale-hint">
+            <span>
+              这张单{staleInfo.changedAt ? `在 ${fmtDateTime(staleInfo.changedAt)} ` : ''}刚被别人改过，页面上的内容可能旧了
+            </span>
+            <Button onClick={() => void load()}>重新载入</Button>
+          </div>
+        ) : null}
         {order.paymentStatus === 'draft' ? (
           <div className="alert warn">
             这单还是「草稿」：PI 发出去以后，请把收款状态改成「待确认」，不然客户不回邮件系统不会提醒你。
