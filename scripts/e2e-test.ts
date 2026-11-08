@@ -4081,6 +4081,44 @@ eq(
   true
 )
 
+/* ---------------- R65：恢复/检查的孤儿目录随备份清掉（R46 挂账 #4） ---------------- */
+section('R65：备份顺手清恢复孤儿目录（崩溃漏清的那种）')
+{
+  // 恢复流程在正常路径会自己收走 probe/holding 目录，但崩溃/断电会漏——
+  // 服务端上没人看就一年攒一年。备份时顺手扫一遍：超过 24 小时的才算孤儿，
+  // 真在跑的恢复不会花一天；恢复在途（restoring）时绝不插手。
+  const hoursAgo = (h: number) => {
+    const t = new Date(Date.now() - h * 60 * 60 * 1000)
+    return (p: string) => fs.utimesSync(p, t, t)
+  }
+  const old = hoursAgo(30)
+  const data = dataDir()
+  // 四类孤儿：两处探针目录、恢复前旧图的 holding、换库的临时库文件——全部种上旧时间戳
+  const orphans = [
+    join(data, '.restore-check-20250101000000'),
+    join(data, '.inspect-20250101000000'),
+    join(data, 'images.pre-restore-20250101000000'),
+    join(data, 'ikanbot.db.restoring')
+  ]
+  for (const p of orphans) {
+    if (p.endsWith('.restoring')) fs.writeFileSync(p, 'crashed')
+    else fs.mkdirSync(p, { recursive: true })
+    old(p)
+  }
+  // 刚出现的同名前缀目录：真在跑的恢复，不许动
+  const fresh = join(data, '.restore-check-fresh')
+  fs.mkdirSync(fresh, { recursive: true })
+  const knownBefore = new Set((await listBackups()).map((b) => b.path))
+  await createBackup('test')
+  // 不数总数：备份目录有「保留最近 30 份」的剪枝，总数可能原地踏步；看「多了一个新文件」
+  check('备份照常成功（清孤儿不挡正事）', (await listBackups()).some((b) => !knownBefore.has(b.path)))
+  for (const p of orphans) {
+    check(`孤儿被清：${p.split('/').pop()}`, !fs.existsSync(p))
+  }
+  check('刚出现的探针目录不是孤儿，不许动', fs.existsSync(fresh))
+  fs.rmSync(fresh, { recursive: true, force: true })
+}
+
 section('R9 工作台会盯住备份（数据只躺在这台电脑上）')
 const r9setStamp = (at: string | null, err: string | null): void => {
   // R54 起戳单独一行（backup_state）：这里模拟备份服务写凭据，别再往设置正文里塞

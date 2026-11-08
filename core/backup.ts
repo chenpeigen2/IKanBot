@@ -103,11 +103,44 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
   /** 本次备份里快照是否降级过（writeBackup 收尾时读它去留痕） */
   let snapshotFallbackReason = ''
 
+  /**
+   * 清恢复/检查留下的孤儿目录（R46 挂账 #4）：恢复流程的正常路径会自己收走
+   * 探针目录（.restore-check-* / .inspect-*）、恢复前的 holding（*.pre-restore-*）
+   * 和换库临时文件（*.restoring），但崩溃/断电会漏——服务端上没人看就一年攒一年。
+   * 在备份开头顺手扫：恢复在途绝不插手（restoring 为真直接返回）；超过 24 小时
+   * 的才算孤儿——真在跑的恢复不会花一天，新探针/新 holding 不会被误伤。
+   */
+  function pruneOrphanRestores(): void {
+    if (restoring) return
+    const root = dirs.dataDir()
+    let names: string[]
+    try {
+      names = readdirSync(root)
+    } catch {
+      return
+    }
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000
+    for (const name of names) {
+      const isOrphan =
+        /^\.restore-check-/.test(name) || /^\.inspect-/.test(name) || /\.pre-restore-/.test(name) || /\.restoring$/.test(name)
+      if (!isOrphan) continue
+      const p = join(root, name)
+      try {
+        if (statSync(p).mtimeMs >= cutoff) continue // 刚出现的，可能真在跑
+        rmSync(p, { recursive: true, force: true })
+      } catch {
+        /* 一个删不动不影响别的，下次备份再试 */
+      }
+    }
+  }
+
   async function writeBackup(note: string): Promise<string> {
     // 上一轮的降级原因不许带进这一轮：一次 VACUUM 失败之后，
     // 每次成功备份都会被追一句陈旧的「快照降级」，还把下一次的真错盖掉
     snapshotFallbackReason = ''
     skippedFiles = []
+    // 顺手清上一次恢复漏下的孤儿目录（恢复在途时它自己会闭嘴）
+    pruneOrphanRestores()
     const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
     // 备份目录不存在就现建（服务器侧目录从没被打开过时是空的）：
     // 不能因为目录还没人创建过就把第一次备份记成失败
