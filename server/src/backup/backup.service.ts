@@ -1,5 +1,6 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common'
-import { readFileSync, unlinkSync } from 'node:fs'
+import { readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Database } from 'node-sqlite3-wasm'
 import { Inject } from '@nestjs/common'
@@ -113,8 +114,28 @@ export class BackupService implements OnModuleInit, OnModuleDestroy {
         },
         // 服务器没有屏幕：备份目录外的 zip 没有「亲手点过」的放行理由
         isApprovedPath: () => false,
-        // 打包时现算一份搬迁对账进包（R70）：恢复完成后跟包里的逐项对，全零差才两头都好
-        migrationReport: () => migrationReport(this.db)
+        // 打包时从快照字节算搬迁对账进包（R70/R72）：快照就是包里那份库，对出来的才是
+        // 「包自己」的账（主连接算与包内快照之间有写间隙，diff 会假警报）。
+        // 同一份 core migrationReport 算法，经临时文件 + 裸驱动喂进去
+        migrationReportFromSnapshot: async (dbData: Buffer) => {
+          const tmp = join(tmpdir(), `migration-report-${Date.now()}-${snapshotSeq++}.db`)
+          try {
+            writeFileSync(tmp, dbData)
+            const raw = new Database(tmp)
+            try {
+              const asyncDb = {
+                get: async (sql: string, params?: unknown[]) => raw.get(sql, params as never[]),
+                all: async (sql: string, params?: unknown[]) => raw.all(sql, params as never[]),
+                run: async () => ({ changes: 0, lastInsertRowid: 0n })
+              } as unknown as Db
+              return await migrationReport(asyncDb)
+            } finally {
+              raw.close()
+            }
+          } finally {
+            unlinkSync(tmp)
+          }
+        }
       }
     )
   }

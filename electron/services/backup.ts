@@ -1,8 +1,11 @@
 import { existsSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'fs'
 import { join, resolve, dirname } from 'path'
+import { tmpdir } from 'os'
+import { randomUUID } from 'crypto'
 import { app, dialog } from 'electron'
-import { Database } from 'node-sqlite3-wasm'
-import { dataDir, imagesDir, backupsDir, docsDir, closeDb, openDb, getDb, coreDb} from '../db'
+import { Database, Database as RawDatabase } from 'node-sqlite3-wasm'
+import { dataDir, imagesDir, backupsDir, docsDir, closeDb, openDb, getDb, coreDb } from '../db'
+import type { Db } from '../../core/db'
 import { backupCore } from '../../core/backup'
 import { readZip } from '../../core/zip'
 import { migrationReport, diffMigrationReports, type MigrationReport, type MigrationDiff } from '../../core/migration'
@@ -85,7 +88,7 @@ const core = backupCore(
     isApprovedPath: (p: string) => dialogApproved.has(resolve(p)),
     // 恢复成功后进程马上 relaunch 重启：旗子举到死，死之前的每一笔写都得拦
     keepRestoringAfterRestore: true,
-    migrationReport: () => migrationReport(coreDb)
+    migrationReportFromSnapshot: (dbData) => migrationReportFromSnapshotDb(dbData)
   }
 )
 
@@ -167,6 +170,31 @@ export async function restoreBackupWithReport(path: string): Promise<{
   } catch (e) {
     disarmRestoreReport()
     throw e
+  }
+}
+
+/**
+ * 从快照字节算搬迁对账（R72）：字节写临时文件、裸驱动直开（不走 electron/db 的连接包装——
+ * 那套带锁目录与旁注，临时文件不需要），套一层异步 Db 适配喂给 core 的同一份
+ * migrationReport 算法——不许另写一份。
+ */
+async function migrationReportFromSnapshotDb(dbData: Buffer): Promise<MigrationReport | null> {
+  const tmp = join(tmpdir(), `migration-report-${Date.now()}-${randomUUID()}.db`)
+  try {
+    writeFileSync(tmp, dbData)
+    const raw = new RawDatabase(tmp)
+    try {
+      const asyncDb = {
+        get: async (sql: string, params?: unknown[]) => raw.get(sql, params as never[]),
+        all: async (sql: string, params?: unknown[]) => raw.all(sql, params as never[]),
+        run: async () => ({ changes: 0, lastInsertRowid: 0n })
+      }
+      return await migrationReport(asyncDb as unknown as Db)
+    } finally {
+      raw.close()
+    }
+  } finally {
+    rmSync(tmp, { force: true })
   }
 }
 

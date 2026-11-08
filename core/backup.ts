@@ -57,11 +57,11 @@ export interface BackupHooks {
   /** 服务器上有没有图/单据目录之外还该打进包的目录——现在没有，留接口不硬做 */
   extraEntries?(): ZipEntry[]
   /**
-   * 打包时现算一份搬迁对账进包（R70，可选）：包里带「导出那一刻」的 12 表行数与口径指纹，
-   * 恢复完成后现算一份逐项对——两份全零差才说明包和恢复两头都好。没有实现（旧测试桩）就
-   * 不进包，行为与 R70 之前一致。
+   * 打包时从**快照字节**现算一份搬迁对账进包（R70 起可选钩子，R72 改形：从主连接改从快照算——
+   * 主连接算的对账与包里的库快照之间有写间隙，diff 会假警报；快照字节就是包里那份库，
+   * 对出来的才是「包自己」的账。没有实现（旧测试桩）就不进包，行为与 R70 之前一致。
    */
-  migrationReport?(): Promise<import('./migration').MigrationReport | null>
+  migrationReportFromSnapshot?(dbData: Buffer): Promise<import('./migration').MigrationReport | null>
 }
 
 export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
@@ -159,12 +159,15 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
 
     try {
       const entries = collectBackupEntries()
-      // 搬迁对账进包（R70）：打包的是「此刻的库」，对账也算「此刻的库」——
-      // 两次查询之间有间隙，切库窗口本来就停写（第七节），接受
-      if (hooks.migrationReport) {
+      // 搬迁对账进包（R70/R72）：从**快照字节**算——快照就是包里那份库，对出来的才是「包自己」
+      // 的账，主连接的间隙写不会混进来（R72 前走主连接，diff 会假警报）
+      if (hooks.migrationReportFromSnapshot) {
         try {
-          const mr = await hooks.migrationReport()
-          if (mr) entries.push({ name: 'migration-report.json', data: Buffer.from(JSON.stringify(mr, null, 2)) })
+          const dbEntry = entries.find((e) => e.name === 'ikanbot.db')
+          if (dbEntry) {
+            const mr = await hooks.migrationReportFromSnapshot(dbEntry.data)
+            if (mr) entries.push({ name: 'migration-report.json', data: Buffer.from(JSON.stringify(mr, null, 2)) })
+          }
         } catch (e) {
           // 对账算不出来不能把备份也拖死：包照打，只是这一份没有对账可比
           console.warn('[backup] 搬迁对账没算出来，本包不含对账：', (e as Error).message)
