@@ -41,6 +41,10 @@ async function main() {
   // 备份记账也归零：seed 是「重建」，上次试跑留下的 lastBackupAt 会把首页的
   // 「还没有一份成功备份」提醒吃掉，sweep 基线（docs/backend-plan.md R59 表）就复现不了
   db.exec("DELETE FROM settings WHERE key = 'backup_state'")
+  // 恢复对账（R68/R69）同账：seed 是「重建」，上一次恢复留下的对账卡会在 /settings
+  // 的截图与 sweep 基线里多出一块，基线复现不了（先例：d851ffd 把 lastBackupAt 归零）
+  db.exec("DELETE FROM settings WHERE key = 'last_restore_report'")
+  db.exec("DELETE FROM settings WHERE key = 'pending_restore_report'")
 
   // 商品
   const tshirt = await products.saveProduct({

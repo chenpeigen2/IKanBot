@@ -27,7 +27,7 @@ import * as credits from '../electron/services/credits'
 import { getSettings, saveSettings, markBackupOk, markBackupFail, baseCurrencyLocked } from '../electron/services/settings'
 import { createBackup, inspectBackup, isRestoring, listBackups, pruneBackups, restoreBackup, uniqueBackupName } from '../electron/services/backup'
 import { migrationReport } from '../core/migration'
-import { settleRestoreReport, restoreReportPendingFile } from '../electron/services/backup'
+import { settleRestoreReport, restoreReportPendingFile, armRestoreReport, disarmRestoreReport, restoreBackupWithReport } from '../electron/services/backup'
 import * as docs from '../electron/services/docs'
 import { collectDir, createZip, readZip, verifyZip, zhFsError } from '../electron/services/zip'
 import { docPageFingerprint } from '../src/shared/docFingerprint'
@@ -13173,6 +13173,40 @@ section('R63：方言照妖镜 —— core 里不出现 SQLite 专有语法（�
 /* ---------------- 汇总 ---------------- */
 
 console.log(`\n${'='.repeat(46)}`)
+/* ---------------- R69：恢复对账的语义小账（失败不留孤儿标记 / seed 清键） ---------------- */
+section('R69：恢复对账的语义小账')
+{
+  // ① 恢复失败不留孤儿标记：标记残留在「失败没发生恢复」的库上，下次启动 settle 会把
+  //    当前库算成「恢复后对账」——语义全错。恢复抛错必须把标记一起撤掉
+  armRestoreReport()
+  check('武装后标记在', fs.existsSync(restoreReportPendingFile()))
+  const r69attempt = async (fn: () => Promise<unknown>): Promise<string> => {
+    try {
+      await fn()
+      return ''
+    } catch (e) {
+      return (e as Error).message
+    }
+  }
+  const r69bad = await r69attempt(() => restoreBackupWithReport(join(dataDir(), 'not-here.zip')))
+  check('坏路径恢复被拦', r69bad.length > 0, r69bad)
+  check('恢复失败 → 标记被撤（孤儿标记不再残留）', !fs.existsSync(restoreReportPendingFile()))
+  // ② 成功路径：标记留着等重启后的 settle 补算
+  const r69Pack = await createBackup('test')
+  await restoreBackupWithReport(r69Pack)
+  check('恢复成功 → 标记留着等补算', fs.existsSync(restoreReportPendingFile()))
+  openDb()
+  await settleRestoreReport()
+  check('补算后标记清掉、对账落库', !fs.existsSync(restoreReportPendingFile()))
+  // ③ seed 清对账键：seed 是「重建」，上一次恢复的对账卡不许在基线里多出一块
+  const seedSrc = fs.readFileSync('scripts/seed.ts', 'utf8')
+  check('seed 清 last_restore_report（基线复现口径，先例 d851ffd）', seedSrc.includes("DELETE FROM settings WHERE key = 'last_restore_report'"))
+  const lastRep69 = getDb().get("SELECT value FROM settings WHERE key = 'last_restore_report'") as
+    | { value?: string }
+    | null
+  check('补算的对账确实落库（lastReport 通道的数据源）', !!lastRep69?.value)
+}
+
 console.log(`通过 ${passed} 项，失败 ${failed} 项`)
 console.log('='.repeat(46))
 closeDb()

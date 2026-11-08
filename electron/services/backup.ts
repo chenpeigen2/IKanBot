@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync, unlinkSync } from 'fs'
+import { existsSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'fs'
 import { join, resolve, dirname } from 'path'
 import { app, dialog } from 'electron'
 import { Database } from 'node-sqlite3-wasm'
@@ -126,6 +126,31 @@ export async function settleRestoreReport(): Promise<void> {
 /** 恢复对账的补算标记（userData 根目录小文件；存在 = 上次恢复后还没补算过） */
 export function restoreReportPendingFile(): string {
   return join(app.getPath('userData'), 'restore-report-pending')
+}
+
+/** 恢复前武装对账标记（R69）：恢复成功那一刻进程就退，算不了——标记留给重启后的 settle 补算 */
+export function armRestoreReport(): void {
+  writeFileSync(restoreReportPendingFile(), '1')
+}
+
+/** 恢复失败/异常时撤掉标记（R69）：标记残留会让下次启动把「当前库」算成「恢复后对账」，语义全错 */
+export function disarmRestoreReport(): void {
+  rmSync(restoreReportPendingFile(), { force: true })
+}
+
+/**
+ * 本机恢复 + 对账标记的完整编排（R69 抽成型，ipc 与测试同调）：
+ * 武装标记 → 恢复；恢复抛错（坏包/已在恢复/路径非法）必须把标记撤掉再抛——
+ * 恢复没发生，对账就不该在下次启动被补算出来。
+ */
+export async function restoreBackupWithReport(path: string): Promise<{ restarted: boolean }> {
+  armRestoreReport()
+  try {
+    return await restoreBackup(path)
+  } catch (e) {
+    disarmRestoreReport()
+    throw e
+  }
 }
 
 /** 原生选择框挑一个备份包；取消返回空串（本机独有：服务器没有屏幕，远端模式恢复走列表） */

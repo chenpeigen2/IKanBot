@@ -1,4 +1,4 @@
-import { dialog, shell, BrowserWindow, app } from 'electron'
+import { dialog, shell, BrowserWindow } from 'electron'
 import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync } from 'fs'
 import { join, basename, resolve, sep } from 'path'
 import { tmpdir } from 'os'
@@ -16,7 +16,7 @@ import * as money from '../services/money'
 import * as credits from '../services/credits'
 import * as settingsSvc from '../services/settings'
 import * as docsSvc from '../services/docs'
-import { createBackup, inspectBackup, listBackups, pickBackup, restoreBackup } from '../services/backup'
+import { createBackup, inspectBackup, listBackups, pickBackup, restoreBackupWithReport } from '../services/backup'
 import { EXPORT_FILE_NAME } from '../../src/shared/types'
 import type { ExportKind, OrderExportFilter } from '../../src/shared/types'
 import { localDate } from '../../src/shared/date'
@@ -549,15 +549,11 @@ export function registerIpc(): void {
   )
   handle('backup:restore', async (path: string) => {
     if (isRemoteMode()) return await remoteCall('backup:restore', [await resolveRemoteBackupPath(path)])
-    // 恢复对账（R68）：本机模式恢复成功那一刻进程马上退出，对账算不了——写一个 userData
-    // 根目录的补算标记（不能放 settings：恢复会把整库换成包内容，包打在标记写入之前，
-    // 标记必被洗掉——实拍踩过），重启后的启动流程补算（settleRestoreReport）
-    try {
-      writeFileSync(join(app.getPath('userData'), 'restore-report-pending'), '1')
-    } catch {
-      /* 写不上就算了：对账是锦上添花，闸门在恢复那一刻已经把过关 */
-    }
-    return await restoreBackup(path)
+    // 恢复对账（R68/R69）：本机模式恢复成功那一刻进程马上退出，对账算不了——
+    // 武装 userData 补算标记（不能放 settings：恢复会把整库换成包内容，包打在标记写入之前，
+    // 标记必被洗掉——实拍踩过），重启后的启动流程补算（settleRestoreReport）；
+    // 恢复抛错时标记被撤（restoreBackupWithReport），失败不留「待补算」的假账
+    return await restoreBackupWithReport(path)
   })
   handle('backup:lastReport', async () => {
     if (isRemoteMode()) return await remoteCall('backup:lastReport', [])
