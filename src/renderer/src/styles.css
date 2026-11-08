@@ -675,6 +675,28 @@ label {
   color: var(--danger);
 }
 
+/* 弱提示条（M4 第二片 R63）：「有人正在改」——不弹窗不拦操作，刷新快照后整条消失。
+   按 .alert 的样子做软黄底 + 左边 3px 重条：复验还账——纯 --warning-soft 底在弹窗白底上
+   几乎看不见，弱提示也得让人一眼找得到 */
+.stale-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--warning-soft);
+  color: var(--warning);
+  border: 1px solid var(--warning-soft);
+  border-left: 3px solid var(--warning);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.stale-hint .btn {
+  flex: none;
+}
+
 /* 数字输入框：右对齐 */
 .input.num,
 input.num {
