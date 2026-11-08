@@ -47,6 +47,12 @@ export class BackupController {
    * 服务器落进备份目录并按同一条闸门验收（结构/quick_check/版本守卫），回服务器路径。
    * 恢复仍然走 POST /api/backup/restore——两步分开，恢复前还能「查看摘要后确认替换」。
    */
+  @Post('lastReport')
+  @HttpCode(200)
+  lastReport() {
+    return this.backup.lastReport()
+  }
+
   @Post('upload')
   @HttpCode(200)
   async upload(@Req() req: Request): Promise<{ path: string; hasDb: boolean; orderCount: number | null; paymentCount: number | null }> {

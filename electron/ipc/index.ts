@@ -1,9 +1,9 @@
-import { dialog, shell, BrowserWindow } from 'electron'
+import { dialog, shell, BrowserWindow, app } from 'electron'
 import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync } from 'fs'
 import { join, basename, resolve, sep } from 'path'
 import { tmpdir } from 'os'
 import { pathToFileURL } from 'url'
-import { imagesDir, docsDir, dataDir, backupsDir, coreDb } from '../db'
+import { imagesDir, docsDir, dataDir, backupsDir, coreDb, getDb } from '../db'
 import { filesCore } from '../../core/files'
 import * as products from '../services/products'
 import * as customers from '../services/customers'
@@ -531,27 +531,46 @@ export function registerIpc(): void {
     isRemoteMode() ? await remoteCall('backup:list', []) : listBackups()
   )
   handle('backup:pick', () => pickBackup())
-  // 搬迁最后一公里（R66/R67）：远端模式下「选择要恢复的备份」可能选到两类路径——
+  // 搬迁最后一公里（R66-R68）：远端模式下「选择要恢复的备份」可能选到两类路径——
   // 服务器自己的包（备份列表里来的）与老桌面带来的本机包（pick 的对话框永远在本机）。
-  // 判据不能用 existsSync：同机部署时服务器备份目录就在本机盘上，两条路都存在——
-  // 让服务器先认领（inspect 探针，快）；认领失败而本机确有此文件 → 视为本机包先上传
-  // （同一本机路径会话内缓存，摘要+恢复不重传），之后全链走服务器路径与既有闸门。
+  // 判据（R68 定稿）：**服务器备份列表认领**——列表里有的原样用（inspect 的真错误原样透传，
+  // 不再被「服务器上没有」吞掉）；列表里没有而本机确有此文件 → 视为本机包先上传
+  // （同一本机路径会话内缓存，摘要+恢复不重传）。existsSync 判据在同机部署会把服务器
+  // 自己的包误传一份（R67 mode-test 实锤），废弃。
   const resolveRemoteBackupPath = async (path: string): Promise<string> => {
     if (typeof path !== 'string' || !path) return path
-    try {
-      await remoteCall('backup:inspect', [path])
-      return path
-    } catch {
-      if (existsSync(path)) return await remoteUploadBackup(path)
-      throw new Error('这份备份包服务器上没有，本机也没找到，请重新选择。')
-    }
+    const list = (await remoteCall('backup:list', [])) as Array<{ path?: unknown }>
+    if (Array.isArray(list) && list.some((b) => String(b?.path ?? '') === path)) return path
+    if (existsSync(path)) return await remoteUploadBackup(path)
+    throw new Error('这份备份包服务器上没有，本机也没找到，请重新选择。')
   }
   handle('backup:inspect', async (path: string) =>
     isRemoteMode() ? await remoteCall('backup:inspect', [await resolveRemoteBackupPath(path)]) : inspectBackup(path)
   )
-  handle('backup:restore', async (path: string) =>
-    isRemoteMode() ? await remoteCall('backup:restore', [await resolveRemoteBackupPath(path)]) : restoreBackup(path)
-  )
+  handle('backup:restore', async (path: string) => {
+    if (isRemoteMode()) return await remoteCall('backup:restore', [await resolveRemoteBackupPath(path)])
+    // 恢复对账（R68）：本机模式恢复成功那一刻进程马上退出，对账算不了——写一个 userData
+    // 根目录的补算标记（不能放 settings：恢复会把整库换成包内容，包打在标记写入之前，
+    // 标记必被洗掉——实拍踩过），重启后的启动流程补算（settleRestoreReport）
+    try {
+      writeFileSync(join(app.getPath('userData'), 'restore-report-pending'), '1')
+    } catch {
+      /* 写不上就算了：对账是锦上添花，闸门在恢复那一刻已经把过关 */
+    }
+    return await restoreBackup(path)
+  })
+  handle('backup:lastReport', async () => {
+    if (isRemoteMode()) return await remoteCall('backup:lastReport', [])
+    const row = getDb().get("SELECT value FROM settings WHERE key = 'last_restore_report'") as
+      | { value?: string }
+      | null
+    if (!row?.value) return null
+    try {
+      return JSON.parse(row.value)
+    } catch {
+      return null
+    }
+  })
   handle('backup:reveal', async () => {
     if (isRemoteMode()) {
       // 备份包在服务器磁盘上，本机没有这个目录可开；恢复入口在备份列表里

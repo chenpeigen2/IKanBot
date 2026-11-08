@@ -147,9 +147,27 @@ export class BackupService implements OnModuleInit, OnModuleDestroy {
     this.assertSqlite()
     await this.core!.restoreBackup(requireBackupPath(_rawPath))
     // 服务器不重启进程（连接已重开）；桌面端拿到 restarted:false 后自己刷新界面。
-    // 恢复完顺手跑搬迁对账（第七节第 2 条第一版）：行数/收款合计/单号唯一逐项带回去
+    // 恢复完顺手跑搬迁对账（第七节第 2 条）：行数/收款合计/单号唯一/逐客户预收余额逐项带回去，
+    // 同时持久化进 settings——恢复完成页面会整页刷新，对账卡要刷新后还看得到
     const report = await migrationReport(this.db)
+    await this.db.run(
+      'INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+      ['last_restore_report', JSON.stringify({ ...report, reportedAt: new Date().toISOString() })]
+    )
     return { restarted: false, report }
+  }
+
+  /** 最近一次恢复的搬迁对账（设置页对账卡；没恢复过返回 null） */
+  async lastReport(): Promise<(MigrationReport & { reportedAt: string }) | null> {
+    const row = (await this.db.get("SELECT value FROM settings WHERE key = 'last_restore_report'")) as
+      | { value?: string }
+      | null
+    if (!row?.value) return null
+    try {
+      return JSON.parse(row.value) as MigrationReport & { reportedAt: string }
+    } catch {
+      return null
+    }
   }
 
   /** 老桌面的整库包落进备份目录并按同一条闸门验收（core 里把门，这里只转发字节） */

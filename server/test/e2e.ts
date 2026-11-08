@@ -93,8 +93,8 @@ async function main(): Promise<void> {
     const routes: string[] = meta.body.routes ?? []
     check('GET /api 自描述已接接口', routes.includes('POST /api/customers/list') && routes.includes('GET /healthz'))
     check(
-      '路由数与控制器一致（108 个：前 30 + 订单 30 + 报价 8 + 打样 8 + 预收 4 + 装箱 9 + 工作台 2 + 月报 1 + 导出 1 + 客户聚合 3 + 登录 1 + 单据存档 6 + 备份 5）',
-      routes.length === 108
+      '路由数与控制器一致（109 个：前 30 + 订单 30 + 报价 8 + 打样 8 + 预收 4 + 装箱 9 + 工作台 2 + 月报 1 + 导出 1 + 客户聚合 3 + 登录 1 + 单据存档 6 + 备份 6）',
+      routes.length === 109
     )
     const metaNoAuth = await raw.get('/api')
     check('GET /api 不挂锁（探活与覆盖率靠它）', metaNoAuth.status === 200)
@@ -1261,6 +1261,33 @@ async function main(): Promise<void> {
         typeof rep.creditAppliedTotal === 'number',
       JSON.stringify(rep)
     )
+
+    console.log('搬迁对账 v2（R68）：逐客户预收派生余额 + 恢复对账持久化')
+    // 造一笔真预收：单子没有明细（合计 0），收进来的 1000 全额进客户预收——
+    // 打包 → 恢复这一份，恢复后对账里的逐客户余额必须把这笔查出来（money 域同一份算法）
+    const preCust = await http.post('/api/customers/save').send({ input: { company: 'R68 Prepaid Co' } })
+    const preOrder = await http
+      .post('/api/orders/create')
+      .send({ input: { customerId: preCust.body.id, currency: 'USD', exchangeRate: 7.2, paymentStatus: 'confirmed' } })
+    await http.post('/api/orders/addPayment').send({
+      orderId: preOrder.body.id,
+      p: { paidAt: localDate(), amount: 1000, bankRef: 'R68-OVERPAY' }
+    })
+    const prePack = await http.post('/api/backup/create').send({})
+    const repWithCredit = await http.post('/api/backup/restore').send({ path: prePack.body.path })
+    const cb = repWithCredit.body?.report?.creditBalances
+    const mine = Array.isArray(cb) ? cb.find((x: { company?: string }) => x.company === 'R68 Prepaid Co') : null
+    check(
+      '搬迁对账带逐客户预收派生余额（多收的那笔按 money 域同一份算法出现在客户名下）',
+      Array.isArray(cb) && mine && Math.abs(mine.available - 1000) < 0.001 && mine.currency === 'USD',
+      JSON.stringify(cb)
+    )
+    const lastRep = await http.post('/api/backup/lastReport').send({})
+    check(
+      '恢复对账持久化（backup/lastReport 读得到最近一次，带 reportedAt）',
+      lastRep.status === 200 && lastRep.body?.reportedAt && lastRep.body?.tables?.orders > 0,
+      JSON.stringify(lastRep.body)
+    )
     const bkInspect = await http.post('/api/backup/inspect').send({ path: bkCreate.body.path })
     check(
       '备份包能打开来看：带库、带订单与收款数（恢复前必须看得见，不等于闭眼按）',
@@ -1291,7 +1318,10 @@ async function main(): Promise<void> {
       JSON.stringify(bkPermList.body)
     )
 
-    // 恢复对拍：恢复前的订单数 → 造一笔新账 → 恢复 → 行数回到备份那一刻，新账消失
+    // 恢复对拍：先打一份「此刻」的包 → 造一笔新账 → 恢复 → 行数回到备份那一刻，新账消失。
+    // 包必须现打：前面各段（R66-R68）造过账也恢复过，老包里的订单数早就不等于此刻的基线
+    const r61Pack = await http.post('/api/backup/create').send({})
+    check('对拍源包现打', r61Pack.status === 200 && String(r61Pack.body.path).endsWith('.zip'))
     const beforeTotal = Number((await http.post('/api/orders/list').send({ filter: {} })).body.total)
     const r61Cust = await http.post('/api/customers/save').send({ input: { company: 'R61 Restore Probe' } })
     const r61Order = await http
@@ -1302,7 +1332,7 @@ async function main(): Promise<void> {
       .send({ orderId: Number(r61Order.body.id), items: [{ styleNo: 'R61-1', quantity: 3, unitPrice: 2 }] })
     const probeTotal = Number((await http.post('/api/orders/list').send({ filter: {} })).body.total)
     check('造账成功：恢复前的订单比备份那一刻多一张', probeTotal === beforeTotal + 1, `${beforeTotal} -> ${probeTotal}`)
-    const bkRestore = await http.post('/api/backup/restore').send({ path: bkCreate.body.path })
+    const bkRestore = await http.post('/api/backup/restore').send({ path: r61Pack.body.path })
     check(
       '恢复成功：整库导入 + 目录替换；服务器重开连接不重启进程',
       bkRestore.status === 200 && bkRestore.body.restarted === false,

@@ -4,7 +4,7 @@ import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs'
 import { openDb, closeDb } from '../db'
 import { registerIpc } from '../ipc'
 import { initUpdater } from '../services/updater'
-import { autoBackupOnStart } from '../services/backup'
+import { autoBackupOnStart, settleRestoreReport } from '../services/backup'
 import { isRemoteMode } from '../mode'
 import { TRAY_ICON_BASE64 } from '../resources/trayIcon'
 
@@ -239,6 +239,9 @@ app.whenReady().then(() => {
     return
   }
   registerIpc()
+  // R68：上次恢复的对账补算——本机恢复成功那一刻进程就退了，重启后第一件事把账补上
+  //（远端模式对账由服务器在恢复响应里自己写，不走这里）
+  if (!isRemoteMode()) void settleRestoreReport()
   // R61：远端模式下备份发生在服务器（服务器自己有定时器），
   // 这台电脑的自动备份不跑——本机库里那份账已经不动了。
   // R63 修：截图/探针模式（IKAN_SHOT）同样不跑——sweep 起九次应用，

@@ -129,7 +129,8 @@ export const REMOTE_ROUTES: Record<string, RouteSpec> = {
   'backup:create': { path: '/api/backup/create', args: [] },
   'backup:list': { path: '/api/backup/list', args: [] },
   'backup:inspect': { path: '/api/backup/inspect', args: ['path'] },
-  'backup:restore': { path: '/api/backup/restore', args: ['path'] }
+  'backup:restore': { path: '/api/backup/restore', args: ['path'] },
+  'backup:lastReport': { path: '/api/backup/lastReport', args: [] }
 }
 
 export function isRemoteChannel(channel: string): boolean {

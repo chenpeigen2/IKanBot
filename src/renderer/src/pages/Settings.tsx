@@ -47,6 +47,7 @@ export default function Settings() {
    * 服务器那份设置，而备份包、图片、单据存档都在这台电脑上，成功标记也只写本机库——
    * 用服务器的值显示，刚点完「立即备份」界面还会说「从来没备过」。
    */
+  const [restoreReport, setRestoreReport] = useState<any>(null)
   const [backupResult, setBackupResult] = useState<{ lastBackupAt: string | null; lastBackupError: string | null }>(
     { lastBackupAt: null, lastBackupError: null }
   )
@@ -148,6 +149,10 @@ export default function Settings() {
     window.api.updater.state().then(setUpdate, fail('更新状态'))
     void loadSource()
     void loadBackupResult()
+    window.api.backup
+      .lastReport()
+      .then(setRestoreReport)
+      .catch(() => setRestoreReport(null))
   }, [])
 
   const switchMode = async (mode: 'local' | 'remote') => {
@@ -781,6 +786,38 @@ export default function Settings() {
             {source?.mode === 'remote' ? '服务器最近一次成功备份：' : '本机最近一次成功备份：'}
             <strong>{sinceWords(backupResult.lastBackupAt)}</strong>
           </div>
+          {restoreReport ? (
+            <div style={{ marginBottom: 12, border: '1px solid var(--border, #e3e5ea)', borderRadius: 8, padding: '10px 12px' }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                最近一次恢复的搬迁对账（{restoreReport.reportedAt ? new Date(restoreReport.reportedAt).toLocaleString() : ''}）
+              </div>
+              <div className="hint" style={{ marginBottom: 6 }}>
+                恢复把整库换成了备份那一刻的样子。下面是从恢复后的库里现算的账：每张核心表多少行、
+                收款合计、单号有没有重复（行数 = 去重数才算平）、客户预收还剩多少——
+                跟恢复前心里记的数对不上，就别接着录单，先来问。
+              </div>
+              <div className="row" style={{ flexWrap: 'wrap', gap: 12, marginBottom: 6 }}>
+                {Object.entries(restoreReport.tables ?? {}).map(([t, n]) => (
+                  <span key={t} className="hint mono">
+                    {t}: {String(n)}
+                  </span>
+                ))}
+              </div>
+              <div className="hint" style={{ marginBottom: restoreReport.creditBalances?.length ? 6 : 0 }}>
+                收款合计 <strong className="mono">{Number(restoreReport.paymentTotal ?? 0).toFixed(2)}</strong>
+                {' · '}单号 <strong className="mono">{restoreReport.orderNoCount}</strong> / 去重{' '}
+                <strong className="mono">{restoreReport.orderNoDistinct}</strong>
+                {restoreReport.orderNoCount === restoreReport.orderNoDistinct ? '（平）' : '（重复了，别录单）'}
+                {' · '}抵扣台账合计 <strong className="mono">{Number(restoreReport.creditAppliedTotal ?? 0).toFixed(2)}</strong>
+              </div>
+              {restoreReport.creditBalances?.length ? (
+                <div className="hint">
+                  客户预收余额：
+                  {restoreReport.creditBalances.map((c: any) => `${c.company}（${c.currency}）${Number(c.available).toFixed(2)}`).join('；')}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           {backupResult.lastBackupError ? (
             <div className="alert warn" style={{ marginBottom: 12 }}>
               上一次备份没成功（或没备齐）：{backupResult.lastBackupError}

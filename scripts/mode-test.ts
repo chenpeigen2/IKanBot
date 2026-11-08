@@ -12,6 +12,8 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { Database as RawDb } from 'node-sqlite3-wasm'
+import { createZip } from '../core/zip'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -339,8 +341,8 @@ async function main(): Promise<void> {
 
     const state = await ipc('mode:get')
     check(
-      `覆盖率口径：98 / 120（实得 ${(state as any).data?.covered} / ${(state as any).data?.total}）`,
-      state.ok && (state as any).data.covered === 98 && (state as any).data.total === 120
+      `覆盖率口径：99 / 121（实得 ${(state as any).data?.covered} / ${(state as any).data?.total}；R68 +backup:lastReport）`,
+      state.ok && (state as any).data.covered === 99 && (state as any).data.total === 121
     )
     const probe = await ipc('mode:test')
     check('设置页的「测试连接」走真后端', probe.ok && (probe as any).data.ok === true)
@@ -803,6 +805,31 @@ async function main(): Promise<void> {
       JSON.stringify(importedRestore)
     )
     rmSync(fromOldDesktop, { force: true })
+    // 搬迁对账持久化（R68）：恢复后 backup:lastReport 读得到最近一次（带 reportedAt）
+    const lastRep = (await ipc('backup:lastReport')) as any
+    check(
+      '远端恢复对账持久化：backup:lastReport 读得到最近一次（表行数在、带 reportedAt）',
+      lastRep.ok === true && lastRep.data?.reportedAt && lastRep.data?.tables?.orders > 0,
+      JSON.stringify(lastRep)
+    )
+    // 本机 future 包透传（R68）：上传被版本守卫拦时，桌面拿到的是「请先把程序升级…」
+    // 这句人话——不是被吞成别的（服务器先认领判据的透传行为锁）
+    const futureDb = join(root, `future-${Date.now()}.db`)
+    const fdb = new RawDb(futureDb)
+    fdb.exec('PRAGMA user_version = 999')
+    fdb.close()
+    const futureBytes = readFileSync(futureDb)
+    rmSync(futureDb, { force: true })
+    const futureZipPath = join(root, `future-${Date.now()}.zip`)
+    writeFileSync(futureZipPath, createZip([{ name: 'ikanbot.db', data: futureBytes }]))
+    const futurePeek = (await ipc('backup:inspect', futureZipPath)) as any
+    check(
+      '本机「未来包」上传被版本守卫拦：桌面拿到「请先把程序升级」这句人话',
+      futurePeek.ok === false && String(futurePeek.error ?? '').includes('升级'),
+      JSON.stringify(futurePeek)
+    )
+    rmSync(futureZipPath, { force: true })
+
     // 上传缓存行为（R67）：摘要 + 恢复两次调用，服务器备份目录里只该多出一份 imported 包
     const importedFiles = readdirSync(join(root, 'backups')).filter((f) => f.includes('-imported'))
     // 服务器自己的 manual 包不能被当成「老桌面带来的包」误传一份（同机部署时两个目录都在本机盘上）
@@ -859,7 +886,8 @@ async function main(): Promise<void> {
     const gateZip = (await ipc('backup:create')) as any
     check('先压一份本机备份当恢复源', gateZip.ok === true && typeof gateZip.data === 'string', JSON.stringify(gateZip))
     const gateRestored = (await ipc('backup:restore', gateZip.data)) as any
-    check('恢复通道自己在闸门里：换完数据等着重启', gateRestored.ok === true, JSON.stringify(gateRestored))
+    console.log('[debug] gateRestored:', JSON.stringify(gateRestored))
+    check('恢复通道自己在闸门里：换完数据等着重启', gateRestored.ok === true)
     const gateList = (await ipc('customers:list', '')) as any
     check(
       '恢复在途时业务读写先停一停（这会儿写进去的，重启后没影）',
@@ -869,6 +897,7 @@ async function main(): Promise<void> {
     const gateBackupList = (await ipc('backup:list')) as any
     check('备份页自己照常用（还得看得见的列表、按得动取消）', gateBackupList.ok === true, JSON.stringify(gateBackupList))
     const gateRestoreAgain = (await ipc('backup:restore', gateZip.data)) as any
+    console.log('[debug] gateRestoreAgain:', JSON.stringify(gateRestoreAgain))
     check(
       '恢复不让第二次恢复插队（两次并发换库 = A 包的库配 B 包的照片，反悔药还可能被同名顶掉）',
       !gateRestoreAgain.ok && String(gateRestoreAgain.error).includes('已经在恢复备份了'),

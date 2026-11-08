@@ -255,6 +255,8 @@ export interface IKanApi {
      * 而备份包、图片、单据存档都在这台电脑上。
      */
     lastResult(): Promise<{ lastBackupAt: string | null; lastBackupError: string | null }>
+    /** 最近一次恢复的搬迁对账（R68；没恢复过为 null） */
+    lastReport(): Promise<any>
   }
   exporter: {
     csv(kind: ExportKind, filter?: OrderExportFilter): Promise<string>

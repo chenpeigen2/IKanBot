@@ -220,7 +220,9 @@ const api: IKanApi = {
     inspect: (path: string) => call<any>('backup:inspect', path),
     restore: (path: string) => call<{ restarted: boolean }>('backup:restore', path),
     /** 本机这一份备份的结果（成功时刻 / 上次失败原因）：永远读本机库，后端模式也一样 */
-    lastResult: () => call<{ lastBackupAt: string | null; lastBackupError: string | null }>('backup:lastResult')
+    lastResult: () => call<{ lastBackupAt: string | null; lastBackupError: string | null }>('backup:lastResult'),
+    /** 最近一次恢复的搬迁对账（R68；没恢复过为 null） */
+    lastReport: () => call<any>('backup:lastReport'),
   },
   exporter: {
     csv: (kind: ExportKind, filter?: OrderExportFilter) => call<string>('export:csv', kind, filter)

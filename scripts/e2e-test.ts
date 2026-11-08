@@ -27,6 +27,7 @@ import * as credits from '../electron/services/credits'
 import { getSettings, saveSettings, markBackupOk, markBackupFail, baseCurrencyLocked } from '../electron/services/settings'
 import { createBackup, inspectBackup, isRestoring, listBackups, pruneBackups, restoreBackup, uniqueBackupName } from '../electron/services/backup'
 import { migrationReport } from '../core/migration'
+import { settleRestoreReport, restoreReportPendingFile } from '../electron/services/backup'
 import * as docs from '../electron/services/docs'
 import { collectDir, createZip, readZip, verifyZip, zhFsError } from '../electron/services/zip'
 import { docPageFingerprint } from '../src/shared/docFingerprint'
@@ -4144,6 +4145,22 @@ section('R66：搬迁对账（migrationReport）')
   check('备份 inspect/restore 远端分支：本机包先上传（remoteUploadBackup）', ipcSrc.includes('remoteUploadBackup'))
   const clientSrc = fs.readFileSync('electron/remote/client.ts', 'utf8')
   check('上传打到服务器的搬迁口（/api/backup/upload）', clientSrc.includes('/api/backup/upload'))
+}
+
+/* ---------------- R68：恢复对账持久化（本机补算路径） ---------------- */
+section('R68：恢复对账持久化（本机补算）')
+{
+  // 本机恢复成功那一刻进程就退了：分支只写 pending 标记，重启后 settleRestoreReport 补算。
+  // 这里直调补算函数，锁「pending → last_restore_report → 清标记」这条链
+  // 标记写 userData 文件（settings 会被恢复洗掉）；文件路径与 services 同一函数
+  const pendingFile = restoreReportPendingFile()
+  fs.writeFileSync(pendingFile, '1')
+  await settleRestoreReport()
+  const rep68 = getDb().get("SELECT value FROM settings WHERE key = 'last_restore_report'") as { value?: string } | null
+  const parsed68 = rep68?.value ? (JSON.parse(rep68.value) as { tables?: Record<string, number>; reportedAt?: string }) : null
+  check('补算把对账写进 last_restore_report（带 reportedAt、核心表行数在）', !!parsed68?.reportedAt && (parsed68?.tables?.orders ?? 0) > 0)
+  check('补算后 pending 标记清掉', !fs.existsSync(restoreReportPendingFile()))
+  check('对账带逐客户预收余额字段（数组，可为空）', Array.isArray(parsed68 && (parsed68 as any).creditBalances))
 }
 
 section('R9 工作台会盯住备份（数据只躺在这台电脑上）')

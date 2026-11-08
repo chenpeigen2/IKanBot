@@ -34,5 +34,5 @@ if [ -f "out/shots/${NAME}.png" ]; then
   echo "saved out/shots/${NAME}.png"
   exit 0
 fi
-echo "截图失败（rc=$RC）：out/shots/${NAME}.png 未生成"
+echo "截图失败（rc=${RC}）：out/shots/${NAME}.png 未生成"
 exit 1

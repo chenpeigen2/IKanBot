@@ -1,4 +1,5 @@
 import type { Db } from './db'
+import { moneyCore } from './money'
 
 /**
  * 整库搬迁对账（第七节第 2 条第一版，SQLite→SQLite）。
@@ -22,6 +23,16 @@ export interface MigrationReport {
   orderNoDistinct: number
   /** 抵扣台账合计（reversed_at 非空的撤销行不算） */
   creditAppliedTotal: number
+  /** 逐客户预收派生余额（非零行；与客户页「可用预收」同一份 money 域算法，R68） */
+  creditBalances: MigrationCreditRow[]
+}
+
+/** 逐客户预收派生余额的一行：只列非零的（搬迁后与原库逐项对，第七节「customerCreditBalance 抽查」） */
+export interface MigrationCreditRow {
+  customerId: number
+  company: string
+  currency: string
+  available: number
 }
 
 /** 对账要覆盖的核心表：单据、明细、主档、流水、留痕、台账（不含设置/缓存类） */
@@ -52,11 +63,40 @@ export async function migrationReport(db: Db): Promise<MigrationReport> {
   const credit = (await db.get(
     'SELECT COALESCE(SUM(amount), 0) AS total FROM credit_applications WHERE reversed_at IS NULL'
   )) as { total?: number } | null
+  // 逐客户预收派生余额：候选客户 = 「收过钱的单」的客户 ∪ 「抵扣台账里有动静」的客户
+  //——没用掉的预收不落 credit_applications（那张表只记用掉的），只查台账会漏掉刚多收的客户
+  //（R68 第一版就栽在这）。余额本身逐个调 money 域的同一份算法（与客户页「可用预收」同源，
+  // 这里不许另写一份），零余额的过滤掉。
+  const cand = (await db.all(
+    `SELECT DISTINCT customer_id AS id FROM (
+       SELECT o.customer_id AS customer_id FROM payments p JOIN orders o ON o.id = p.order_id
+       UNION
+       SELECT ca.customer_id AS customer_id FROM credit_applications ca
+     ) WHERE customer_id IS NOT NULL`
+  )) as { id?: number }[]
+  const companies = new Map<number, string>()
+  for (const r of cand) {
+    const id = Number(r.id)
+    const row = (await db.get('SELECT company FROM customers WHERE id = ?', [id])) as { company?: string } | null
+    companies.set(id, String(row?.company ?? `#${id}`))
+  }
+  const balances = moneyCore(db).customerCreditBalance
+  const creditBalances: MigrationCreditRow[] = []
+  for (const r of cand) {
+    const id = Number(r.id)
+    for (const cur of await balances(id)) {
+      if (cur.available <= 0.001) continue
+      creditBalances.push({ customerId: id, company: companies.get(id) ?? `#${id}`, currency: cur.currency, available: cur.available })
+    }
+  }
+  creditBalances.sort((a, b) => a.customerId - b.customerId || a.currency.localeCompare(b.currency))
+
   return {
     tables,
     paymentTotal: Number(pay?.total ?? 0),
     orderNoCount: Number(noCount?.n ?? 0),
     orderNoDistinct: Number(noDistinct?.n ?? 0),
-    creditAppliedTotal: Number(credit?.total ?? 0)
+    creditAppliedTotal: Number(credit?.total ?? 0),
+    creditBalances
   }
 }

@@ -1,9 +1,10 @@
-import { readFileSync, unlinkSync } from 'fs'
+import { existsSync, readFileSync, rmSync, unlinkSync } from 'fs'
 import { join, resolve, dirname } from 'path'
 import { app, dialog } from 'electron'
 import { Database } from 'node-sqlite3-wasm'
-import { dataDir, imagesDir, backupsDir, docsDir, closeDb, openDb, getDb } from '../db'
+import { dataDir, imagesDir, backupsDir, docsDir, closeDb, openDb, getDb, coreDb} from '../db'
 import { backupCore } from '../../core/backup'
+import { migrationReport } from '../../core/migration'
 import type { BackupPreview } from '../../core/backup'
 import { markBackupFail, markBackupOk } from './settings'
 
@@ -98,6 +99,34 @@ export const inspectBackup = core.inspectBackup
 export const importBackupZip = core.importBackupZip
 export const restoreBackup = core.restoreBackup
 export const isRestoring = core.isRestoring
+
+/**
+ * 上次恢复的对账补算（R68）：本机恢复成功那一刻进程马上退出（afterRestore relaunch+exit），
+ * 恢复后的账当时算不了。restore 分支只在恢复前写 pending_restore_report 标记，
+ * 重启后启动流程调这里补算：算好写进 last_restore_report（设置页对账卡读它），清掉标记。
+ * 没 pending 就什么都不做；算错不挡启动（对账是锦上添花，闸门在恢复那一刻已经把过关）。
+ */
+export async function settleRestoreReport(): Promise<void> {
+  try {
+    // 标记放 userData 根目录的小文件，不放 settings：恢复会把整库换成「包内容」，
+    // 包打在标记写入之前——settings 里的标记恢复完必然被洗掉（R68 实拍踩过）。
+    // userData 根目录不在恢复的替换范围内，标记跨重启存活
+    if (!existsSync(restoreReportPendingFile())) return
+    const report = await migrationReport(coreDb)
+    getDb().run(
+      'INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+      ['last_restore_report', JSON.stringify({ ...report, reportedAt: new Date().toISOString() })]
+    )
+    rmSync(restoreReportPendingFile(), { force: true })
+  } catch {
+    /* 下次重启再试 */
+  }
+}
+
+/** 恢复对账的补算标记（userData 根目录小文件；存在 = 上次恢复后还没补算过） */
+export function restoreReportPendingFile(): string {
+  return join(app.getPath('userData'), 'restore-report-pending')
+}
 
 /** 原生选择框挑一个备份包；取消返回空串（本机独有：服务器没有屏幕，远端模式恢复走列表） */
 export function pickBackup(): string {
