@@ -208,8 +208,11 @@ app.whenReady().then(() => {
   // macOS 的 Dock 图标不走 exe/安装包嵌入那套：开发模式与打包后都要显式 setIcon，
   // 否则 Dock 里躺的是 Electron 默认图标（旧机器是 Windows，这个问题从来没露过头）。
   if (process.platform === 'darwin' && app.dock) {
+    // R63 修：开发模式的路径写成了 getAppPath()/../build——那指到仓库的上一级去了，
+    // 永远找不到，Dock 里躺的一直是 Electron 默认图标（看起来就是「图标怎么不是之前那个」）。
+    // 打包后图标在 resourcesPath（extraResources 塞进去的 icon.png）；开发模式在项目的 build/ 下
     const loadDockIcon = (): Buffer | null => {
-      for (const dir of [process.resourcesPath, join(app.getAppPath(), '..', 'build')]) {
+      for (const dir of [process.resourcesPath, join(app.getAppPath(), 'build')]) {
         for (const name of ['icon.png', 'icon_1024.png']) {
           const p = join(dir, name)
           try {
@@ -237,8 +240,11 @@ app.whenReady().then(() => {
   }
   registerIpc()
   // R61：远端模式下备份发生在服务器（服务器自己有定时器），
-  // 这台电脑的自动备份不跑——本机库里那份账已经不动了
-  if (!isRemoteMode()) autoBackupOnStart()
+  // 这台电脑的自动备份不跑——本机库里那份账已经不动了。
+  // R63 修：截图/探针模式（IKAN_SHOT）同样不跑——sweep 起九次应用，
+  // 第一趟就把 lastBackupAt 写上，工作台「还没有成功备份」的提醒被吃掉，
+  // sweep 基线（reminder-sub×2）从此对不齐；探针是只读的，本就不该动账
+  if (!isRemoteMode() && !shotRoute) autoBackupOnStart()
   createWindow()
   if (!shotRoute) createTray()
   // 「每天一备」不按进程生命周期兑现：托盘常驻的用户一开几周，
