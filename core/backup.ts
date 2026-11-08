@@ -323,6 +323,25 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
     return target
   }
 
+  /**
+   * 探针开库后的三道闸（自检 / 版本 / 见 inspectRestoredDb 与 inspectBackup——两条路
+   * 必须同一道闸：R67 实锤 inspect 原先没做版本检查，搬上来的「未来包」能过摘要、
+   * 拖到恢复才被拦；话术逐字共享，别让两条路各说各话）。
+   */
+  function assertDbProbeUsable(database: { get(sql: string, params?: unknown[]): unknown }): void {
+    const check = database.get('PRAGMA quick_check') as { quick_check?: string } | null
+    if (String(check?.quick_check ?? '') !== 'ok') {
+      throw bizError('备份里的数据库自检没通过，这份包不能用')
+    }
+    const v = Number((database.get('PRAGMA user_version') as { user_version?: number })?.user_version ?? 0)
+    if (v > LATEST_DB_VERSION) {
+      throw bizError(
+        `这份备份来自更新的程序版本（数据格式 v${v}，当前只认到 v${LATEST_DB_VERSION}）。` +
+          `请先把程序升级到该版本或更高，再恢复。`
+      )
+    }
+  }
+
   /** 用一个临时文件把备份里的库打开看一眼，确认没坏、版本没超前 */
   function inspectRestoredDb(dbData: Buffer, stamp: string): void {
     const probeDir = join(dirs.dataDir(), `.restore-check-${stamp}`)
@@ -332,17 +351,7 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
     try {
       writeFileSync(probeFile, dbData)
       database = hooks.openProbe(probeFile)
-      const check = database.get('PRAGMA quick_check') as { quick_check?: string } | null
-      if (String(check?.quick_check ?? '') !== 'ok') {
-        throw bizError('备份里的数据库自检没通过，这份包不能用')
-      }
-      const v = Number((database.get('PRAGMA user_version') as { user_version?: number })?.user_version ?? 0)
-      if (v > LATEST_DB_VERSION) {
-        throw bizError(
-          `这份备份来自更新的程序版本（数据格式 v${v}，当前只认到 v${LATEST_DB_VERSION}）。` +
-            `请先把程序升级到该版本或更高，再恢复。`
-        )
-      }
+      assertDbProbeUsable(database)
       const orders = database.get('SELECT COUNT(*) AS n FROM orders') as { n: number } | null
       const payments = database.get('SELECT COUNT(*) AS n FROM payments') as { n: number } | null
       if (!orders || !payments) throw bizError('备份里的数据库缺少核心数据表，这份包不能用')
@@ -483,6 +492,9 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
     try {
       writeFileSync(probeFile, dbEntry.data)
       database = hooks.openProbe(probeFile)
+      // 与恢复路同一道闸（R67）：自检 + 版本守卫。搬上来的「未来包」要在摘要这一步
+      // 就被人话拦下（「请先把程序升级到该版本或更高」），不能拖到恢复才炸
+      assertDbProbeUsable(database)
       probe.orderCount = Number((database.get('SELECT COUNT(*) AS n FROM orders') as { n: number }).n)
       probe.paymentCount = Number((database.get('SELECT COUNT(*) AS n FROM payments') as { n: number }).n)
     } catch (e) {

@@ -531,13 +531,20 @@ export function registerIpc(): void {
     isRemoteMode() ? await remoteCall('backup:list', []) : listBackups()
   )
   handle('backup:pick', () => pickBackup())
-  // 搬迁最后一公里（R66）：远端模式下「选择要恢复的备份」选到的是本机盘上的包
-  //（pick 的对话框永远在本机）——先上传到服务器备份目录（同一包会话内缓存，摘要+恢复不重传），
-  // 之后的 inspect/restore 走的全是服务器路径与既有闸门。服务器自己的包（本机不存在）原样转发。
+  // 搬迁最后一公里（R66/R67）：远端模式下「选择要恢复的备份」可能选到两类路径——
+  // 服务器自己的包（备份列表里来的）与老桌面带来的本机包（pick 的对话框永远在本机）。
+  // 判据不能用 existsSync：同机部署时服务器备份目录就在本机盘上，两条路都存在——
+  // 让服务器先认领（inspect 探针，快）；认领失败而本机确有此文件 → 视为本机包先上传
+  // （同一本机路径会话内缓存，摘要+恢复不重传），之后全链走服务器路径与既有闸门。
   const resolveRemoteBackupPath = async (path: string): Promise<string> => {
     if (typeof path !== 'string' || !path) return path
-    if (existsSync(path)) return await remoteUploadBackup(path)
-    return path
+    try {
+      await remoteCall('backup:inspect', [path])
+      return path
+    } catch {
+      if (existsSync(path)) return await remoteUploadBackup(path)
+      throw new Error('这份备份包服务器上没有，本机也没找到，请重新选择。')
+    }
   }
   handle('backup:inspect', async (path: string) =>
     isRemoteMode() ? await remoteCall('backup:inspect', [await resolveRemoteBackupPath(path)]) : inspectBackup(path)

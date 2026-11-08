@@ -11,7 +11,7 @@
  * 运行：npm run test:mode（会先构建 server/dist）
  */
 import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -803,6 +803,15 @@ async function main(): Promise<void> {
       JSON.stringify(importedRestore)
     )
     rmSync(fromOldDesktop, { force: true })
+    // 上传缓存行为（R67）：摘要 + 恢复两次调用，服务器备份目录里只该多出一份 imported 包
+    const importedFiles = readdirSync(join(root, 'backups')).filter((f) => f.includes('-imported'))
+    // 服务器自己的 manual 包不能被当成「老桌面带来的包」误传一份（同机部署时两个目录都在本机盘上）
+    const manualCopies = importedFiles.filter((f) => f.includes('-manual')).length
+    check(
+      '同一包的摘要+恢复只上传一次，且服务器自己的包不被误传（imported 里只有一份，不含 manual）',
+      importedFiles.length === 1 && manualCopies === 0,
+      importedFiles.join(' | ')
+    )
 
     // 切回本机：后端那份数据必须原封不动地留在后端
     saveConnection({ mode: 'local' })

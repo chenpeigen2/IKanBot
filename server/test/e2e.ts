@@ -5,6 +5,8 @@ import { Test } from '@nestjs/testing'
 import type { NestExpressApplication } from '@nestjs/platform-express'
 import request from 'supertest'
 import { AppModule } from '../src/app.module'
+import { Database } from 'node-sqlite3-wasm'
+import { createZip } from '../../core/zip'
 import { configureApp } from '../src/app.setup'
 import { BackupService } from '../src/backup/backup.service'
 import { DB } from '../src/db/db.module'
@@ -1226,6 +1228,25 @@ async function main(): Promise<void> {
       '整库包上传成功：落在服务器备份目录并带回摘要（带库、订单/收款数）',
       upResp.status === 200 && upResp.body?.path !== bkCreate.body.path && upResp.body?.hasDb === true && upResp.body?.orderCount > 0,
       `${upResp.status} ${JSON.stringify(upResp.text)}`
+    )
+    // 造一份「来自未来的包」：db 的 user_version 拉到 999 → 上传必须被人话拦
+    //（版本守卫对搬上来的包与列表里的包一视同仁——老程序收到新数据，升级前不许动）
+    // 裸驱动直接钉 user_version：server 的 SqliteDb 打开时会自动迁移，会把版本拉回当前值，
+    // 就测不到「版本超前」那条人话了
+    const futureDb = join(tmpdir(), `future-${Date.now()}.db`)
+    const fdb = new Database(futureDb)
+    fdb.exec('PRAGMA user_version = 999')
+    fdb.close()
+    const futureZip = createZip([{ name: 'ikanbot.db', data: readFileSync(futureDb) }])
+    rmSync(futureDb, { force: true })
+    const futureUp = await http
+      .post('/api/backup/upload')
+      .set('content-type', 'application/octet-stream')
+      .send(futureZip)
+    check(
+      '来自未来的包被人话拦（先升级程序再打开），且不留在备份列表里',
+      futureUp.status === 400 && String(futureUp.body?.error?.message ?? '').includes('升级'),
+      `${futureUp.status} ${JSON.stringify(futureUp.text)}`
     )
     const upRestore = await http.post('/api/backup/restore').send({ path: upResp.body.path })
     check('上传的包走既有恢复闸门成功', upRestore.status === 200 && upRestore.body?.restarted === false, JSON.stringify(upRestore.text))
