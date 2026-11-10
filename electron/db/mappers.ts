@@ -320,6 +320,15 @@ export function mapCustomerStats(r: Row): CustomerStats {
           currency: str(x.currency)
         }))
       : [],
+    missingCostList: Array.isArray(r.missing_cost_list)
+      ? r.missing_cost_list.map((x: Record<string, unknown>) => ({
+          customerId: num(x.customer_id),
+          orderId: num(x.order_id),
+          orderNo: str(x.order_no),
+          currency: str(x.currency),
+          missingItems: num(x.missing_items)
+        }))
+      : [],
     orderCount: num(r.order_count),
     excludedOrderCount: num(r.excluded_order_count),
     totalAmount: num(r.total_amount),

@@ -232,6 +232,10 @@ eq('客户订单数', stats.orderCount, 1)
 eq('客户成交额（按汇率折算为基准币）', stats.totalAmount, total * 7.2)
 // 这一单有一行成本没录（A002），所以毛利是「不可信」→ null（不许拿 0 成本凑一个漂亮的数）
 eq('有成本没录全的订单：客户毛利不可信（null）', stats.totalProfit, null)
+// R78：成本没录全清单（与缺汇率清单同构）——毛利不可信的两个原因都要能点排查
+const missCostList = stats.missingCostList ?? []
+check('成本没录全清单含 A002 那张单（单号/缺失行数）', missCostList.some((x) => x.orderId === order.id && x.missingItems === 1), JSON.stringify(missCostList))
+check('成本没录全清单带客户 id', missCostList.every((x) => x.customerId === c1.id))
 eq('客户未收金额', Math.round(stats.outstanding), 0)
 
 /* ---------------- R76：缺汇率单的清单（客户页从「数张数」到「可点直达」） ---------------- */
@@ -262,6 +266,7 @@ section('R76：缺汇率单清单')
   const custSrc76 = fs.readFileSync('src/renderer/src/pages/Customers.tsx', 'utf8')
   check('客户详情：缺汇率清单渲染成直达链接（rateMissingList）', custSrc76.includes('rateMissingList'))
   check('R77 毛利卡：同一份清单的直达链接（不可信的原因可点排查）', custSrc76.includes('点单号直达）') && (custSrc76.match(/rateMissingList/g) || []).length >= 2)
+  check('R78 毛利卡：成本没录全清单的直达链接（missingCostList 渲染）', custSrc76.includes('missingCostList') && custSrc76.includes('点单号直达补成本'))
 }
 
 /* ---------------- 提醒 ---------------- */

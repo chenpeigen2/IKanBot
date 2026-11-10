@@ -860,7 +860,27 @@ export default function Customers() {
               {/* 能不能算得出毛利由服务端判定（算不出来就是 null），界面不再各写一遍条件 */}
               <div className="stat-value small">{moneyOrDash(detail.stats.totalProfit, detail.base)}</div>
               {detail.stats.missingCostOrders ? (
-                <div className="stat-hint">有 {detail.stats.missingCostOrders} 单成本没录全</div>
+                <div className="stat-hint">
+                  有 {detail.stats.missingCostOrders} 单成本没录全
+                  {(detail.stats.missingCostList ?? []).length > 0 ? (
+                    <div>
+                      （{(detail.stats.missingCostList ?? []).map((x: { orderId: number; orderNo: string }) => (
+                        <button
+                          key={x.orderId}
+                          className="link"
+                          style={{ marginRight: 8 }}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            navigate(`/orders/${x.orderId}`)
+                          }}
+                        >
+                          {x.orderNo}
+                        </button>
+                      ))}
+                      点单号直达补成本）
+                    </div>
+                  ) : null}
+                </div>
               ) : null}
               {detail.stats.rateMissingOrders ? (
                 <div className="stat-hint">

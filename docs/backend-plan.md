@@ -619,6 +619,13 @@
   返回第一次的结果（e2e + HTTP 双锁）。**剩余**：`row_version BIGINT` 大字段方案（读时带出、
   写时自增，比 updated_at 抗同秒碰撞）留给切 MySQL 时一起做；列表页「有人正在改」弱提示
   （需要在线状态/心跳，属于第二片）未做。
+- **R78：「成本没录全」直达链接——毛利不可信的另一半原因可点排查（2026-11-11，
+  自动化第 9 轮，与 R76 缺汇率清单同构）**：customerStats 新增 missingCostList
+  （customerId/orderId/orderNo/currency/missingItems），毛利卡「有 N 单成本没录全」升级为
+  可点直达（点单号开订单补成本）。截图 1 张入库 docs/ui/r78/（node 直连 SQLite 预置
+  unit_cost NULL 的确认单——SQL 直插列多 NOT NULL，三次试错才齐）。
+  本轮验收：e2e 2531 → 2534、双模式 146、数据层 76、HTTP 224；typecheck 零错误；
+  sweep 九路由与基线一致。
 - **R77：毛利卡的缺汇率直达链接（2026-11-11，自动化第 8 轮，R76 报告留的「留待需要时」）**：
   毛利卡「有 N 单汇率没填」升级为可点直达（同成交额卡 R76 的清单——同一份 rateMissingList）。
   毛利「不可信」的原因直接可以点排查。e2e 接线断言一条（rateMissingList 出现 ≥2 处 + 直达文案）。

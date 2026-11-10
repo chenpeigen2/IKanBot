@@ -388,6 +388,10 @@ export function customersCore(db: Db) {
     // 坏账不进待收，但客户页要能看见这家客户赖过多少钱：作废/失效单上的坏账也算
     const badDebt = all.reduce((s, r) => s + r.badDebtBase, 0)
     const missingCostOrders = rows.filter((r) => r.missingCostItems > 0).length
+    // 成本没录全清单（R78）：与缺汇率清单同构——毛利不可信的两个原因都要能点排查
+    const missingCostList = rows
+      .filter((r) => r.missingCostItems > 0)
+      .map((r) => ({ customer_id: customerId, order_id: r.orderId, order_no: r.orderNo, currency: r.currency, missing_items: r.missingCostItems }))
     // 外币没填汇率的单：成交额/待收/毛利都按 0 折，上面的合计是「少算了这几单」的数。
     // 不亮出来，老板会拿着一个偏小的成交额去对账
     const rateMissingOrders = rows.filter((r) => r.rateMissing || (!r.isHomeCurrency && r.exchangeRate === 1)).length
@@ -416,6 +420,7 @@ export function customersCore(db: Db) {
       sample_count: sampleCount,
       bad_debt: badDebt,
       missing_cost_orders: missingCostOrders,
+      missing_cost_list: missingCostList,
       rate_missing_orders: rateMissingOrders,
       rate_missing_samples: samples.rateMissing,
       bad_debt_rate_missing_orders: badDebtRateMissingOrders,
