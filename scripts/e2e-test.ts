@@ -4191,6 +4191,21 @@ section('R74：导出整库（搬迁用）')
   check('搬迁手册存在（docs/migration.md 四步+回滚）', fs.existsSync('docs/migration.md') && fs.readFileSync('docs/migration.md', 'utf8').includes('第 4 步'))
 }
 
+/* ---------------- R75：-export 包的行为级断言（文件名/探针闸/对账进包） ---------------- */
+section('R75：-export 包行为级断言')
+{
+  // R74 只有接线 grep；这里锁行为：-export 包与 manual 包同一条闸门，且包名可辨
+  const expPath = await createBackup('export')
+  check('-export 包文件名带 -export（搬迁的人一眼认出）', /ikanbot-\d{14}-export(-\d+)?\.zip$/.test(expPath.split(/[\\/]/).pop() ?? ''), expPath)
+  const expPreview = await inspectBackup(expPath)
+  check('-export 包过探针闸（与 manual 同一条闸，不豁免）', expPreview.hasDb === true && expPreview.orderCount !== null)
+  const expZip = readZip(fs.readFileSync(expPath))
+  check('-export 包带搬迁对账（对账进包不豁免）', expZip.some((e) => e.name === 'migration-report.json'))
+  // 与 manual 包在备份列表里并存（备份页照常可见、可恢复）
+  const expInList = (await listBackups()).some((b) => b.path === expPath)
+  check('-export 包进备份列表（恢复页可选它）', expInList)
+}
+
 section('R9 工作台会盯住备份（数据只躺在这台电脑上）')
 const r9setStamp = (at: string | null, err: string | null): void => {
   // R54 起戳单独一行（backup_state）：这里模拟备份服务写凭据，别再往设置正文里塞

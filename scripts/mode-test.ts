@@ -738,6 +738,13 @@ async function main(): Promise<void> {
     // 远端模式下必须照常答得出来——跟着 settings:get 去问服务器，界面上会显示服务器那次备份
     // 备份簇上后端（R61）：远端模式备份发生在服务器（库+图片+单据存档整包，同一份 core），
     // 桌面只转发与展示；本机那份备份账不再被打
+    // R75：create 通道 note 透传（R74 记账的自动化缺口）——'export' note 全链到服务器包名
+    const remoteExport = (await ipc('backup:create', 'export')) as any
+    check(
+      '远端 create 带 export note 的透传到服务器包名（-export 包落在服务器备份目录）',
+      remoteExport.ok === true && /ikanbot-\d{14}-export(-\d+)?\.zip$/.test(String(remoteExport.data)),
+      JSON.stringify(remoteExport)
+    )
     const remoteBackup = (await ipc('backup:create')) as any
     check(
       '远端模式「立即备份」打的是服务器那份（路径落在服务器的备份目录里）',
