@@ -164,9 +164,9 @@ export class BackupService implements OnModuleInit, OnModuleDestroy {
     if (this.timer) clearInterval(this.timer)
   }
 
-  async create(): Promise<string> {
+  async create(note?: string): Promise<string> {
     this.assertSqlite()
-    return this.core!.createBackup('manual')
+    return this.core!.createBackup(note || 'manual')
   }
 
   list(): Array<{ path: string; name: string; takenAt: string | null; size: number }> {

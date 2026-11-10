@@ -4178,6 +4178,18 @@ section('R71：对账卡的 diff 呈现（接线）')
   check('老包没有对账也明说（无 diff 时的文案）', setSrc.includes('这份包没有带对账'))
 }
 
+/* ---------------- R74：导出整库（搬迁入口） ---------------- */
+section('R74：导出整库（搬迁用）')
+{
+  // 搬迁的用户旅程入口（第七节第 1 条）：设置页一个显式按钮，打一份 -export 包并说清用途——
+  // 「立即备份」是日常保险，「导出整库」是要带走搬家的那份
+  const setSrc74 = fs.readFileSync('src/renderer/src/pages/Settings.tsx', 'utf8')
+  check('设置页有导出整库入口（搬迁用）', setSrc74.includes('导出整库'))
+  check('导出整库打的是 -export 包（与日常备份区分，见包名即知用途）', setSrc74.includes("createBackup('export')") || setSrc74.includes("backup.create('export')"))
+  const backupSrc74 = fs.readFileSync('electron/services/backup.ts', 'utf8')
+  check('导出包仍走同一条备份闸门（自验/记账不豁免）', backupSrc74.includes('createBackup'))
+}
+
 section('R9 工作台会盯住备份（数据只躺在这台电脑上）')
 const r9setStamp = (at: string | null, err: string | null): void => {
   // R54 起戳单独一行（backup_state）：这里模拟备份服务写凭据，别再往设置正文里塞

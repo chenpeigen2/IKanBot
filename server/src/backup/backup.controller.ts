@@ -17,9 +17,10 @@ export class BackupController {
 
   @Post('create')
   @HttpCode(200)
-  async create(): Promise<{ path: string }> {
+  async create(@Body() body: Record<string, unknown>): Promise<{ path: string }> {
     // 包成对象：裸字符串回来时 HTTP 层不给 application/json，桌面端解析会含糊
-    return { path: await this.backup.create() }
+    const note = typeof body?.['note'] === 'string' && body['note'].trim() ? body['note'].trim() : undefined
+    return { path: await this.backup.create(note) }
   }
 
   @Post('list')

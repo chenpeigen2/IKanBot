@@ -520,12 +520,12 @@ export function registerIpc(): void {
   /* ---- 备份 / 导出 ---- */
   // R61：远端模式下备份发生在服务器（库 + 图片 + 单据存档整包，同一份 core），桌面只转发；
   // 本机模式全部走本机 backup 服务。备份在服务器磁盘上，restore 用的路径也是服务器的。
-  handle('backup:create', async () => {
+  handle('backup:create', async (note?: string) => {
     if (isRemoteMode()) {
-      const r = (await remoteCall('backup:create', [])) as { path?: unknown }
+      const r = (await remoteCall('backup:create', [note])) as { path?: unknown }
       return String(r?.path ?? '')
     }
-    return createBackup('manual')
+    return createBackup(note || 'manual')
   })
   handle('backup:list', async () =>
     isRemoteMode() ? await remoteCall('backup:list', []) : listBackups()

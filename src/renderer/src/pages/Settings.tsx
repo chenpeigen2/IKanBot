@@ -857,6 +857,24 @@ export default function Settings() {
             <Button variant="primary" disabled={busy} onClick={runBackup}>
               {busy ? '备份中，别关窗口…' : '立即备份'}
             </Button>
+            <Button
+              disabled={busy}
+              onClick={async () => {
+                if (!confirm('导出整库（搬迁用）：把数据库、商品图、单据存档打成一个 zip，带到新电脑或服务器上恢复。\n和「立即备份」是同一种包，文件名里带 -export 方便认。\n\n现在导出吗？')) return
+                setBusy(true)
+                try {
+                  const p = await window.api.backup.create('export')
+                  toast(`整库已导出：${p}
+搬迁步骤见 docs/migration.md（导出 → 上传服务器 → 恢复 → 看对账卡）`)
+                } catch (e) {
+                  toast((e as Error).message, 'error')
+                } finally {
+                  setBusy(false)
+                }
+              }}
+            >
+              导出整库（搬迁用）
+            </Button>
             {source?.mode === 'remote' ? null : (
               <>
                 <Button

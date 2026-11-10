@@ -239,7 +239,7 @@ export interface IKanApi {
     baseDir(): string
   }
   backup: {
-    create(): Promise<string>
+    create(note?: string): Promise<string>
     reveal(): Promise<string>
     /** 备份目录里现成的备份包（新→旧） */
     list(): Promise<BackupFile[]>

@@ -213,7 +213,7 @@ const api: IKanApi = {
     }
   },
   backup: {
-    create: () => call<string>('backup:create'),
+    create: (note?: string) => call<string>('backup:create', note),
     reveal: () => call<string>('backup:reveal'),
     list: () => call<any[]>('backup:list'),
     pick: () => call<string>('backup:pick'),
