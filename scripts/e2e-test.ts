@@ -4188,6 +4188,7 @@ section('R74：导出整库（搬迁用）')
   check('导出整库打的是 -export 包（与日常备份区分，见包名即知用途）', setSrc74.includes("createBackup('export')") || setSrc74.includes("backup.create('export')"))
   const backupSrc74 = fs.readFileSync('electron/services/backup.ts', 'utf8')
   check('导出包仍走同一条备份闸门（自验/记账不豁免）', backupSrc74.includes('createBackup'))
+  check('搬迁手册存在（docs/migration.md 四步+回滚）', fs.existsSync('docs/migration.md') && fs.readFileSync('docs/migration.md', 'utf8').includes('第 4 步'))
 }
 
 section('R9 工作台会盯住备份（数据只躺在这台电脑上）')
