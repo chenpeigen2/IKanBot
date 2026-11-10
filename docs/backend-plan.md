@@ -627,7 +627,7 @@
   ② customerStats 新增 rateMissingList（customerId/orderId/orderNo/currency，非草稿），
      客户详情成交额卡把提示升级成**可点直达的链接清单**（点单号开订单，补上汇率这里就消）；
      毛利卡同步「有 N 单汇率没填」。mappers 转 camel（首版 snake 原样透传被断言抓住）。
-  本轮验收：e2e 2525 → 2530、双模式 146、数据层 76、HTTP 224；typecheck 零错误；
+  本轮验收：e2e 2525 → 2530（+5，R76 段五条断言）、双模式 146、数据层 76、HTTP 224；typecheck 零错误；
   sweep 九路由与基线一致。截图 1 张入库 docs/ui/r76/（shot JS 走真实 API 预置）。
 - **R75：-export 包覆盖补齐（2026-11-10，自动化第 6 轮，R74 记账缺口）**：
   R74 只有接线 grep（复验点出「-export 行为无任何行为级断言」）——补两层：桌面 e2e 四条
