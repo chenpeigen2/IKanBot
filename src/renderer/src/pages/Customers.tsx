@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Modal, useToast, money, moneyOrDash, Empty, fmtDate, fmtDateTime, PaymentTag, ShipTag, Button, LoadError, PromptModal, newRequestId, useLoadGuard } from '../ui'
 import { useStaleSnapshot } from '../hooks/useStaleSnapshot'
 import { localDate } from '../../../shared/date'
@@ -169,6 +170,7 @@ export default function Customers() {
     | null
   >(null)
   /** 读取失败不能装成「没有客户」 */
+  const navigate = useNavigate()
   const [loadError, setLoadError] = useState('')
   /** 连点两次「搜索」会同时挂着两个请求：后到的旧关键词结果不许盖住新列表 */
   const beginList = useLoadGuard()
@@ -831,6 +833,25 @@ export default function Customers() {
               {detail.stats.rateMissingOrders > 0 ? (
                 <div className="stat-hint">
                   有 {detail.stats.rateMissingOrders} 单外币没填汇率，成交额/未收/毛利都没折进去
+                  {(detail.stats.rateMissingList ?? []).length > 0 ? (
+                    <div>
+                      缺汇率的单：
+                      {(detail.stats.rateMissingList ?? []).map((x: { orderId: number; orderNo: string; currency: string }) => (
+                        <button
+                          key={x.orderId}
+                          className="link"
+                          style={{ marginRight: 8 }}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            navigate(`/orders/${x.orderId}`)
+                          }}
+                        >
+                          {x.orderNo}（{x.currency}）
+                        </button>
+                      ))}
+                      ——点单号直达，补上汇率这里就消
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
             </div>

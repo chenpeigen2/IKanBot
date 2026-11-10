@@ -335,6 +335,8 @@ export interface OrderMoneyRow extends OrderMoney {
   profitBase: number | null
   /** 外币单汇率没填过：折不出基准币，上面的 *Base 全是 0，靠「汇率待修」追人补 */
   rateMissing: boolean
+  /** 本币单（没有折算这件事；「汇率待修」的哨兵判定要排除它） */
+  isHomeCurrency: boolean
   /** 尚未追回的坏账（基准币） */
   badDebtBase: number
 }
@@ -768,6 +770,7 @@ export function moneyCore(db: Db) {
         customerName: String(r.customer_name ?? ''),
         country: String(r.country ?? ''),
         currency,
+        isHomeCurrency,
         exchangeRate: rateRaw,
         baseRate: rate,
         rateMissing,

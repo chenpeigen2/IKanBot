@@ -234,6 +234,35 @@ eq('客户成交额（按汇率折算为基准币）', stats.totalAmount, total 
 eq('有成本没录全的订单：客户毛利不可信（null）', stats.totalProfit, null)
 eq('客户未收金额', Math.round(stats.outstanding), 0)
 
+/* ---------------- R76：缺汇率单的清单（客户页从「数张数」到「可点直达」） ---------------- */
+section('R76：缺汇率单清单')
+{
+  // 造两单缺汇率（外币不填汇率）+ 一单本币（不算缺）——清单必须只含缺的那两张，单号可点直达
+  const missCust = await customers.saveCustomer({ company: 'R76 缺汇率 Co' })
+  // 缺汇率 = 外币单不填汇率（建单默认 1 是「汇率待修」认的哨兵；显式填 0 会被另一道闸门拦）
+  // 统计口径只数非草稿（草稿未成生意）——两张都转成「待确认」再验
+  const miss1 = await orders.createOrder({ customerId: missCust.id, currency: 'USD', exchangeRateDate: localDate() })
+  const miss2 = await orders.createOrder({ customerId: missCust.id, currency: 'EUR', exchangeRateDate: localDate() })
+  const missHome = await orders.createOrder({ customerId: missCust.id, currency: 'CNY', exchangeRate: 1, exchangeRateDate: localDate() })
+  await orders.setPaymentStatus(miss1.id, 'confirmed')
+  await orders.setPaymentStatus(miss2.id, 'confirmed')
+  await orders.setPaymentStatus(missHome.id, 'confirmed')
+  const missStats = await customers.customerStats(missCust.id)
+  check('缺汇率单计数口径不变（2 张）', Number(missStats.rateMissingOrders) === 2, String(missStats.rateMissingOrders))
+  const missList = missStats.rateMissingList ?? []
+  check(
+    '缺汇率清单带单号与币种（只含缺的两张）',
+    missList.length === 2 && missList.some((x) => x.orderId === miss1.id && x.currency === 'USD') && missList.some((x) => x.orderId === miss2.id && x.currency === 'EUR'),
+    JSON.stringify(missList)
+  )
+  check('清单带客户 id（直达链接的数据源）', missList.every((x) => x.customerId === missCust.id))
+  const homeStats = await customers.customerStats(c1.id)
+  check('不缺汇率的客户清单为空', (homeStats.rateMissingList ?? []).length === 0)
+  // 渲染层接线：客户详情把清单渲染成可点直达的链接
+  const custSrc76 = fs.readFileSync('src/renderer/src/pages/Customers.tsx', 'utf8')
+  check('客户详情：缺汇率清单渲染成直达链接（rateMissingList）', custSrc76.includes('rateMissingList'))
+}
+
 /* ---------------- 提醒 ---------------- */
 section('待办提醒')
 // 单独建一个未包装、出货日临近的订单

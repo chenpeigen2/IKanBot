@@ -312,6 +312,14 @@ export function mapEvent(r: Row): OrderEvent {
 
 export function mapCustomerStats(r: Row): CustomerStats {
   return {
+    rateMissingList: Array.isArray(r.rate_missing_list)
+      ? r.rate_missing_list.map((x: Record<string, unknown>) => ({
+          customerId: num(x.customer_id),
+          orderId: num(x.order_id),
+          orderNo: str(x.order_no),
+          currency: str(x.currency)
+        }))
+      : [],
     orderCount: num(r.order_count),
     excludedOrderCount: num(r.excluded_order_count),
     totalAmount: num(r.total_amount),

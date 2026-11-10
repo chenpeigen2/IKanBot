@@ -247,6 +247,8 @@ export interface CustomerStats {
   rateMissingSamples: number
   /** 有坏账、但汇率没填的单数：这些单的坏账折成 0，坏账合计少算了它们 */
   badDebtRateMissingOrders: number
+  /** 缺汇率的外币单清单（R76）：客户页渲染成可点直达的链接；不缺则为空数组 */
+  rateMissingList: { customerId: number; orderId: number; orderNo: string; currency: string }[]
 }
 
 /** 客户历史订单简要（客户详情页「订单历史」那一列） */

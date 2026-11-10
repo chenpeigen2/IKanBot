@@ -390,10 +390,16 @@ export function customersCore(db: Db) {
     const missingCostOrders = rows.filter((r) => r.missingCostItems > 0).length
     // 外币没填汇率的单：成交额/待收/毛利都按 0 折，上面的合计是「少算了这几单」的数。
     // 不亮出来，老板会拿着一个偏小的成交额去对账
-    const rateMissingOrders = rows.filter((r) => r.rateMissing).length
+    const rateMissingOrders = rows.filter((r) => r.rateMissing || (!r.isHomeCurrency && r.exchangeRate === 1)).length
     // 坏账也要单独数一遍缺汇率的：作废单本来就不在 rows 里，
     // 只靠 rateMissingOrders 的话，一笔作废单上的 USD 坏账会无声无息地变成 0
     const badDebtRateMissingOrders = all.filter((r) => r.badDebtOutstanding > 0.001 && r.rateMissing).length
+    // 缺汇率清单（R76）：客户页从「数张数」升级到「可点直达」。口径与工作台「汇率待修」对齐——
+    // 两种长相都算：压根没值的（0/空，折不成）和被建单兜底成 1:1 的哨兵（不填汇率建单默认 1）。
+    // 原口径只认前者，不填汇率建的单工作台在追、客户页却不算缺（R6 挂账的真正语义缺口）
+    const rateMissingList = rows
+      .filter((r) => r.rateMissing || (!r.isHomeCurrency && r.exchangeRate === 1))
+      .map((r) => ({ customer_id: customerId, order_id: r.orderId, order_no: r.orderNo, currency: r.currency }))
     const totalProfitRaw = rows.reduce((s, r) => s + (r.profitBase ?? 0), 0)
     // 下面的历史列表会把草稿/失效/作废也列出来，成交额却不含它们；
     // 不写明条数，老板会以为系统漏单（N-口径一致）
@@ -412,7 +418,8 @@ export function customersCore(db: Db) {
       missing_cost_orders: missingCostOrders,
       rate_missing_orders: rateMissingOrders,
       rate_missing_samples: samples.rateMissing,
-      bad_debt_rate_missing_orders: badDebtRateMissingOrders
+      bad_debt_rate_missing_orders: badDebtRateMissingOrders,
+      rate_missing_list: rateMissingList
     })
   }
 
