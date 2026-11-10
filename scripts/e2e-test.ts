@@ -261,6 +261,7 @@ section('R76：缺汇率单清单')
   // 渲染层接线：客户详情把清单渲染成可点直达的链接
   const custSrc76 = fs.readFileSync('src/renderer/src/pages/Customers.tsx', 'utf8')
   check('客户详情：缺汇率清单渲染成直达链接（rateMissingList）', custSrc76.includes('rateMissingList'))
+  check('R77 毛利卡：同一份清单的直达链接（不可信的原因可点排查）', custSrc76.includes('点单号直达）') && (custSrc76.match(/rateMissingList/g) || []).length >= 2)
 }
 
 /* ---------------- 提醒 ---------------- */

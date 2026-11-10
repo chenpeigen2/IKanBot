@@ -863,7 +863,27 @@ export default function Customers() {
                 <div className="stat-hint">有 {detail.stats.missingCostOrders} 单成本没录全</div>
               ) : null}
               {detail.stats.rateMissingOrders ? (
-                <div className="stat-hint">有 {detail.stats.rateMissingOrders} 单汇率没填</div>
+                <div className="stat-hint">
+                  有 {detail.stats.rateMissingOrders} 单汇率没填
+                  {(detail.stats.rateMissingList ?? []).length > 0 ? (
+                    <div>
+                      （{(detail.stats.rateMissingList ?? []).map((x: { orderId: number; orderNo: string; currency: string }) => (
+                        <button
+                          key={x.orderId}
+                          className="link"
+                          style={{ marginRight: 8 }}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            navigate(`/orders/${x.orderId}`)
+                          }}
+                        >
+                          {x.orderNo}
+                        </button>
+                      ))}
+                      点单号直达）
+                    </div>
+                  ) : null}
+                </div>
               ) : null}
             </div>
             {/* R4-S1：未收金额 = 钱还没到手，和工作台「待收款金额」同色（橙） */}
