@@ -234,8 +234,8 @@ eq('客户成交额（按汇率折算为基准币）', stats.totalAmount, total 
 eq('有成本没录全的订单：客户毛利不可信（null）', stats.totalProfit, null)
 // R78：成本没录全清单（与缺汇率清单同构）——毛利不可信的两个原因都要能点排查
 const missCostList = stats.missingCostList ?? []
-check('成本没录全清单含 A002 那张单（单号/缺失行数）', missCostList.some((x) => x.orderId === order.id && x.missingItems === 1), JSON.stringify(missCostList))
-check('成本没录全清单带客户 id', missCostList.every((x) => x.customerId === c1.id))
+check('R78：成本没录全清单含 A002 那张单（单号/缺失行数）', missCostList.some((x) => x.orderId === order.id && x.missingItems === 1), JSON.stringify(missCostList))
+check('R78：成本没录全清单带客户 id', missCostList.every((x) => x.customerId === c1.id))
 eq('客户未收金额', Math.round(stats.outstanding), 0)
 
 /* ---------------- R76：缺汇率单的清单（客户页从「数张数」到「可点直达」） ---------------- */
