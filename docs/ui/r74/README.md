@@ -11,5 +11,5 @@
 ## 没有独立画面的行为
 
 - `-export` 包与普通包同一条闸门（探针自验/对账进包/markOk）——R73/R70 的断言覆盖；
-  create 通道 note 透传（preload→远端→server）由 HTTP「搬迁上传」段与双模式覆盖。
+  create 通道 note 透传（preload→远端→server）由 typecheck 与本机路径验证；远端 note 转发为同一机制（args: ['note']），自动化覆盖未做、已记账。
 - 手册本身是文档：docs/migration.md（导出 → 上传 → 恢复 → 对账核对四步 + 回滚）。
