@@ -619,6 +619,14 @@
   返回第一次的结果（e2e + HTTP 双锁）。**剩余**：`row_version BIGINT` 大字段方案（读时带出、
   写时自增，比 updated_at 抗同秒碰撞）留给切 MySQL 时一起做；列表页「有人正在改」弱提示
   （需要在线状态/心跳，属于第二片）未做。
+- **R79：MySQL 方言组装抽纯函数 + 本地测试锁（2026-11-10/11，自动化第 10 轮）**：
+  R66 立的原则「MySQL 侧要么真实现要么报错不静默」缺测试锁——mysql.ts 的 upsert/insertIgnore
+  SQL 组装抽成 `server/src/db/mysql-sql.ts` 纯函数（buildUpsert/buildInsertIgnore），数据层冒烟
+  加六条本地锁：overwrite/increment 两种 mode 的 SQL 文本与参数占位、insertIgnore 占位符与列数
+  一致、bizMonthExpr 报错不静默（不需要真实例——bizMonthExpr 不碰连接池，直接构造即测）。
+  **R76 报告计数虚报清偿**（复验三轮）：+6/七条 → +5/五条（三处：报告/索引/记账）。
+  本轮验收：e2e 2534、双模式 146、数据层 76 → **82**、HTTP 224；typecheck 零错误。
+  无 UI 形态，证据为断言输出。
 - **R78：「成本没录全」直达链接——毛利不可信的另一半原因可点排查（2026-11-11，
   自动化第 9 轮，与 R76 缺汇率清单同构）**：customerStats 新增 missingCostList
   （customerId/orderId/orderNo/currency/missingItems），毛利卡「有 N 单成本没录全」升级为

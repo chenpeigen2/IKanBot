@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import mysql from 'mysql2/promise'
+import { buildInsertIgnore, buildUpsert } from './mysql-sql'
 import type { Db, Row, RunResult } from './types'
 
 export interface MysqlConfig {
@@ -62,27 +63,16 @@ export class MysqlDb implements Db {
   }
 
   async upsert(spec: Parameters<Db['upsert']>[0]): Promise<RunResult> {
-    // ON DUPLICATE KEY UPDATE 与 SQLite 的 ON CONFLICT DO UPDATE 同一套语义；
-    // increment 时两个占位符都填新值（旧值 + 新值），与 SQLite 的 value = value + ? 对齐
-    const set =
-      spec.mode === 'increment'
-        ? `${spec.valueCol} = ${spec.valueCol} + ?`
-        : `${spec.valueCol} = VALUES(${spec.valueCol})`
-    const params = spec.mode === 'increment' ? [spec.key, spec.value, spec.value] : [spec.key, spec.value]
-    const [res] = await this.conn().query(
-      `INSERT INTO ${spec.table}(${spec.keyCol}, ${spec.valueCol}) VALUES(?, ?) ON DUPLICATE KEY UPDATE ${set}`,
-      params
-    )
+    // SQL 组装抽在 mysql-sql.ts（R79）：纯函数可本地测，这里只管执行
+    const { sql, params } = buildUpsert(spec)
+    const [res] = await this.conn().query(sql, params)
     const r = res as mysql.ResultSetHeader
     return { lastInsertRowid: Number(r.insertId ?? 0), changes: Number(r.affectedRows ?? 0) }
   }
 
   async insertIgnore(table: string, cols: string[], params: unknown[]): Promise<RunResult> {
-    // INSERT IGNORE：撞唯一索引时整句放弃，与 SQLite 的 INSERT OR IGNORE 同一套语义
-    const [res] = await this.conn().query(
-      `INSERT IGNORE INTO ${table}(${cols.join(', ')}) VALUES(${cols.map(() => '?').join(', ')})`,
-      params
-    )
+    const sql = buildInsertIgnore(table, cols)
+    const [res] = await this.conn().query(sql, params)
     const r = res as mysql.ResultSetHeader
     return { lastInsertRowid: Number(r.insertId ?? 0), changes: Number(r.affectedRows ?? 0) }
   }

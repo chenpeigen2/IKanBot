@@ -9,6 +9,7 @@ import { customersCore } from '../../core/customers'
 import { productsCore } from '../../core/products'
 import { settingsCore } from '../../core/settings'
 import { moneyCore } from '../../core/money'
+import { buildInsertIgnore, buildUpsert } from '../src/db/mysql-sql'
 import { loadConfig } from '../src/config/config'
 import { LATEST_DB_VERSION } from '../../electron/db/schema'
 import { createUser, findUserByUsername } from '../src/auth/users'
@@ -94,6 +95,24 @@ async function main(): Promise<void> {
       mysql.db.kind === 'mysql' && mysql.db.port === 3307 && mysql.db.user === 'ikanbot'
     )
     const noHost = loadConfig({ IKAN_DB: 'mysql' })
+    // R79：MySQL SQL 组装的本地测试锁——不需要真实例，锁「组装出来的 SQL 与参数」
+    // 与「bizMonthExpr 报错不静默」两条承诺
+    const b1 = buildUpsert({ table: 'settings', keyCol: 'key', valueCol: 'value', mode: 'overwrite', key: 'backup_state', value: '{}' })
+    check('upsert overwrite 的 SQL（ON DUPLICATE KEY UPDATE = VALUES）', b1.sql === 'INSERT INTO settings(key, value) VALUES(?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)', b1.sql)
+    check('upsert overwrite 的参数（两占位符）', b1.params.length === 2 && b1.params[0] === 'backup_state' && b1.params[1] === '{}', JSON.stringify(b1.params))
+    const b2 = buildUpsert({ table: 'settings', keyCol: 'key', valueCol: 'value', mode: 'increment', key: 'counter', value: 5 })
+    check('upsert increment 的 SQL（旧值 + 新值）', b2.sql === 'INSERT INTO settings(key, value) VALUES(?, ?) ON DUPLICATE KEY UPDATE value = value + ?', b2.sql)
+    check('upsert increment 的参数（三占位符，旧值+新值各填一次）', b2.params.length === 3 && b2.params[1] === 5 && b2.params[2] === 5, JSON.stringify(b2.params))
+    const ig = buildInsertIgnore('orders', ['order_no', 'pi_no'])
+    check('insertIgnore 的 SQL（占位符与列数一致）', ig === 'INSERT IGNORE INTO orders(order_no, pi_no) VALUES(?, ?)', ig)
+    let bizThrew: string | null = null
+    try {
+      // 不需要真实例：bizMonthExpr 不碰连接池，直接 throw
+      new (require('../src/db/mysql').MysqlDb)({ host: 'db.local', user: 'u', password: 'p', database: 'd' }).bizMonthExpr('created_at')
+    } catch (e) {
+      bizThrew = (e as Error).message
+    }
+    check('bizMonthExpr 报错不静默（消息指向先用 SQLite）', bizThrew !== null && bizThrew.includes('还没有 MySQL 实现'), bizThrew ?? '')
     check('只说 mysql 没给 host 不瞎连，落回 sqlite', noHost.db.kind === 'sqlite')
     const badPort = (() => {
       try {
