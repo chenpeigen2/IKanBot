@@ -4283,20 +4283,18 @@ section('R80：订单列表性能基线')
   const t0 = Date.now()
   const perf = await ordersCore(getDb()).listOrderRows({ limit: 20, offset: 0 })
   const pageMs = Date.now() - t0
-  check('500 单规模下首页列表能出（口径不被批量打乱）', perf.rows.length === 20 && Number(perf.total) === before80.total + 500, `${before80.total} -> ${perf.total}（rows ${perf.rows.length}，${pageMs}ms）`)
+  check(`500 单规模下首页列表能出（口径不被批量打乱；实跑 ${pageMs}ms）`, perf.rows.length === 20 && Number(perf.total) === before80.total + 500)
   const t1 = Date.now()
   await ordersCore(getDb()).listOrderRows({ limit: 20, offset: 0 })
   const pageMs2 = Date.now() - t1
   check(
-    '500 单规模下列表页耗时上限 500ms（性能回归锁；复验实测 9ms，333 倍余量——3 秒锁不住缓慢劣化，R80 复验建议收紧）',
+    `500 单规模下列表页耗时上限 500ms（实跑 ${pageMs2}ms；复验实测 9ms——3 秒锁不住缓慢劣化，R80 复验建议收紧）`,
     pageMs2 < 500,
     `first ${pageMs}ms, second ${pageMs2}ms`
   )
   const t2 = Date.now()
   const deep = await ordersCore(getDb()).listOrderRows({ limit: 20, offset: 400 })
   check('R81：深翻页（offset 400，行数内）能出且非空', deep.rows.length === 20 && Date.now() - t2 < 500)
-  const lastMs = Date.now() - t2
-  check('深翻页（第 8 页）也能出且耗时同量级', lastMs < 3000, `${lastMs}ms`)
   // 清理：性能数据不留在后续断言的账本里
   db80.exec('BEGIN')
   db80.run("DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE customer_id = ?)", [seed80.id])
