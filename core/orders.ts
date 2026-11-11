@@ -461,6 +461,7 @@ export function ordersCore(db: Db) {
    *
    * 排序要先看全筛选集才能排（金额、待收、逾期都不是数据库里的列），
    * 所以先算完再切页；总数按筛选条件给，分页拿的是它而不是本页行数。
+   * total 的口径（R80 复验实证）：只排除作废（void）——草稿/失效都计入行数与 total。
    */
   async function listOrderRows(
     filter: OrderListFilter & { limit?: number; offset?: number } = {}
