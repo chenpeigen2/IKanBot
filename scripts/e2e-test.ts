@@ -27,6 +27,7 @@ import * as credits from '../electron/services/credits'
 import { getSettings, saveSettings, markBackupOk, markBackupFail, baseCurrencyLocked } from '../electron/services/settings'
 import { createBackup, inspectBackup, isRestoring, listBackups, pruneBackups, restoreBackup, uniqueBackupName } from '../electron/services/backup'
 import { migrationReport, diffMigrationReports } from '../core/migration'
+import { ordersCore } from '../core/orders'
 import { settleRestoreReport, restoreReportPendingFile, armRestoreReport, disarmRestoreReport, restoreBackupWithReport } from '../electron/services/backup'
 import * as docs from '../electron/services/docs'
 import { collectDir, createZip, readZip, verifyZip, zhFsError } from '../electron/services/zip'
@@ -4239,6 +4240,71 @@ section('R75：-export 包行为级断言')
   // 与 manual 包在备份列表里并存（备份页照常可见、可恢复）
   const expInList = (await listBackups()).some((b) => b.path === expPath)
   check('-export 包进备份列表（恢复页可选它）', expInList)
+}
+
+/* ---------------- R80：订单列表性能基线（500 单规模，SQL 快路径的前置参照） ---------------- */
+section('R80：订单列表性能基线')
+{
+  // SQL 快路径（orders.list 整表算钱的渐进改造）动工前先锁基线：500 单规模下
+  // 列表耗时上限——未来任何优化（金额缓存列/SQL 聚合）都必须以此为对照，
+  // 基线漂移（变慢）会被这条锁抓住。造数走直连 SQLite 批量插（口径字段齐全，快），
+  // 列表查询走正门（core 的 orders.list）。
+  const db80 = getDb()
+  // 基线与断言同口径：listOrderRows 的 total 排除非 billing（作废/失效），全表 COUNT 会差出
+  // 前面段的 5 张——批量前读一份同口径基线
+  const before80 = await ordersCore(getDb()).listOrderRows({})
+  const seed80 = await customers.saveCustomer({ company: 'R80 Perf Co' })
+  // 批量插 500 张确认单（USD 7.15、各带一行明细）——直插快于 API 循环，字段口径与 API 一致
+  db80.exec('BEGIN')
+  let inserted80 = 0
+  for (let i = 0; i < 500; i++) {
+    const no = `SO20800101${String(i).padStart(3, '0')}`
+    db80.run(
+      "INSERT INTO orders(order_no, pi_no, customer_id, currency, exchange_rate, base_currency, payment_status, created_at, updated_at, incoterm, port_of_loading, port_of_destination, payment_method, deposit_ratio) VALUES(?,?,?,'USD',7.15,'CNY','confirmed',datetime('now'),datetime('now'),'FOB','Ningbo','Hamburg','T/T',0.3)",
+      [no, no.replace('SO', 'PI'), seed80.id]
+    )
+    const oid = Number((await db80.get('SELECT id FROM orders WHERE order_no = ?', [no]))?.id)
+    db80.run(
+      'INSERT INTO order_items(order_id, style_no, product_name, color, size, quantity, unit_price) VALUES(?,?,?,?,?,?,?)',
+      [oid, `R80-${i}`, '性能基线', 'Black', 'M', 10, 5]
+    )
+    inserted80++
+  }
+  db80.exec('COMMIT')
+  const inBase80 = Number((await db80.get('SELECT COUNT(*) AS n FROM orders WHERE customer_id = ?', [seed80.id]))?.n ?? 0)
+  check('批量插入账实相符（500 次 run 全部落库）', inBase80 === 500, `inserted ${inserted80}, inBase ${inBase80}`)
+  const after80 = await ordersCore(getDb()).listOrderRows({})
+  const expRows = (after80.rows as { orderNo: string }[]).filter((x) => String(x.orderNo).startsWith('SO20800101'))
+  check(
+    'R80 定位：批量后全量（行数与 total 各 +500）',
+    after80.rows.length === before80.rows.length + 500 && after80.total === before80.total + 500,
+    `rows ${before80.rows.length} -> ${after80.rows.length}；total ${before80.total} -> ${after80.total}；SO20800101* 可见 ${expRows.length}`
+  )
+  const t0 = Date.now()
+  const perf = await ordersCore(getDb()).listOrderRows({ limit: 20, offset: 0 })
+  const pageMs = Date.now() - t0
+  check('500 单规模下首页列表能出（口径不被批量打乱）', perf.rows.length === 20 && Number(perf.total) === before80.total + 500, `${before80.total} -> ${perf.total}（rows ${perf.rows.length}）`)
+  const t1 = Date.now()
+  await ordersCore(getDb()).listOrderRows({ limit: 20, offset: 0 })
+  const pageMs2 = Date.now() - t1
+  check(
+    '500 单规模下列表页耗时上限 3 秒（性能回归锁，SQL 快路径的前置参照）',
+    pageMs2 < 3000,
+    `first ${pageMs}ms, second ${pageMs2}ms`
+  )
+  const t2 = Date.now()
+  await ordersCore(getDb()).listOrderRows({ limit: 20, offset: 500 * 8 })
+  const lastMs = Date.now() - t2
+  check('深翻页（第 8 页）也能出且耗时同量级', lastMs < 3000, `${lastMs}ms`)
+  // 清理：性能数据不留在后续断言的账本里
+  db80.exec('BEGIN')
+  db80.run("DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE customer_id = ?)", [seed80.id])
+  db80.run('DELETE FROM orders WHERE customer_id = ?', [seed80.id])
+  db80.run('DELETE FROM customers WHERE id = ?', [seed80.id])
+  db80.exec('COMMIT')
+  const afterCleanup = Number((await db80.get('SELECT COUNT(*) AS n FROM orders'))?.n ?? 0)
+    const afterCleanupRows = await ordersCore(getDb()).listOrderRows({})
+  check('性能数据清理干净（不影响后续断言的账本口径）', afterCleanupRows.rows.length === before80.rows.length && afterCleanupRows.total === before80.total)
 }
 
 section('R9 工作台会盯住备份（数据只躺在这台电脑上）')
