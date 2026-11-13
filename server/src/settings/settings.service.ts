@@ -27,4 +27,9 @@ export class SettingsService {
   baseCurrencyLocked(): Promise<boolean> {
     return this.core.baseCurrencyLocked()
   }
+
+  /** 数据自检（R83）：活库探针的用户主动版——quick_check/版本/核心表行数 */
+  dataHealthCheck(): Promise<{ ok: boolean; quickCheck: string; version: number; tables: Record<string, number> }> {
+    return this.core.dataHealthCheck()
+  }
 }

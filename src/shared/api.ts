@@ -227,6 +227,8 @@ export interface IKanApi {
     save(s: AppSettings): Promise<AppSettings>
     /** 基准币种是否已锁死（库里已有单据） */
     baseLocked(): Promise<boolean>
+    /** 数据自检（R83）：quick_check/版本/核心表行数——活库探针的用户主动版 */
+    health(): Promise<any>
   }
   images: {
     pick(): Promise<string[]>

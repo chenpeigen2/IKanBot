@@ -198,7 +198,8 @@ const api: IKanApi = {
   settings: {
     get: () => call<AppSettings>('settings:get'),
     save: (s: AppSettings) => call<AppSettings>('settings:save', s),
-    baseLocked: () => call<boolean>('settings:baseLocked')
+    baseLocked: () => call<boolean>('settings:baseLocked'),
+    health: () => call<any>('settings:health'),
   },
   images: {
     pick: () => call<string[]>('images:pick'),

@@ -26,6 +26,7 @@ export function saveSettings(s: AppSettings): Promise<AppSettings> {
 export function baseCurrencyLocked(): Promise<boolean> {
   return core.baseCurrencyLocked()
 }
+export const dataHealthCheck = core.dataHealthCheck
 
 /** 备份服务专用：盖一个「最近成功备份于」的时间戳，同时清掉上次的失败提示 */
 export function markBackupOk(iso: string): Promise<void> {

@@ -26,4 +26,9 @@ export class SettingsController {
   baseCurrencyLocked() {
     return this.settings.baseCurrencyLocked()
   }
+  @Post('health')
+  @HttpCode(200)
+  health() {
+    return this.settings.dataHealthCheck()
+  }
 }

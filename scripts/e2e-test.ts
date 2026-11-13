@@ -4306,6 +4306,21 @@ section('R80：订单列表性能基线')
   check('性能数据清理干净（不影响后续断言的账本口径）', afterCleanupRows.rows.length === before80.rows.length && afterCleanupRows.total === before80.total)
 }
 
+/* ---------------- R83：数据自检（用户主动版探针——不等备份随时能问「数据健康吗」） ---------------- */
+section('R83：数据自检')
+{
+  const health = await settingsCore(getDb()).dataHealthCheck()
+  check('自检三道闸全过（quick_check/版本/核心表）', health.ok === true && health.quickCheck === 'ok' && health.version >= 1 && Object.keys(health.tables).length === 12, JSON.stringify({ quickCheck: health.quickCheck, version: health.version, tables: Object.keys(health.tables).length }))
+  check('自检带 12 表行数（搬迁对账同款清单）', (health.tables?.orders ?? 0) > 0 && (health.tables?.customers ?? 0) > 0)
+  // 通道接线：设置页的自检按钮走 settings:health（本机读本机、远端读服务器）
+  const setSrc83 = fs.readFileSync('src/renderer/src/pages/Settings.tsx', 'utf8')
+  check('设置页有数据自检入口（settings.health 调用）', setSrc83.includes('settings.health()') || setSrc83.includes('backup.health()'))
+  const apiSrc83 = fs.readFileSync('src/shared/api.ts', 'utf8')
+  check('settings 域有 health 通道声明', apiSrc83.includes('health(): Promise'))
+  const ipcSrc83 = fs.readFileSync('electron/ipc/index.ts', 'utf8')
+  check('ipc 注册 settings:health', ipcSrc83.includes("handle('settings:health'"))
+}
+
 section('R9 工作台会盯住备份（数据只躺在这台电脑上）')
 const r9setStamp = (at: string | null, err: string | null): void => {
   // R54 起戳单独一行（backup_state）：这里模拟备份服务写凭据，别再往设置正文里塞

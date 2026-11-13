@@ -42,6 +42,7 @@ export const REMOTE_ROUTES: Record<string, RouteSpec> = {
   'products:referenceCount': { path: '/api/products/referenceCount', args: ['id'] },
   'products:importCsv': { path: '/api/products/importCsv', args: ['text', 'mode'] },
   'settings:get': { path: '/api/settings/get', args: [] },
+  'settings:health': { path: '/api/settings/health', args: [] },
   'settings:save': { path: '/api/settings/save', args: ['input'] },
   'settings:baseLocked': { path: '/api/settings/baseLocked', args: [] },
 

@@ -378,6 +378,7 @@ export function registerIpc(): void {
   handle('settings:get', () => settingsSvc.getSettings())
   handle('settings:save', (s: any) => settingsSvc.saveSettings(s))
   handle('settings:baseLocked', () => settingsSvc.baseCurrencyLocked())
+  handle('settings:health', async () => settingsSvc.dataHealthCheck())
 
   /* ---- 图片 ---- */
   handle('images:pick', async (): Promise<string[]> => {

@@ -93,8 +93,8 @@ async function main(): Promise<void> {
     const routes: string[] = meta.body.routes ?? []
     check('GET /api 自描述已接接口', routes.includes('POST /api/customers/list') && routes.includes('GET /healthz'))
     check(
-      '路由数与控制器一致（109 个：前 30 + 订单 30 + 报价 8 + 打样 8 + 预收 4 + 装箱 9 + 工作台 2 + 月报 1 + 导出 1 + 客户聚合 3 + 登录 1 + 单据存档 6 + 备份 6）',
-      routes.length === 109
+      '路由数与控制器一致（110 个：前 30 + 订单 30 + 报价 8 + 打样 8 + 预收 4 + 装箱 9 + 工作台 2 + 月报 1 + 导出 1 + 客户聚合 3 + 登录 1 + 单据存档 6 + 备份 6 + 设置自检 1）',
+      routes.length === 110
     )
     const metaNoAuth = await raw.get('/api')
     check('GET /api 不挂锁（探活与覆盖率靠它）', metaNoAuth.status === 200)

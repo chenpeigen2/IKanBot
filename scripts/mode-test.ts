@@ -341,8 +341,8 @@ async function main(): Promise<void> {
 
     const state = await ipc('mode:get')
     check(
-      `覆盖率口径：99 / 121（实得 ${(state as any).data?.covered} / ${(state as any).data?.total}；R68 +backup:lastReport）`,
-      state.ok && (state as any).data.covered === 99 && (state as any).data.total === 121
+      `覆盖率口径：100 / 122（实得 ${(state as any).data?.covered} / ${(state as any).data?.total}；R68 +backup:lastReport、R83 +settings:health）`,
+      state.ok && (state as any).data.covered === 100 && (state as any).data.total === 122
     )
     const probe = await ipc('mode:test')
     check('设置页的「测试连接」走真后端', probe.ok && (probe as any).data.ok === true)

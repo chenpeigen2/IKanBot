@@ -48,6 +48,8 @@ export default function Settings() {
    * 用服务器的值显示，刚点完「立即备份」界面还会说「从来没备过」。
    */
   const [restoreReport, setRestoreReport] = useState<any>(null)
+  const [healthCheck, setHealthCheck] = useState<any>(null)
+  const [healthBusy, setHealthBusy] = useState(false)
   const [backupResult, setBackupResult] = useState<{ lastBackupAt: string | null; lastBackupError: string | null }>(
     { lastBackupAt: null, lastBackupError: null }
   )
@@ -853,9 +855,51 @@ export default function Settings() {
               上一次备份没成功（或没备齐）：{backupResult.lastBackupError}
             </div>
           ) : null}
+          {healthCheck ? (
+            <div
+              style={{
+                marginBottom: 12,
+                border: `1px solid ${healthCheck.ok ? 'var(--ok, #2f7d32)' : 'var(--danger)'}`,
+                borderRadius: 8,
+                padding: '10px 12px',
+                background: healthCheck.ok ? 'transparent' : 'var(--danger-soft)',
+              }}
+            >
+              <div style={{ fontWeight: 600 }}>
+                {healthCheck.ok
+                  ? '数据自检通过：库能开、版本正常、核心表都在。'
+                  : '数据自检没通过——请先不要录单，按下面的说明处理或来问。'}
+              </div>
+              <div className="hint" style={{ marginBottom: 6 }}>
+                自检（quick_check）：{healthCheck.quickCheck} · 数据结构版本：v{healthCheck.version}
+              </div>
+              <div className="row" style={{ flexWrap: 'wrap', gap: 12 }}>
+                {Object.entries(healthCheck.tables ?? {}).map(([t, n]) => (
+                  <span key={t} className="hint mono">
+                    {t}: {String(n)}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <div className="row" style={{ flexWrap: 'wrap', gap: 8 }}>
             <Button variant="primary" disabled={busy} onClick={runBackup}>
               {busy ? '备份中，别关窗口…' : '立即备份'}
+            </Button>
+            <Button
+              disabled={healthBusy}
+              onClick={async () => {
+                setHealthBusy(true)
+                try {
+                  setHealthCheck(await window.api.settings.health())
+                } catch (e) {
+                  toast(`数据自检没跑出来：${(e as Error).message}`, 'error')
+                } finally {
+                  setHealthBusy(false)
+                }
+              }}
+            >
+              {healthBusy ? '自检中…' : '数据自检'}
             </Button>
             <Button
               disabled={busy}

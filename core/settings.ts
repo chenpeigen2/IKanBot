@@ -8,6 +8,7 @@
 import { CURRENCIES, type AppSettings, type BankAccount, type Currency } from '../src/shared/types'
 import { BizError } from '../src/shared/errors'
 import type { Db } from './db'
+import { LATEST_DB_VERSION } from '../electron/db/schema'
 
 export const SETTINGS_DEFAULTS: AppSettings = {
   company: {
@@ -361,7 +362,31 @@ export function settingsCore(db: Db) {
     })
   }
 
-  return { get, save, baseCurrencyLocked, patchBackup }
+  /**
+   * 数据自检（R83，探针闸的用户主动版）：不等备份/恢复，随时能问「我的数据健康吗」。
+   * 三道闸与 restore/backup 的探针同一套口径（自检/版本/核心表在不在）——
+   * quick_check 不过 = 库损坏；版本超前 = 被新版程序写过；核心表缺 = 结构异常。
+   * 12 表行数顺带给（搬迁对账同款清单），用户看一眼就知道「账还在」。
+   */
+  async function dataHealthCheck(): Promise<{
+    ok: boolean
+    quickCheck: string
+    version: number
+    tables: Record<string, number>
+  }> {
+    const check = (await db.get('PRAGMA quick_check')) as { quick_check?: string } | null
+    const quickCheck = String(check?.quick_check ?? '')
+    const ver = Number((await db.get('PRAGMA user_version'))?.['user_version'] ?? 0)
+    const tables: Record<string, number> = {}
+    for (const t of ['orders', 'order_items', 'customers', 'products', 'quotations', 'quotation_items', 'sample_orders', 'sample_order_items', 'payments', 'order_events', 'packing_lists', 'credit_applications']) {
+      const r = (await db.get(`SELECT COUNT(*) AS n FROM ${t}`)) as { n?: number } | null
+      tables[t] = Number(r?.n ?? 0)
+    }
+    const ok = quickCheck === 'ok' && ver <= LATEST_DB_VERSION && (tables['orders'] ?? 0) >= 0
+    return { ok, quickCheck, version: ver, tables }
+  }
+
+  return { get, save, baseCurrencyLocked, patchBackup, dataHealthCheck }
 }
 
 export type SettingsCore = ReturnType<typeof settingsCore>
