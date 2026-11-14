@@ -25,7 +25,10 @@ function scanHandles() {
       const st = fs.statSync(p)
       if (st.isDirectory()) walk(p)
       else if (f.endsWith('.ts') && !p.includes('electron/preload')) {
-        found.push(...[...fs.readFileSync(p, 'utf8').matchAll(/handle\((['"])([^'"]+)\1/g)].map((m) => m[2]))
+        const src = fs.readFileSync(p, 'utf8')
+        // handle() 异步注册 + handleSync() 同步注册（R88 复验收编：images:baseDir 走 handleSync，
+        // 只扫 handle 会漏——静态口径要对齐运行时注册数）
+        found.push(...[...src.matchAll(/\bhandle(?:Sync)?\((['"])([^'"]+)\1/g)].map((m) => m[2]))
       }
     }
   }
@@ -74,7 +77,11 @@ function stripComments(src) {
   return out
 }
 const preload = stripComments(read('electron/preload/index.ts'))
-const preloadChannels = uniq([...preload.matchAll(/call[^(]*\(\s*(['"])([^'"]+)\1/g)].map((m) => m[2]))
+const preloadChannels = uniq([
+  ...[...preload.matchAll(/call[^(]*\(\s*(['"])([^'"]+)\1/g)].map((m) => m[2]),
+  // sendSync 旁路（R88 复验收编：images:baseDir 走 ipcRenderer.sendSync，call 正则看不见）
+  ...[...preload.matchAll(/sendSync\((['"])([^'"]+)\1/g)].map((m) => m[2])
+])
 
 /** ③ 远端转发表 */
 const remoteSrc = read('electron/remote/client.ts')
@@ -122,7 +129,7 @@ if (remoteMissingHandle.length) {
   console.log('--- 硬闸 B1：REMOTE_ROUTES 转发但没有 handle ---')
   for (const c of remoteMissingHandle) console.log(c)
 }
-const remotePaths = [...remoteSrc.matchAll(/(?:['"])([a-z]+:[a-zA-Z0-9]+)\1\s*:\s*\{\s*path:\s*(['"])([^'"]+)\2/g)].map((m) => ({ ch: m[1], path: m[3] }))
+const remotePaths = [...remoteSrc.matchAll(/(['"])([a-z]+:[a-zA-Z0-9]+)\1\s*:\s*\{\s*path:\s*(['"])([^'"]+)\3/g)].map((m) => ({ ch: m[2], path: m[4] }))
 const missingServerRoute = remotePaths.filter((r) => !serverRoutes.includes(r.path))
 if (missingServerRoute.length) {
   bad++
@@ -135,6 +142,6 @@ console.log('--- 软清单 C：handle 有但 preload 没暴露（死通道候选
 console.log(notExposed.length === 0 ? '（无）' : notExposed.join('\n'))
 /** 软清单 D：本地独有通道（handle 有但 REMOTE_ROUTES 没有）——覆盖率口径的本体 */
 const localOnly = handles.filter((c) => !remoteRoutes.includes(c))
-console.log('--- 软清单 D：本地独有通道（不上后端，覆盖率 100/122 的 22 条口径本体） ---')
+console.log('--- 软清单 D：本地独有通道（不上后端；含 mode:/updater: 前缀豁免——app 覆盖率口径的 22 条业务未覆盖是这里的子集） ---')
 console.log(`共 ${localOnly.length} 条：` + localOnly.join(', '))
 if (bad > 0) process.exitCode = 1

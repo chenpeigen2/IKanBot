@@ -93,14 +93,19 @@ console.log('总路由（controller 声明）:', routes.length, ' 功能断言�
 console.log('--- 未在 HTTP 冒烟正文引用的路由（参数路由按前缀匹配） ---')
 for (const r of uncovered) console.log(`${r.method} ${r.route}  (${r.file})`)
 
-/** 反方向对表：冒烟正文里的 /api|/healthz 字面量必须指向真实控制器路由（否则是打空气的死测试） */
-const ALLOW = ['/', '/healthz', '/api', '/api/no-such-route', '/api/auth/login', '/api/files/images/', '/api/export/']
+/** 反方向对表：冒烟正文里的 /api|/healthz 字面量必须指向真实控制器路由（否则是打空气的死测试）。
+ * allowlist 语义（R88 复验打回后修正：原版 '/' 前缀把所有字面量整体放行，反方向形同虚设）：
+ * 尾斜杠项按前缀匹配，无尾斜杠项**精确**匹配。query 串字面量（/api/...?x=y）先截到 ? 再对。 */
+const ALLOW_EXACT = ['/', '/healthz', '/api', '/api/no-such-route']
+const ALLOW_PREFIX = ['/api/files/images/', '/api/export/']
 const literals = [...new Set([...e2e.matchAll(/['"`](\/(?:api|healthz)[^'"`\s]*)['"`]/g)].map((m) => m[1]))]
 const dead = []
-for (const lit of literals) {
-  if (ALLOW.some((a) => lit === a || lit.startsWith(a))) continue
+for (const rawLit of literals) {
+  const lit = rawLit.split('?')[0]
+  if (ALLOW_EXACT.includes(lit)) continue
+  if (ALLOW_PREFIX.some((a) => lit.startsWith(a))) continue
   const hit = routes.some((r) => r.route === lit || (r.route.includes(':') && lit.startsWith(r.route.slice(0, r.route.indexOf(':')))))
-  if (!hit) dead.push(lit)
+  if (!hit) dead.push(rawLit)
 }
 console.log('--- 反方向对表：冒烟引用了但控制器没有的路由（打空气） ---')
 console.log(dead.length === 0 ? '（无）' : dead.join('\n'))

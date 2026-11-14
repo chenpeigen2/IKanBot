@@ -630,22 +630,32 @@
   数据层 82、HTTP 224；typecheck 零错误。基线留档（R81 终态，复验全绿原跑）：561 单首页
   9ms / 二刷 9ms / 深翻页 offset 400 <500ms。
   无 UI 形态，证据为断言输出。
-- **R88：接线审计成双——IPC 三层自动化对表 + http 审计四口径加强 + 审计入 CI（2026-11-14，R87 复验小账清偿）**：
+- **R88：接线审计成双——IPC 三层自动化对表 + http 审计四口径加强 + 审计入 CI（2026-11-14，R87 复验小账清偿；首验打回后返工，两死代码修活）**：
   R83 复验人工做的「通道三层核对」升格成常备工具：`scripts/audit-ipc-wiring.cjs`（npm run
-  audit:ipc）——主进程 handle（131，扫整棵 electron/ 树，handle 助手在 services/ 也用）/ preload
-  call 面（131）/ REMOTE_ROUTES（100）/ server 控制器路由（108）逐层对表。硬闸三条：preload
+  audit:ipc）——主进程 handle（**132**，扫整棵 electron/ 树含 handleSync 旁路，handle 助手在
+  services/ 也用）/ preload call 面（**132**，含 sendSync）/ REMOTE_ROUTES（100）/ server 控制
+  器路由（108）逐层对表。硬闸三条：preload
   调用必须有 handle（点到就现场报错类）、远端转发通道必须有 handle、远端路径必须存在于
-  server 控制器（远端打空气类）；软清单两条人审（死通道候选、本地独有 31 条=覆盖率口径
-  本体）。首版审计自己就吃了一次口径亏（只扫 ipc/index.ts 漏掉 services/updater.ts 的 5 条
-  updater handle——audit 报红后修工具扫全树，131↔131 对齐），工具本身的红验证是真抓过。
+  server 控制器（远端打空气类）；软清单两条人审（死通道候选、本地独有 32 条=覆盖率口径
+  本体 + mode:/updater: 豁免）。**首轮复验打回**（周文娟四篡改实锤）：B2 正则 `(?:['"])` 非捕
+  获组吃掉引号回引 → remotePaths 恒空 →「远端打空气」闸永不报红；反方向被 allowlist `'/'`
+  前缀整体放行 → 死路由检测恒空；另认账两条流程毛病（自证跑在未入库逻辑上、红跑留档只有
+  转述）。返工逐行留档在 yanfa 报告返工节：B2 引号改捕获组、反方向改双列 allowlist 语义
+  （精确/前缀 + query 截断）、收编 handleSync/sendSync（131→132）、软清单文案修正；入库版
+  红验证两回：B2 篡改报 `customers:list → /api/bogus/two` exit 1、反方向塞死路由报
+  `/api/no-such-thing` exit 1，还原均 exit 0。
+  首版审计自己就吃了一次口径亏（只扫 ipc/index.ts 漏掉 services/updater.ts 的 5 条
+  updater handle——audit 报红后修工具扫全树），工具本身的红验证是真抓过。
   http 审计按 R87 复验的四个潜伏口径全部加强：域目录多 controller 文件全扫、@Delete/@Patch
-  与双引号装饰器同扫、字符串感知的注释剥离（check 名里的路由字面量算锁、注释里的不算）、
-  **反方向对表**（冒烟引用但控制器不存在的路由 = 打空气的死测试，带 allowlist：/healthz、
-  /api、故意 404 的 /api/no-such-route 等）——自证能抓（假路由实测 dead-detected=true）。
+  与双引号装饰器同扫、字符串感知的注释剥离（check 名里的路由字面量算锁、注释里的不算——
+  复验端到端实证：真引用撤掉立刻 107/exit 1）、
+  **反方向对表**（冒烟引用但控制器不存在的路由 = 打空气的死测试，双列 allowlist 语义）——
+  修活后入库版实测能抓（塞 /api/no-such-thing 报红 exit 1，见返工节）。
   **审计挂进 test:all**（`npm run audit:http && npm run audit:ipc`）——CI 从此守这两道门，
   将来加通道不接线、改路由不补测试当场红。本轮验收：e2e 2553、双模式 146、数据层 82、
-  HTTP 241（不变）；audit:http 108/108 + 反方向零死路由；audit:ipc 131/131/100 全对齐；
-  typecheck 零错误；sweep 与重钉基线一致（常态值）。无 UI 形态，证据为审计输出。
+  HTTP 241（不变）；audit:http 108/108 + 反方向（无）；audit:ipc **132/132** · 100 全对齐
+  （收编 handleSync/sendSync 后）；typecheck 零错误；sweep 与重钉基线一致（常态值）。
+  无 UI 形态，证据为审计输出。
 - **R87：HTTP 冒烟改单簇实弹——108/108 全覆盖 + 深度损坏无指引直锁（2026-11-14，R86 复验小账清偿）**：
   R85 的「health 功能断言查漏」升格成系统化审计：`scripts/audit-http-coverage.cjs`（npm run
   audit:http，入库可复跑）把 server 控制器 108 条路由逐条与 HTTP 冒烟正文对表（一个
