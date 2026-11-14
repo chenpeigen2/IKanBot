@@ -463,6 +463,25 @@ async function main(): Promise<void> {
       sSwitch.status === 400 && String(sSwitch.body.error.message).includes('基准币不能换')
     )
 
+    // R85：数据自检的远端路实弹——R83 复验只锁了路由数（110 含「设置自检 1」），
+    // 功能与字段全没锁：problems 若被响应包装层无声丢掉，远端红框就退回 R83 的一句英文
+    const healthRemote = await http.post('/api/settings/health').send({})
+    check(
+      'POST /api/settings/health 200：ok/quick_check ok/版本/12 表全带',
+      healthRemote.status === 200 &&
+        healthRemote.body.ok === true &&
+        healthRemote.body.quickCheck === 'ok' &&
+        typeof healthRemote.body.version === 'number' &&
+        healthRemote.body.version >= 1 &&
+        Object.keys(healthRemote.body.tables ?? {}).length === 12,
+      JSON.stringify(healthRemote.body).slice(0, 240)
+    )
+    check(
+      'problems 过远端通道（健康库是空数组不是 undefined——丢了远端红框就退回一句英文）',
+      Array.isArray(healthRemote.body.problems) && healthRemote.body.problems.length === 0,
+      JSON.stringify(healthRemote.body.problems)
+    )
+
     console.log('金额只读面')
     const moneyCust = await http.post('/api/customers/save').send({ input: { company: 'Money Co' } })
     const mcid = Number(moneyCust.body.id)

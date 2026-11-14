@@ -240,7 +240,10 @@ PI 单据预览：A4 纵向中英双语，带主图与费用行，浏览器打�
   用户主动版：quick_check/版本/12 表行数），1 张对照
 - 增量矩阵：[docs/ui/r84/](docs/ui/r84/README.md) —— 自检红框人话化：problems 问题清单
   先行 + quick_check 原文技术行（绿框不变；坏库副本实拍），2 张对照
-- 断言规模：e2e 2549 项 · 双模式 146 项 · 数据层 82 项 · HTTP 冒烟 224 项（`npm run test:all`）
+- 增量矩阵：[docs/ui/r85/](docs/ui/r85/README.md) —— 数据自检的远端路实弹：远端模式
+  绿框（服务器空库 12 表全 0，本机 4 单同屏对比）+ problems 红框经 HTTP 通道原样渲染，
+  2 张对照
+- 断言规模：e2e 2549 项 · 双模式 146 项 · 数据层 82 项 · HTTP 冒烟 226 项（`npm run test:all`）
 
 ---
 

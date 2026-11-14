@@ -4,8 +4,10 @@
 quick_check 原文技术行」**；catch toast 补「请先不要录单」（与红框同话术）。绿框不变。
 
 坏库副本拍法（真库 `data/ikanbot.db` 没碰）：`data/ikanbot.db` 拷副本，改 header 第
-32–35 字节（freelist 首干页指针指到不存在的页 0x00ffffff），放独立目录，`IKAN_DATA_DIR`
-重定向过去再点「数据自检」。
+32–35 字节为 `00 ff ff ff`（大端读即 0x00ffffff——freelist 首干页指针指到不存在的页；
+R84 复验小账：此前的「ff ff ff 00」按大端是 0xffffff00，字节序笔误，两种都能造坏库但
+只有这个字节序能复现截图里的 `invalid page number 16777215`），放独立目录，
+`IKAN_DATA_DIR` 重定向过去再点「数据自检」。
 
 | 文件 | 这是什么状态 | 断言说明 |
 | --- | --- | --- |
