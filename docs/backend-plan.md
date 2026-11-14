@@ -631,6 +631,13 @@
   9ms / 二刷 9ms / 深翻页 offset 400 <500ms。
   无 UI 形态，证据为断言输出。
 
+- **R100：勘误注记时点修正（2026-11-15，R99 复验挑刺 1 清偿，docs-only，豁免条款先行发版）**：
+  R99 复验挑刺 1：R96 新加的勘误注记「R99 复验自纠源头在其报告」时点错位——事实链是笔误
+  源头在 R96+R97 复验报告、其作者已在 R98 复验报告自纠（R99 复验此刻才发生，谈不上自纠）。
+  两处（backend-plan R98 条目 / r98-yanfa）注记改准为该事实链。R99 复验挑刺 2（「手动跑
+  不发布」是「默认不发布」的简化）按复验原话维持不改。本轮验收：docs-only，四套数字不变
+  （e2e 2560、双模式 146、数据层 82、HTTP 241）；typecheck 零错误；双审计 108/108、
+  132/132·100。无 UI 形态。按 R99 豁免条款 bump/tag 先行、轻量复验追认。
 - **R99：CI 口径笔误改准 + docs-only 发版顺序豁免条款正式化 + 终盘点（2026-11-15，R98 复验小账清偿，docs-only）**：
   R98 复验挑刺 1、2 清偿：① backend-plan R98 条目与 r98-yanfa 的「win/mac 两矩阵」改准为
   「三 job（Windows x64、macOS x64+arm64、Linux x64）」——笔误源头在 R96+R97 复验报告（其
@@ -647,7 +654,7 @@
   R96+R97 合并复验三条挑刺里两条当轮清：① r95 README :37 的 mode 措辞 R96 只加注未改文
   （同文件前后打架）——本轮改文「mode 信息来自本机 mode 配置——env 钉住时来自环境变量，
   无环境变量时来自 connection.json」；② 终盘点清单补 CI 口径一笔：CI（release.yml）只在
-  tag 推送或手动触发（workflow_dispatch）跑 **typecheck + test:e2e**（三 job：Windows x64、macOS x64+arm64、Linux x64——R98 首版误写「两矩阵」，R99 复验自纠源头在其报告、入库两处一并改准），双模式/数据层/HTTP/双审计只活在
+  tag 推送或手动触发（workflow_dispatch）跑 **typecheck + test:e2e**（三 job：Windows x64、macOS x64+arm64、Linux x64——R98 首版误写「两矩阵」，源头在 R96+R97 复验报告、其作者已在 R98 复验报告自纠（R99 复验挑刺 1 指出本注记时点错位，R100 改准），入库两处一并改准），双模式/数据层/HTTP/双审计只活在
   本地 test:all——R88 节报「CI 从此守这两道门」字面不成立（CI 守的是 e2e+typecheck 两道
   门），归「本地/CI 分工」观察类记账，CI 覆盖面扩充（搬 test:all/双审计进 CI）属工装决策
   不单方面扩。③ R96 漏 add 流程账留痕（复验裁定终态已清不追改）：根因与 R84 漏带 lock
