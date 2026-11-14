@@ -13,7 +13,7 @@ import { filesCore } from '../core/files'
 import { LATEST_DB_VERSION } from '../electron/db/schema'
 import * as fs from 'fs'
 import { tmpdir } from 'os'
-import { join, isAbsolute } from 'path'
+import { join, isAbsolute, dirname } from 'path'
 import { Database } from 'node-sqlite3-wasm'
 import * as products from '../electron/services/products'
 import * as customers from '../electron/services/customers'
@@ -26,6 +26,7 @@ import * as dashboard from '../electron/services/dashboard'
 import * as money from '../electron/services/money'
 import * as credits from '../electron/services/credits'
 import { getSettings, saveSettings, markBackupOk, markBackupFail, baseCurrencyLocked } from '../electron/services/settings'
+import { backupCore } from '../core/backup'
 import { createBackup, inspectBackup, isRestoring, listBackups, pruneBackups, restoreBackup, uniqueBackupName } from '../electron/services/backup'
 import { migrationReport, diffMigrationReports } from '../core/migration'
 import { ordersCore } from '../core/orders'
@@ -4350,6 +4351,120 @@ section('R83：数据自检')
   check('settings 域有 health 通道声明', apiSrc83.includes('health(): Promise'))
   const ipcSrc83 = fs.readFileSync('electron/ipc/index.ts', 'utf8')
   check('ipc 注册 settings:health', ipcSrc83.includes("handle('settings:health'"))
+}
+
+/* ---------------- R86：备份把库修好这件事要说破（VACUUM INTO 快照的隐形重建） ---------------- */
+section('R86：备份快照的隐形修复')
+{
+  // freelist 坏但表全读得动的临时库（r84 README 配方：header 32–35 = 00 ff ff ff 大端 0x00ffffff；
+  // 先插后删造出真 freelist 页，再掰坏首干页指针——和真库副本同一口味）
+  const mkFreelistCorrupt86 = (p: string): void => {
+    const d = new Database(p)
+    d.run('CREATE TABLE orders(id INTEGER PRIMARY KEY)')
+    // 探针闸核心表要 orders+payments 两张都在（assertDbProbeUsable 的 COUNT 闸）
+    d.run('CREATE TABLE payments(id INTEGER PRIMARY KEY, order_id INTEGER)')
+    d.run("INSERT INTO orders(id) VALUES (1),(2),(3),(4),(5),(6),(7),(8),(9),(10)")
+    d.run('DELETE FROM orders WHERE id > 3')
+    d.close()
+    const fd = fs.openSync(p, 'r+')
+    fs.writeSync(fd, Buffer.from([0x00, 0xff, 0xff, 0xff]), 0, 4, 32)
+    fs.closeSync(fd)
+  }
+  // 指引条（R86）：freelist 级损坏时 problems 要说破「备份包是重建的干净库」这条修复路
+  const tables86 = ['orders', 'order_items', 'customers', 'products', 'quotations', 'quotation_items', 'sample_orders', 'sample_order_items', 'payments', 'order_events', 'packing_lists', 'credit_applications']
+  const corruptB86 = join(tmpdir(), `r86-health-${Date.now()}.db`)
+  {
+    const d = new Database(corruptB86)
+    for (const t of tables86) d.run(`CREATE TABLE ${t}(id INTEGER PRIMARY KEY)`)
+    d.run('INSERT INTO orders(id) VALUES (1),(2),(3)')
+    d.close()
+    const fd = fs.openSync(corruptB86, 'r+')
+    fs.writeSync(fd, Buffer.from([0x00, 0xff, 0xff, 0xff]), 0, 4, 32)
+    fs.closeSync(fd)
+  }
+  const raw86 = {
+    get: async (sql: string, params?: unknown[]) => {
+      const d = new Database(corruptB86)
+      try { return d.get(sql, params as never[]) } finally { d.close() }
+    },
+    all: async (sql: string, params?: unknown[]) => {
+      const d = new Database(corruptB86)
+      try { return d.all(sql, params as never[]) } finally { d.close() }
+    },
+    run: async () => ({ changes: 0, lastInsertRowid: 0n })
+  } as unknown as Db
+  const health86 = await settingsCore(raw86 as Db).dataHealthCheck()
+  check(
+    'freelist 坏但表全读得动 → problems 说破「立即备份=修复」这条路（活库还坏着，先别录单）',
+    health86.ok === false &&
+      (health86.problems ?? []).some((x: string) => x.includes('立即备份') && x.includes('恢复')) &&
+      (health86.problems ?? []).some((x: string) => x.includes('请先不要录单')) &&
+      !(health86.problems ?? []).some((x: string) => x.startsWith('核心表')),
+    JSON.stringify(health86.problems)
+  )
+  fs.rmSync(corruptB86, { force: true })
+
+  // 行为锁 A：坏库经 backupCore（VACUUM INTO 快照，与桌面/服务器同款）打出来的包里是修好的库
+  const dirA = join(tmpdir(), `r86-backup-${Date.now()}`)
+  fs.mkdirSync(join(dirA, 'backups'), { recursive: true })
+  const corruptA = join(dirA, 'ikanbot.db')
+  mkFreelistCorrupt86(corruptA)
+  const hooksA = {
+    snapshotDb: (dbFile: string) => {
+      const snap = `${dbFile}.vac-${Date.now()}`
+      const d = new Database(dbFile)
+      try { d.exec(`VACUUM INTO '${snap.replace(/'/g, "''")}'`) } finally { d.close() }
+      const data = fs.readFileSync(snap)
+      fs.rmSync(snap, { force: true })
+      return { data }
+    },
+    openProbe: (file: string) => {
+      const d = new Database(file)
+      return { get: (sql: string, params?: unknown[]) => d.get(sql, params as never[]), close: () => d.close() }
+    },
+    closeDb: () => {},
+    openDb: () => {},
+    markOk: async () => {},
+    markFail: async () => {},
+    afterRestore: () => {},
+    isApprovedPath: () => false
+  }
+  const dirsA = {
+    dataDir: () => dirA,
+    backupsDir: () => join(dirA, 'backups'),
+    imagesDir: () => join(dirA, 'images'),
+    docsDir: () => join(dirA, 'docs'),
+    dbFile: () => corruptA
+  }
+  const zipA = await backupCore(dirsA, hooksA).createBackup('r86')
+  const innerA = readZip(fs.readFileSync(zipA))
+  const dbEntryA = innerA.find((e) => e.name === 'ikanbot.db')
+  const innerDbA = join(tmpdir(), `r86-inner-${Date.now()}.db`)
+  fs.writeFileSync(innerDbA, dbEntryA?.data ?? Buffer.alloc(0))
+  {
+    const d = new Database(innerDbA)
+    const qc = String((d.get('PRAGMA quick_check') as { quick_check?: string })?.quick_check ?? '')
+    const n = Number((d.get('SELECT COUNT(*) AS n FROM orders') as { n?: number })?.n ?? 0)
+    d.close()
+    check('坏库打出来的包是重建的干净库（quick_check ok + 数据还在）', qc === 'ok' && n === 3, JSON.stringify({ qc, n }))
+  }
+  fs.rmSync(innerDbA, { force: true })
+
+  // 行为锁 C：快照降级直拷 + 活库损坏 → 备份失败原因要带「降级直拷」这层（lastBackupError 里能分流）
+  let failMsgC = ''
+  const bcC = backupCore(dirsA, {
+    ...hooksA,
+    // 模拟 VACUUM INTO 失败（磁盘满/库被锁）降级直拷：直拷拷进来的就是坏字节
+    snapshotDb: () => ({ data: fs.readFileSync(corruptA), fallback: '测试模拟：VACUUM INTO 失败' }),
+    markFail: async (m: string) => { failMsgC = m }
+  })
+  const errC = await bcC.createBackup('r86c').then(() => '', (e: Error) => e.message)
+  check(
+    '快照降级直拷遇上活库损坏 → 坏包不落盘，失败原因带「降级直拷」这层',
+    errC !== '' && failMsgC.includes('自检没通过') && failMsgC.includes('直接拷贝'),
+    JSON.stringify({ errC: errC.slice(0, 100), failMsgC: failMsgC.slice(0, 200) })
+  )
+  fs.rmSync(dirA, { recursive: true, force: true })
 }
 
 section('R9 工作台会盯住备份（数据只躺在这台电脑上）')

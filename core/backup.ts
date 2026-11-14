@@ -191,7 +191,10 @@ export function backupCore(dirs: BackupDirs, hooks: BackupHooks) {
       } catch {
         /* 临时文件删不掉不影响报错 */
       }
-      const msg = (e as Error).message
+      // R86：快照降级直拷过的备份失败了，原因要带上这一层——直拷把活库原样拷进包，
+      // 包自检拒的其实是活库的坏。和「包本身坏」是两回事，lastBackupError 里能分流
+      const msg =
+        (e as Error).message + (snapshotFallbackReason ? `（本次快照降级为直接拷贝：${snapshotFallbackReason}）` : '')
       // 记原因这一步自己坏了不能把原始失败顶掉（closeDb 之后 markBackupFail 会再抛一句
       // 「数据库尚未初始化」，用户看到的那句话就跟备份为什么坏了没关系）
       try {
