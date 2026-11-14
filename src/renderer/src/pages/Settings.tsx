@@ -870,9 +870,22 @@ export default function Settings() {
                   ? '数据自检通过：库能开、版本正常、核心表都在。'
                   : '数据自检没通过——请先不要录单，按下面的说明处理或来问。'}
               </div>
-              <div className="hint" style={{ marginBottom: 6 }}>
-                自检（quick_check）：{healthCheck.quickCheck} · 数据结构版本：v{healthCheck.version}
-              </div>
+              {(healthCheck.problems ?? []).length > 0 ? (
+                <>
+                  <div className="hint" style={{ color: 'var(--danger)', marginBottom: 6 }}>
+                    {(healthCheck.problems as string[]).map((x, i) => (
+                      <div key={i}>{x}</div>
+                    ))}
+                  </div>
+                  <div className="hint mono" style={{ color: 'var(--danger)', marginBottom: 6, whiteSpace: 'pre-wrap' }}>
+                    自检原文（给技术支持看）：{healthCheck.quickCheck || '（没有响应）'} · 数据结构版本：v{healthCheck.version}
+                  </div>
+                </>
+              ) : (
+                <div className="hint" style={{ marginBottom: 6 }}>
+                  自检（quick_check）：{healthCheck.quickCheck} · 数据结构版本：v{healthCheck.version}
+                </div>
+              )}
               <div className="row" style={{ flexWrap: 'wrap', gap: 12 }}>
                 {Object.entries(healthCheck.tables ?? {}).map(([t, n]) => (
                   <span key={t} className="hint mono">
@@ -893,7 +906,7 @@ export default function Settings() {
                 try {
                   setHealthCheck(await window.api.settings.health())
                 } catch (e) {
-                  toast(`数据自检没跑出来：${(e as Error).message}`, 'error')
+                  toast(`数据自检没跑出来：${(e as Error).message}——请先不要录单，立即联系技术支持。`, 'error')
                 } finally {
                   setHealthBusy(false)
                 }

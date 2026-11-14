@@ -14,7 +14,7 @@ npm run dev          # 开发模式（热重载）
 npm run build        # 构建到 out/
 npm run pack         # 打包为免安装目录 release/win-unpacked
 npm run dist         # 打包为安装包 + 免安装 exe
-npm run test:e2e     # 端到端业务逻辑测试（90 项断言）
+npm run test:e2e     # 端到端业务逻辑测试（2549 项断言）
 npm run typecheck    # TypeScript 类型检查
 ```
 
@@ -238,7 +238,9 @@ PI 单据预览：A4 纵向中英双语，带主图与费用行，浏览器打�
   （与缺汇率清单同构），1 张对照
 - 增量矩阵：[docs/ui/r83/](docs/ui/r83/README.md) —— 设置页「数据自检」（活库探针闸的
   用户主动版：quick_check/版本/12 表行数），1 张对照
-- 断言规模：e2e 2545 项 · 双模式 146 项 · 数据层 82 项 · HTTP 冒烟 224 项（`npm run test:all`）
+- 增量矩阵：[docs/ui/r84/](docs/ui/r84/README.md) —— 自检红框人话化：problems 问题清单
+  先行 + quick_check 原文技术行（绿框不变；坏库副本实拍），2 张对照
+- 断言规模：e2e 2549 项 · 双模式 146 项 · 数据层 82 项 · HTTP 冒烟 224 项（`npm run test:all`）
 
 ---
 

@@ -12,6 +12,7 @@ import { settingsCore, BACKUP_STATE_KEY } from '../core/settings'
 import { filesCore } from '../core/files'
 import { LATEST_DB_VERSION } from '../electron/db/schema'
 import * as fs from 'fs'
+import { tmpdir } from 'os'
 import { join, isAbsolute } from 'path'
 import { Database } from 'node-sqlite3-wasm'
 import * as products from '../electron/services/products'
@@ -4312,6 +4313,36 @@ section('R83：数据自检')
   const health = await settingsCore(getDb()).dataHealthCheck()
   check('自检三道闸全过（quick_check/版本/核心表）', health.ok === true && health.quickCheck === 'ok' && health.version >= 1 && Object.keys(health.tables).length === 12, JSON.stringify({ quickCheck: health.quickCheck, version: health.version, tables: Object.keys(health.tables).length }))
   check('自检带 12 表行数（搬迁对账同款清单）', (health.tables?.orders ?? 0) > 0 && (health.tables?.customers ?? 0) > 0)
+  check('健康库 problems 为空（ok 时没有人话问题；字段必须存在——旧核心没有 problems 会红）', Array.isArray(health.problems) && health.problems.length === 0, JSON.stringify(health.problems))
+  // 版本超前的坏库：problems 给「请先升级程序」的人话（R83 复验挂账——英文原文不上界面）。
+  // 裸驱动临时库 + 异步适配喂给 settingsCore——与 R72 快照对账同一套喂法
+  const v999Path = join(tmpdir(), `health-v999-${Date.now()}.db`)
+  {
+    const vdb = new Database(v999Path)
+    vdb.run('PRAGMA user_version = 999')
+    vdb.close()
+  }
+  const rawAdapted = {
+    get: async (sql: string, params?: unknown[]) => {
+      const d = new Database(v999Path)
+      try { return d.get(sql, params as never[]) } finally { d.close() }
+    },
+    all: async (sql: string, params?: unknown[]) => {
+      const d = new Database(v999Path)
+      try { return d.all(sql, params as never[]) } finally { d.close() }
+    },
+    run: async () => ({ changes: 0, lastInsertRowid: 0n })
+  } as unknown as Db
+  const vHealth = await settingsCore(rawAdapted as Db).dataHealthCheck()
+  fs.rmSync(v999Path, { force: true })
+  check(
+    '版本超前 → problems 给「请先升级程序」人话（英文原文不上界面）',
+    vHealth.ok === false && (vHealth.problems ?? []).some((x: string) => x.includes('请先不要录单') && x.includes('升级到')),
+    JSON.stringify(vHealth.problems)
+  )
+  const setSrc84 = fs.readFileSync('src/renderer/src/pages/Settings.tsx', 'utf8')
+  check('红框渲染 problems 清单（人话怎么办先行；quickCheck 原文单独技术细节行给技术支持）', setSrc84.includes('healthCheck.problems') && setSrc84.includes('自检原文（给技术支持看）') && setSrc84.includes('请先不要录单'))
+  check('重损坏兜底（catch toast）也带「请先不要录单」——与红框同话术', /没跑出来：\$\{[^}]+\}——请先不要录单/.test(setSrc84))
   // 通道接线：设置页的自检按钮走 settings:health（本机读本机、远端读服务器）
   const setSrc83 = fs.readFileSync('src/renderer/src/pages/Settings.tsx', 'utf8')
   check('设置页有数据自检入口（settings.health 调用）', setSrc83.includes('settings.health()') || setSrc83.includes('backup.health()'))

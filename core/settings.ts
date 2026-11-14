@@ -373,17 +373,43 @@ export function settingsCore(db: Db) {
     quickCheck: string
     version: number
     tables: Record<string, number>
+    /** 人话问题清单（R84 复验挂账）：红框里给「怎么办」先行——quick_check 原文留在
+     *  quickCheck 字段、红框的技术细节行照给，供技术支持排查 */
+    problems: string[]
   }> {
     const check = (await db.get('PRAGMA quick_check')) as { quick_check?: string } | null
     const quickCheck = String(check?.quick_check ?? '')
     const ver = Number((await db.get('PRAGMA user_version'))?.['user_version'] ?? 0)
     const tables: Record<string, number> = {}
+    // 缺表/结构坏：COUNT 会抛英文 SQLite 错（R84 e2e 实锤）——记成人话问题，不让英文上界面
+    const problems: string[] = []
     for (const t of ['orders', 'order_items', 'customers', 'products', 'quotations', 'quotation_items', 'sample_orders', 'sample_order_items', 'payments', 'order_events', 'packing_lists', 'credit_applications']) {
-      const r = (await db.get(`SELECT COUNT(*) AS n FROM ${t}`)) as { n?: number } | null
-      tables[t] = Number(r?.n ?? 0)
+      try {
+        const r = (await db.get(`SELECT COUNT(*) AS n FROM ${t}`)) as { n?: number } | null
+        tables[t] = Number(r?.n ?? 0)
+      } catch {
+        problems.push(`核心表 ${t} 读不出来（数据结构异常）——请先不要录单，立即联系技术支持。`)
+        tables[t] = -1
+      }
     }
-    const ok = quickCheck === 'ok' && ver <= LATEST_DB_VERSION && (tables['orders'] ?? 0) >= 0
-    return { ok, quickCheck, version: ver, tables }
+    // 三道闸的人话问题清单（R84）：红框里说「怎么办」，人话先行；quickCheck 的英文原文
+    // 留在原字段、界面在红框的技术细节行照给（R83 复验认可原文可见）——截图发给技术支持
+    // 就够排查，不用再来回问
+    if (quickCheck !== 'ok') {
+      problems.push(
+        quickCheck === ''
+          ? '数据库自检没有响应——库文件可能损坏，请先不要录单，立即联系技术支持。'
+          : '数据库文件自检没通过（库可能损坏）——请先不要录单，立即联系技术支持。'
+      )
+    }
+    if (ver > LATEST_DB_VERSION) {
+      problems.push(
+        `这份数据来自更新的程序版本（数据格式 v${ver}，当前只认到 v${LATEST_DB_VERSION}）——` +
+          `请先不要录单，把程序升级到最新版再打开。`
+      )
+    }
+    const ok = problems.length === 0
+    return { ok, quickCheck, version: ver, tables, problems }
   }
 
   return { get, save, baseCurrencyLocked, patchBackup, dataHealthCheck }
