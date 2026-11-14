@@ -34,5 +34,5 @@ connection.json 是无环境变量时的产品常态路径。
 - 实验教训记档：toast 实拍的两个坑——① fetch 轮询测「服务器死没死」会被 800ms 超时误判
   （服务器活着但慢→误判死亡→click 落在死前拍成绿框），改确定性时序（shell 定点杀 + JS 定点
   点）；② error toast 寿命 5200ms（ui.tsx），capture 必须落在点后 ~3 秒内。
-- 拍到的场景顺带证实：服务器宕机后设置页的备份卡**仍渲染**（mode 信息来自本机 connection.json），
-  按钮可点——toast 路径可达的前提。
+- 拍到的场景顺带证实：服务器宕机后设置页的备份卡**仍渲染**（mode 信息来自本机 mode 配置——
+  env 钉住时来自环境变量，无环境变量时来自 connection.json），按钮可点——toast 路径可达的前提。

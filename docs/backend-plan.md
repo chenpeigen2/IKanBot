@@ -630,6 +630,17 @@
   数据层 82、HTTP 224；typecheck 零错误。基线留档（R81 终态，复验全绿原跑）：561 单首页
   9ms / 二刷 9ms / 深翻页 offset 400 <500ms。
   无 UI 形态，证据为断言输出。
+- **R98：复验挑刺两笔清偿 + CI 口径记账（2026-11-14，docs-only）**：
+  R96+R97 合并复验三条挑刺里两条当轮清：① r95 README :37 的 mode 措辞 R96 只加注未改文
+  （同文件前后打架）——本轮改文「mode 信息来自本机 mode 配置——env 钉住时来自环境变量，
+  无环境变量时来自 connection.json」；② 终盘点清单补 CI 口径一笔：CI（release.yml）只在
+  tag 推送跑 **typecheck + test:e2e**（win/mac 两矩阵），双模式/数据层/HTTP/双审计只活在
+  本地 test:all——R88 节报「CI 从此守这两道门」字面不成立（CI 守的是 e2e+typecheck 两道
+  门），归「本地/CI 分工」观察类记账，CI 覆盖面扩充（搬 test:all/双审计进 CI）属工装决策
+  不单方面扩。③ R96 漏 add 流程账留痕（复验裁定终态已清不追改）：根因与 R84 漏带 lock
+  同类——改文工具的产物要逐个核对 git add。
+  本轮验收：docs-only，四套数字不变（e2e 2560、双模式 146、数据层 82、HTTP 241）；
+  typecheck 零错误；双审计 108/108、132/132·100。无 UI 形态。
 - **R97：日备闸首包时序归因 + 本会话终盘点（2026-11-14，docs-only）**：
   ① **日备闸 ~9 秒首包机制归因**（R95 复验「没验的」第 2 条清偿）：server 备份调度
   `onModuleInit` 里 `setInterval(每小时)` + `setTimeout(10_000).unref()`——启动补查**故意
