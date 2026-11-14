@@ -4404,6 +4404,39 @@ section('R86：备份快照的隐形修复')
   )
   fs.rmSync(corruptB86, { force: true })
 
+  // R87 补锁（R86 复验小账）：深度损坏（缺核心表）不给「立即备份」指引要有直锁——
+  // 快照多半打不出来/会被自检拒，指引只属于「表全读得动」的 freelist 级坏法
+  const deepPath86 = join(tmpdir(), `r86-deep-${Date.now()}.db`)
+  {
+    const d = new Database(deepPath86)
+    d.run('CREATE TABLE orders(id INTEGER PRIMARY KEY)')
+    d.run('CREATE TABLE payments(id INTEGER PRIMARY KEY, order_id INTEGER)')
+    d.close()
+    const fd = fs.openSync(deepPath86, 'r+')
+    fs.writeSync(fd, Buffer.from([0x00, 0xff, 0xff, 0xff]), 0, 4, 32)
+    fs.closeSync(fd)
+  }
+  const rawDeep86 = {
+    get: async (sql: string, params?: unknown[]) => {
+      const d = new Database(deepPath86)
+      try { return d.get(sql, params as never[]) } finally { d.close() }
+    },
+    all: async (sql: string, params?: unknown[]) => {
+      const d = new Database(deepPath86)
+      try { return d.all(sql, params as never[]) } finally { d.close() }
+    },
+    run: async () => ({ changes: 0, lastInsertRowid: 0n })
+  } as unknown as Db
+  const deep86 = await settingsCore(rawDeep86 as Db).dataHealthCheck()
+  check(
+    '深度损坏（缺核心表）→ problems 只报「核心表读不出来」，不混「立即备份」指引（R87 补锁）',
+    deep86.ok === false &&
+      (deep86.problems ?? []).some((x: string) => x.startsWith('核心表')) &&
+      !(deep86.problems ?? []).some((x: string) => x.includes('立即备份')),
+    JSON.stringify(deep86.problems)
+  )
+  fs.rmSync(deepPath86, { force: true })
+
   // 行为锁 A：坏库经 backupCore（VACUUM INTO 快照，与桌面/服务器同款）打出来的包里是修好的库
   const dirA = join(tmpdir(), `r86-backup-${Date.now()}`)
   fs.mkdirSync(join(dirA, 'backups'), { recursive: true })

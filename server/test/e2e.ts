@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Test } from '@nestjs/testing'
@@ -481,6 +481,151 @@ async function main(): Promise<void> {
       Array.isArray(healthRemote.body.problems) && healthRemote.body.problems.length === 0,
       JSON.stringify(healthRemote.body.problems)
     )
+
+    console.log('R87：改单簇实弹（审计补锁——12 条无功能断言的路由）')
+    {
+      const aCust = await http.post('/api/customers/save').send({ input: { company: 'R87 Audit Co' } })
+      const aCid = Number(aCust.body.id)
+      // lastTerms：confirmed 单算「真做过」——币种与汇率要能被下一单的「沿用上次」继承
+      const aOrder = await http
+        .post('/api/orders/create')
+        .send({ input: { customerId: aCid, currency: 'USD', exchangeRate: 7.2, paymentStatus: 'confirmed' } })
+      const aOid = Number(aOrder.body.id)
+      const aTerms = await http.post('/api/orders/lastTerms').send({ customerId: aCid })
+      check(
+        'orders lastTerms 回最近一张做过单的口径（币种/汇率）',
+        aTerms.status === 200 && aTerms.body && aTerms.body.currency === 'USD' && Number(aTerms.body.exchangeRate) === 7.2,
+        JSON.stringify(aTerms.body)
+      )
+      // 明细三连：updateItem / removeItem / replaceItems（行数与款式经 get 复核）
+      const aItems = await http
+        .post('/api/orders/addItems')
+        .send({
+          orderId: aOid,
+          items: [{ styleNo: 'R87-A', quantity: 10, unitPrice: 5 }, { styleNo: 'R87-B', quantity: 4, unitPrice: 12.5 }]
+        })
+      const aItem1 = Number(aItems.body.items[0].id)
+      const aItem2 = Number(aItems.body.items[1].id)
+      const aUpd = await http.post('/api/orders/updateItem').send({ orderId: aOid, itemId: aItem1, patch: { quantity: 20 } })
+      const aGet1 = await http.post('/api/orders/get').send({ id: aOid })
+      check(
+        'orders updateItem 改数量落库',
+        aUpd.status === 200 &&
+          Number(aGet1.body.items.find((x: { id: number }) => Number(x.id) === aItem1)?.quantity) === 20,
+        JSON.stringify(aGet1.body?.items)
+      )
+      const aDel = await http.post('/api/orders/removeItem').send({ orderId: aOid, itemId: aItem2 })
+      const aGet2 = await http.post('/api/orders/get').send({ id: aOid })
+      check(
+        'orders removeItem 删行落库（只剩一张明细）',
+        aDel.status === 200 && aGet2.body.items.length === 1,
+        JSON.stringify(aGet2.body?.items?.map((x: { styleNo: string }) => x.styleNo))
+      )
+      const aRep = await http
+        .post('/api/orders/replaceItems')
+        .send({ orderId: aOid, items: [{ styleNo: 'R87-C', quantity: 3, unitPrice: 30 }] })
+      const aGet3 = await http.post('/api/orders/get').send({ id: aOid })
+      check(
+        'orders replaceItems 整单换行（旧行不残留）',
+        aRep.status === 200 && aGet3.body.items.length === 1 && aGet3.body.items[0].styleNo === 'R87-C',
+        JSON.stringify(aGet3.body?.items)
+      )
+      const aParties = await http
+        .post('/api/orders/setParties')
+        .send({ id: aOid, patch: { billTo: { company: 'R87 BILL CO' } } })
+      const aGet4 = await http.post('/api/orders/get').send({ id: aOid })
+      check(
+        'orders setParties 改抬头落库',
+        aParties.status === 200 && String(aGet4.body.billTo?.company ?? '') === 'R87 BILL CO',
+        JSON.stringify(aGet4.body?.billTo)
+      )
+      // 装箱行两连：addLine / deleteLine
+      const aPl = await http.post('/api/pl/create').send({
+        input: { orderId: aOid, containerNo: 'R87BOX', lines: [{ boxNo: '1', styleNo: 'R87-C', quantity: 2 }] }
+      })
+      const aPlId = Number(aPl.body[0].id)
+      const aLine = await http
+        .post('/api/pl/addLine')
+        .send({ orderId: aOid, plId: aPlId, line: { boxNo: '2', styleNo: 'R87-C', quantity: 1 } })
+      check(
+        'pl addLine 加一行（两行）',
+        aLine.status === 200 && aLine.body[0].lines.length === 2,
+        JSON.stringify({ createStatus: aPl.status, createBody: aPl.body?.[0], addStatus: aLine.status, addBody: aLine.body })
+      )
+      const aLineId = Number(aLine.body?.[0]?.lines?.[1]?.id)
+      const aLineDel = await http.post('/api/pl/deleteLine').send({ orderId: aOid, plId: aPlId, lineId: aLineId })
+      check('pl deleteLine 删一行（回到一行）', aLineDel.status === 200 && aLineDel.body[0].lines.length === 1, JSON.stringify(aLineDel.body?.[0]?.lines))
+      // 商品上下架
+      const aProd = await http
+        .post('/api/products/save')
+        .send({ input: { styleNo: 'R87-P', name: '审计款', composition: '100% Cotton', sizes: ['M'], colors: ['Black'] } })
+      const aPid = Number(aProd.body.id)
+      const aOff = await http.post('/api/products/setActive').send({ id: aPid, active: 0 })
+      const aOn = await http.post('/api/products/setActive').send({ id: aPid, active: 1 })
+      check(
+        'products setActive 上下架落库（0→1）',
+        aOff.status === 200 && aOff.body.active === 0 && aOn.status === 200 && aOn.body.active === 1,
+        JSON.stringify({ off: aOff.body?.active, on: aOn.body?.active })
+      )
+      // 打样：删收款（要原因留痕）+ 删单
+      const aSample = await http.post('/api/samples/save').send({
+        input: {
+          customerId: aCid,
+          currency: 'USD',
+          exchangeRate: 7.2,
+          exchangeRateDate: localDate(),
+          sampleDate: localDate(),
+          items: [{ styleNo: 'R87-S', quantity: 2, unitPrice: 10, goodsUnitPrice: 8 }]
+        }
+      })
+      const aSid = Number(aSample.body.id)
+      await http.post('/api/samples/addPayment').send({ id: aSid, p: { paidAt: localDate(), amount: 5, method: 'tt' } })
+      const aPayId = Number((await http.post('/api/samples/listPayments').send({ id: aSid })).body[0]?.id)
+      const aPayNoReason = await http.post('/api/samples/deletePayment').send({ id: aSid, paymentId: aPayId, reason: '  ' })
+      check(
+        'samples deletePayment 不写原因拒（操作历史要留痕）',
+        aPayNoReason.status === 400 && String(aPayNoReason.body.error.message).includes('原因')
+      )
+      const aPayDel = await http
+        .post('/api/samples/deletePayment')
+        .send({ id: aSid, paymentId: aPayId, reason: 'R87 审计测试撤销' })
+      const aPays = await http.post('/api/samples/listPayments').send({ id: aSid })
+      check('samples deletePayment 撤销收款（流水清零）', aPayDel.status === 200 && aPays.body.length === 0, JSON.stringify(aPays.body))
+      // 删单前的两道闸走一遍：有应收先取消（原因写备注、拒空原因），再删
+      const aCancelNoReason = await http.post('/api/samples/save').send({ input: { id: aSid, status: 'cancelled', note: '' } })
+      check(
+        '取消打样单不写原因拒（备注要交代）',
+        aCancelNoReason.status === 400 && String(aCancelNoReason.body.error.message).includes('原因')
+      )
+      const aCancel = await http
+        .post('/api/samples/save')
+        .send({ input: { id: aSid, status: 'cancelled', note: 'R87 审计：客户自己打样了' } })
+      check('取消打样单（原因入档）', aCancel.status === 200 && aCancel.body.status === 'cancelled', JSON.stringify(aCancel.body?.status))
+      const aSampleDel = await http.post('/api/samples/delete').send({ id: aSid })
+      const aSampleGet = await http.post('/api/samples/get').send({ id: aSid })
+      check(
+        'samples delete 删打样单（get 回空体）',
+        aSampleDel.status === 200 && aSampleGet.status === 200 && aSampleGet.text === '',
+        JSON.stringify({ del: aSampleDel.status, get: String(aSampleGet.text ?? '').slice(0, 40) })
+      )
+      // 图片 GET 是故意不挂鉴权的唯一例外（R59 记账：<img> 带不了 Authorization 头，挂了远端商品卡全白）——
+      // 锁住这个例外，防止将来有人「补齐鉴权」把远端商品图锁没
+      writeFileSync(join(process.env['IKAN_IMAGES_DIR'] ?? '', 'r87-probe.png'), Buffer.from('R87-PROBE-IMAGE'))
+      const imgNoAuth = await raw.get('/api/files/images/r87-probe.png').responseType('blob')
+      const imgBytes = Buffer.isBuffer(imgNoAuth.body) ? imgNoAuth.body : Buffer.from(String(imgNoAuth.text ?? ''), 'latin1')
+      check(
+        'files 图片 GET 不挂鉴权（故意的唯一例外）',
+        imgNoAuth.status === 200 && imgBytes.toString('latin1').includes('R87-PROBE-IMAGE'),
+        `status=${imgNoAuth.status} type=${imgNoAuth.headers?.['content-type'] ?? ''}`
+      )
+      // docs listQuotation：没版次的报价回空数组（版次语义由桌面 e2e 的 core 层锁）
+      const aQDocs = await http.post('/api/docs/listQuotation').send({ quotationId: 999999 })
+      check(
+        'docs listQuotation 无版次回空数组',
+        aQDocs.status === 200 && Array.isArray(aQDocs.body) && aQDocs.body.length === 0,
+        JSON.stringify(aQDocs.body)
+      )
+    }
 
     console.log('金额只读面')
     const moneyCust = await http.post('/api/customers/save').send({ input: { company: 'Money Co' } })

@@ -630,6 +630,32 @@
   数据层 82、HTTP 224；typecheck 零错误。基线留档（R81 终态，复验全绿原跑）：561 单首页
   9ms / 二刷 9ms / 深翻页 offset 400 <500ms。
   无 UI 形态，证据为断言输出。
+- **R87：HTTP 冒烟改单簇实弹——108/108 全覆盖 + 深度损坏无指引直锁（2026-11-14，R86 复验小账清偿）**：
+  R85 的「health 功能断言查漏」升格成系统化审计：`scripts/audit-http-coverage.cjs`（npm run
+  audit:http，入库可复跑）把 server 控制器 108 条路由逐条与 HTTP 冒烟正文对表（一个
+  controller 文件可挂多个 @Controller 块、参数路由按前缀匹配）——修脚本自身的两处口径
+  bug 后实测**12 条路由零功能断言**（改单簇 orders updateItem/removeItem/replaceItems/
+  setParties/lastTerms、装箱行 pl addLine/deleteLine、商品上下架 setActive、打样删除簇
+  samples delete/deletePayment、docs listQuotation、files 图片 GET）。本轮补 15 条功能锁：
+  改单三连经 get 复核行数款式；setParties 改抬头；装箱行加/删（顺手实证装箱守恒闸经 HTTP
+  照样拦超装）；商品 0→1 上下架；打样删收款（拒空原因）→取消（拒空原因、原因入备注档）→
+  删单三层全实弹；图片 GET 锁成「**故意不挂鉴权的唯一例外**」（R59 记账的 <img> 限制，
+  防将来有人补齐鉴权把远端商品图锁没）；listQuotation 空数组形状。审计后 **108/108**。
+  桌面 e2e 补 1 条（R86 复验小账）：深度损坏（缺核心表）problems 只报「核心表读不出来」
+  不混「立即备份」指引——指引条的作用域从此有直锁。红验证：本段为覆盖锁（行为已在桌面
+  e2e core 层锁死），红能力当场实证两回——测试自身键名错（lastTerms 收 customerId、
+  setParties 收 id）当场红、装箱守恒闸对超装当场 400 拒。
+  本轮验收：e2e 2552 → 2553、双模式 146、数据层 82、HTTP 226 → 241；typecheck 零错误；
+  sweep 与重钉基线一致。无 UI 形态，证据为断言输出。
+  **sweep 基线二修（同日实测，修正 R63 归因）**：R87 全链 sweep 首跑 overflow 突变（/orders
+  498.117 → 282.117、/samples 357.359 → 141.359，两路同差 216px），渲染层零改动（diff=0）
+  排除代码——实测容器宽在 **982 ↔ 1198 两态间漂**（width max-content 不变 1480.117，只有
+  容器变；窗口宽随显示环境被钳制，内屏 1440 下常规 innerWidth=1224 → 容器 982，宽容器态
+  1198 对应窗口 1440，罕见 ~1/6）。**修正 R63 的归因**：当时把「+2px 日漂」归于字体度量，
+  真机制是这套容器两态 + 轻微字体度量的叠加。基线改法：w 钉同日恒定值（1480.117 /
+  1339.359），overflow 钉**常态值 498.117 / 357.359** 并注明宽容器态例外值（282.117 /
+  141.359，扫到不算回归、只记环境态），健康指标（phantom/docOverflow/mainOverflow=0）
+  永远硬锁。连续多跑复现：常态 498.117 连续三跑稳定。
 - **R86：备份快照的隐形修复说破——「坏库打出来的包是修好的库」+ sweep 重钉（2026-11-14，R85 复验小账清偿）**：
   背景：R85 复验期间实证——坏库服务器的 auto 备份包里 quick_check=ok、活库却依旧报错。
   原来备份的 VACUUM INTO 快照对 freelist/结构级损坏是一次**隐形重建**：包是修好的库，
