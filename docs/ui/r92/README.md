@@ -1,0 +1,20 @@
+# R92 截图矩阵（2026-11-14）—— 锚点竞态修复：等两张卡的数据到位再滚
+
+R91 复验实测的竞态：锚点 effect 是一次性 150ms 定时器 + early return + `?.` 静默——settings
+数据晚到时锚点还不在 DOM，直进 **10 跑 7 落**（浮层铁证 scrollTop=0），远端模式 settings.get
+走 HTTP 暴露面更大。本轮修法：effect 依赖 **[s, source]**（两张卡的数据都到位、布局长到最终
+高度再滚——只等 s 会先滚到一半、来源卡随后长高把锚点顶离视口顶）+ 一次性 `scrollDoneRef`
+（防 s 后续刷新把用户拽回备份卡）+ 锚点元素 `scroll-margin-top: 70`（topbar 不遮挡）。
+
+拍法：`bash scripts/shot.sh '/settings?scroll=backup'`（直进，无点击——纯滚动验证），
+`IKAN_DATA_DIR` 指 freelist 坏副本（r84 配方，真库没碰）。修复前同口径直进 6 跑 3 落
+（R91 复验 10 跑 3 中）；修复后 **6 跑全中、落点逐像素一致**（本表 2 张实拍 + 其余 4 张同几何）。
+
+| 文件 | 这是什么状态 | 断言说明 |
+| --- | --- | --- |
+| settings-anchored-stable.png | 直进带锚点：数据备份卡贴视口顶（scroll-margin 生效，未被 topbar 遮挡），上方来源卡完整长高——双数据闸后的稳定落点 | e2e「R92 补锁」：依赖 [s, source] + 一次性 ref + 双数据闸三件同在（源码锁）；落点稳定性为本表 6 跑实拍 |
+
+## 没有独立画面的行为
+
+- e2e R92 补锁红验证：锁写在实现前实跑 ✗ 红（R91 两条照绿——锁独立性也对）、实现后 2560 全绿。
+- 修复前竞态的实拍证据在 R91 复验报告（wj91-pure-run7 浮层铁证 scrollTop=0 anchor=Y）。

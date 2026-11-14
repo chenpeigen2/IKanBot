@@ -4541,6 +4541,11 @@ section('R91：红条详情锚点直滚')
     setSrc91.includes('id="backup-card"') && setSrc91.includes('scroll=backup') && setSrc91.includes("getElementById('backup-card')"),
     '锚点元素与滚动逻辑'
   )
+  check(
+    '锚点滚动等两张卡的数据到位再滚（依赖 [s, source] + 一次性 ref——直进 10 跑 7 落的竞态清偿，R92 补锁）',
+    /scroll=backup[\s\S]*\}, \[s, source\]\)/.test(setSrc91) && setSrc91.includes('scrollDoneRef') && setSrc91.includes("if (!s || !source) return"),
+    'effect 依赖 [s, source]、一次性 ref 与双数据闸须同在'
+  )
 }
 
 section('R9 工作台会盯住备份（数据只躺在这台电脑上）')

@@ -229,12 +229,20 @@ export default function Settings() {
   }, [])
 
   // R91：工作台健康红条的「详情」跳转带 ?scroll=backup——进来直接滚到数据备份卡
-  //（自检红框/绿框、12 表行数、原文技术行都在这张卡上），不用自己翻
+  //（自检红框/绿框、12 表行数、原文技术行都在这张卡上），不用自己翻。
+  // R92 修竞态：一次性 150ms 定时器在 settings 数据晚到时锚点还不在 DOM、?. 静默吞
+  //（复验实测直进 10 跑 7 落、远端 HTTP 暴露面更大）——改为依赖 [s, source]：两张卡
+  // 的数据都到位、布局长到最终高度再滚（只等 s 会先滚到一半、来源卡随后长高把锚点
+  // 顶离视口顶）；一次性 ref 防 s 后续刷新把用户拽回备份卡。topbar 遮挡由
+  // 锚点元素的 scroll-margin-top 兜。
+  const scrollDoneRef = useRef(false)
   useEffect(() => {
-    if (/[?&]scroll=backup/.test(window.location.hash)) {
-      window.setTimeout(() => document.getElementById('backup-card')?.scrollIntoView({ block: 'start' }), 150)
-    }
-  }, [])
+    if (scrollDoneRef.current) return
+    if (!/[?&]scroll=backup/.test(window.location.hash)) return
+    if (!s || !source) return // 两张卡的数据都到位才滚，等下次数据变更再试
+    scrollDoneRef.current = true
+    document.getElementById('backup-card')?.scrollIntoView({ block: 'start' })
+  }, [s, source])
 
   // 订阅「登录已失效」（R61）：后端换了秘钥后，远端请求收到 401 时主进程会清掉
   // safeStorage 里的登录态并广播过来——登录卡不能还挂着「已登录：某某」的假象，
@@ -767,7 +775,7 @@ export default function Settings() {
 
         {sourceCard}
 
-        <div id="backup-card" />
+        <div id="backup-card" style={{ scrollMarginTop: 70 }} />
         <Card title="数据备份">
           {source?.mode === 'remote' ? (
             <div className="hint" style={{ marginBottom: 8 }}>
