@@ -9,8 +9,7 @@
  *         ①里有而③没有的 = 本地独有通道（覆盖率口径的本体，打印/对话框/窗口类按设计不上后端）。 */
 const fs = require('fs')
 const path = require('path')
-const ROOT = path.resolve(__dirname, '..')
-const CHANNEL = /[a-z]+:[a-zA-Z0-9]+/g
+const { stripComments, controllerRoutes, ROOT } = require('./lib/audit-shared.cjs')
 
 const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8')
 const uniq = (arr) => [...new Set(arr)]
@@ -37,45 +36,8 @@ function scanHandles() {
 }
 const handles = scanHandles()
 
-/** ② preload 调用面：call('...') 的通道字面量（剥注释后提取） */
-function stripComments(src) {
-  let out = ''
-  let i = 0
-  let quote = null
-  while (i < src.length) {
-    const c = src[i]
-    if (quote) {
-      out += c
-      if (c === '\\') {
-        out += src[i + 1] ?? ''
-        i += 2
-        continue
-      }
-      if (c === quote) quote = null
-      i++
-      continue
-    }
-    if (c === "'" || c === '"' || c === '`') {
-      quote = c
-      out += c
-      i++
-      continue
-    }
-    if (c === '/' && src[i + 1] === '/') {
-      while (i < src.length && src[i] !== '\n') i++
-      continue
-    }
-    if (c === '/' && src[i + 1] === '*') {
-      i += 2
-      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i++
-      i += 2
-      continue
-    }
-    out += c
-    i++
-  }
-  return out
-}
+/** ② preload 调用面：call('...') 的通道字面量（剥注释后提取；stripComments 唯一真源在
+ *  scripts/lib/audit-shared.cjs——R88 复验-2 小账「两份复制将来会分叉」的抽取） */
 const preload = stripComments(read('electron/preload/index.ts'))
 const preloadChannels = uniq([
   ...[...preload.matchAll(/call[^(]*\(\s*(['"])([^'"]+)\1/g)].map((m) => m[2]),
@@ -87,30 +49,8 @@ const preloadChannels = uniq([
 const remoteSrc = read('electron/remote/client.ts')
 const remoteRoutes = uniq([...remoteSrc.matchAll(/(['"])([a-z]+:[a-zA-Z0-9]+)\1\s*:\s*\{/g)].map((m) => m[2]))
 
-/** ④ server 控制器路由（与 audit:http 同源口径） */
-function controllerRoutes() {
-  const routes = []
-  const serverSrc = path.join(ROOT, 'server/src')
-  for (const dir of fs.readdirSync(serverSrc)) {
-    const cdir = path.join(serverSrc, dir)
-    if (!fs.statSync(cdir).isDirectory()) continue
-    for (const file of fs.readdirSync(cdir).filter((f) => f.endsWith('.controller.ts'))) {
-      const src = fs.readFileSync(path.join(cdir, file), 'utf8')
-      const blocks = []
-      const re = /@Controller\((['"])([^'"]+)\1\)/g
-      let m
-      while ((m = re.exec(src))) blocks.push({ base: m[2], start: m.index })
-      for (let i = 0; i < blocks.length; i++) {
-        const seg = src.slice(blocks[i].start, i + 1 < blocks.length ? blocks[i + 1].start : src.length)
-        for (const r of seg.matchAll(/@(Post|Get|Put|Delete|Patch)\((['"])([^'"]+)\2\)/g)) {
-          routes.push(`/${blocks[i].base}/${r[3]}`)
-        }
-      }
-    }
-  }
-  return routes
-}
-const serverRoutes = controllerRoutes()
+/** ④ server 控制器路由（唯一真源在 scripts/lib/audit-shared.cjs——与 audit:http 同一函数） */
+const serverRoutes = controllerRoutes().map((r) => r.route)
 
 console.log('主进程 handle:', handles.length, '· preload 调用通道:', preloadChannels.length, '· REMOTE_ROUTES:', remoteRoutes.length, '· server 路由:', serverRoutes.length)
 
@@ -130,6 +70,12 @@ if (remoteMissingHandle.length) {
   for (const c of remoteMissingHandle) console.log(c)
 }
 const remotePaths = [...remoteSrc.matchAll(/(['"])([a-z]+:[a-zA-Z0-9]+)\1\s*:\s*\{\s*path:\s*(['"])([^'"]+)\3/g)].map((m) => ({ ch: m[2], path: m[4] }))
+/** 硬闸 B0（R90 加）：条目数与路径提取数必须相等——B2 的正则要求 path 是入口第一个字段，
+ *  字段重排的条目会掉出 remotePaths、B2 对它失明且不吭声（复验-2 小账）。有差当场报红。 */
+if (remotePaths.length !== remoteRoutes.length) {
+  bad++
+  console.log(`--- 硬闸 B0：REMOTE_ROUTES 条目 ${remoteRoutes.length} 与路径提取 ${remotePaths.length} 不等——有条目掉出口径（查 path 是否不在入口首字段/引号变体） ---`)
+}
 const missingServerRoute = remotePaths.filter((r) => !serverRoutes.includes(r.path))
 if (missingServerRoute.length) {
   bad++

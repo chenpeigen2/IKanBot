@@ -104,6 +104,19 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
   const overdueCount = reminders.filter((r) => r.days < 0).length
   const dataCount = reminders.filter((r) => r.kind === 'data').length
 
+  // R90：健康红条两分支共用——最坏场景（深损坏把 stats 全挂、走下面的早退分支）恰恰
+  // 最需要这句「先别录单」，R89 复验挑的洞
+  const healthBanner =
+    healthOk === false ? (
+      <div className="alert error">
+        <strong>数据自检没通过——请先不要录单。</strong>
+        <br />
+        {healthFirst}
+        <br />
+        详情与 12 表行数在 <a href="#/settings">设置 · 数据备份 · 数据自检</a>。
+      </div>
+    ) : null
+
   const cur = stats?.currency ?? 'CNY'
 
   const toggleGroup = (orderNo: string) =>
@@ -152,6 +165,7 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
           </Button>
         </div>
         <div className="content">
+          {healthBanner}
           <LoadError what="工作台" message={loadError} onRetry={() => void load()} />
         </div>
       </>
@@ -179,15 +193,7 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
             下面还是上一次读到的数，点「工作台」重新进来可以再试。
           </div>
         ) : null}
-        {healthOk === false ? (
-          <div className="alert error">
-            <strong>数据自检没通过——请先不要录单。</strong>
-            <br />
-            {healthFirst}
-            <br />
-            详情与 12 表行数在 <a href="#/settings">设置 · 数据备份 · 数据自检</a>。
-          </div>
-        ) : null}
+        {healthBanner}
         <div className="stat-grid">
           {/* R4-S1：统计卡默认全黑；一屏最多 1 张卡上色。
               卡 2「待收款金额」用橙（钱还没到手，要动手），是本屏唯一的彩色卡；

@@ -4519,6 +4519,11 @@ section('R89：工作台健康红条')
     dashSrc89.includes('setHealthOk(null)'),
     'catch 分支须回 null'
   )
+  check(
+    '健康红条两分支共用——深损坏把 stats 全挂走早退分支时也拦（R90 补锁：R89 复验挑的洞）',
+    (dashSrc89.match(/healthBanner/g) ?? []).length >= 3,
+    'healthBanner 须出现在定义 + 早退分支 + 主分支三处'
+  )
 }
 
 section('R9 工作台会盯住备份（数据只躺在这台电脑上）')

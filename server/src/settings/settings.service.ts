@@ -28,8 +28,15 @@ export class SettingsService {
     return this.core.baseCurrencyLocked()
   }
 
-  /** 数据自检（R83）：活库探针的用户主动版——quick_check/版本/核心表行数 */
-  dataHealthCheck(): Promise<{ ok: boolean; quickCheck: string; version: number; tables: Record<string, number> }> {
+  /** 数据自检（R83）：活库探针的用户主动版——quick_check/版本/核心表行数；
+   *  problems 人话清单 R84 起是返回值的一部分（R89 复验挑的 TS 口径账，运行时一直带着） */
+  dataHealthCheck(): Promise<{
+    ok: boolean
+    quickCheck: string
+    version: number
+    tables: Record<string, number>
+    problems: string[]
+  }> {
     return this.core.dataHealthCheck()
   }
 }

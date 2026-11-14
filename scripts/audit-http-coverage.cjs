@@ -1,80 +1,16 @@
-/* 只读审计（R88 版）：server 控制器路由 vs HTTP 冒烟（server/test/e2e.ts）的功能断言覆盖。
- * R87 版的四个潜伏口径（复验拆出来的）本版修掉：
- *   ① 一个域目录可以有多个 *.controller.ts——全扫；
- *   ② @Delete/@Patch、双引号装饰器——同扫；
+/* 只读审计（R88 版 + R90 抽取）：server 控制器路由 vs HTTP 冒烟（server/test/e2e.ts）的功能断言覆盖。
+ * R87 版的四个潜伏口径（复验拆出来的）已修掉：
+ *   ① 一个域目录可以有多个 *.controller.ts——全扫（共用件）；
+ *   ② @Delete/@Patch、双引号装饰器——同扫（共用件）；
  *   ③ 注释剥离——判定前把 e2e.ts 的注释剥掉（保留字符串字面量：check 名里带路由也算锁）；
  *   ④ 反方向对表——e2e.ts 里出现的 /api/... 字面量逐个反查控制器，不存在的报「打空气的死测试」。
- * 判定仍是「路由全名在冒烟正文（剥注释后）被字面引用过」——它是接线锁，不是断言强度锁。 */
+ * 判定仍是「路由全名在冒烟正文（剥注释后）被字面引用过」——它是接线锁，不是断言强度锁。
+ * controllerRoutes/stripComments 唯一真源在 scripts/lib/audit-shared.cjs（R90 抽取）。 */
 const fs = require('fs')
 const path = require('path')
-const ROOT = path.resolve(__dirname, '..')
+const { stripComments, controllerRoutes, ROOT } = require('./lib/audit-shared.cjs')
 const raw = fs.readFileSync(path.join(ROOT, 'server/test/e2e.ts'), 'utf8')
-
-/** 字符串感知的注释剥离：'...' / "..." / `...` 里的 // 和 /* 不算注释 */
-function stripComments(src) {
-  let out = ''
-  let i = 0
-  let quote = null
-  while (i < src.length) {
-    const c = src[i]
-    if (quote) {
-      out += c
-      if (c === '\\') {
-        out += src[i + 1] ?? ''
-        i += 2
-        continue
-      }
-      if (c === quote) quote = null
-      i++
-      continue
-    }
-    if (c === "'" || c === '"' || c === '`') {
-      quote = c
-      out += c
-      i++
-      continue
-    }
-    if (c === '/' && src[i + 1] === '/') {
-      while (i < src.length && src[i] !== '\n') i++
-      continue
-    }
-    if (c === '/' && src[i + 1] === '*') {
-      i += 2
-      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i++
-      i += 2
-      continue
-    }
-    out += c
-    i++
-  }
-  return out
-}
-
 const e2e = stripComments(raw)
-
-/** 收集控制器路由：所有域目录 × 所有 *.controller.ts × 所有 @Controller 块 */
-function controllerRoutes() {
-  const routes = []
-  const serverSrc = path.join(ROOT, 'server/src')
-  for (const dir of fs.readdirSync(serverSrc)) {
-    const cdir = path.join(serverSrc, dir)
-    if (!fs.statSync(cdir).isDirectory()) continue
-    for (const file of fs.readdirSync(cdir).filter((f) => f.endsWith('.controller.ts'))) {
-      const src = fs.readFileSync(path.join(cdir, file), 'utf8')
-      const blocks = []
-      const re = /@Controller\((['"])([^'"]+)\1\)/g
-      let m
-      while ((m = re.exec(src))) blocks.push({ base: m[2], start: m.index })
-      for (let i = 0; i < blocks.length; i++) {
-        const seg = src.slice(blocks[i].start, i + 1 < blocks.length ? blocks[i + 1].start : src.length)
-        for (const r of seg.matchAll(/@(Post|Get|Put|Delete|Patch)\((['"])([^'"]+)\2\)/g)) {
-          routes.push({ route: `/${blocks[i].base}/${r[3]}`, method: r[1], file })
-        }
-      }
-    }
-  }
-  return routes
-}
 
 const routes = controllerRoutes()
 

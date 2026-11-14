@@ -630,6 +630,20 @@
   数据层 82、HTTP 224；typecheck 零错误。基线留档（R81 终态，复验全绿原跑）：561 单首页
   9ms / 二刷 9ms / 深翻页 offset 400 <500ms。
   无 UI 形态，证据为断言输出。
+- **R90：健康红条两分支共用 + 审计收编三件小账（2026-11-14，R89/R88-2 复验小账清偿）**：
+  R89 复验挑的最要紧的洞：深损坏把 stats 全挂时工作台走「没加载出来 + 重新加载」早退分支，
+  那个分支没有红条 JSX——最需要「请先不要录单」的最坏场景反而没这句话。本轮：① 红条抽成
+  `healthBanner` 共用件、早退分支与主分支都渲染；② settings.service 返回类型补 problems
+  声明（TS 口径账）；③ 审计公共模块抽取 `scripts/lib/audit-shared.cjs`（controllerRoutes/
+  stripComments 唯一真源——R88-2 小账「两份复制将来分叉」）；④ audit:ipc 加硬闸 B0：
+  REMOTE_ROUTES 条目数与路径提取数必须相等（B2 正则要求 path 在入口首字段，字段重排的
+  条目会静默掉出口径）——篡改红验证：args 提前重排 customers:list → 条目 100 vs 提取 99
+  报红 exit 1，还原 exit 0（留档 out/audit-ipc-red-b0.log）。桌面红验证：stash Dashboard
+  下 R90 补锁 ✗ 红、还原复绿；深损坏副本（orders 数据页清零——缺表副本会把 migrate 挂死，
+  真机缺表本来会被 migrate 修回，教训记入 r90 README）实拍最坏场景红条照挂。
+  本轮验收：e2e 2556 → 2557、双模式 146、数据层 82、HTTP 241；typecheck 零错误；sweep 与
+  重钉基线一致（常态值）；audit:http 108/108、audit:ipc 132/132·100（共用件抽取后实跑
+  exit 0）。截图 1 张入库 docs/ui/r90/。
 - **R89：工作台健康红条——库坏了开屏就拦（2026-11-14）**：R83 的「数据自检」要用户自己去
   设置页点；坏库用户往往根本不去设置页。工作台开屏顺带问一次 `settings:health`（本机读本机、
   远端读服务器），`ok===false` 时页面顶部挂红条：「数据自检没通过——请先不要录单。」+
