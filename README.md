@@ -256,6 +256,9 @@ PI 单据预览：A4 纵向中英双语，带主图与费用行，浏览器打�
 - 增量矩阵：[docs/ui/r94/](docs/ui/r94/README.md) —— 远端模式健康链路全链实拍：工作台
   红条（服务器坏库 problems 经 HTTP）→ 锚点详情直滚 → 红框详情（R89/R91/R92 远端挂账
   清偿），2 张对照
+- 增量矩阵：[docs/ui/r95/](docs/ui/r95/README.md) —— 远端 catch toast 实拍：服务器宕机
+  点自检 → 「……——请先不要录单，立即联系技术支持」全字兑现（「先别录单」三态齐：红框/
+  深损坏早退分支/catch toast），1 张对照
 - 断言规模：e2e 2560 项 · 双模式 146 项 · 数据层 82 项 · HTTP 冒烟 241 项
   （`npm run test:all`；`npm run audit:http` = server 路由功能断言覆盖 108/108、
   `npm run audit:ipc` = IPC 三层接线 132/132 · 远端 100 全对齐）
