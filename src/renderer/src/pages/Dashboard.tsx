@@ -32,6 +32,9 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
   const [loadError, setLoadError] = useState('')
   /** 展开过的「同一单多条事由」（key 是单号，收起状态不落库，刷新后回到默认） */
   const [openGroups, setOpenGroups] = useState<Set<string>>(new Set())
+  /** R89：数据自检结果（null=通道没跑起来，不拦工作台；false=坏了，挂红条） */
+  const [healthOk, setHealthOk] = useState<boolean | null>(null)
+  const [healthFirst, setHealthFirst] = useState('')
 
   const aliveRef = useRef(true)
   /** 定时器刷新、窗口聚焦、后台切回来可能同时触发：后到的旧结果不许盖住新的一次 */
@@ -54,6 +57,17 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
       setLoadError((e as Error).message || '工作台数据没算出来')
     } finally {
       if (aliveRef.current && isCurrent()) setLoading(false)
+    }
+    // R89：开屏顺带问一次「数据健康吗」——库坏了当场挂红条，不等用户去设置页点自检。
+    // health 通道整体跑不起来（远端断等）时静默回 null：那类故障有自己的提示路，不在这里拦
+    try {
+      const h = await window.api.settings.health()
+      if (aliveRef.current && isCurrent()) {
+        setHealthOk(h.ok)
+        setHealthFirst((h.problems ?? [])[0] ?? '')
+      }
+    } catch {
+      if (aliveRef.current && isCurrent()) setHealthOk(null)
     }
   }, [beginLoad])
 
@@ -163,6 +177,15 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
             这次刷新没成功：{loadError}
             <br />
             下面还是上一次读到的数，点「工作台」重新进来可以再试。
+          </div>
+        ) : null}
+        {healthOk === false ? (
+          <div className="alert error">
+            <strong>数据自检没通过——请先不要录单。</strong>
+            <br />
+            {healthFirst}
+            <br />
+            详情与 12 表行数在 <a href="#/settings">设置 · 数据备份 · 数据自检</a>。
           </div>
         ) : null}
         <div className="stat-grid">

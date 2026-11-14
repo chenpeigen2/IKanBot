@@ -245,8 +245,11 @@ PI 单据预览：A4 纵向中英双语，带主图与费用行，浏览器打�
   2 张对照
 - 增量矩阵：[docs/ui/r86/](docs/ui/r86/README.md) —— 备份快照的隐形修复说破：坏库红框
   多一条「立即备份 = 修复路」指引（VACUUM INTO 快照重建，行为锁三条），1 张对照
-- 断言规模：e2e 2553 项 · 双模式 146 项 · 数据层 82 项 · HTTP 冒烟 241 项
-  （`npm run test:all`；`npm run audit:http` = server 路由功能断言覆盖 108/108）
+- 增量矩阵：[docs/ui/r89/](docs/ui/r89/README.md) —— 工作台健康红条：库坏了开屏就拦
+  （「先别录单」+ problems 首条 + 跳设置页自检详情；坏副本实拍），2 张对照
+- 断言规模：e2e 2556 项 · 双模式 146 项 · 数据层 82 项 · HTTP 冒烟 241 项
+  （`npm run test:all`；`npm run audit:http` = server 路由功能断言覆盖 108/108、
+  `npm run audit:ipc` = IPC 三层接线 132/132 · 远端 100 全对齐）
 
 ---
 

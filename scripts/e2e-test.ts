@@ -4500,6 +4500,27 @@ section('R86：备份快照的隐形修复')
   fs.rmSync(dirA, { recursive: true, force: true })
 }
 
+/* ---------------- R89：工作台健康红条（库坏了开屏就拦，不等用户去设置页） ---------------- */
+section('R89：工作台健康红条')
+{
+  const dashSrc89 = fs.readFileSync('src/renderer/src/pages/Dashboard.tsx', 'utf8')
+  check(
+    '工作台开屏调 settings.health 且只在 ok===false 时挂红条',
+    dashSrc89.includes('window.api.settings.health()') && dashSrc89.includes('healthOk === false'),
+    'settings.health 调用与 ok===false 条件须同在'
+  )
+  check(
+    '健康红条带「先别录单」承诺 + 指到设置页自检详情',
+    dashSrc89.includes('数据自检没通过——请先不要录单') && dashSrc89.includes('#/settings'),
+    '红条文案与跳转链接'
+  )
+  check(
+    'health 通道整体跑不起来时不拦工作台（静默回 null，故障走自己的提示路）',
+    dashSrc89.includes('setHealthOk(null)'),
+    'catch 分支须回 null'
+  )
+}
+
 section('R9 工作台会盯住备份（数据只躺在这台电脑上）')
 const r9setStamp = (at: string | null, err: string | null): void => {
   // R54 起戳单独一行（backup_state）：这里模拟备份服务写凭据，别再往设置正文里塞
