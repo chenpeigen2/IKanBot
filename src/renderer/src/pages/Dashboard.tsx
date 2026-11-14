@@ -113,7 +113,7 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
         <br />
         {healthFirst}
         <br />
-        详情与 12 表行数在 <a href="#/settings">设置 · 数据备份 · 数据自检</a>。
+            详情与 12 表行数在 <a href="#/settings?scroll=backup">设置 · 数据备份 · 数据自检</a>。
       </div>
     ) : null
 
@@ -177,10 +177,10 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
       <div className="topbar">
         <h1>工作台</h1>
         <div className="spacer" />
-        <Button  onClick={() => onNavigate('/orders')}>
+        <Button onClick={() => onNavigate('/orders')}>
           查看全部订单
         </Button>
-        <Button variant="primary"  onClick={() => onNavigate('/orders?new=1')}>
+        <Button variant="primary" onClick={() => onNavigate('/orders?new=1')}>
           + 新建订单
         </Button>
       </div>
@@ -327,7 +327,7 @@ export default function Dashboard({ onNavigate }: { onNavigate: (p: string) => v
           <div className="card-head">
             <h2>最近订单</h2>
             <div className="spacer" />
-            <Button size="sm"  onClick={() => onNavigate('/orders')}>
+            <Button size="sm" onClick={() => onNavigate('/orders')}>
               全部
             </Button>
           </div>

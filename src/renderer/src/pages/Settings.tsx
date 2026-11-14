@@ -228,6 +228,14 @@ export default function Settings() {
     return window.api.updater.on((info) => setUpdate(info))
   }, [])
 
+  // R91：工作台健康红条的「详情」跳转带 ?scroll=backup——进来直接滚到数据备份卡
+  //（自检红框/绿框、12 表行数、原文技术行都在这张卡上），不用自己翻
+  useEffect(() => {
+    if (/[?&]scroll=backup/.test(window.location.hash)) {
+      window.setTimeout(() => document.getElementById('backup-card')?.scrollIntoView({ block: 'start' }), 150)
+    }
+  }, [])
+
   // 订阅「登录已失效」（R61）：后端换了秘钥后，远端请求收到 401 时主进程会清掉
   // safeStorage 里的登录态并广播过来——登录卡不能还挂着「已登录：某某」的假象，
   // 当场刷新成未登录、弹一次提示，指到重新登录的入口
@@ -759,6 +767,7 @@ export default function Settings() {
 
         {sourceCard}
 
+        <div id="backup-card" />
         <Card title="数据备份">
           {source?.mode === 'remote' ? (
             <div className="hint" style={{ marginBottom: 8 }}>

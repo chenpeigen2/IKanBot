@@ -4526,6 +4526,23 @@ section('R89：工作台健康红条')
   )
 }
 
+/* ---------------- R91：红条详情跳转带锚点——直滚到数据备份卡（小账清扫轮） ---------------- */
+section('R91：红条详情锚点直滚')
+{
+  const dashSrc91 = fs.readFileSync('src/renderer/src/pages/Dashboard.tsx', 'utf8')
+  check(
+    '红条「详情」跳转带 ?scroll=backup 锚点（进设置页不用自己翻到备份卡）',
+    dashSrc91.includes('#/settings?scroll=backup'),
+    '链接锚点参数'
+  )
+  const setSrc91 = fs.readFileSync('src/renderer/src/pages/Settings.tsx', 'utf8')
+  check(
+    '设置页吃 scroll=backup 锚点滚到数据备份卡（锚点元素 + 滚动逻辑同在）',
+    setSrc91.includes('id="backup-card"') && setSrc91.includes('scroll=backup') && setSrc91.includes("getElementById('backup-card')"),
+    '锚点元素与滚动逻辑'
+  )
+}
+
 section('R9 工作台会盯住备份（数据只躺在这台电脑上）')
 const r9setStamp = (at: string | null, err: string | null): void => {
   // R54 起戳单独一行（backup_state）：这里模拟备份服务写凭据，别再往设置正文里塞
