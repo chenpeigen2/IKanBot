@@ -652,7 +652,7 @@
   前缀」两套旧写法。本轮按 R101 复验的明示把正向也统一到 matchRoute（`:param` 只吃一段、
   逐段相等）——**统一当场暴露四条被旧口径误配盖住的真缺口**：orders/delete（被 addItems
   类长字面量子串误配）、orders/addItem（singular——e2e 只打过复数 addItems）、
-  orders/lastExchangeRate（无字面量）、samples/list（被 listPayments 子串误配）。四条当场
+  orders/lastExchangeRate（被 lastExchangeRateInfo 字面量子串误配——R102 复验勘误：四条全是子串误配、无「真无覆盖」类，原记法不准已改）、samples/list（被 listPayments 子串误配）。四条当场
   补真功能锁：addItem 单条落库（get 复核）、delete 空单整单删除（get 回空体）、
   lastExchangeRate 全局最近一次下单汇率（**顶层原始类型 JSON 走 text 断言**——supertest 对
   顶层 number 不进 body 的坑当场抓到）、samples/list 带回刚建打样单。审计终态回到
