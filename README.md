@@ -260,9 +260,9 @@ PI 单据预览：A4 纵向中英双语，带主图与费用行，浏览器打�
   点自检 → 「……——请先不要录单，立即联系技术支持」全字兑现（「先别录单」三态齐：红框/
   深损坏早退分支/catch toast），1 张对照
 - 断言规模：e2e 2560 项 · 双模式 146 项 · 数据层 82 项 · HTTP 冒烟 245 项
-  （`npm run test:all`；`npm run audit:http` = server 路由功能断言覆盖 108/108、
+  （`npm run test:all`；`npm run audit:http` = server 路由功能断言覆盖 110/110、
   `npm run audit:ipc` = IPC 三层接线 132/132 · 远端 100 全对齐、
-  `npm run audit:route-match` = 路由匹配器自测 18 项）
+  `npm run audit:route-match` = 路由匹配器自测 20 项）
 
 ---
 

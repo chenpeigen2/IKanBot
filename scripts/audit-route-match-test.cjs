@@ -1,7 +1,8 @@
-/* 审计路由匹配器自测（R101）：共享件必须先证明「参数路由只吃一段」，再给两条审计用。
+/* 审计路由匹配器自测（R101 起；R103 补控制器扫描）：共享件必须先证明「参数路由只吃一段」
+ * 且空装饰器不漏，再给两条审计用。
  * 跑法：node scripts/audit-route-match-test.cjs（已串进 npm run test:all） */
 const assert = require('node:assert/strict')
-const { normalizePath, matchRoute, findServerRoute } = require('./lib/audit-shared.cjs')
+const { normalizePath, matchRoute, findServerRoute, controllerRoutes } = require('./lib/audit-shared.cjs')
 
 let passed = 0
 const check = (name, fn) => {
@@ -52,5 +53,13 @@ check('精确路由优先于参数路由', () => {
   const routes = ['/api/files/images/:name', '/api/files/images/upload']
   assert.equal(findServerRoute('/api/files/images/upload', routes), '/api/files/images/upload')
 })
+
+console.log('控制器路由扫描')
+check('空 @Controller() / @Get() 装饰器进入静态路由表', () => {
+  const routes = controllerRoutes()
+  assert.ok(routes.some((r) => r.route === '/healthz' && r.file === 'health.controller.ts'))
+  assert.ok(routes.some((r) => r.route === '/api' && r.file === 'meta.controller.ts'))
+})
+check('静态控制器路由总数为 110（与运行时自描述一致）', () => assert.equal(controllerRoutes().length, 110))
 
 console.log(`\n路由匹配自测：${passed} 项全过`)

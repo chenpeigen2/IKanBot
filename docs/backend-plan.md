@@ -631,6 +631,20 @@
   9ms / 二刷 9ms / 深翻页 offset 400 <500ms。
   无 UI 形态，证据为断言输出。
 
+- **R103：审计静态路由扫描覆盖空装饰器——运行时 110 vs 静态 108 盲区收口（2026-11-15，R101/R102 挂账清偿）**：
+  根因是 `scripts/lib/audit-shared.cjs` 的 `controllerRoutes()` 只识别带非空字符串参数的
+  装饰器，漏掉 `health.controller.ts` 的 `@Controller()` + `@Get('healthz')` 与
+  `meta.controller.ts` 的 `@Controller('api')` + `@Get()`——正好是 `GET /healthz` 与
+  `GET /api` 两条，构成运行时 110 vs 静态 108 的唯一差额。修复：共享扫描器接受空装饰器，
+  并新增与 `routes.service.ts` 同款的 `joinPath()` 统一去斜杠/滤空段，避免 `//healthz`
+  或 `/api/`；`audit:http` 静态路由 108/108 → **110/110**，`audit:ipc` server 路由
+  108 → **110**；`audit:route-match` 18 → **20** 项（新增空装饰器命中与静态总数 110 两条锁）。
+  红验证：旧扫描下 `audit:http` 仍是 108/108 绿——证明该盲区是静默漏扫，单靠它自己发现不了；
+  新增自测在旧扫描下 exit 1 并直接指出 `/healthz` 未命中，恢复新实现后 20 项全绿。
+  本轮验收：typecheck 零错误；e2e 2560、双模式 146、数据层 82、HTTP 245；
+  `audit:route-match` 20、`audit:http` 110/110（反向无、过期豁免无）、`audit:ipc`
+  132/132·100·110（软清单 C 无），`npm run typecheck && npm run test:all` exit 0。
+  无 UI 形态，证据为审计输出与断言结果。不扩大到运行时动态路由或其他业务代码。
 - **R101：审计路由匹配收口（2026-11-15，B2 参数化误报 + 负向探针按名豁免两笔挂账清偿）**：
   ① `scripts/lib/audit-shared.cjs` 新增共享 `normalizePath()` / `matchRoute()` /
   `findServerRoute()`：截 query/hash、补前导斜杠、去非根尾斜杠；`:param` 只吃一个非空

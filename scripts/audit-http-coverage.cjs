@@ -1,4 +1,4 @@
-/* 只读审计（R88 版 + R90 抽取 + R101 反向收口 + R102 正向统一）：server 控制器路由 vs
+/* 只读审计（R88 版 + R90 抽取 + R101 反向收口 + R102 正向统一 + R103 空装饰器）：server 控制器路由 vs
  * HTTP 冒烟（server/test/e2e.ts）的功能断言覆盖。
  * 已修掉的口径坑：
  *   ① 一个域目录可以有多个 *.controller.ts——全扫（共用件）；
@@ -10,6 +10,8 @@
  *   ⑥ R102：正向覆盖也统一到 matchRoute（与反向同款单段语义）——旧写法的两个字面问题一并
  *     消掉：字面量 includes 是子串匹配（/api/customers/list 会误配进 /api/customers/list-x），
  *     参数路由前缀匹配不限段数（:name 能被多段字面量误配）。
+ *   ⑦ R103：共享 controllerRoutes 补空装饰器（@Controller() / @Get()）并按 joinPath 归一，
+ *     静态路由 108 → 110，与运行时自描述对齐。
  * 判定仍是「路由在冒烟正文（剥注释后）被字面引用过」——它是接线锁，不是断言强度锁。
  * controllerRoutes/stripComments/matchRoute 唯一真源在 scripts/lib/audit-shared.cjs。 */
 const fs = require('fs')

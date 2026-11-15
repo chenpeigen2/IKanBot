@@ -46,7 +46,9 @@ function stripComments(src) {
 }
 
 /** 收集 server 控制器路由：所有域目录 × 所有 *.controller.ts × 所有 @Controller 块。
- *  装饰器认 @Post/@Get/@Put/@Delete/@Patch、单双引号——口径与 audit:http、audit:ipc 同源。 */
+ *  装饰器认 @Post/@Get/@Put/@Delete/@Patch、单双引号，以及空装饰器（R103：
+ *  @Controller() 与 @Get() 此前被只认非空参数的正则漏掉，静态 108 vs 运行时 110）。
+ *  路径拼接对齐 routes.service.ts 的 joinPath，避免出现 `//healthz` 或 `/api/`。 */
 function controllerRoutes() {
   const routes = []
   const serverSrc = path.join(ROOT, 'server/src')
@@ -56,18 +58,25 @@ function controllerRoutes() {
     for (const file of fs.readdirSync(cdir).filter((f) => f.endsWith('.controller.ts'))) {
       const src = fs.readFileSync(path.join(cdir, file), 'utf8')
       const blocks = []
-      const re = /@Controller\((['"])([^'"]+)\1\)/g
+      const re = /@Controller\(\s*(?:(['"])([^'"]*)\1)?\s*\)/g
       let m
-      while ((m = re.exec(src))) blocks.push({ base: m[2], start: m.index })
+      while ((m = re.exec(src))) blocks.push({ base: m[2] ?? '', start: m.index })
       for (let i = 0; i < blocks.length; i++) {
         const seg = src.slice(blocks[i].start, i + 1 < blocks.length ? blocks[i + 1].start : src.length)
-        for (const r of seg.matchAll(/@(Post|Get|Put|Delete|Patch)\((['"])([^'"]+)\2\)/g)) {
-          routes.push({ route: `/${blocks[i].base}/${r[3]}`, method: r[1], file })
+        for (const r of seg.matchAll(/@(Post|Get|Put|Delete|Patch)\(\s*(?:(['"])([^'"]*)\2)?\s*\)/g)) {
+          const route = joinPath(blocks[i].base, r[3] ?? '')
+          routes.push({ route, method: r[1], file })
         }
       }
     }
   }
   return routes
+}
+
+/** 与 server/src/meta/routes.service.ts 的 joinPath 同款：去两端斜杠、滤空段、补根斜杠。 */
+function joinPath(base, sub) {
+  const parts = [base, sub].map((p) => p.replace(/^\/+|\/+$/g, '')).filter(Boolean)
+  return `/${parts.join('/')}`
 }
 
 /** 路由比对前的归一：截掉 query/hash、补前导斜杠、去掉非根尾斜杠。
