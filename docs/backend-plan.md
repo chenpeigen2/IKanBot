@@ -647,6 +647,18 @@
   `audit:route-match` 18、`audit:http` 108/108（反向无、过期豁免无）、`audit:ipc`
   132/132·100·108（软清单 C 无），`npm run typecheck && npm run test:all` exit 0。
   无 UI 形态，证据为审计输出与断言结果。运行时 110 vs 静态 108 的审计盲区未在本轮扩大处理。
+- **R102：审计正向覆盖口径统一——统一后当场暴露并补锁四条真缺口（2026-11-15，R101「可另开一轮统一」的实账）**：
+  R101 只把 audit 的反方向对表统一到共享 matchRoute，正向覆盖仍是「字面量 includes + 参数
+  前缀」两套旧写法。本轮按 R101 复验的明示把正向也统一到 matchRoute（`:param` 只吃一段、
+  逐段相等）——**统一当场暴露四条被旧口径误配盖住的真缺口**：orders/delete（被 addItems
+  类长字面量子串误配）、orders/addItem（singular——e2e 只打过复数 addItems）、
+  orders/lastExchangeRate（无字面量）、samples/list（被 listPayments 子串误配）。四条当场
+  补真功能锁：addItem 单条落库（get 复核）、delete 空单整单删除（get 回空体）、
+  lastExchangeRate 全局最近一次下单汇率（**顶层原始类型 JSON 走 text 断言**——supertest 对
+  顶层 number 不进 body 的坑当场抓到）、samples/list 带回刚建打样单。审计终态回到
+  **108/108**（这次是逐段语义下的 108，不是子串放行的 108）。本轮验收：e2e 2560、双模式
+  146、数据层 82、HTTP 241 → **245**；typecheck 零错误；audit:route-match 18 项全过；
+  audit:ipc 132/132·100。无 UI 形态（脚本+server 测试），证据为审计输出与断言结果。
 - **R100：勘误注记时点修正（2026-11-15，R99 复验挑刺 1 清偿，docs-only，豁免条款先行发版）**：
   R99 复验挑刺 1：R96 新加的勘误注记「R99 复验自纠源头在其报告」时点错位——事实链是笔误
   源头在 R96+R97 复验报告、其作者已在 R98 复验报告自纠（R99 复验此刻才发生，谈不上自纠）。

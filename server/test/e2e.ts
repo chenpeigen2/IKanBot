@@ -841,6 +841,66 @@ async function main(): Promise<void> {
     const sGet = await http.post('/api/samples/get').send({ id: sid })
     check('转单后的打样单记得转到了哪张单', sGet.status === 200 && Number(sGet.body.convertedOrderId) > 0)
 
+    console.log('R102：审计口径统一暴露的四条真缺口补锁')
+    {
+      const r102Cust = await http.post('/api/customers/save').send({ input: { company: 'R102 Audit Co' } })
+      const r102Cid = Number(r102Cust.body.id)
+      // lastExchangeRate：全局最近一次下单汇率（不带参——R87 段那类按客户查的是 lastTerms）
+      const r102Order = await http
+        .post('/api/orders/create')
+        .send({ input: { customerId: r102Cid, currency: 'USD', exchangeRate: 7.2, paymentStatus: 'confirmed' } })
+      const r102Oid = Number(r102Order.body.id)
+      const r102Lxr = await http.post('/api/orders/lastExchangeRate').send({})
+      check(
+        'orders lastExchangeRate 回全局最近一次下单汇率（不带参；顶层原始类型 JSON 走 text 断言）',
+        r102Lxr.status === 200 && Number(r102Lxr.text) === 7.2,
+        JSON.stringify({ status: r102Lxr.status, text: String(r102Lxr.text ?? '').slice(0, 80) })
+      )
+      // addItem（单条）：与批量 addItems 并存的另一条正门——旧审计被 addItems 字面量子串误配盖住
+      const r102Add = await http
+        .post('/api/orders/addItem')
+        .send({ orderId: r102Oid, item: { styleNo: 'R102-1', quantity: 6, unitPrice: 8 } })
+      const r102Get = await http.post('/api/orders/get').send({ id: r102Oid })
+      check(
+        'orders addItem 单条落库（与批量 addItems 并存的正门）',
+        r102Add.status === 200 &&
+          r102Get.body.items.length === 1 &&
+          r102Get.body.items[0].styleNo === 'R102-1' &&
+          Number(r102Get.body.items[0].quantity) === 6,
+        JSON.stringify(r102Get.body?.items)
+      )
+      // delete：空单（无明细/收款/装箱/存档/照片/转单）可整单删除
+      const r102Order2 = await http
+        .post('/api/orders/create')
+        .send({ input: { customerId: r102Cid, currency: 'USD', exchangeRate: 7.2 } })
+      const r102Oid2 = Number(r102Order2.body.id)
+      const r102Del = await http.post('/api/orders/delete').send({ id: r102Oid2 })
+      const r102Get2 = await http.post('/api/orders/get').send({ id: r102Oid2 })
+      check(
+        'orders delete 空单整单删除（get 回空体）',
+        r102Del.status === 200 && r102Get2.status === 200 && r102Get2.text === '',
+        JSON.stringify({ del: r102Del.status, get: String(r102Get2.text ?? '').slice(0, 40) })
+      )
+      // samples/list：真实打样单在列表里（形状 + 内容）
+      const r102Sample = await http.post('/api/samples/save').send({
+        input: {
+          customerId: r102Cid,
+          currency: 'USD',
+          exchangeRate: 7.2,
+          exchangeRateDate: localDate(),
+          sampleDate: localDate(),
+          items: [{ styleNo: 'R102-S', quantity: 2, unitPrice: 10, goodsUnitPrice: 8 }]
+        }
+      })
+      const r102Sid = Number(r102Sample.body.id)
+      const r102List = await http.post('/api/samples/list').send({})
+      check(
+        'samples list 列表带回刚建的打样单（形状 + 内容）',
+        r102List.status === 200 && Array.isArray(r102List.body) && r102List.body.some((x: { id: number }) => Number(x.id) === r102Sid),
+        JSON.stringify(r102List.body?.length)
+      )
+    }
+
     console.log('预收与退款')
     const cApply = await http.post('/api/credits/apply').send({
       input: { customerId: ocid, currency: 'USD', targetKind: 'order', targetId: oid, amount: 10 }
