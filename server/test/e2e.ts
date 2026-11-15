@@ -1238,7 +1238,7 @@ async function main(): Promise<void> {
     )
 
     console.log('错误体')
-    const unknown = await http.post('/api/no-such-route').send({})
+    const unknown = await http.post('/api/no-such-route?audit=negative-probe').send({})
     check('未知路由回中文错误体', unknown.status === 404 && unknown.body.error.message === '没有这个接口')
 
     const wrongMethod = await http.get('/api/customers/list')

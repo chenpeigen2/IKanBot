@@ -4,12 +4,12 @@
  *     ③ electron/remote/client.ts 的 REMOTE_ROUTES['domain:action']（远端转发表）
  *     ④ server 控制器路由（远端通道的服务端实现——与 audit:http 同源口径）
  * 硬闸：②里调的通道 ①必须有（点到了没实现 = 现场报错类 bug）；
- *       ③里转发的通道 ①必须有、④路由必须存在（远端模式打空气）。
+ *       ③里转发的通道 ①必须有、④路由必须存在（远端模式打空气；参数路由只吃一段）。
  * 软清单：①里有而②没有的通道（内部用/预留死通道，逐条人审）；
  *         ①里有而③没有的 = 本地独有通道（覆盖率口径的本体，打印/对话框/窗口类按设计不上后端）。 */
 const fs = require('fs')
 const path = require('path')
-const { stripComments, controllerRoutes, ROOT } = require('./lib/audit-shared.cjs')
+const { stripComments, controllerRoutes, findServerRoute, ROOT } = require('./lib/audit-shared.cjs')
 
 const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8')
 const uniq = (arr) => [...new Set(arr)]
@@ -76,10 +76,10 @@ if (remotePaths.length !== remoteRoutes.length) {
   bad++
   console.log(`--- 硬闸 B0：REMOTE_ROUTES 条目 ${remoteRoutes.length} 与路径提取 ${remotePaths.length} 不等——有条目掉出口径（查 path 是否不在入口首字段/引号变体） ---`)
 }
-const missingServerRoute = remotePaths.filter((r) => !serverRoutes.includes(r.path))
+const missingServerRoute = remotePaths.filter((r) => findServerRoute(r.path, serverRoutes) === null)
 if (missingServerRoute.length) {
   bad++
-  console.log('--- 硬闸 B2：REMOTE_ROUTES 的路径 server 控制器里不存在（远端打空气） ---')
+  console.log('--- 硬闸 B2：REMOTE_ROUTES 的路径 server 控制器里不存在（远端打空气；参数路由只吃一段） ---')
   for (const r of missingServerRoute) console.log(`${r.ch} → ${r.path}`)
 }
 /** 软清单 C：handle 有但 preload 没暴露（死通道候选，人审） */

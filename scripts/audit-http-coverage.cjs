@@ -4,11 +4,13 @@
  *   ② @Delete/@Patch、双引号装饰器——同扫（共用件）；
  *   ③ 注释剥离——判定前把 e2e.ts 的注释剥掉（保留字符串字面量：check 名里带路由也算锁）；
  *   ④ 反方向对表——e2e.ts 里出现的 /api/... 字面量逐个反查控制器，不存在的报「打空气的死测试」。
+ * R101 收口：反向对表改用 scripts/lib/audit-shared.cjs 的 matchRoute（`:param` 只吃一段、
+ * query/尾斜杠归一）；负向探针只豁免 `/api/no-such-route?audit=negative-probe` 这个精确字面量。
  * 判定仍是「路由全名在冒烟正文（剥注释后）被字面引用过」——它是接线锁，不是断言强度锁。
  * controllerRoutes/stripComments 唯一真源在 scripts/lib/audit-shared.cjs（R90 抽取）。 */
 const fs = require('fs')
 const path = require('path')
-const { stripComments, controllerRoutes, ROOT } = require('./lib/audit-shared.cjs')
+const { stripComments, controllerRoutes, matchRoute, ROOT } = require('./lib/audit-shared.cjs')
 const raw = fs.readFileSync(path.join(ROOT, 'server/test/e2e.ts'), 'utf8')
 const e2e = stripComments(raw)
 
@@ -32,17 +34,24 @@ for (const r of uncovered) console.log(`${r.method} ${r.route}  (${r.file})`)
 /** 反方向对表：冒烟正文里的 /api|/healthz 字面量必须指向真实控制器路由（否则是打空气的死测试）。
  * allowlist 语义（R88 复验打回后修正：原版 '/' 前缀把所有字面量整体放行，反方向形同虚设）：
  * 尾斜杠项按前缀匹配，无尾斜杠项**精确**匹配。query 串字面量（/api/...?x=y）先截到 ? 再对。 */
-const ALLOW_EXACT = ['/', '/healthz', '/api', '/api/no-such-route']
+const ALLOW_EXACT = ['/', '/healthz', '/api']
 const ALLOW_PREFIX = ['/api/files/images/', '/api/export/']
+/** 负向探针只豁免带显式标记的精确字面量：将来有人塞同名死路由不会被按名放过。
+ *  每条豁免必须在 e2e 正文里真的出现，否则也报红（防止探针删了、豁免还留着）。 */
+const NEGATIVE_PROBES = ['/api/no-such-route?audit=negative-probe']
 const literals = [...new Set([...e2e.matchAll(/['"`](\/(?:api|healthz)[^'"`\s]*)['"`]/g)].map((m) => m[1]))]
 const dead = []
 for (const rawLit of literals) {
+  if (NEGATIVE_PROBES.includes(rawLit)) continue
   const lit = rawLit.split('?')[0]
   if (ALLOW_EXACT.includes(lit)) continue
   if (ALLOW_PREFIX.some((a) => lit.startsWith(a))) continue
-  const hit = routes.some((r) => r.route === lit || (r.route.includes(':') && lit.startsWith(r.route.slice(0, r.route.indexOf(':')))))
+  const hit = routes.some((r) => matchRoute(r.route, lit))
   if (!hit) dead.push(rawLit)
 }
+const staleProbes = NEGATIVE_PROBES.filter((probe) => !literals.includes(probe))
 console.log('--- 反方向对表：冒烟引用了但控制器没有的路由（打空气） ---')
 console.log(dead.length === 0 ? '（无）' : dead.join('\n'))
-if (uncovered.length > 0 || dead.length > 0) process.exitCode = 1
+console.log('--- 负向探针豁免：已声明但正文里没出现的（过期豁免） ---')
+console.log(staleProbes.length === 0 ? '（无）' : staleProbes.join('\n'))
+if (uncovered.length > 0 || dead.length > 0 || staleProbes.length > 0) process.exitCode = 1

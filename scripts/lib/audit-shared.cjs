@@ -70,4 +70,50 @@ function controllerRoutes() {
   return routes
 }
 
-module.exports = { stripComments, controllerRoutes, ROOT }
+/** 路由比对前的归一：截掉 query/hash、补前导斜杠、去掉非根尾斜杠。
+ *  审计里的路径可能来自 `<img>` URL 或带查询串的负向探针，不能按原始字面量全等。 */
+function normalizePath(value) {
+  let out = String(value ?? '').trim()
+  const cut = out.search(/[?#]/)
+  if (cut >= 0) out = out.slice(0, cut)
+  if (!out) return '/'
+  if (!out.startsWith('/')) out = `/${out}`
+  if (out.length > 1) out = out.replace(/\/+$/, '') || '/'
+  return out
+}
+
+/** 单条路由匹配：支持 `:param` 占一个非空路径段，段数必须相等。
+ *  例：`/api/files/images/:name` 命中 `/api/files/images/x.png`，
+ *  不命中 `/api/files/images/x.png/extra`（参数路由不能变成前缀通配）。 */
+function matchRoute(pattern, actual) {
+  const patternPath = normalizePath(pattern)
+  const actualPath = normalizePath(actual)
+  const patternSegs = patternPath === '/' ? [] : patternPath.slice(1).split('/')
+  const actualSegs = actualPath === '/' ? [] : actualPath.slice(1).split('/')
+  if (patternSegs.length !== actualSegs.length) return false
+  for (let i = 0; i < patternSegs.length; i++) {
+    const expected = patternSegs[i]
+    if (expected.startsWith(':')) {
+      if (!actualSegs[i]) return false
+      continue
+    }
+    if (expected !== actualSegs[i]) return false
+  }
+  return true
+}
+
+/** 在控制器路由表里查一条实际路径；精确路由优先于参数路由。
+ *  routes 可传字符串数组或 `{ route }` 对象数组，返回命中的原始项（未命中 null）。 */
+function findServerRoute(pathValue, routes) {
+  const normalized = normalizePath(pathValue)
+  const entries = routes.map((item) => ({
+    item,
+    route: typeof item === 'string' ? item : item.route
+  }))
+  const exact = entries.find((entry) => normalizePath(entry.route) === normalized)
+  if (exact) return exact.item
+  const matched = entries.find((entry) => matchRoute(entry.route, normalized))
+  return matched ? matched.item : null
+}
+
+module.exports = { stripComments, controllerRoutes, normalizePath, matchRoute, findServerRoute, ROOT }

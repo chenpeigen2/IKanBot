@@ -631,6 +631,22 @@
   9ms / 二刷 9ms / 深翻页 offset 400 <500ms。
   无 UI 形态，证据为断言输出。
 
+- **R101：审计路由匹配收口（2026-11-15，B2 参数化误报 + 负向探针按名豁免两笔挂账清偿）**：
+  ① `scripts/lib/audit-shared.cjs` 新增共享 `normalizePath()` / `matchRoute()` /
+  `findServerRoute()`：截 query/hash、补前导斜杠、去非根尾斜杠；`:param` 只吃一个非空
+  路径段，段数严格相等，精确路由优先于参数路由。② `audit:ipc` 硬闸 B2 从
+  `serverRoutes.includes()` 改为 `findServerRoute()`，`/api/files/images/:name` 这类
+  参数路由不再被误报；多一段、空参数仍报红。③ `audit:http` 反向对表改用 `matchRoute()`；
+  移除裸 `/api/no-such-route` 按名豁免，改为只豁免精确字面量
+  `/api/no-such-route?audit=negative-probe`；新增过期豁免检查（声明了探针但 e2e 正文
+  没出现也报红）。④ e2e 未知路由探针加 `?audit=negative-probe` 标记，断言不变。
+  ⑤ 新增 `audit:route-match` 18 项匹配器自测并串入 `test:all`，README 数字同步。
+  红验证：参数路由单段绿、多一段红（`customers:list → /api/files/images/probe.png/extra`）、
+  裸负向路由红（同时报打空气与过期豁免）、带标记恢复绿；篡改均已还原，`client.ts` diff 为零。
+  本轮验收：typecheck 零错误；e2e 2560、双模式 146、数据层 82、HTTP 241 全绿；
+  `audit:route-match` 18、`audit:http` 108/108（反向无、过期豁免无）、`audit:ipc`
+  132/132·100·108（软清单 C 无），`npm run typecheck && npm run test:all` exit 0。
+  无 UI 形态，证据为审计输出与断言结果。运行时 110 vs 静态 108 的审计盲区未在本轮扩大处理。
 - **R100：勘误注记时点修正（2026-11-15，R99 复验挑刺 1 清偿，docs-only，豁免条款先行发版）**：
   R99 复验挑刺 1：R96 新加的勘误注记「R99 复验自纠源头在其报告」时点错位——事实链是笔误
   源头在 R96+R97 复验报告、其作者已在 R98 复验报告自纠（R99 复验此刻才发生，谈不上自纠）。
